@@ -1,5 +1,6 @@
 //! FCP n8n Connector implementation.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,7 +30,7 @@ use crate::{
     },
     error::{N8nError, N8nResult},
     types::{
-        CredentialMetadataView, DraftMutationPrecondition, FolderListView, ListView,
+        CredentialMetadataView, DraftMutationPrecondition, FolderListView, ListView, Workflow,
         WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary, WorkflowStateView,
         WorkflowVersion,
     },
@@ -199,6 +200,73 @@ struct DraftWritePlan {
     workflow_id: Option<String>,
     graph_digest: String,
     provider_payload: Value,
+}
+
+const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
+const MCP_ACCESS_READBACK_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.mcp-access-readback.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpAccessScope {
+    WorkflowIds,
+    Project,
+    Folder,
+    AllCurrent,
+}
+
+impl McpAccessScope {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkflowIds => "workflow_ids",
+            Self::Project => "project",
+            Self::Folder => "folder",
+            Self::AllCurrent => "all_current",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpAccessReconcileGuard {
+    #[serde(rename = "approvalRef")]
+    approval_ref: String,
+    #[serde(rename = "dryRunDigest")]
+    dry_run_digest: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpAccessReconcileInput {
+    scope: McpAccessScope,
+    desired: bool,
+    #[serde(rename = "dryRun")]
+    dry_run: bool,
+    #[serde(rename = "projectId")]
+    project_id: Option<String>,
+    #[serde(rename = "folderId")]
+    folder_id: Option<String>,
+    #[serde(rename = "workflowIds")]
+    workflow_ids: Option<Vec<String>>,
+    guard: Option<McpAccessReconcileGuard>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct McpAccessPlanItem {
+    id: String,
+    #[serde(rename = "availableInMCP")]
+    available_in_mcp: Option<bool>,
+    desired: bool,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct McpAccessPlan {
+    planned: Vec<McpAccessPlanItem>,
+    changed: Vec<McpAccessPlanItem>,
+    skipped: Vec<McpAccessPlanItem>,
+    exceptions: Vec<McpAccessPlanItem>,
+    #[serde(rename = "readbackDigest")]
+    readback_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -614,6 +682,17 @@ impl N8nConnector {
             });
         }
 
+        if operation == "n8n.mcp_access.reconcile" {
+            let reconcile = parse_mcp_access_input(&input).map_err(|error| error.to_fcp_error())?;
+            if !reconcile.dry_run {
+                self.require_mcp_access_approval(&reconcile, &input, &params)?;
+                return Err(FcpError::CapabilityDenied {
+                    capability: "n8n.mcp_access.write".into(),
+                    reason: "typed n8n MCP-access admin adapter is not available; no provider write was attempted".into(),
+                });
+            }
+        }
+
         let request_number = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
@@ -661,6 +740,10 @@ impl N8nConnector {
                     .await
             }
             "n8n.folders.get" => self.invoke_folders_get(client, &input, Some(context)).await,
+            "n8n.mcp_access.reconcile" => {
+                self.invoke_mcp_access_reconcile(client, &input, Some(context))
+                    .await
+            }
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 self.invoke_workflow_draft_write(
                     client,
@@ -754,6 +837,44 @@ impl N8nConnector {
             next_cursor: resp.next_cursor,
         })
         .map_err(N8nError::from)
+    }
+
+    async fn invoke_mcp_access_reconcile(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let reconcile = parse_mcp_access_input(input)?;
+        if !reconcile.dry_run {
+            return Err(N8nError::InvalidInput(
+                "mcp access writes require the typed admin adapter and are not enabled".into(),
+            ));
+        }
+
+        let mut workflows = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        loop {
+            let query = ListQuery::new(MAX_LIST_LIMIT, cursor.clone())?;
+            let page = client.list_workflows_typed(&query, context.clone()).await?;
+            workflows.extend(page.data);
+            if workflows.len() > MAX_MCP_ACCESS_WORKFLOWS {
+                return Err(N8nError::InvalidInput(
+                    "mcp access reconciliation exceeds the bounded workflow limit".into(),
+                ));
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            cursor = Some(next_cursor);
+        }
+
+        let plan = plan_mcp_access_reconcile(&reconcile, &workflows)?;
+        serde_json::to_value(plan).map_err(N8nError::from)
     }
 
     async fn invoke_workflows_get(
@@ -1203,6 +1324,57 @@ impl N8nConnector {
         Ok(())
     }
 
+    fn require_mcp_access_approval(
+        &self,
+        input: &McpAccessReconcileInput,
+        raw_input: &Value,
+        params: &Value,
+    ) -> FcpResult<()> {
+        let guard = input
+            .guard
+            .as_ref()
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: "n8n.mcp_access.write".into(),
+                reason: "mcp access write requires a guard with approvalRef and dryRunDigest"
+                    .into(),
+            })?;
+        let approval_values = params
+            .get("approval_tokens")
+            .and_then(Value::as_array)
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: "n8n.mcp_access.write".into(),
+                reason: "mcp access write requires approval_tokens".into(),
+            })?;
+        let approvals: Vec<ApprovalToken> = approval_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid approval token".into(),
+            })?;
+        let matching = approvals
+            .iter()
+            .filter(|approval| {
+                is_matching_draft_approval(
+                    approval,
+                    "n8n.mcp_access.reconcile",
+                    &guard.approval_ref,
+                    self.zone_id.as_ref(),
+                    raw_input,
+                    current_time_ms(),
+                )
+            })
+            .count();
+        if matching != 1 {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.mcp_access.write".into(),
+                reason: "mcp access write requires exactly one matching approval bound to the server scope and dry-run input".into(),
+            });
+        }
+        Ok(())
+    }
+
     fn resource_uris_for_operation(
         &self,
         operation: &str,
@@ -1219,7 +1391,8 @@ impl N8nConnector {
             | "n8n.executions.list"
             | "n8n.projects.list"
             | "n8n.credentials.list"
-            | "n8n.tags.list" => instance_resource_uri(server_id),
+            | "n8n.tags.list"
+            | "n8n.mcp_access.reconcile" => instance_resource_uri(server_id),
             "n8n.workflows.create_draft" => {
                 if let Some(project_id) = input.get("project_id").and_then(Value::as_str) {
                     project_resource_uri(server_id, project_id)
@@ -2191,8 +2364,192 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         }
         "n8n.folders.list" => parse_folder_list_input(input).map(|_| ()),
         "n8n.folders.get" => parse_folder_get_input(input).map(|_| ()),
+        "n8n.mcp_access.reconcile" => parse_mcp_access_input(input).map(|_| ()),
         _ => Ok(()),
     }
+}
+
+fn parse_mcp_access_input(input: &Value) -> N8nResult<McpAccessReconcileInput> {
+    let typed: McpAccessReconcileInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "mcp access input requires scope, desired, dryRun, and only scope-specific filters"
+                .into(),
+        )
+    })?;
+    if typed.dry_run {
+        if typed.guard.is_some() {
+            return Err(N8nError::InvalidInput(
+                "dryRun must not include a write guard".into(),
+            ));
+        }
+    } else {
+        let guard = typed.guard.as_ref().ok_or_else(|| {
+            N8nError::InvalidInput("non-dry-run MCP access requires guard".into())
+        })?;
+        if guard.approval_ref.is_empty()
+            || guard.approval_ref.len() > 256
+            || guard.approval_ref.trim() != guard.approval_ref
+            || guard.dry_run_digest.is_empty()
+            || guard.dry_run_digest.len() > 256
+            || guard.dry_run_digest.trim() != guard.dry_run_digest
+            || !is_blake3_digest(&guard.dry_run_digest)
+        {
+            return Err(N8nError::InvalidInput(
+                "guard approvalRef and dryRunDigest must be bounded non-empty strings".into(),
+            ));
+        }
+    }
+
+    match typed.scope {
+        McpAccessScope::WorkflowIds => {
+            let ids = typed.workflow_ids.as_ref().ok_or_else(|| {
+                N8nError::InvalidInput("workflow_ids scope requires workflowIds".into())
+            })?;
+            if ids.is_empty() || ids.len() > MAX_MCP_ACCESS_WORKFLOWS {
+                return Err(N8nError::InvalidInput(
+                    "workflowIds must contain between 1 and 1000 IDs".into(),
+                ));
+            }
+            if typed.project_id.is_some() || typed.folder_id.is_some() {
+                return Err(N8nError::InvalidInput(
+                    "workflow_ids scope cannot include projectId or folderId".into(),
+                ));
+            }
+            let mut unique = BTreeSet::new();
+            for id in ids {
+                sanitize_path_segment(id, "workflow id")?;
+                if !unique.insert(id) {
+                    return Err(N8nError::InvalidInput(
+                        "workflowIds must not contain duplicates".into(),
+                    ));
+                }
+            }
+        }
+        McpAccessScope::Project => {
+            let project_id = typed
+                .project_id
+                .as_deref()
+                .ok_or_else(|| N8nError::InvalidInput("project scope requires projectId".into()))?;
+            sanitize_path_segment(project_id, "project id")?;
+            if typed.folder_id.is_some() || typed.workflow_ids.is_some() {
+                return Err(N8nError::InvalidInput(
+                    "project scope cannot include folderId or workflowIds".into(),
+                ));
+            }
+        }
+        McpAccessScope::Folder => {
+            let folder_id = typed
+                .folder_id
+                .as_deref()
+                .ok_or_else(|| N8nError::InvalidInput("folder scope requires folderId".into()))?;
+            sanitize_path_segment(folder_id, "folder id")?;
+            if typed.project_id.is_some() || typed.workflow_ids.is_some() {
+                return Err(N8nError::InvalidInput(
+                    "folder scope cannot include projectId or workflowIds".into(),
+                ));
+            }
+        }
+        McpAccessScope::AllCurrent => {
+            if typed.project_id.is_some()
+                || typed.folder_id.is_some()
+                || typed.workflow_ids.is_some()
+            {
+                return Err(N8nError::InvalidInput(
+                    "all_current scope cannot include projectId, folderId, or workflowIds".into(),
+                ));
+            }
+        }
+    }
+    Ok(typed)
+}
+
+fn is_blake3_digest(value: &str) -> bool {
+    value.len() == "blake3-256:".len() + 64
+        && value.starts_with("blake3-256:")
+        && value["blake3-256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn plan_mcp_access_reconcile(
+    input: &McpAccessReconcileInput,
+    workflows: &[Workflow],
+) -> N8nResult<McpAccessPlan> {
+    let requested_ids = input
+        .workflow_ids
+        .as_ref()
+        .map(|ids| ids.iter().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default();
+    let mut seen_requested = BTreeSet::new();
+    let mut planned = Vec::new();
+    let changed = Vec::new();
+    let mut skipped = Vec::new();
+    let mut exceptions = Vec::new();
+
+    for workflow in workflows {
+        let selected = match input.scope {
+            McpAccessScope::WorkflowIds => requested_ids.contains(&workflow.id),
+            McpAccessScope::Project => workflow.project_id == input.project_id,
+            McpAccessScope::Folder => workflow.parent_folder_id == input.folder_id,
+            McpAccessScope::AllCurrent => true,
+        };
+        if !selected {
+            continue;
+        }
+        if input.scope == McpAccessScope::WorkflowIds {
+            seen_requested.insert(workflow.id.clone());
+        }
+        let item = |reason| McpAccessPlanItem {
+            id: workflow.id.clone(),
+            available_in_mcp: workflow.available_in_mcp(),
+            desired: input.desired,
+            reason,
+        };
+        if workflow.is_archived != Some(false) {
+            if workflow.is_archived == Some(true) {
+                skipped.push(item("archived"));
+            } else {
+                exceptions.push(item("archive_state_unknown"));
+            }
+            continue;
+        }
+        let Some(current) = workflow.available_in_mcp() else {
+            exceptions.push(item("availability_state_unknown"));
+            continue;
+        };
+        if current == input.desired {
+            skipped.push(item("already_desired"));
+        } else {
+            planned.push(item("requires_change"));
+        }
+    }
+
+    for missing_id in requested_ids.difference(&seen_requested) {
+        exceptions.push(McpAccessPlanItem {
+            id: missing_id.clone(),
+            available_in_mcp: None,
+            desired: input.desired,
+            reason: "not_found",
+        });
+    }
+
+    let digest_input = json!({
+        "scope": input.scope.as_str(),
+        "desired": input.desired,
+        "planned": &planned,
+        "changed": &changed,
+        "skipped": &skipped,
+        "exceptions": &exceptions,
+    });
+    let readback_digest =
+        digest_canonical_json(MCP_ACCESS_READBACK_DIGEST_DOMAIN_V1, &digest_input)?;
+    Ok(McpAccessPlan {
+        planned,
+        changed,
+        skipped,
+        exceptions,
+        readback_digest,
+    })
 }
 
 fn require_exact_object<'a>(
@@ -2298,6 +2655,7 @@ fn workflow_view_schema() -> serde_json::Value {
             "parentFolderId": {"type": ["string", "null"]},
             "createdAt": {"type": ["string", "null"]},
             "updatedAt": {"type": ["string", "null"]},
+            "availableInMCP": {"type": ["boolean", "null"]},
             "tags": {
                 "type": ["array", "null"],
                 "items": tag_view_schema(),
@@ -2646,6 +3004,73 @@ fn workflow_draft_output_schema() -> serde_json::Value {
     })
 }
 
+fn mcp_access_reconcile_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "desired", "dryRun"],
+        "properties": {
+            "scope": {
+                "type": "string",
+                "enum": ["workflow_ids", "project", "folder", "all_current"],
+            },
+            "desired": {"type": "boolean"},
+            "dryRun": {"type": "boolean"},
+            "projectId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "folderId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "workflowIds": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_MCP_ACCESS_WORKFLOWS,
+                "items": {"type": "string", "minLength": 1, "maxLength": 256},
+            },
+            "guard": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approvalRef", "dryRunDigest"],
+                "properties": {
+                    "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "dryRunDigest": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^blake3-256:[0-9a-f]{64}$"
+                    },
+                },
+            },
+        },
+    })
+}
+
+fn mcp_access_reconcile_output_schema() -> serde_json::Value {
+    let item = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "availableInMCP", "desired", "reason"],
+        "properties": {
+            "id": {"type": "string"},
+            "availableInMCP": {"type": ["boolean", "null"]},
+            "desired": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+    });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["planned", "changed", "skipped", "exceptions", "readbackDigest"],
+        "properties": {
+            "planned": {"type": "array", "items": item},
+            "changed": {"type": "array", "items": item},
+            "skipped": {"type": "array", "items": item},
+            "exceptions": {"type": "array", "items": item},
+            "readbackDigest": {
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+        },
+    })
+}
+
 /// Build the operations info for introspection.
 fn operations_info() -> Vec<OperationInfo> {
     vec![
@@ -2929,6 +3354,30 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.folders.list"),
                     CapabilityId::from_static("n8n.projects.list"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.mcp_access.reconcile",
+            "Read and reconcile the official n8n MCP availability policy for the configured server",
+            mcp_access_reconcile_input_schema(),
+            mcp_access_reconcile_output_schema(),
+            "n8n.mcp_access.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Run a bounded dry-run to compare the configured server's workflow MCP availability with the requested policy.".into(),
+                common_mistakes: vec![
+                    "The configured server identity is authoritative; never infer it from a workflow name.".into(),
+                    "dryRun=true performs only bounded workflow metadata reads and does not require approval.".into(),
+                    "dryRun=false is fail-closed until a supported typed n8n admin adapter is implemented; this operation never uses the private web bulk endpoint.".into(),
+                    "Archived workflows are skipped and unknown archive or availability states are reported as exceptions.".into(),
+                ],
+                examples: vec![r#"{"scope":"all_current","desired":true,"dryRun":true}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.list"),
+                    CapabilityId::from_static("n8n.workflows.get"),
                 ],
             },
         ),
@@ -3446,9 +3895,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_12_operations() {
+    fn operations_info_has_13_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 13);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -3458,6 +3907,94 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.credentials.list"));
         assert!(operation_ids.contains(&"n8n.workflows.create_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
+        assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
+    }
+
+    #[test]
+    fn mcp_access_dry_run_plans_only_explicit_non_archived_changes() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "all_current",
+            "desired": true,
+            "dryRun": true,
+        }))
+        .expect("valid dry-run input");
+        let workflows: Vec<Workflow> = serde_json::from_value(json!([
+            {
+                "id": "already-enabled",
+                "isArchived": false,
+                "settings": {"availableInMCP": true}
+            },
+            {
+                "id": "needs-enable",
+                "isArchived": false,
+                "settings": {"availableInMCP": false}
+            },
+            {
+                "id": "archived",
+                "isArchived": true,
+                "settings": {"availableInMCP": false}
+            },
+            {
+                "id": "unknown-availability",
+                "isArchived": false,
+                "settings": {"timeSavedMode": "fixed"}
+            }
+        ]))
+        .unwrap();
+        let plan = plan_mcp_access_reconcile(&input, &workflows).unwrap();
+        assert_eq!(plan.planned.len(), 1);
+        assert_eq!(plan.planned[0].id, "needs-enable");
+        assert!(plan.changed.is_empty());
+        assert_eq!(plan.skipped[0].reason, "already_desired");
+        assert_eq!(plan.skipped[1].reason, "archived");
+        assert_eq!(plan.exceptions[0].reason, "availability_state_unknown");
+        assert!(plan.readback_digest.starts_with("blake3-256:"));
+    }
+
+    #[test]
+    fn mcp_access_workflow_id_scope_reports_missing_ids() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "workflow_ids",
+            "desired": false,
+            "dryRun": true,
+            "workflowIds": ["present", "missing"]
+        }))
+        .expect("valid workflow ID scope");
+        let workflows: Vec<Workflow> = serde_json::from_value(json!([
+            {
+                "id": "present",
+                "isArchived": false,
+                "settings": {"availableInMCP": true}
+            }
+        ]))
+        .unwrap();
+        let plan = plan_mcp_access_reconcile(&input, &workflows).unwrap();
+        assert_eq!(plan.planned.len(), 1);
+        assert_eq!(plan.planned[0].id, "present");
+        assert_eq!(plan.exceptions[0].id, "missing");
+        assert_eq!(plan.exceptions[0].reason, "not_found");
+    }
+
+    #[test]
+    fn mcp_access_input_rejects_write_without_guard_and_scope_smuggling() {
+        assert!(
+            parse_mcp_access_input(&json!({
+                "scope": "all_current",
+                "desired": true,
+                "dryRun": false,
+            }))
+            .is_err()
+        );
+        assert!(
+            parse_mcp_access_input(&json!({
+                "scope": "folder",
+                "desired": true,
+                "dryRun": true,
+                "folderId": "folder-1",
+                "projectId": "project-1",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:58e765ff3d59c83811ad983541f2a10dac3800eb82a849384458c09fbff6e2ab"
+interface_hash = "blake3-256:fcp.interface.v2:c730a99d5cc7b797946aa13839097e780082ce3f2c724bc2d3764f45305a12a3"
 
 [connector]
 id = "fcp.n8n"
@@ -45,6 +45,7 @@ optional = [
     "n8n.credentials.metadata.read",
     "n8n.executions.read",
     "n8n.folders.read",
+    "n8n.mcp_access.write",
     "n8n.projects.read",
     "n8n.tags.read",
     "n8n.workflows.write",
@@ -596,6 +597,237 @@ examples = ['{"project_id": "project-1"}']
 related = [
     "n8n.folders.get",
     "n8n.projects.list",
+]
+
+[provides.operations."n8n.mcp_access.reconcile"]
+description = "Read and reconcile the official n8n MCP availability policy for the configured server"
+capability = "n8n.mcp_access.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema]
+additionalProperties = false
+required = [
+    "scope",
+    "desired",
+    "dryRun",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.dryRun]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.folderId]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.guard]
+additionalProperties = false
+required = [
+    "approvalRef",
+    "dryRunDigest",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.guard.properties.approvalRef]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.guard.properties.dryRunDigest]
+maxLength = 256
+minLength = 1
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.projectId]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.scope]
+enum = [
+    "workflow_ids",
+    "project",
+    "folder",
+    "all_current",
+]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.workflowIds]
+maxItems = 1000
+minItems = 1
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".input_schema.properties.workflowIds.items]
+maxLength = 256
+minLength = 1
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema]
+additionalProperties = false
+required = [
+    "planned",
+    "changed",
+    "skipped",
+    "exceptions",
+    "readbackDigest",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed]
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed.items]
+additionalProperties = false
+required = [
+    "id",
+    "availableInMCP",
+    "desired",
+    "reason",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed.items.properties.availableInMCP]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed.items.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.changed.items.properties.reason]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions]
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions.items]
+additionalProperties = false
+required = [
+    "id",
+    "availableInMCP",
+    "desired",
+    "reason",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions.items.properties.availableInMCP]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions.items.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.exceptions.items.properties.reason]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned]
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned.items]
+additionalProperties = false
+required = [
+    "id",
+    "availableInMCP",
+    "desired",
+    "reason",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned.items.properties.availableInMCP]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned.items.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.planned.items.properties.reason]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.readbackDigest]
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped]
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped.items]
+additionalProperties = false
+required = [
+    "id",
+    "availableInMCP",
+    "desired",
+    "reason",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped.items.properties.availableInMCP]
+type = [
+    "boolean",
+    "null",
+]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped.items.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped.items.properties.id]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.skipped.items.properties.reason]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.mcp_access.reconcile".ai_hints]
+when_to_use = "Run a bounded dry-run to compare the configured server's workflow MCP availability with the requested policy."
+common_mistakes = [
+    "The configured server identity is authoritative; never infer it from a workflow name.",
+    "dryRun=true performs only bounded workflow metadata reads and does not require approval.",
+    "dryRun=false is fail-closed until a supported typed n8n admin adapter is implemented; this operation never uses the private web bulk endpoint.",
+    "Archived workflows are skipped and unknown archive or availability states are reported as exceptions.",
+]
+examples = ['{"scope":"all_current","desired":true,"dryRun":true}']
+related = [
+    "n8n.workflows.list",
+    "n8n.workflows.get",
 ]
 
 [provides.operations."n8n.projects.list"]
@@ -1218,6 +1450,12 @@ type = [
     "null",
 ]
 
+[provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.availableInMCP]
+type = [
+    "boolean",
+    "null",
+]
+
 [provides.operations."n8n.workflows.list".output_schema.properties.data.items.properties.createdAt]
 type = [
     "string",
@@ -1574,6 +1812,13 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "n8n.mcp_access.write"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "n8n.executions.read"
 requests = 200
 window_ms = 60000
@@ -1595,15 +1840,16 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
-"n8n.credentials.list" = ["n8n.credentials.metadata.read"]
-"n8n.workflows.create_draft" = ["n8n.workflows.write"]
-"n8n.executions.list" = ["n8n.executions.read"]
-"n8n.folders.get" = ["n8n.folders.read"]
-"n8n.executions.get" = ["n8n.executions.read"]
-"n8n.tags.list" = ["n8n.tags.read"]
-"n8n.folders.list" = ["n8n.folders.read"]
-"n8n.projects.list" = ["n8n.projects.read"]
-"n8n.workflows.activate" = ["n8n.workflows.write"]
-"n8n.workflows.update_draft" = ["n8n.workflows.write"]
-"n8n.workflows.get" = ["n8n.workflows.read"]
 "n8n.workflows.list" = ["n8n.workflows.read"]
+"n8n.workflows.activate" = ["n8n.workflows.write"]
+"n8n.credentials.list" = ["n8n.credentials.metadata.read"]
+"n8n.folders.get" = ["n8n.folders.read"]
+"n8n.folders.list" = ["n8n.folders.read"]
+"n8n.tags.list" = ["n8n.tags.read"]
+"n8n.executions.list" = ["n8n.executions.read"]
+"n8n.workflows.create_draft" = ["n8n.workflows.write"]
+"n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.projects.list" = ["n8n.projects.read"]
+"n8n.workflows.update_draft" = ["n8n.workflows.write"]
+"n8n.executions.get" = ["n8n.executions.read"]
+"n8n.mcp_access.reconcile" = ["n8n.mcp_access.write"]

@@ -135,6 +135,8 @@ enum HostRunOnceOperation {
     WorkflowsCreateDraft,
     #[serde(rename = "n8n.workflows.update_draft")]
     WorkflowsUpdateDraft,
+    #[serde(rename = "n8n.mcp_access.reconcile")]
+    McpAccessReconcile,
 }
 
 impl HostRunOnceOperation {
@@ -152,6 +154,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
+            "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
             _ => Err(AppError::new("operation_not_allowed")),
         }
     }
@@ -169,7 +172,8 @@ impl HostRunOnceOperation {
             | Self::WorkflowsGet
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
-            | Self::WorkflowsUpdateDraft => BrokerCredentialPurpose::RestApi,
+            | Self::WorkflowsUpdateDraft
+            | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
         }
     }
 }
@@ -773,6 +777,18 @@ fn validate_host_run_once_input(
             ],
             &["id", "graph", "guard"],
         ),
+        HostRunOnceOperation::McpAccessReconcile => (
+            &[
+                "scope",
+                "desired",
+                "dryRun",
+                "projectId",
+                "folderId",
+                "workflowIds",
+                "guard",
+            ],
+            &["scope", "desired", "dryRun"],
+        ),
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str()))
         || required.iter().any(|key| !object.contains_key(*key))
@@ -812,7 +828,108 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
             validate_workflow_draft_input(operation, input, object)
         }
+        HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
+}
+
+fn validate_mcp_access_input(
+    input: &Value,
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    const MAX_WORKFLOW_IDS: usize = 1_000;
+    let scope = object
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if !matches!(scope, "workflow_ids" | "project" | "folder" | "all_current")
+        || object.get("desired").and_then(Value::as_bool).is_none()
+        || object.get("dryRun").and_then(Value::as_bool).is_none()
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let dry_run = object
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    match (dry_run, object.get("guard")) {
+        (true, Some(_)) => return Err(AppError::new("invalid_operation_input")),
+        (false, None) => return Err(AppError::new("invalid_operation_input")),
+        (false, Some(Value::Object(guard))) => {
+            if guard
+                .keys()
+                .any(|key| !matches!(key.as_str(), "approvalRef" | "dryRunDigest"))
+                || guard
+                    .get("approvalRef")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| {
+                        value.is_empty() || value.len() > 256 || value.trim() != value
+                    })
+                || guard
+                    .get("dryRunDigest")
+                    .and_then(Value::as_str)
+                    .is_none_or(|value| {
+                        value.is_empty() || value.len() > 256 || !is_blake3_digest(value)
+                    })
+            {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+        }
+        (false, Some(_)) => return Err(AppError::new("invalid_operation_input")),
+        (true, None) => {}
+    }
+
+    match scope {
+        "workflow_ids" => {
+            let ids = object
+                .get("workflowIds")
+                .and_then(Value::as_array)
+                .filter(|ids| !ids.is_empty() && ids.len() <= MAX_WORKFLOW_IDS)
+                .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+            let mut unique = std::collections::BTreeSet::new();
+            for id in ids {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+                host_run_once_input_id(&json!({"id": id}), "id")?;
+                if !unique.insert(id) {
+                    return Err(AppError::new("invalid_operation_input"));
+                }
+            }
+            if object.contains_key("projectId") || object.contains_key("folderId") {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+        }
+        "project" => {
+            host_run_once_input_id(input, "projectId")?;
+            if object.contains_key("folderId") || object.contains_key("workflowIds") {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+        }
+        "folder" => {
+            host_run_once_input_id(input, "folderId")?;
+            if object.contains_key("projectId") || object.contains_key("workflowIds") {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+        }
+        "all_current" => {
+            if object.contains_key("projectId")
+                || object.contains_key("folderId")
+                || object.contains_key("workflowIds")
+            {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn is_blake3_digest(value: &str) -> bool {
+    value.len() == "blake3-256:".len() + 64
+        && value.starts_with("blake3-256:")
+        && value["blake3-256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_workflow_draft_input(
@@ -965,6 +1082,7 @@ fn expected_host_run_once_resource_uri(
             "{root}/workflows/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "id")?)
         )),
+        HostRunOnceOperation::McpAccessReconcile => Ok(root),
         HostRunOnceOperation::ExecutionsGet => Ok(format!(
             "{root}/workflows/{}/executions/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "workflow_id")?),
@@ -1040,6 +1158,7 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.data_tables.search" | "n8n.data_tables.mutate" => OperationIntent::DataTables,
         "n8n.audit.inspect" => OperationIntent::Audit,
         "n8n.workflows.versions" => OperationIntent::VersionHistory,
+        "n8n.mcp_access.reconcile" => OperationIntent::McpAccessReconcile,
         _ => return Err(AppError::new("unknown_public_operation")),
     };
     Ok(intent)

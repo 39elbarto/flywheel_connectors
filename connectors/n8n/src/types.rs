@@ -120,6 +120,11 @@ pub struct Workflow {
     pub created_at: Option<String>,
     #[serde(default, rename = "updatedAt")]
     pub updated_at: Option<String>,
+    /// The list endpoint may include workflow settings.  Keep the raw value
+    /// process-local so the MCP availability planner can inspect the one
+    /// allow-listed flag without returning arbitrary provider settings.
+    #[serde(default)]
+    pub settings: Option<Value>,
     #[serde(default)]
     pub tags: Option<Vec<Tag>>,
 }
@@ -382,6 +387,8 @@ pub struct WorkflowView {
     pub created_at: Option<String>,
     #[serde(rename = "updatedAt")]
     pub updated_at: Option<String>,
+    #[serde(rename = "availableInMCP", skip_serializing_if = "Option::is_none")]
+    pub available_in_mcp: Option<bool>,
     pub tags: Option<Vec<TagView>>,
 }
 
@@ -521,8 +528,19 @@ pub struct FolderListView {
 }
 
 impl Workflow {
+    /// Return only the provider's explicit MCP availability flag.
+    #[must_use]
+    pub fn available_in_mcp(&self) -> Option<bool> {
+        self.settings
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|settings| settings.get("availableInMCP"))
+            .and_then(Value::as_bool)
+    }
+
     #[must_use]
     pub fn into_view(self) -> WorkflowView {
+        let available_in_mcp = self.available_in_mcp();
         WorkflowView {
             id: self.id,
             name: self.name,
@@ -535,6 +553,7 @@ impl Workflow {
             parent_folder_id: self.parent_folder_id,
             created_at: self.created_at,
             updated_at: self.updated_at,
+            available_in_mcp,
             tags: self
                 .tags
                 .map(|tags| tags.into_iter().map(Tag::into_view).collect::<Vec<_>>()),
@@ -767,6 +786,7 @@ mod tests {
             parent_folder_id: None,
             created_at: None,
             updated_at: None,
+            settings: Some(json!({"availableInMCP": true, "private": "discard"})),
             tags: Some(vec![Tag {
                 id: Some("t1".into()),
                 name: Some("dev".into()),
@@ -776,6 +796,8 @@ mod tests {
         assert_eq!(v["id"], "w1");
         assert_eq!(v["name"], "My Workflow");
         assert_eq!(v["active"], true);
+        assert_eq!(v["availableInMCP"], true);
+        assert!(v.get("private").is_none());
         assert_eq!(v["tags"][0]["name"], "dev");
     }
 
@@ -1142,6 +1164,7 @@ mod tests {
             parent_folder_id: None,
             created_at: None,
             updated_at: None,
+            settings: None,
             tags: Some(vec![Tag {
                 id: Some("t1".into()),
                 name: Some("dev".into()),
@@ -1167,6 +1190,7 @@ mod tests {
             parent_folder_id: None,
             created_at: None,
             updated_at: None,
+            settings: None,
             tags: None,
         };
         let dbg = format!("{w:?}");
@@ -1248,6 +1272,7 @@ mod tests {
                 parent_folder_id: None,
                 created_at: None,
                 updated_at: None,
+                settings: None,
                 tags: None,
             }],
             next_cursor: Some("cursor1".into()),
@@ -1388,6 +1413,7 @@ mod tests {
                 parent_folder_id: None,
                 created_at: None,
                 updated_at: None,
+                available_in_mcp: None,
                 tags: None,
             }],
             next_cursor: Some("opaque-cursor".into()),

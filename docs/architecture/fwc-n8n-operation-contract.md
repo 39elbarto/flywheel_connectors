@@ -52,9 +52,12 @@ concurrent malicious root updater, and it does not claim signature
 verification; a future signed installer/update receipt can strengthen that
 root of trust.
 `n8n.targets.resolve`, `n8n.runtime.status`,
-`n8n.node_resources.explore`, `n8n.evaluations.manage`, and
-`n8n.mcp_access.reconcile` are not all representable by that enum yet. Local,
-typed REST, local MCP, and any official-MCP operation beyond capability
+`n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
+representable by that enum yet. `n8n.mcp_access.reconcile` is now represented
+as a typed REST intent and host operation for bounded dry-run reconciliation.
+Its write branch remains fail-closed until a supported typed n8n admin API is
+proven; the private web bulk endpoint is not an accepted provider surface.
+Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
 names.

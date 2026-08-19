@@ -851,6 +851,7 @@ pub enum OperationIntent {
     DataTables,
     Audit,
     VersionHistory,
+    McpAccessReconcile,
 }
 
 impl OperationIntent {
@@ -858,13 +859,18 @@ impl OperationIntent {
     pub const fn is_write(self) -> bool {
         matches!(
             self,
-            Self::WorkflowDraftWrite | Self::Lifecycle | Self::Execution | Self::DataTables
+            Self::WorkflowDraftWrite
+                | Self::Lifecycle
+                | Self::Execution
+                | Self::DataTables
+                | Self::McpAccessReconcile
         )
     }
 
     const fn preferred_and_fallback(self) -> (Provider, Option<Provider>) {
         match self {
             Self::CapabilitiesInspection => (Provider::OfficialMcp, None),
+            Self::McpAccessReconcile => (Provider::TypedRest, None),
             Self::KnownIdRead | Self::Search => (Provider::TypedRest, Some(Provider::OfficialMcp)),
             Self::NodeKnowledge | Self::Validation => {
                 (Provider::LocalMcp, Some(Provider::OfficialMcp))
@@ -899,6 +905,7 @@ pub enum ProviderCapability {
     DataTables,
     Audit,
     VersionHistory,
+    McpAccessReconcile,
 }
 
 impl From<OperationIntent> for ProviderCapability {
@@ -917,6 +924,7 @@ impl From<OperationIntent> for ProviderCapability {
             OperationIntent::DataTables => Self::DataTables,
             OperationIntent::Audit => Self::Audit,
             OperationIntent::VersionHistory => Self::VersionHistory,
+            OperationIntent::McpAccessReconcile => Self::McpAccessReconcile,
         }
     }
 }

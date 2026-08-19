@@ -94,6 +94,18 @@ Important runtime truths:
   owner-gated disposable EEC and Hetzner enable/disable/readback acceptance.
   This is not a durable reconciliation ledger; future workflows still require
   a later bounded run.
+- Large workflow pages use an operation-scoped transport budget: the typed
+  `n8n.workflows.list` and `n8n.mcp_access.reconcile` paths allow at most
+  `512 KiB` for the compact inter-process result. Their owned invocation
+  deadlines are `30 seconds` and `60 seconds` respectively; the generic
+  connector/owned defaults remain `64 KiB` and `10 seconds`. The provider
+  response itself remains bounded to `10 MiB`, is typed and compacted before
+  crossing the connector boundary, and is never logged as raw payload.
+- On 2026-08-19 the installed release passed read-only live smoke on both
+  servers: EEC listed 100 items and its `all_current` dry-run planned 137
+  workflows (48 already disabled, 0 changes, 0 exceptions); Hetzner listed
+  100 items and planned 300 (56 already disabled, 0 changes, 3 bounded
+  exceptions). No workflow write, activation, deletion, or retry occurred.
 - The library now includes a compact, provider-neutral target resolver and
   provider router. It accepts explicit server, confirmed project mapping,
   workflow/execution provenance, canonical resource URI, or bounded ambiguity;

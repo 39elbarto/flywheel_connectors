@@ -724,9 +724,14 @@ impl SubprocessConnector {
             )));
         }
 
-        let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
-            .await
-            .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
+        let runner = ConnectorProcessRunner::spawn_for_connector(
+            Some(&summary.id),
+            &config.binary,
+            &config.args,
+            &config.env,
+        )
+        .await
+        .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
         let state_root = configured_connector_state_root(&config);
         let (runner_tx, mut runner_rx) =
             mpsc::channel::<ConnectorRpcRequest>(CONNECTOR_RPC_QUEUE_CAPACITY);
@@ -4491,11 +4496,25 @@ fn owned_invocation_config(
         // wrapper that strips descriptions and schemas before model output.
         config.max_frame_bytes = 2 * 1024 * 1024;
     }
-    if connector_id.as_str() == "fcp.n8n" && operation.as_str() == "n8n.mcp_access.reconcile" {
-        // Reconciliation may perform several bounded provider reads before
-        // returning its compact plan. Keep the general RPC ceiling at 10s,
-        // but give this typed operation enough time for its fixed read set.
-        config.rpc_timeout = Duration::from_secs(30);
+    if connector_id.as_str() == "fcp.n8n"
+        && matches!(
+            operation.as_str(),
+            "n8n.workflows.list" | "n8n.mcp_access.reconcile"
+        )
+    {
+        // These two typed operations return bounded workflow collections or
+        // compact reconciliation plans that can exceed the generic 64 KiB
+        // owned-invocation frame. Keep this exception operation-scoped.
+        config.max_frame_bytes = N8N_BOUNDED_RPC_MAX_FRAME_BYTES;
+        // The provider list payload is larger than the compact connector view;
+        // allow bounded decoding time without changing the general 10s limit.
+        config.rpc_timeout = if operation.as_str() == "n8n.mcp_access.reconcile" {
+            // A bounded all-current reconciliation may require two provider
+            // pages; each page can take about 20s through the mediated path.
+            Duration::from_secs(60)
+        } else {
+            Duration::from_secs(30)
+        };
     }
     config
 }
@@ -4544,7 +4563,51 @@ mod owned_per_invocation_unit_tests {
                 &OperationId::from_static("n8n.workflows.list"),
             )
             .max_frame_bytes,
-            OwnedInvocationConfig::default().max_frame_bytes
+            N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            owned_invocation_config(
+                &ConnectorId::from_static("fcp.n8n"),
+                &OperationId::from_static("n8n.workflows.list"),
+            )
+            .rpc_timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            owned_invocation_config(
+                &ConnectorId::from_static("fcp.n8n"),
+                &OperationId::from_static("n8n.mcp_access.reconcile"),
+            )
+            .max_frame_bytes,
+            N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            owned_invocation_config(
+                &ConnectorId::from_static("fcp.n8n"),
+                &OperationId::from_static("n8n.mcp_access.reconcile"),
+            )
+            .rpc_timeout,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn n8n_large_connector_frames_are_scoped_to_bounded_operations() {
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.list")),
+            N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.mcp_access.reconcile")),
+            N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.get")),
+            CONNECTOR_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.test"), Some("n8n.workflows.list")),
+            CONNECTOR_RPC_MAX_FRAME_BYTES
         );
     }
 
@@ -5957,6 +6020,7 @@ struct ConnectorProcessRunner {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     _stderr_task: JoinHandle<()>,
+    connector_id: Option<String>,
     poisoned: bool,
     epoch: u64,
     next_request_seq: u64,
@@ -5979,7 +6043,24 @@ const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 /// delimiter. Larger results must use a bounded connector-level page or compact
 /// receipt instead of widening this transport frame.
 const CONNECTOR_RPC_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Bounded frame for the two n8n operations whose compact, page-bounded result
+/// can legitimately exceed the generic connector frame. This is selected only
+/// when the host-owned connector identity and operation both match.
+const N8N_BOUNDED_RPC_MAX_FRAME_BYTES: usize = 512 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
+fn connector_rpc_frame_limit(connector_id: Option<&str>, operation: Option<&str>) -> usize {
+    if connector_id == Some("fcp.n8n")
+        && matches!(
+            operation,
+            Some("n8n.workflows.list" | "n8n.mcp_access.reconcile")
+        )
+    {
+        N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+    } else {
+        CONNECTOR_RPC_MAX_FRAME_BYTES
+    }
+}
 
 #[derive(Debug)]
 struct ConnectorFrameLimitError {
@@ -6004,17 +6085,32 @@ impl std::fmt::Display for ConnectorFrameLimitError {
 
 impl std::error::Error for ConnectorFrameLimitError {}
 
+#[cfg(test)]
 fn connector_frame_limit_error(
     direction: &'static str,
     observed_bytes: usize,
     request_may_have_reached_connector: bool,
+) -> std::io::Error {
+    connector_frame_limit_error_with_limit(
+        direction,
+        observed_bytes,
+        request_may_have_reached_connector,
+        CONNECTOR_RPC_MAX_FRAME_BYTES,
+    )
+}
+
+fn connector_frame_limit_error_with_limit(
+    direction: &'static str,
+    observed_bytes: usize,
+    request_may_have_reached_connector: bool,
+    limit_bytes: usize,
 ) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         ConnectorFrameLimitError {
             direction,
             observed_bytes: u64::try_from(observed_bytes).unwrap_or(u64::MAX),
-            limit_bytes: u64::try_from(CONNECTOR_RPC_MAX_FRAME_BYTES).unwrap_or(u64::MAX),
+            limit_bytes: u64::try_from(limit_bytes).unwrap_or(u64::MAX),
             request_may_have_reached_connector,
         },
     )
@@ -6122,7 +6218,17 @@ fn log_connector_stderr_line(line: &[u8], truncated: bool) {
 }
 
 impl ConnectorProcessRunner {
+    #[cfg(test)]
     async fn spawn(
+        command: &str,
+        args: &[String],
+        env: &BTreeMap<String, String>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_for_connector(None, command, args, env).await
+    }
+
+    async fn spawn_for_connector(
+        connector_id: Option<&ConnectorId>,
         command: &str,
         args: &[String],
         env: &BTreeMap<String, String>,
@@ -6182,6 +6288,7 @@ impl ConnectorProcessRunner {
             stdin,
             stdout: BufReader::new(stdout),
             _stderr_task: stderr_task,
+            connector_id: connector_id.map(|id| id.as_str().to_string()),
             poisoned: false,
             epoch: 0,
             next_request_seq: 0,
@@ -6194,15 +6301,31 @@ impl ConnectorProcessRunner {
         request_id
     }
 
+    #[cfg(test)]
     async fn send_json(
         &mut self,
         value: &serde_json::Value,
         io_timeout: Duration,
     ) -> std::io::Result<u64> {
+        self.send_json_with_limit(value, io_timeout, CONNECTOR_RPC_MAX_FRAME_BYTES)
+            .await
+    }
+
+    async fn send_json_with_limit(
+        &mut self,
+        value: &serde_json::Value,
+        io_timeout: Duration,
+        max_frame_bytes: usize,
+    ) -> std::io::Result<u64> {
         let line = serde_json::to_string(value)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        if line.len() > CONNECTOR_RPC_MAX_FRAME_BYTES {
-            return Err(connector_frame_limit_error("stdin", line.len(), false));
+        if line.len() > max_frame_bytes {
+            return Err(connector_frame_limit_error_with_limit(
+                "stdin",
+                line.len(),
+                false,
+                max_frame_bytes,
+            ));
         }
         let frame_bytes = u64::try_from(line.len()).unwrap_or(u64::MAX);
         fcp_async_core::time::timeout(io_timeout, async {
@@ -6215,9 +6338,10 @@ impl ConnectorProcessRunner {
         Ok(frame_bytes)
     }
 
-    async fn read_json(
+    async fn read_json_with_limit(
         &mut self,
         io_timeout: Duration,
+        max_frame_bytes: usize,
     ) -> std::io::Result<(serde_json::Value, u64)> {
         let mut line = Vec::with_capacity(1024);
         let bytes = fcp_async_core::time::timeout(io_timeout, async {
@@ -6227,11 +6351,12 @@ impl ConnectorProcessRunner {
                         if byte == b'\n' {
                             return Ok(line.len());
                         }
-                        if line.len() == CONNECTOR_RPC_MAX_FRAME_BYTES {
-                            return Err(connector_frame_limit_error(
+                        if line.len() == max_frame_bytes {
+                            return Err(connector_frame_limit_error_with_limit(
                                 "stdout",
                                 line.len().saturating_add(1),
                                 true,
+                                max_frame_bytes,
                             ));
                         }
                         line.push(byte);
@@ -6327,6 +6452,8 @@ impl ConnectorProcessRunner {
             .get("operation")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
+        let frame_limit =
+            connector_rpc_frame_limit(self.connector_id.as_deref(), operation.as_deref());
         let request = json!({
             "jsonrpc": "2.0",
             "id": expected_id,
@@ -6334,7 +6461,10 @@ impl ConnectorProcessRunner {
             "params": params,
         });
 
-        let request_frame_bytes = match self.send_json(&request, io_timeout).await {
+        let request_frame_bytes = match self
+            .send_json_with_limit(&request, io_timeout, frame_limit)
+            .await
+        {
             Ok(frame_bytes) => frame_bytes,
             Err(err) => {
                 if connector_frame_limit_metadata(&err).is_none() {
@@ -6352,7 +6482,7 @@ impl ConnectorProcessRunner {
             correlation_id,
             operation,
             connector_request_frame_bytes = request_frame_bytes,
-            connector_frame_limit_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES,
+            connector_frame_limit_bytes = frame_limit,
             "connector request frame accepted"
         );
 
@@ -6364,17 +6494,18 @@ impl ConnectorProcessRunner {
                 return Err(connector_io_timeout_error("stdout read", io_timeout));
             }
 
-            let (response, response_frame_bytes) = match self.read_json(remaining).await {
-                Ok(response) => response,
-                Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
-                    self.epoch = self.epoch.saturating_add(1);
-                    return Err(connector_io_timeout_error("stdout read", io_timeout));
-                }
-                Err(err) => {
-                    self.poison_transport();
-                    return Err(err);
-                }
-            };
+            let (response, response_frame_bytes) =
+                match self.read_json_with_limit(remaining, frame_limit).await {
+                    Ok(response) => response,
+                    Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                        self.epoch = self.epoch.saturating_add(1);
+                        return Err(connector_io_timeout_error("stdout read", io_timeout));
+                    }
+                    Err(err) => {
+                        self.poison_transport();
+                        return Err(err);
+                    }
+                };
             tracing::debug!(
                 event = "connector_rpc_frame",
                 schema_version = "fwc.google_workspace.telemetry.v1",
@@ -6384,7 +6515,7 @@ impl ConnectorProcessRunner {
                 correlation_id,
                 operation,
                 connector_response_frame_bytes = response_frame_bytes,
-                connector_frame_limit_bytes = CONNECTOR_RPC_MAX_FRAME_BYTES,
+                connector_frame_limit_bytes = frame_limit,
                 "connector response frame accepted"
             );
 

@@ -20,6 +20,7 @@ use super::{HostRunOnceEnvelope, HostRunOnceServerId};
 const MAX_CREDENTIAL_BYTES: usize = 4096;
 const MAX_ENVELOPE_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_N8N_BOUNDED_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_OFFICIAL_MCP_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 16 * 1024;
 const PROCESS_GRACE: Duration = Duration::from_millis(100);
@@ -321,6 +322,12 @@ fn process_spec(
 const fn max_output_bytes(operation: super::HostRunOnceOperation) -> usize {
     if matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect) {
         MAX_OFFICIAL_MCP_OUTPUT_BYTES
+    } else if matches!(
+        operation,
+        super::HostRunOnceOperation::WorkflowsList
+            | super::HostRunOnceOperation::McpAccessReconcile
+    ) {
+        MAX_N8N_BOUNDED_OUTPUT_BYTES
     } else {
         MAX_OUTPUT_BYTES
     }
@@ -1544,7 +1551,11 @@ mod tests {
         );
         assert_eq!(
             max_output_bytes(crate::HostRunOnceOperation::WorkflowsList),
-            MAX_OUTPUT_BYTES
+            MAX_N8N_BOUNDED_OUTPUT_BYTES
+        );
+        assert_eq!(
+            max_output_bytes(crate::HostRunOnceOperation::McpAccessReconcile),
+            MAX_N8N_BOUNDED_OUTPUT_BYTES
         );
     }
     use crate::HostRunOnceOperation;

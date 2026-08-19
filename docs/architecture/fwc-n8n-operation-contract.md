@@ -337,7 +337,7 @@ guarantees, not permission to replay.
 | `n8n.data_tables.mutate` | `n8n.data_tables.write` | action-dependent | Interactive | BestEffort | official MCP | table/schema/row-count readback | 256 KiB |
 | `n8n.evaluations.manage` | `n8n.evaluations.manage` | action-dependent | action-dependent | action-dependent | local MCP | evaluation URI/status | 256 KiB |
 | `n8n.audit.inspect` | `n8n.audit.read` | Safe / High | None | None | REST/local MCP | instance URI; redacted findings | 512 KiB |
-| `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 256 KiB |
+| `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 512 KiB operation-scoped; 60 s all-current budget |
 
 ### 5.1 Exact operation inputs and outputs
 
@@ -517,6 +517,15 @@ cross-process server lock and transient redacted receipts; a durable
 reconciliation receipt/ledger is not yet implemented. Project/folder/all-current
 scopes apply only to workflows present at that time; future workflows require a
 later reconciliation.
+
+The current host implementation keeps the generic owned connector frame and
+RPC timeout at `64 KiB` and `10 seconds`. Only typed
+`n8n.workflows.list` and `n8n.mcp_access.reconcile` receive the bounded
+`512 KiB` result frame; their per-invocation budgets are `30 seconds` and
+`60 seconds` respectively. The provider response remains subject to the
+independent `10 MiB` body cap and is compacted to an allow-listed result before
+it crosses the connector boundary. This exception is not a generic MCP or
+caller-configurable frame expansion.
 
 ## 6. Provider routing
 

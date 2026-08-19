@@ -1184,8 +1184,8 @@ mod tests {
             .expect("valid execution provenance")
     }
 
-    fn target(query: TargetQuery) -> ResolvedTarget {
-        match TargetResolver::resolve(&query).expect("target should resolve") {
+    fn target(query: &TargetQuery) -> ResolvedTarget {
+        match TargetResolver::resolve(query).expect("target should resolve") {
             TargetResolution::Resolved(target) => target,
             TargetResolution::Ambiguous { .. } => panic!("target should not be ambiguous"),
         }
@@ -1193,7 +1193,7 @@ mod tests {
 
     #[test]
     fn explicit_server_resolves_instance() {
-        let resolved = target(TargetQuery::explicit_server(ServerId::Eec));
+        let resolved = target(&TargetQuery::explicit_server(ServerId::Eec));
         assert_eq!(resolved.resource_uri.as_str(), "fwc-n8n://eec");
         assert_eq!(resolved.kind, ResourceKind::Instance);
     }
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn confirmed_project_mapping_resolves_project() {
         let mapping = ConfirmedProjectMapping::new(ServerId::Hetzner, "project-7").unwrap();
-        let resolved = target(TargetQuery {
+        let resolved = target(&TargetQuery {
             project_mapping: Some(mapping),
             ..TargetQuery::default()
         });
@@ -1213,20 +1213,20 @@ mod tests {
 
     #[test]
     fn workflow_and_execution_provenance_resolve_exact_resources() {
-        let workflow_target = target(TargetQuery {
+        let workflow_target = target(&TargetQuery {
             workflow_provenance: Some(workflow(ServerId::Eec, "wf-1")),
             ..TargetQuery::default()
         });
         assert_eq!(workflow_target.kind, ResourceKind::Workflow);
 
-        let execution_target = target(TargetQuery {
+        let execution_target = target(&TargetQuery {
             execution_provenance: Some(execution(ServerId::Eec, "wf-1", "run-2")),
             ..TargetQuery::default()
         });
         assert_eq!(execution_target.kind, ResourceKind::Execution);
         assert_eq!(execution_target.server, ServerId::Eec);
 
-        let combined_target = target(TargetQuery {
+        let combined_target = target(&TargetQuery {
             server: Some(ServerId::Eec),
             project_mapping: Some(
                 ConfirmedProjectMapping::new(ServerId::Eec, "project-1").unwrap(),
@@ -1315,7 +1315,7 @@ mod tests {
             TargetResolver::resolve(&query).unwrap_err().code(),
             TargetResolveCode::LegacyOptInRequired
         );
-        let resolved = target(query.with_legacy_opt_in());
+        let resolved = target(&query.with_legacy_opt_in());
         assert_eq!(resolved.server, ServerId::Legacy);
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn typed_rest_is_preferred_for_known_id_reads() {
-        let target = target(TargetQuery {
+        let target = target(&TargetQuery {
             workflow_provenance: Some(workflow(ServerId::Eec, "wf-1")),
             ..TargetQuery::default()
         });
@@ -1404,7 +1404,7 @@ mod tests {
 
     #[test]
     fn server_scoped_search_routes_without_guessing_a_resource() {
-        let target = target(TargetQuery::explicit_server(ServerId::Hetzner));
+        let target = target(&TargetQuery::explicit_server(ServerId::Hetzner));
         let capabilities =
             CapabilitySnapshot::default().with(Provider::TypedRest, ProviderCapability::Search);
         let route =
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn fallback_is_reported_explicitly() {
-        let target = target(TargetQuery {
+        let target = target(&TargetQuery {
             workflow_provenance: Some(workflow(ServerId::Eec, "wf-1")),
             ..TargetQuery::default()
         });
@@ -1434,7 +1434,7 @@ mod tests {
 
     #[test]
     fn capability_drift_denies_unknown_write_tool() {
-        let target = target(TargetQuery {
+        let target = target(&TargetQuery {
             workflow_provenance: Some(workflow(ServerId::Eec, "wf-1")),
             ..TargetQuery::default()
         });
@@ -1449,7 +1449,7 @@ mod tests {
 
     #[test]
     fn local_knowledge_requires_local_target() {
-        let target = target(TargetQuery::explicit_server(ServerId::Eec));
+        let target = target(&TargetQuery::explicit_server(ServerId::Eec));
         let capabilities = CapabilitySnapshot::default()
             .with(Provider::LocalMcp, ProviderCapability::NodeKnowledge);
         let error =

@@ -599,7 +599,7 @@ impl N8nConnector {
             operation,
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
         ) {
-            let plan = self.prepare_draft_write(operation, &input)?;
+            let plan = Self::prepare_draft_write(operation, &input)?;
             self.require_draft_approval(operation, &input, &params)?;
             Some(plan)
         } else {
@@ -840,7 +840,7 @@ impl N8nConnector {
                     name: workflow.name.clone(),
                     settings: workflow.settings.clone(),
                     static_data: workflow.static_data.clone(),
-                    pin_data: workflow.pin_data.clone(),
+                    pin_data: workflow.pin_data,
                 }),
                 Value::Object(provider_payload),
             )
@@ -1113,7 +1113,7 @@ impl N8nConnector {
             .ok_or_else(|| N8nError::InvalidInput("connector is not configured".into()))
     }
 
-    fn prepare_draft_write(&self, operation: &str, input: &Value) -> FcpResult<DraftWritePlan> {
+    fn prepare_draft_write(operation: &str, input: &Value) -> FcpResult<DraftWritePlan> {
         let typed: WorkflowDraftMutationInput =
             serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
                 code: 1005,
@@ -3060,7 +3060,7 @@ mod tests {
             canonical_draft_settings("n8n.workflows.update_draft", &base).unwrap(),
             json!({})
         );
-        let mut update_settings = base.clone();
+        let mut update_settings = base;
         update_settings["graph"]["settings"] = json!({"executionOrder": "v1"});
         assert!(canonical_draft_settings("n8n.workflows.update_draft", &update_settings).is_ok());
         update_settings["graph"]["settings"] = json!({"availableInMCP": false});
@@ -4577,7 +4577,7 @@ mod tests {
             token.issuer.clone(),
             token.scope.clone(),
             token.zone_id.clone(),
-            token.signature.clone(),
+            token.signature,
         );
         assert!(!is_matching_draft_approval(
             &expired,

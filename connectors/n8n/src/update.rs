@@ -16,6 +16,7 @@ const MAX_ATOM_BYTES: usize = 256;
 const MAX_TOOLS: usize = 512;
 const MAX_DEPENDENCIES: usize = 512;
 const MAX_APPROVAL_TTL_MS: u64 = 15 * 60 * 1_000;
+const MAX_SMOKE_CHECKS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -300,6 +301,8 @@ pub struct VerifiedCandidate {
     snapshot: ComponentSnapshot,
     stage_id: String,
     verification_digest: String,
+    #[serde(skip)]
+    release_artifact_binding: Option<String>,
 }
 
 impl VerifiedCandidate {
@@ -307,6 +310,29 @@ impl VerifiedCandidate {
         snapshot: ComponentSnapshot,
         stage_id: impl Into<String>,
         artifact_evidence_digest: impl Into<String>,
+    ) -> Result<Self, UpdateError> {
+        Self::from_verified_stage_internal(snapshot, stage_id, artifact_evidence_digest, None)
+    }
+
+    pub(crate) fn from_verified_stage_with_release_binding(
+        snapshot: ComponentSnapshot,
+        stage_id: impl Into<String>,
+        artifact_evidence_digest: impl Into<String>,
+        release_artifact_binding: impl Into<String>,
+    ) -> Result<Self, UpdateError> {
+        Self::from_verified_stage_internal(
+            snapshot,
+            stage_id,
+            artifact_evidence_digest,
+            Some(release_artifact_binding.into()),
+        )
+    }
+
+    fn from_verified_stage_internal(
+        snapshot: ComponentSnapshot,
+        stage_id: impl Into<String>,
+        artifact_evidence_digest: impl Into<String>,
+        release_artifact_binding: Option<String>,
     ) -> Result<Self, UpdateError> {
         let snapshot = snapshot.normalize_and_validate()?;
         let stage_id = stage_id.into();
@@ -317,22 +343,47 @@ impl VerifiedCandidate {
             return Err(UpdateError::InvalidSnapshot("stage_id_invalid"));
         }
         validate_digest("artifact_evidence_digest", &artifact_evidence_digest)?;
+        if let Some(binding) = &release_artifact_binding {
+            validate_digest("release_artifact_binding", binding)?;
+        }
         let snapshot_digest = snapshot.digest()?;
-        let verification_digest = canonical_digest(&(
-            "fwc.n8n.verified-stage.v1",
-            &stage_id,
-            &artifact_evidence_digest,
-            &snapshot_digest,
-        ))?;
+        let verification_digest = match &release_artifact_binding {
+            Some(binding) => canonical_digest(&(
+                "fwc.n8n.verified-stage.v2",
+                &stage_id,
+                &artifact_evidence_digest,
+                &snapshot_digest,
+                binding,
+            ))?,
+            None => canonical_digest(&(
+                "fwc.n8n.verified-stage.v1",
+                &stage_id,
+                &artifact_evidence_digest,
+                &snapshot_digest,
+            ))?,
+        };
         Ok(Self {
             snapshot,
             stage_id,
             verification_digest,
+            release_artifact_binding,
         })
     }
 
     pub const fn snapshot(&self) -> &ComponentSnapshot {
         &self.snapshot
+    }
+
+    pub(crate) fn stage_id(&self) -> &str {
+        &self.stage_id
+    }
+
+    pub(crate) fn verification_digest(&self) -> &str {
+        &self.verification_digest
+    }
+
+    pub(crate) fn release_artifact_binding(&self) -> Option<&str> {
+        self.release_artifact_binding.as_deref()
     }
 }
 
@@ -366,6 +417,10 @@ impl AuthorizedUpdate {
     pub const fn candidate(&self) -> &ComponentSnapshot {
         self.candidate.snapshot()
     }
+
+    pub(crate) const fn candidate_handle(&self) -> &VerifiedCandidate {
+        &self.candidate
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -378,8 +433,20 @@ pub struct SmokeReport {
 }
 
 impl SmokeReport {
-    const fn valid_for_apply(&self) -> bool {
-        self.passed && self.zero_idle_confirmed && self.redaction_confirmed
+    fn valid_for_apply(&self) -> bool {
+        self.passed
+            && self.zero_idle_confirmed
+            && self.redaction_confirmed
+            && !self.check_ids.is_empty()
+            && self.check_ids.len() <= MAX_SMOKE_CHECKS
+            && self.check_ids.iter().all(|id| {
+                !id.is_empty()
+                    && id.len() <= MAX_ATOM_BYTES
+                    && id.is_ascii()
+                    && id.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')
+                    })
+            })
     }
 }
 

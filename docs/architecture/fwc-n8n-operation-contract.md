@@ -32,6 +32,13 @@ discards all descriptions and raw schemas. The public result retains only
 sorted tool names, SHA-256 input/output schema digests, and explicit
 `unknown`/`unreviewed` markers until the owner approves a capability policy.
 
+Implementation status snapshot (2026-08-19): the host-side local
+`n8n-mcp` update executor and its security primitives are implemented behind
+the connector boundary. The public CLI still has no registry fetch, `npm`
+invocation, release switch, or live update command. The implementation status
+and evidence are maintained in `connectors/n8n/README.md`; this document
+continues to define the accepted public contract and owner gates.
+
 The immutable bundle contract now requires twelve exact artifacts, including
 `fcp-mcp-bridge`, its manifest, and separate EEC/Hetzner official-MCP
 inventories. Immutable release `release-20260817-nqm817-34` is installed, the
@@ -767,6 +774,32 @@ Allowed telemetry fields:
 Prohibited telemetry includes API keys, tokens, credential values, auth
 headers, workflow JSON, Code source, execution payloads, customer/patient
 messages, external response bodies, and raw release notes.
+
+### 12.1 Local `n8n-mcp` update executor boundary
+
+The trusted local-provider update path is review-first and host-owned:
+
+- candidate, stage plan, metadata, registry URL, and exact artifact SRI are
+  bound before stage creation; a mismatch performs no stage I/O;
+- archive listing is streamed with a hard output bound and absolute deadline;
+  timeout handling kills and waits for the same child, and non-zero, oversized,
+  or I/O failures are fail-closed;
+- the receipt digest is checked before and after listing and again on a fresh
+  descriptor immediately before extraction, so the validated artifact cannot be
+  silently replaced between those phases;
+- failed materialization, extraction, re-verification, and candidate-binding
+  paths discard only the exact stage through bounded descriptor-relative
+  cleanup. Cleanup failure is terminal and retains both error causes; cleanup
+  is never run after activation starts;
+- the executor accepts only fixed stage-I/O operations. It cannot receive a
+  model-supplied command, environment, path, URL, registry script, or npm
+  lifecycle instruction. Registry scripts and release notes remain data, not
+  authority.
+
+The executor's apply path is tested offline, but wiring registry discovery and
+the owner-facing public update command remains a separate gated task. A failed
+exact precondition returns before the component lock is acquired; callers must
+not infer lock ownership from that error.
 
 ## 13. Future-only gates
 

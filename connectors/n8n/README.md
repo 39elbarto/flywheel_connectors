@@ -445,6 +445,11 @@ The current update subsystem is a review-first contract, not a live updater:
   owner-decision adapter must authenticate the owner and issue an opaque,
   single-use decision with a UUID, a short bounded lifetime, and a persistent
   replay ledger.
+- The host-side trusted executor is now implemented as a narrow library path;
+  it is not a generic command runner and is not exposed as a model-controlled
+  `npm` or shell operation. It accepts only the opaque verified candidate,
+  validates candidate, stage plan, metadata, registry URL, and exact artifact
+  SRI binding before any stage I/O, and then uses the fixed stage-I/O contract.
 - Apply accepts only an opaque verified staged-artifact handle. It consumes the
   authorization, holds a per-component lock, checks the exact active snapshot,
   and permits only compare-and-swap activation and conditional rollback.
@@ -460,24 +465,27 @@ The current update subsystem is a review-first contract, not a live updater:
 - A fixed `.registry-artifact.tgz` receipt must be present in the stage and its
   bytes must match the registry `dist.integrity` SHA-512 SRI before an opaque
   verified candidate can exist. The candidate artifact digest domain-separates
-  and binds that verified tarball SRI to the extracted-tree digest. The future
-  installer owns atomically creating the new empty version-plus-UUID directory
-  and materializing the receipt from the exact tarball it extracts; its absence
-  or any mismatch fails closed. Specifications require an empty inherited
-  environment and an allowlisted replacement environment.
+  and binds that verified tarball SRI to the extracted-tree digest. The trusted
+  executor creates the empty version-plus-UUID directory, materializes the
+  receipt from the exact artifact, performs a bounded streaming `tar --list`
+  preflight with an absolute deadline, and rechecks the receipt digest before
+  extraction. Any mismatch fails closed. The child receives an empty inherited
+  environment plus an allowlisted replacement environment.
 - A host-only append-only decision ledger writes and fsyncs a private pending
   record, atomically commits it with no-replace rename under an anchored
   root-owned directory fd, then fsyncs the directory. Matching replay is
   rejected; malformed or colliding committed records fail closed. A crash
   before commit may leave an ignored pending file but cannot consume the
   decision. The ledger trust root is not created by the runtime.
-- These primitives are not wired to the public CLI. No executor, npm
-  invocation, staging write, component lock, release switch, or live apply path
-  or registry-receipt materialization exists yet. Activation must re-verify
-  the exact stage digest while holding the future component lock before any
-  switch. The current verifier proves receipt integrity plus stage consistency;
-  without that trusted installer it does not claim that extraction provenance
-  is independently established or that the candidate is activation-ready.
+- The public CLI still does not fetch from the registry, invoke `npm`, switch a
+  release, or expose a live apply command. The implemented executor is the
+  host-side security boundary for a future adapter: it re-verifies the exact
+  stage before `apply_authorized`, and on every pre-activation materialize,
+  extraction, re-verification, or candidate-mismatch failure it performs a
+  bounded fd-relative discard. A discard failure is terminal and preserves the
+  original error. No discard is attempted after activation has begun.
+- `begin_exact` returns before acquiring the component lock when its exact
+  precondition fails; callers must not assume a lock exists on that error path.
 - Registry lifecycle scripts are never executed and are represented only by a
   digest. Release notes are discarded. Neither registry content nor package
   content can authorize an update or directly edit documentation or skills.
@@ -525,6 +533,21 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - `connectors/n8n/tests/integration.rs` contains the runtime contract proof surface, including hostile provider-payload redaction fixtures.
 
 ## Verification Bundle
+
+The nqm81.11 security closeout (2026-08-19) passed the focused connector proof
+lane: 301 library tests, the connector binary test suite (52 passed, one
+approved cgroup-v2 integration ignored), 125 integration tests, three local
+non-mock tests, `cargo check --locked -p fcp-n8n --all-targets`,
+`cargo clippy --locked -p fcp-n8n --lib --no-deps -- -D warnings`,
+`cargo fmt --all -- --check`, and `git diff --check`. Full all-target clippy
+still reports 13 pre-existing warnings in unchanged n8n test binaries; those
+are outside this closeout and are not silently treated as fixed.
+
+The security tests cover bounded archive listing and timeout kill/wait,
+receipt replacement between preflight and extraction, immutable
+candidate/metadata/artifact binding before stage creation, hostile archive
+entries, fd-relative bounded cleanup, cleanup-failure terminal reporting, and
+the absence of cleanup after activation.
 
 The static provider build must apply `+crt-static` only to the final
 `fcp-n8n` crate invocation:

@@ -8,16 +8,18 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::fs;
 use std::fs::{File, Metadata};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::update::{
-    ComponentSnapshot, ProvenanceSnapshot, ToolSnapshot, UpdateComponent, UpdateError,
-    VerifiedCandidate,
+    ApplyReceipt, AuthorizedUpdate, ComponentSnapshot, ProvenanceSnapshot, ToolSnapshot,
+    UpdateBackend, UpdateComponent, UpdateError, VerifiedCandidate, apply_authorized,
 };
 
 const NPM_PROGRAM: &str = "/usr/bin/npm";
@@ -32,6 +34,8 @@ const MAX_STAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_STAGE_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_STAGE_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const STAGE_TARBALL_RECEIPT: &str = ".registry-artifact.tgz";
+const TAR_PROGRAM: &str = "/usr/bin/tar";
+const MAX_ARCHIVE_LIST_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -440,6 +444,7 @@ fn verify_local_mcp_stage_for_owner(
         &receipt_integrity,
         &artifact_binding_digest,
     ))?;
+    let release_artifact_binding = registry_release_binding(metadata, &receipt_integrity)?;
     let snapshot = ComponentSnapshot {
         component: UpdateComponent::LocalN8nMcp,
         version: metadata.version.clone(),
@@ -455,10 +460,11 @@ fn verify_local_mcp_stage_for_owner(
     };
     crate::update::detect_update(snapshot.clone(), snapshot.clone())
         .map_err(LocalMcpAdapterError::Snapshot)?;
-    let candidate = VerifiedCandidate::from_verified_stage(
+    let candidate = VerifiedCandidate::from_verified_stage_with_release_binding(
         snapshot,
         plan.stage_id.clone(),
-        safe_metadata_digest.clone(),
+        safe_metadata_digest,
+        release_artifact_binding,
     )
     .map_err(LocalMcpAdapterError::Snapshot)?;
     Ok(VerifiedLocalMcpStage {
@@ -1245,10 +1251,877 @@ fn canonical_digest<T: Serialize>(value: &T) -> Result<String, LocalMcpAdapterEr
     Ok(format!("blake3-256:{}", blake3::hash(&bytes).to_hex()))
 }
 
+fn registry_release_binding(
+    metadata: &LocalMcpRegistryMetadata,
+    artifact_integrity: &str,
+) -> Result<String, LocalMcpAdapterError> {
+    if artifact_integrity != metadata.integrity {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_integrity_mismatch",
+        ));
+    }
+    canonical_digest(&(
+        "fwc.n8n.registry-release-artifact.v1",
+        &metadata.version,
+        &metadata.metadata_digest,
+        &metadata.integrity,
+        &metadata.registry_tarball_url,
+        artifact_integrity,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedLocalMcpArtifact {
+    version: String,
+    bytes: Vec<u8>,
+}
+
+impl TrustedLocalMcpArtifact {
+    pub fn from_registry_bytes(
+        version: &str,
+        bytes: Vec<u8>,
+    ) -> Result<Self, LocalMcpAdapterError> {
+        validate_exact_npm_version(version)?;
+        if bytes.len() as u64 > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        Ok(Self {
+            version: version.to_string(),
+            bytes,
+        })
+    }
+}
+
+pub trait LocalMcpStageIo {
+    fn create_empty_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError>;
+
+    fn discard_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError>;
+
+    fn materialize_exact_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        artifact: &TrustedLocalMcpArtifact,
+    ) -> Result<(), LocalMcpAdapterError>;
+
+    fn extract_exact_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError>;
+
+    fn reverify(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        metadata: &LocalMcpRegistryMetadata,
+        tools: Vec<ToolSnapshot>,
+    ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
+        verify_root_owned_local_mcp_stage(plan, metadata, tools)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum LocalMcpExecutorError {
+    Adapter(LocalMcpAdapterError),
+    Update(UpdateError),
+    PlanMismatch,
+    CandidateMismatch,
+    CleanupFailed {
+        original: Box<Self>,
+        cleanup: LocalMcpAdapterError,
+    },
+}
+
+impl std::fmt::Display for LocalMcpExecutorError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Adapter(error) => error.fmt(formatter),
+            Self::Update(error) => error.fmt(formatter),
+            Self::PlanMismatch => formatter.write_str("local n8n-mcp stage plan mismatch"),
+            Self::CandidateMismatch => formatter.write_str("local n8n-mcp candidate mismatch"),
+            Self::CleanupFailed { .. } => formatter.write_str("local n8n-mcp stage cleanup failed"),
+        }
+    }
+}
+
+impl std::error::Error for LocalMcpExecutorError {}
+
+fn validate_fixed_stage_plan(plan: &LocalMcpStagePlan) -> Result<(), LocalMcpExecutorError> {
+    let expected = build_local_mcp_stage_plan(
+        plan.exact_version(),
+        plan.stage_id(),
+        Path::new(STAGING_ROOT),
+    )
+    .map_err(LocalMcpExecutorError::Adapter)?;
+    (plan == &expected)
+        .then_some(())
+        .ok_or(LocalMcpExecutorError::PlanMismatch)
+}
+
+fn verify_artifact_bytes(
+    artifact: &TrustedLocalMcpArtifact,
+    metadata: &LocalMcpRegistryMetadata,
+) -> Result<String, LocalMcpExecutorError> {
+    use base64::Engine;
+    use sha2::{Digest, Sha512};
+
+    if artifact.version != metadata.version {
+        return Err(LocalMcpExecutorError::Adapter(
+            LocalMcpAdapterError::StageMismatch("artifact_version_mismatch"),
+        ));
+    }
+    let digest = format!(
+        "sha512-{}",
+        base64::engine::general_purpose::STANDARD.encode(Sha512::digest(&artifact.bytes))
+    );
+    if digest != metadata.integrity {
+        return Err(LocalMcpExecutorError::Adapter(
+            LocalMcpAdapterError::StageMismatch("registry_integrity_mismatch"),
+        ));
+    }
+    Ok(digest)
+}
+
+fn cleanup_pre_activation_error<I: LocalMcpStageIo>(
+    stage_io: &mut I,
+    plan: &LocalMcpStagePlan,
+    original: LocalMcpExecutorError,
+) -> LocalMcpExecutorError {
+    match stage_io.discard_stage(plan) {
+        Ok(()) => original,
+        Err(cleanup) => LocalMcpExecutorError::CleanupFailed {
+            original: Box::new(original),
+            cleanup,
+        },
+    }
+}
+
+fn validate_authorized_candidate_before_stage(
+    authorized: &AuthorizedUpdate,
+    plan: &LocalMcpStagePlan,
+    metadata: &LocalMcpRegistryMetadata,
+) -> Result<(), LocalMcpExecutorError> {
+    let candidate = authorized.candidate_handle();
+    let snapshot = candidate.snapshot();
+    if candidate.stage_id() != plan.stage_id()
+        || !valid_blake3_digest(candidate.verification_digest())
+        || snapshot.component != UpdateComponent::LocalN8nMcp
+        || snapshot.version != plan.exact_version()
+        || snapshot.version != metadata.version
+        || snapshot.provenance.source_kind != "npm_staged_artifact"
+        || !valid_blake3_digest(&snapshot.provenance.artifact_digest)
+        || !valid_blake3_digest(&snapshot.provenance.metadata_digest)
+    {
+        return Err(LocalMcpExecutorError::CandidateMismatch);
+    }
+    Ok(())
+}
+
+/// Prepare and apply one internally generated local n8n-mcp stage.
+///
+/// Authorization is an opaque, already-consumed owner decision. The plan is
+/// checked against the fixed production root, the artifact is checked against
+/// registry SRI before materialization, and the extracted stage is independently
+/// re-verified before the generic lock/CAS, activation, bounded smoke, and
+/// conditional rollback state machine is entered.
+pub fn execute_trusted_local_mcp<B, I>(
+    backend: &mut B,
+    stage_io: &mut I,
+    authorized: AuthorizedUpdate,
+    plan: &LocalMcpStagePlan,
+    metadata: &LocalMcpRegistryMetadata,
+    artifact: &TrustedLocalMcpArtifact,
+    now_unix_ms: u64,
+) -> Result<ApplyReceipt, LocalMcpExecutorError>
+where
+    B: UpdateBackend,
+    I: LocalMcpStageIo,
+{
+    validate_fixed_stage_plan(plan)?;
+    if authorized.component() != UpdateComponent::LocalN8nMcp {
+        return Err(LocalMcpExecutorError::CandidateMismatch);
+    }
+    validate_authorized_candidate_before_stage(&authorized, plan, metadata)?;
+    validate_registry_metadata(metadata).map_err(LocalMcpExecutorError::Adapter)?;
+    let artifact_integrity = verify_artifact_bytes(artifact, metadata)?;
+    let expected_release_binding = registry_release_binding(metadata, &artifact_integrity)
+        .map_err(LocalMcpExecutorError::Adapter)?;
+    if authorized.candidate_handle().release_artifact_binding()
+        != Some(expected_release_binding.as_str())
+    {
+        return Err(LocalMcpExecutorError::CandidateMismatch);
+    }
+
+    stage_io
+        .create_empty_stage(plan)
+        .map_err(LocalMcpExecutorError::Adapter)?;
+    if let Err(error) = stage_io.materialize_exact_artifact(plan, artifact) {
+        return Err(cleanup_pre_activation_error(
+            stage_io,
+            plan,
+            LocalMcpExecutorError::Adapter(error),
+        ));
+    }
+    if let Err(error) = stage_io.extract_exact_artifact(plan) {
+        return Err(cleanup_pre_activation_error(
+            stage_io,
+            plan,
+            LocalMcpExecutorError::Adapter(error),
+        ));
+    }
+
+    let verified = match stage_io.reverify(plan, metadata, authorized.candidate().tools.clone()) {
+        Ok(verified) => verified,
+        Err(error) => {
+            return Err(cleanup_pre_activation_error(
+                stage_io,
+                plan,
+                LocalMcpExecutorError::Adapter(error),
+            ));
+        }
+    };
+    if verified.candidate.stage_id() != authorized.candidate_handle().stage_id()
+        || verified.candidate.verification_digest()
+            != authorized.candidate_handle().verification_digest()
+        || verified.snapshot() != authorized.candidate()
+    {
+        return Err(cleanup_pre_activation_error(
+            stage_io,
+            plan,
+            LocalMcpExecutorError::CandidateMismatch,
+        ));
+    }
+
+    apply_authorized(backend, authorized, now_unix_ms).map_err(LocalMcpExecutorError::Update)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+pub struct FixedFilesystemLocalMcpStageIo;
+
+#[cfg(target_os = "linux")]
+fn fixed_tar_environment() -> BTreeMap<&'static str, &'static str> {
+    BTreeMap::from([("PATH", "/usr/bin:/bin"), ("LC_ALL", "C")])
+}
+
+#[cfg(target_os = "linux")]
+fn fixed_tar_command() -> Command {
+    let mut command = Command::new(TAR_PROGRAM);
+    command.env_clear().envs(fixed_tar_environment());
+    command
+}
+
+#[cfg(target_os = "linux")]
+fn open_tar_handoff_fds(plan: &LocalMcpStagePlan) -> Result<(File, File), LocalMcpAdapterError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+
+    // These two descriptors intentionally omit CLOEXEC: tar receives only
+    // stable `/proc/self/fd/N` aliases, never a replaceable pathname.
+    let filesystem_root =
+        open("/", OFlags::DIRECTORY, Mode::empty()).map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let relative = Path::new(plan.stage_root())
+        .strip_prefix("/")
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let stage_fd = File::from(
+        openat2(
+            &filesystem_root,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?,
+    );
+    verify_stage_directory_metadata(
+        &stage_fd
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?,
+        0,
+    )?;
+    let receipt_fd = File::from(
+        openat2(
+            &stage_fd,
+            STAGE_TARBALL_RECEIPT,
+            OFlags::RDONLY | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?,
+    );
+    verify_stage_file_metadata(
+        &receipt_fd
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?,
+        0,
+    )?;
+    Ok((stage_fd, receipt_fd))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_fd_path(file: &File) -> String {
+    use std::os::fd::AsRawFd;
+
+    format!("/proc/self/fd/{}", file.as_raw_fd())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_archive_listing(listing: &[u8]) -> Result<(), LocalMcpAdapterError> {
+    if listing.len() > MAX_ARCHIVE_LIST_BYTES {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    let mut entries = BTreeMap::<String, char>::new();
+    let mut total_bytes = 0u64;
+    for raw_line in listing.split(|byte| *byte == b'\n') {
+        let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if raw_line.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(raw_line)
+            .map_err(|_| LocalMcpAdapterError::StageMismatch("archive_listing_invalid"))?;
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        if fields.len() != 6 {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_invalid",
+            ));
+        }
+        let kind = fields[0]
+            .as_bytes()
+            .first()
+            .copied()
+            .map(char::from)
+            .ok_or(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_invalid",
+            ))?;
+        if !matches!(kind, '-' | 'd') {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "archive_entry_type_invalid",
+            ));
+        }
+        let size = fields[2]
+            .parse::<u64>()
+            .map_err(|_| LocalMcpAdapterError::StageMismatch("archive_size_invalid"))?;
+        if kind == '-' {
+            total_bytes = total_bytes
+                .checked_add(size)
+                .ok_or(LocalMcpAdapterError::StageBounds)?;
+            if total_bytes > MAX_STAGE_BYTES || size > MAX_STAGE_FILE_BYTES {
+                return Err(LocalMcpAdapterError::StageBounds);
+            }
+        }
+        let name = fields[5];
+        if name.is_empty()
+            || name.len() > 512
+            || name.starts_with('/')
+            || name.contains('\\')
+            || name.chars().any(char::is_control)
+        {
+            return Err(LocalMcpAdapterError::StageMismatch("archive_path_invalid"));
+        }
+        let path = Path::new(name);
+        if path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        }) {
+            return Err(LocalMcpAdapterError::StageMismatch("archive_path_invalid"));
+        }
+        if entries
+            .insert(name.trim_end_matches('/').to_string(), kind)
+            .is_some()
+        {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "archive_duplicate_entry",
+            ));
+        }
+    }
+    for (name, kind) in &entries {
+        if *kind == 'd' {
+            continue;
+        }
+        let mut parent = Path::new(name).parent();
+        while let Some(path) = parent {
+            if let Some(parent_kind) = entries.get(path.to_string_lossy().as_ref()) {
+                if *parent_kind != 'd' {
+                    return Err(LocalMcpAdapterError::StageMismatch(
+                        "archive_parent_type_invalid",
+                    ));
+                }
+            }
+            parent = path.parent();
+        }
+    }
+    if entries.len() > MAX_STAGE_ENTRIES {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TarListingReadError {
+    TooLarge,
+    Io,
+}
+
+#[cfg(target_os = "linux")]
+fn read_bounded_tar_listing<R: Read>(reader: &mut R) -> Result<Vec<u8>, TarListingReadError> {
+    let mut listing = Vec::new();
+    let mut buffer = vec![0_u8; 16 * 1024].into_boxed_slice();
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|_| TarListingReadError::Io)?;
+        if read == 0 {
+            return Ok(listing);
+        }
+        if listing
+            .len()
+            .checked_add(read)
+            .is_none_or(|length| length > MAX_ARCHIVE_LIST_BYTES)
+        {
+            return Err(TarListingReadError::TooLarge);
+        }
+        listing.extend_from_slice(&buffer[..read]);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "linux")]
+fn wait_child_until(
+    child: &mut Child,
+    deadline: Instant,
+    timeout_code: &'static str,
+) -> Result<std::process::ExitStatus, LocalMcpAdapterError> {
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?
+        {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            terminate_child(child);
+            return Err(LocalMcpAdapterError::StageMismatch(timeout_code));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_bounded_tar_listing(receipt_path: &str) -> Result<Vec<u8>, LocalMcpAdapterError> {
+    let deadline = Instant::now() + Duration::from_millis(COMMAND_TIMEOUT_MS);
+    let mut child = fixed_tar_command()
+        .args([
+            "--list",
+            "--verbose",
+            "--numeric-owner",
+            "--full-time",
+            "--quoting-style=escape",
+            "--file",
+            receipt_path,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_child(&mut child);
+        return Err(LocalMcpAdapterError::StageIo);
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let result = read_bounded_tar_listing(&mut stdout);
+        let _ = sender.send(result);
+    });
+    let read_result = loop {
+        match receiver.try_recv() {
+            Ok(result) => break result,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                terminate_child(&mut child);
+                let _ = reader.join();
+                return Err(LocalMcpAdapterError::StageIo);
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        if Instant::now() >= deadline {
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_timeout",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let listing = match read_result {
+        Ok(listing) => listing,
+        Err(TarListingReadError::TooLarge) => {
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        Err(TarListingReadError::Io) => {
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(LocalMcpAdapterError::StageIo);
+        }
+    };
+    let status = match wait_child_until(&mut child, deadline, "archive_listing_timeout") {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(error);
+        }
+    };
+    if reader.join().is_err() {
+        return Err(LocalMcpAdapterError::StageIo);
+    }
+    if !status.success() {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "archive_listing_failed",
+        ));
+    }
+    Ok(listing)
+}
+
+#[cfg(target_os = "linux")]
+fn digest_open_receipt(file: &mut File) -> Result<String, LocalMcpAdapterError> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes_read = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if read == 0 {
+            break;
+        }
+        bytes_read = bytes_read
+            .checked_add(read as u64)
+            .ok_or(LocalMcpAdapterError::StageBounds)?;
+        if bytes_read > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        hasher.update(&buffer[..read]);
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    Ok(format!("blake3-256:{}", hasher.finalize().to_hex()))
+}
+
+#[cfg(target_os = "linux")]
+fn verify_open_receipt_digest(file: &mut File, expected: &str) -> Result<(), LocalMcpAdapterError> {
+    if digest_open_receipt(file)? != expected {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "archive_receipt_changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn preflight_archive(plan: &LocalMcpStagePlan) -> Result<String, LocalMcpAdapterError> {
+    let (_stage_fd, mut receipt_fd) = open_tar_handoff_fds(plan)?;
+    let before_digest = digest_open_receipt(&mut receipt_fd)?;
+    let receipt_path = proc_fd_path(&receipt_fd);
+    let listing = run_bounded_tar_listing(&receipt_path)?;
+    validate_archive_listing(&listing)?;
+    let after_digest = digest_open_receipt(&mut receipt_fd)?;
+    if before_digest != after_digest {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "archive_receipt_changed",
+        ));
+    }
+    Ok(after_digest)
+}
+
+#[cfg(target_os = "linux")]
+fn discard_stage_contents(
+    stage_fd: &File,
+    entries: &mut usize,
+    total_bytes: &mut u64,
+) -> Result<(), LocalMcpAdapterError> {
+    use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, openat2, unlinkat};
+
+    let directory_path = proc_fd_path(stage_fd);
+    for entry in std::fs::read_dir(directory_path).map_err(|_| LocalMcpAdapterError::StageIo)? {
+        let entry = entry.map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let name = entry.file_name();
+        let name_path = Path::new(&name);
+        if name.as_os_str().is_empty()
+            || name_path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        *entries = (*entries)
+            .checked_add(1)
+            .ok_or(LocalMcpAdapterError::StageBounds)?;
+        if *entries > MAX_STAGE_ENTRIES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+
+        let child_dir = openat2(
+            stage_fd,
+            name_path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        );
+        if let Ok(child_dir) = child_dir {
+            let child_dir = File::from(child_dir);
+            verify_stage_directory_metadata(
+                &child_dir
+                    .metadata()
+                    .map_err(|_| LocalMcpAdapterError::StageIo)?,
+                0,
+            )?;
+            discard_stage_contents(&child_dir, entries, total_bytes)?;
+            unlinkat(stage_fd, name_path, AtFlags::REMOVEDIR)
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+            continue;
+        }
+
+        let child_file = openat2(
+            stage_fd,
+            name_path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let child_file = File::from(child_file);
+        let metadata = child_file
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        verify_stage_file_metadata(&metadata, 0)?;
+        *total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or(LocalMcpAdapterError::StageBounds)?;
+        if *total_bytes > MAX_STAGE_BYTES || metadata.len() > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        unlinkat(stage_fd, name_path, AtFlags::empty())
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn discard_fixed_stage(plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+    use rustix::fs::{AtFlags, Mode, OFlags, ResolveFlags, openat2, unlinkat};
+
+    validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let staging_fd = open_stage_root(Path::new(STAGING_ROOT), 0)?;
+    let version_fd = File::from(
+        openat2(
+            &staging_fd,
+            plan.exact_version(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?,
+    );
+    verify_stage_directory_metadata(
+        &version_fd
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?,
+        0,
+    )?;
+    let stage_fd = File::from(
+        openat2(
+            &version_fd,
+            plan.stage_id(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?,
+    );
+    verify_stage_directory_metadata(
+        &stage_fd
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?,
+        0,
+    )?;
+    let mut entries = 0;
+    let mut total_bytes = 0;
+    discard_stage_contents(&stage_fd, &mut entries, &mut total_bytes)?;
+    unlinkat(&version_fd, plan.stage_id(), AtFlags::REMOVEDIR)
+        .map_err(|_| LocalMcpAdapterError::StageIo)
+}
+
+#[cfg(target_os = "linux")]
+impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
+    fn create_empty_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let staging_fd = open_stage_root(Path::new(STAGING_ROOT), 0)?;
+        let version_fd = if let Ok(fd) = openat2(
+            &staging_fd,
+            plan.exact_version(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        ) {
+            File::from(fd)
+        } else {
+            mkdirat(
+                &staging_fd,
+                plan.exact_version(),
+                Mode::from_raw_mode(0o700),
+            )
+            .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+            File::from(
+                openat2(
+                    &staging_fd,
+                    plan.exact_version(),
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                    Mode::empty(),
+                    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+                )
+                .map_err(|_| LocalMcpAdapterError::StageLayout)?,
+            )
+        };
+        verify_stage_directory_metadata(
+            &version_fd
+                .metadata()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?,
+            0,
+        )?;
+        mkdirat(&version_fd, plan.stage_id(), Mode::from_raw_mode(0o700))
+            .map_err(|_| LocalMcpAdapterError::StageLayout)
+    }
+
+    fn discard_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+        discard_fixed_stage(plan)
+    }
+
+    fn materialize_exact_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        artifact: &TrustedLocalMcpArtifact,
+    ) -> Result<(), LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, openat};
+
+        let stage_fd = open_stage_root(Path::new(plan.stage_root()), 0)?;
+        let fd = openat(
+            &stage_fd,
+            STAGE_TARBALL_RECEIPT,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let mut file = File::from(fd);
+        file.write_all(&artifact.bytes)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        file.sync_all().map_err(|_| LocalMcpAdapterError::StageIo)
+    }
+
+    fn extract_exact_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError> {
+        let preflight_digest = preflight_archive(plan)?;
+        let (stage_fd, mut receipt_fd) = open_tar_handoff_fds(plan)?;
+        verify_open_receipt_digest(&mut receipt_fd, &preflight_digest)?;
+        let receipt_path = proc_fd_path(&receipt_fd);
+        let stage_path = proc_fd_path(&stage_fd);
+        let mut child = fixed_tar_command()
+            .args([
+                "--extract",
+                "--file",
+                receipt_path.as_str(),
+                "--directory",
+                stage_path.as_str(),
+                "--no-same-owner",
+                "--no-same-permissions",
+                "--keep-directory-symlink",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let deadline = Instant::now() + Duration::from_millis(COMMAND_TIMEOUT_MS);
+        loop {
+            if child
+                .try_wait()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?
+                .is_some()
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "artifact_extract_timeout",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let status = child.wait().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if !status.success() {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "artifact_extract_failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[derive(Debug, Default)]
+pub struct FixedFilesystemLocalMcpStageIo;
+
+#[cfg(not(target_os = "linux"))]
+impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
+    fn create_empty_stage(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Err(LocalMcpAdapterError::StageLayout)
+    }
+
+    fn discard_stage(&mut self, _plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+        Err(LocalMcpAdapterError::StageLayout)
+    }
+
+    fn materialize_exact_artifact(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+        _artifact: &TrustedLocalMcpArtifact,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Err(LocalMcpAdapterError::StageLayout)
+    }
+
+    fn extract_exact_artifact(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Err(LocalMcpAdapterError::StageLayout)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::update::ToolImpact;
+    use crate::update::{
+        BackendError, DecisionLedger, DetectionOutcome, OwnerPrincipal, ReviewDecision,
+        SmokeReport, authorize_update, detect_update,
+    };
 
     const STAGE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -1631,5 +2504,726 @@ mod tests {
             verify_local_mcp_stage_for_owner(&plan, &metadata, Vec::new(), owner),
             Err(LocalMcpAdapterError::StageLayout)
         ));
+    }
+
+    #[derive(Default)]
+    struct MockStageIo {
+        calls: Vec<&'static str>,
+        verified: Option<VerifiedLocalMcpStage>,
+        create_error: Option<LocalMcpAdapterError>,
+        materialize_error: Option<LocalMcpAdapterError>,
+        extract_error: Option<LocalMcpAdapterError>,
+        reverify_error: Option<LocalMcpAdapterError>,
+        discard_error: Option<LocalMcpAdapterError>,
+    }
+
+    impl LocalMcpStageIo for MockStageIo {
+        fn create_empty_stage(
+            &mut self,
+            _plan: &LocalMcpStagePlan,
+        ) -> Result<(), LocalMcpAdapterError> {
+            self.calls.push("create");
+            self.create_error.take().map_or(Ok(()), Err)
+        }
+
+        fn discard_stage(&mut self, _plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+            self.calls.push("discard");
+            self.discard_error.take().map_or(Ok(()), Err)
+        }
+
+        fn materialize_exact_artifact(
+            &mut self,
+            _plan: &LocalMcpStagePlan,
+            _artifact: &TrustedLocalMcpArtifact,
+        ) -> Result<(), LocalMcpAdapterError> {
+            self.calls.push("materialize");
+            self.materialize_error.take().map_or(Ok(()), Err)
+        }
+
+        fn extract_exact_artifact(
+            &mut self,
+            _plan: &LocalMcpStagePlan,
+        ) -> Result<(), LocalMcpAdapterError> {
+            self.calls.push("extract");
+            self.extract_error.take().map_or(Ok(()), Err)
+        }
+
+        fn reverify(
+            &mut self,
+            _plan: &LocalMcpStagePlan,
+            _metadata: &LocalMcpRegistryMetadata,
+            _tools: Vec<ToolSnapshot>,
+        ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
+            self.calls.push("reverify");
+            if let Some(error) = self.reverify_error.take() {
+                return Err(error);
+            }
+            self.verified
+                .take()
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "missing_mock_verification",
+                ))
+        }
+    }
+
+    struct MockBackend {
+        active: ComponentSnapshot,
+        lock_conflict: bool,
+        smoke_passes: bool,
+        locked: bool,
+        rollbacks: usize,
+    }
+
+    impl UpdateBackend for MockBackend {
+        fn begin_exact(
+            &mut self,
+            current: &ComponentSnapshot,
+            _candidate: &VerifiedCandidate,
+        ) -> Result<(), BackendError> {
+            if self.lock_conflict || self.locked || &self.active != current {
+                return Err(BackendError::ActivationFailed);
+            }
+            self.locked = true;
+            Ok(())
+        }
+
+        fn active_snapshot(
+            &mut self,
+            _component: UpdateComponent,
+        ) -> Result<ComponentSnapshot, BackendError> {
+            self.locked
+                .then(|| self.active.clone())
+                .ok_or(BackendError::ActiveReadFailed)
+        }
+
+        fn activate_exact(&mut self, candidate: &VerifiedCandidate) -> Result<(), BackendError> {
+            if !self.locked {
+                return Err(BackendError::ActivationFailed);
+            }
+            self.active = candidate.snapshot().clone();
+            Ok(())
+        }
+
+        fn smoke_exact(
+            &mut self,
+            expected: &ComponentSnapshot,
+        ) -> Result<SmokeReport, BackendError> {
+            let passed = expected.version != "2.70.0" || self.smoke_passes;
+            Ok(SmokeReport {
+                passed,
+                check_ids: vec!["tools_list".to_string(), "zero_idle".to_string()],
+                zero_idle_confirmed: passed,
+                redaction_confirmed: passed,
+            })
+        }
+
+        fn rollback_exact(
+            &mut self,
+            failed_candidate: &VerifiedCandidate,
+            previous: &ComponentSnapshot,
+        ) -> Result<(), BackendError> {
+            if !self.locked || self.active != *failed_candidate.snapshot() {
+                return Err(BackendError::RollbackFailed);
+            }
+            self.rollbacks += 1;
+            self.active = previous.clone();
+            Ok(())
+        }
+
+        fn finish(&mut self) {
+            self.locked = false;
+        }
+    }
+
+    fn executor_snapshot(version: &str, write: bool) -> ComponentSnapshot {
+        executor_snapshot_with_source(
+            version,
+            write,
+            if write {
+                "npm_staged_artifact"
+            } else {
+                "npm_registry"
+            },
+        )
+    }
+
+    fn executor_snapshot_with_source(
+        version: &str,
+        write: bool,
+        source_kind: &str,
+    ) -> ComponentSnapshot {
+        ComponentSnapshot {
+            component: UpdateComponent::LocalN8nMcp,
+            version: version.to_string(),
+            provenance: ProvenanceSnapshot {
+                source_kind: source_kind.to_string(),
+                artifact_digest: format!("blake3-256:{}", "a".repeat(64)),
+                metadata_digest: format!("blake3-256:{}", "b".repeat(64)),
+                engine_requirement: Some(">=18.0.0".to_string()),
+                protocol_versions: BTreeSet::new(),
+            },
+            dependencies: BTreeMap::from([("zod".to_string(), "^3.25.0".to_string())]),
+            tools: vec![ToolSnapshot {
+                name: if write {
+                    "update_workflow"
+                } else {
+                    "search_nodes"
+                }
+                .to_string(),
+                schema_digest: "blake3-256-schema".to_string(),
+                description_digest: "blake3-256-description".to_string(),
+                impact: if write {
+                    ToolImpact::Write
+                } else {
+                    ToolImpact::Read
+                },
+                permissions: BTreeSet::new(),
+            }],
+        }
+    }
+
+    fn executor_fixture() -> (
+        LocalMcpStagePlan,
+        LocalMcpRegistryMetadata,
+        AuthorizedUpdate,
+        MockStageIo,
+        ComponentSnapshot,
+        TrustedLocalMcpArtifact,
+    ) {
+        executor_fixture_with_source("npm_staged_artifact")
+    }
+
+    fn executor_fixture_with_source(
+        candidate_source_kind: &str,
+    ) -> (
+        LocalMcpStagePlan,
+        LocalMcpRegistryMetadata,
+        AuthorizedUpdate,
+        MockStageIo,
+        ComponentSnapshot,
+        TrustedLocalMcpArtifact,
+    ) {
+        executor_fixture_with_binding(candidate_source_kind, None)
+    }
+
+    fn executor_fixture_with_binding(
+        candidate_source_kind: &str,
+        binding_override: Option<String>,
+    ) -> (
+        LocalMcpStagePlan,
+        LocalMcpRegistryMetadata,
+        AuthorizedUpdate,
+        MockStageIo,
+        ComponentSnapshot,
+        TrustedLocalMcpArtifact,
+    ) {
+        let plan = local_mcp_stage_plan("2.70.0").expect("stage plan");
+        let metadata = parse_registry_metadata(&metadata_value("2.70.0")).expect("metadata");
+        let current = executor_snapshot("2.69.0", false);
+        let candidate = executor_snapshot_with_source("2.70.0", true, candidate_source_kind);
+        let artifact = TrustedLocalMcpArtifact::from_registry_bytes(
+            "2.70.0",
+            b"registry tarball receipt\n".to_vec(),
+        )
+        .expect("artifact");
+        let release_binding = binding_override.unwrap_or_else(|| {
+            registry_release_binding(&metadata, &metadata.integrity).expect("release binding")
+        });
+        let DetectionOutcome::ReviewRequired { review } =
+            detect_update(current.clone(), candidate.clone()).expect("review")
+        else {
+            panic!("expected review");
+        };
+        let verified_candidate = VerifiedCandidate::from_verified_stage_with_release_binding(
+            candidate,
+            plan.stage_id(),
+            format!("blake3-256:{}", "c".repeat(64)),
+            release_binding,
+        )
+        .expect("verified candidate");
+        let decision = crate::update::VerifiedOwnerDecision::from_trusted_source(
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            OwnerPrincipal::Owner,
+            ReviewDecision::Approved,
+            &review,
+            "offline-test-approval",
+            900,
+            2_000,
+        );
+        let mut ledger = TestLedger;
+        let authorized = authorize_update(
+            current.clone(),
+            verified_candidate.clone(),
+            &review,
+            &decision,
+            &mut ledger,
+            1_000,
+        )
+        .expect("authorized update");
+        let verified = VerifiedLocalMcpStage {
+            candidate: verified_candidate,
+            stage_id: plan.stage_id().to_string(),
+            stage_tree_digest: format!("blake3-256:{}", "d".repeat(64)),
+            package_manifest_digest: format!("blake3-256:{}", "e".repeat(64)),
+            package_lock_digest: format!("blake3-256:{}", "f".repeat(64)),
+            entry_count: 1,
+            total_bytes: 1,
+        };
+        let io = MockStageIo {
+            calls: Vec::new(),
+            verified: Some(verified),
+            ..MockStageIo::default()
+        };
+        (plan, metadata, authorized, io, current, artifact)
+    }
+
+    #[derive(Default)]
+    struct TestLedger;
+
+    impl DecisionLedger for TestLedger {
+        fn consume_once(
+            &mut self,
+            _decision_id: &str,
+            _review_digest: &str,
+        ) -> Result<bool, UpdateError> {
+            Ok(true)
+        }
+    }
+
+    #[test]
+    fn trusted_executor_success_runs_fixed_stage_sequence_and_applies() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        let receipt = execute_trusted_local_mcp(
+            &mut backend,
+            &mut io,
+            authorized,
+            &plan,
+            &metadata,
+            &artifact,
+            1_500,
+        )
+        .expect("apply");
+        assert_eq!(receipt.status, crate::update::ApplyStatus::Applied);
+        assert_eq!(io.calls, ["create", "materialize", "extract", "reverify"]);
+        assert!(!io.calls.contains(&"discard"));
+        assert_eq!(backend.active.version, "2.70.0");
+    }
+
+    #[test]
+    fn trusted_executor_discards_after_materialize_failure() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        io.materialize_error = Some(LocalMcpAdapterError::StageIo);
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::Adapter(
+                LocalMcpAdapterError::StageIo,
+            ))
+        );
+        assert_eq!(io.calls, ["create", "materialize", "discard"]);
+    }
+
+    #[test]
+    fn trusted_executor_discards_after_extract_failure() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        io.extract_error = Some(LocalMcpAdapterError::StageMismatch("extract_failed"));
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::Adapter(
+                LocalMcpAdapterError::StageMismatch("extract_failed"),
+            ))
+        );
+        assert_eq!(io.calls, ["create", "materialize", "extract", "discard"]);
+    }
+
+    #[test]
+    fn trusted_executor_discards_after_reverify_failure() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        io.reverify_error = Some(LocalMcpAdapterError::StageMismatch("reverify_failed"));
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::Adapter(
+                LocalMcpAdapterError::StageMismatch("reverify_failed"),
+            ))
+        );
+        assert_eq!(
+            io.calls,
+            ["create", "materialize", "extract", "reverify", "discard"]
+        );
+    }
+
+    #[test]
+    fn trusted_executor_discards_after_post_reverify_candidate_mismatch() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        let verified = io.verified.as_mut().expect("verified fixture");
+        let candidate = verified.candidate.clone();
+        verified.candidate = VerifiedCandidate::from_verified_stage_with_release_binding(
+            candidate.snapshot().clone(),
+            "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            candidate.verification_digest().to_string(),
+            candidate
+                .release_artifact_binding()
+                .expect("release binding")
+                .to_string(),
+        )
+        .expect("mismatched verified candidate");
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::CandidateMismatch)
+        );
+        assert_eq!(
+            io.calls,
+            ["create", "materialize", "extract", "reverify", "discard"]
+        );
+    }
+
+    #[test]
+    fn trusted_executor_reports_cleanup_failure_as_terminal() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        io.materialize_error = Some(LocalMcpAdapterError::StageIo);
+        io.discard_error = Some(LocalMcpAdapterError::StageMismatch("cleanup_failed"));
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        let result = execute_trusted_local_mcp(
+            &mut backend,
+            &mut io,
+            authorized,
+            &plan,
+            &metadata,
+            &artifact,
+            1_500,
+        );
+        assert!(matches!(
+            result,
+            Err(LocalMcpExecutorError::CleanupFailed {
+                cleanup: LocalMcpAdapterError::StageMismatch("cleanup_failed"),
+                ..
+            })
+        ));
+        assert_eq!(io.calls, ["create", "materialize", "discard"]);
+    }
+
+    #[test]
+    fn trusted_executor_does_not_discard_when_create_fails() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        io.create_error = Some(LocalMcpAdapterError::StageIo);
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::Adapter(
+                LocalMcpAdapterError::StageIo,
+            ))
+        );
+        assert_eq!(io.calls, ["create"]);
+    }
+
+    #[test]
+    fn trusted_executor_rejects_candidate_mismatch_before_stage_creation() {
+        let (_plan, metadata, authorized, mut io, _current, artifact) = executor_fixture();
+        let mismatched_plan = local_mcp_stage_plan("2.71.0").expect("mismatched plan");
+        let mut backend = MockBackend {
+            active: executor_snapshot("2.69.0", false),
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &mismatched_plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::CandidateMismatch)
+        );
+        assert!(io.calls.is_empty());
+    }
+
+    #[test]
+    fn trusted_executor_rejects_candidate_provenance_before_stage_creation() {
+        let (plan, metadata, authorized, mut io, current, artifact) =
+            executor_fixture_with_source("npm_registry");
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::CandidateMismatch)
+        );
+        assert!(io.calls.is_empty());
+    }
+
+    #[test]
+    fn trusted_executor_rejects_registry_binding_before_stage_creation() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture_with_binding(
+            "npm_staged_artifact",
+            Some(format!("blake3-256:{}", "0".repeat(64))),
+        );
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: false,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::CandidateMismatch)
+        );
+        assert!(io.calls.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hostile_archive_listing_is_rejected_before_extraction() {
+        let listings = [
+            b"-rw-r--r-- 0/0 1 2026-08-19 00:00 /absolute".as_slice(),
+            b"-rw-r--r-- 0/0 1 2026-08-19 00:00 ../escape".as_slice(),
+            b"lrwxrwxrwx 0/0 0 2026-08-19 00:00 link -> target".as_slice(),
+            b"hrw-r--r-- 0/0 1 2026-08-19 00:00 hardlink".as_slice(),
+            b"crw-r--r-- 0/0 1 2026-08-19 00:00 device".as_slice(),
+            b"-rw-r--r-- 0/0 1 2026-08-19 00:00 package\n-rw-r--r-- 0/0 1 2026-08-19 00:00 package/file".as_slice(),
+        ];
+        for listing in listings {
+            assert!(
+                validate_archive_listing(listing).is_err(),
+                "hostile listing accepted: {:?}",
+                String::from_utf8_lossy(listing)
+            );
+        }
+        let oversized = format!(
+            "-rw-r--r-- 0/0 {} 2026-08-19 00:00 package/file",
+            MAX_STAGE_FILE_BYTES + 1
+        );
+        assert!(validate_archive_listing(oversized.as_bytes()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn archive_listing_accepts_only_bounded_regular_files_and_directories() {
+        let valid = b"drwxr-xr-x 0/0 0 2026-08-19 00:00 package\n-rw-r--r-- 0/0 1 2026-08-19 00:00 package/file";
+        assert!(validate_archive_listing(valid).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tar_environment_is_explicit_and_excludes_tar_options() {
+        let environment = fixed_tar_environment();
+        assert_eq!(environment.get("PATH"), Some(&"/usr/bin:/bin"));
+        assert_eq!(environment.get("LC_ALL"), Some(&"C"));
+        assert!(!environment.contains_key("TAR_OPTIONS"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_tar_listing_reader_rejects_output_over_limit() {
+        let mut reader = std::io::Cursor::new(vec![b'x'; MAX_ARCHIVE_LIST_BYTES + 1]);
+        assert_eq!(
+            read_bounded_tar_listing(&mut reader),
+            Err(TarListingReadError::TooLarge)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tar_listing_deadline_kills_and_waits_for_child() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawn local timeout fixture");
+        assert_eq!(
+            wait_child_until(
+                &mut child,
+                Instant::now() + Duration::from_millis(1),
+                "archive_listing_timeout",
+            ),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_timeout"
+            ))
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("child status after timeout")
+                .is_some()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn receipt_digest_recheck_rejects_replacement() {
+        let root = tempfile::tempdir().expect("receipt tempdir");
+        let path = root.path().join(STAGE_TARBALL_RECEIPT);
+        fs::write(&path, b"archive-a").expect("write initial receipt");
+        let mut preflight = File::open(&path).expect("open initial receipt");
+        let digest = digest_open_receipt(&mut preflight).expect("initial receipt digest");
+        fs::write(&path, b"archive-b").expect("replace receipt");
+        let mut extraction = File::open(&path).expect("open replacement receipt");
+        assert_eq!(
+            verify_open_receipt_digest(&mut extraction, &digest),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "archive_receipt_changed"
+            ))
+        );
+    }
+
+    #[test]
+    fn trusted_executor_propagates_component_lock_conflict() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        let mut backend = MockBackend {
+            active: current,
+            lock_conflict: true,
+            smoke_passes: true,
+            locked: false,
+            rollbacks: 0,
+        };
+        assert_eq!(
+            execute_trusted_local_mcp(
+                &mut backend,
+                &mut io,
+                authorized,
+                &plan,
+                &metadata,
+                &artifact,
+                1_500,
+            ),
+            Err(LocalMcpExecutorError::Update(
+                UpdateError::ActivePreconditionMismatch
+            ))
+        );
+    }
+
+    #[test]
+    fn trusted_executor_rolls_back_after_smoke_failure() {
+        let (plan, metadata, authorized, mut io, current, artifact) = executor_fixture();
+        let mut backend = MockBackend {
+            active: current.clone(),
+            lock_conflict: false,
+            smoke_passes: false,
+            locked: false,
+            rollbacks: 0,
+        };
+        let receipt = execute_trusted_local_mcp(
+            &mut backend,
+            &mut io,
+            authorized,
+            &plan,
+            &metadata,
+            &artifact,
+            1_500,
+        )
+        .expect("conditional rollback");
+        assert_eq!(receipt.status, crate::update::ApplyStatus::RolledBack);
+        assert_eq!(backend.rollbacks, 1);
+        assert_eq!(backend.active, current);
     }
 }

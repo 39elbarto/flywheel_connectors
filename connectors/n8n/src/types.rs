@@ -292,6 +292,11 @@ pub struct WorkflowLifecycleGuard {
 pub struct WorkflowLifecycleInput {
     pub id: String,
     pub action: WorkflowLifecycleAction,
+    /// Optional published version selected by `publish`.  When omitted, the
+    /// provider chooses the current published version and the independent
+    /// readback binds success to that returned version.
+    #[serde(default, rename = "versionId")]
+    pub version_id: Option<String>,
     pub guard: WorkflowLifecycleGuard,
 }
 

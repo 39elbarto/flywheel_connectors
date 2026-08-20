@@ -377,6 +377,69 @@ impl N8nClient {
         decode_write_success(status, &body, require_json_response)
     }
 
+    /// Perform a single mutation request without a request body.  Lifecycle
+    /// `unpublish` is intentionally sent this way; an empty JSON object would
+    /// be a different provider contract and is therefore not substituted.
+    async fn write_no_body(
+        &self,
+        method: Method,
+        url: Url,
+        context: Option<HostEgressContext>,
+        require_json_response: bool,
+    ) -> N8nResult<serde_json::Value> {
+        if matches!(self.auth, N8nAuth::CredentialId(_)) {
+            let context = context.ok_or_else(|| {
+                N8nError::InvalidInput("credential_id requires verified request attribution".into())
+            })?;
+            let response = self
+                .host_egress_http(
+                    &url,
+                    method,
+                    vec![HostEgressHttpHeader {
+                        name: "Accept".to_string(),
+                        value: "application/json".to_string(),
+                    }],
+                    None,
+                    context,
+                    true,
+                )
+                .await?;
+            let status =
+                StatusCode::from_u16(response.status).map_err(|_| N8nError::UnknownOutcome)?;
+            if status.is_server_error() {
+                return Err(N8nError::UnknownOutcome);
+            }
+            if status.is_success() {
+                return decode_write_success(
+                    status,
+                    response.body.as_bytes(),
+                    require_json_response,
+                );
+            }
+            return decode_mediated_response(&response);
+        }
+
+        self.ensure_provider_egress_allowed()?;
+        let response = self
+            .add_auth(self.client.request(method, url))
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        let status = response.status();
+        if !status.is_success() {
+            if status.is_server_error() {
+                let _ = read_bounded_body(response).await;
+                return Err(N8nError::UnknownOutcome);
+            }
+            return self.handle_error(status, response).await;
+        }
+        let body = read_bounded_body(response)
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        decode_write_success(status, &body, require_json_response)
+    }
+
     async fn write_json_mediated(
         &self,
         method: Method,
@@ -727,6 +790,51 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<WorkflowDetail> {
         decode_typed(self.get_workflow(id, context).await?)
+    }
+
+    /// Publish one workflow through the proven official route.  The response
+    /// is decoded before the caller performs its independent GET readback.
+    pub(crate) async fn publish_workflow(
+        &self,
+        id: &str,
+        version_id: Option<&str>,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowDetail> {
+        let url = self.resolve_path_segments(&[
+            ("path segment", "workflows"),
+            ("workflow id", id),
+            ("path segment", "publish"),
+        ])?;
+        let response = match version_id {
+            Some(version_id) => {
+                self.write_json(
+                    Method::POST,
+                    url,
+                    &serde_json::json!({"versionId": version_id}),
+                    context,
+                    true,
+                )
+                .await?
+            }
+            None => self.write_no_body(Method::POST, url, context, true).await?,
+        };
+        decode_typed(response)
+    }
+
+    /// Unpublish one workflow through the proven official route.  The request
+    /// deliberately has no body and the typed response is required.
+    pub(crate) async fn unpublish_workflow(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowDetail> {
+        let url = self.resolve_path_segments(&[
+            ("path segment", "workflows"),
+            ("workflow id", id),
+            ("path segment", "unpublish"),
+        ])?;
+        let response = self.write_no_body(Method::POST, url, context, true).await?;
+        decode_typed(response)
     }
 
     /// Attempt one draft create and return only the provider-assigned ID.

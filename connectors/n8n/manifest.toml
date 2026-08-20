@@ -1176,6 +1176,11 @@ maxLength = 256
 type = "string"
 enum = ["publish", "unpublish"]
 
+[provides.operations."n8n.workflows.lifecycle".input_schema.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
 [provides.operations."n8n.workflows.lifecycle".input_schema.properties.guard]
 additionalProperties = false
 required = ["approvalRef", "idempotencyKey", "precondition"]
@@ -1410,10 +1415,11 @@ max_response_bytes = 1048576
 when_to_use = "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval."
 common_mistakes = [
     "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.",
-    "The local connector validates the typed request and approval but fails closed until capability discovery proves the provider route and version semantics; it never guesses an endpoint or retries.",
+    "Publish uses POST /workflows/{id}/publish with optional versionId; unpublish uses POST /workflows/{id}/unpublish with no body. No legacy route is guessed.",
+    "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.",
     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.",
 ]
-examples = ["{\"id\":\"1001\",\"action\":\"publish\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000003\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
+examples = ["{\"id\":\"1001\",\"action\":\"publish\",\"versionId\":\"published-v1\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000003\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
 related = [
     "n8n.workflows.get",
     "n8n.workflows.activate",

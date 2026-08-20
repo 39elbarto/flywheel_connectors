@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements four per-invocation provider paths behind the same verified wrapper boundary: typed REST reads plus guarded REST draft create/update, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. The Hetzner disposable workflow was deleted and the EEC one was left inactive with MCP access disabled. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
+> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed REST publish/unpublish lifecycle writes, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. The Hetzner disposable workflow was deleted and the EEC one was left inactive with MCP access disabled. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -8,7 +8,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and a typed publish/unpublish lifecycle boundary. Lifecycle requests validate exact target, UUID idempotency, full state precondition, and current-chat approval, then fail closed until a provider route/version contract is proven; no endpoint is guessed.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed publish/unpublish lifecycle writes. Lifecycle requests validate exact target, UUID idempotency, full state precondition, and current-chat approval, then use only the proven `/workflows/{id}/publish` and `/workflows/{id}/unpublish` routes with an independent GET readback; no legacy endpoint is guessed.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
@@ -28,7 +28,7 @@ The current crate exposes these operations:
 - `n8n.folders.get`
 - `n8n.workflows.create_draft`
 - `n8n.workflows.update_draft`
-- `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; provider execution unavailable pending capability discovery)
+- `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; one guarded provider attempt plus independent readback)
 - `n8n.mcp_access.reconcile`
 
 Important runtime truths:
@@ -38,7 +38,7 @@ Important runtime truths:
   `resolve`, `route <public-operation>`, `run-once <host-operation>`, and
   `status`. `run-once` accepts the nine Phase-1 host reads, guarded
   `n8n.workflows.create_draft` and `n8n.workflows.update_draft`, the typed
-  publish/unpublish lifecycle boundary (which currently fails closed), plus the closed
+  publish/unpublish lifecycle path (unknown outcomes fail closed), plus the closed
   `n8n.capabilities.inspect` operation, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
   CLI framing has a fixed five-second maximum, and the operation deadline is
@@ -357,7 +357,7 @@ This packet documents and verifies:
   - `GET {base_url}/projects/{projectId}/folders?select=%5B%22id%22%2C%22name%22%2C%22parentFolder%22%5D&filter=<optional-json>&skip=<n>&take=<1..200>`
   - `GET {base_url}/projects/{projectId}/folders/{folderId}`
 - `n8n.workflows.activate` emits no provider request in this packet. Its capability and approval checks run first, then the operation fails closed with a deferred-lifecycle error. The mediated write path is owned by the lifecycle/egress follow-up beads.
-- `n8n.workflows.lifecycle` accepts only `publish` and `unpublish`, requires an exact workflow target, UUID idempotency key, explicit `versionId`/`activeVersionId`/`active`/`isArchived`/`stateDigest` precondition, and one matching interactive approval. The repository has no proven provider route/version semantics for these actions, so validation completes before any client or provider access and returns `capability_unavailable`; no automatic retry, lifecycle side effect, or readback claim is made.
+- `n8n.workflows.lifecycle` accepts only `publish` and `unpublish`, requires an exact workflow target, UUID idempotency key, explicit `versionId`/`activeVersionId`/`active`/`isArchived`/`stateDigest` precondition, and one matching interactive approval. `publish` uses `POST /workflows/{id}/publish` with an optional JSON `versionId`; `unpublish` uses `POST /workflows/{id}/unpublish` with no body. Both require a strict typed response and independent `GET /workflows/{id}` readback. Publish verifies active state, selected/provider-published version, published graph consistency, draft preservation, and `isArchived=false`; unpublish verifies inactive/null active version, archive preservation, and draft preservation. Timeout, disconnect, 409, 5xx, malformed/ambiguous response, or readback uncertainty is unknown and never retried automatically.
 - Runtime sends `Accept: application/json`.
 - Loopback test requests with API-key mode send `X-N8N-API-KEY`.
 - Owned production credential-reference reads send one typed request per provider call over the authenticated inherited-FD channel. Each strict envelope contains only the exact upstream HTTPS read URL, `GET`, safe `Accept`, the credential UUID, and verified request attribution (`fcp.n8n`, the exact operation, its canonical resource, current zone, session-derived request ID, and raw COSE CBOR capability token encoded as standard base64). The loopback HTTP `POST /rpc/egress/http` transport remains test/legacy-only.
@@ -395,7 +395,7 @@ This packet documents and verifies:
 | `n8n.folders.get` | `GET /projects/{projectId}/folders/{folderId}` | `n8n.folders.read` | `Safe` | `Low` | `Strict` | `project_id`, `folder_id` |
 | `n8n.workflows.create_draft` | one `POST /workflows`, then independent `GET /workflows/{id}` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | name, typed graph, exact approval reference, UUID idempotency key |
 | `n8n.workflows.update_draft` | baseline `GET`, one `PUT /workflows/{id}`, then independent `GET` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, typed graph, full lifecycle/state precondition, exact approval reference, UUID idempotency key |
-| `n8n.workflows.lifecycle` | no provider request until route/version capability is proven; current packet is validation-only and fail-closed | `n8n.workflows.lifecycle` | `Risky` | `High` | `BestEffort` | id, `action=publish|unpublish`, full lifecycle precondition, exact approval reference, UUID idempotency key |
+| `n8n.workflows.lifecycle` | baseline `GET`, one exact `POST /workflows/{id}/publish` (optional `versionId`) or `POST /workflows/{id}/unpublish` (no body), then independent detail `GET` | `n8n.workflows.lifecycle` | `Risky` | `High` | `BestEffort` | id, `action=publish|unpublish`, optional publish `versionId`, full lifecycle precondition, exact approval reference, UUID idempotency key |
 | `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one full required `PUT /workflows/{id}` with only the logical `settings.availableInMCP` change, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef, exact dryRunDigest, and UUID idempotencyKey |
 
 Read output boundary:
@@ -470,7 +470,7 @@ The current implementation does not include:
 - workflow create, update, delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations
 - provider-specific filtering and sorting for workflow or execution list calls
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
-- publish/unpublish provider lifecycle; the typed approval/precondition boundary is present, but execution remains `capability_unavailable` until capability discovery proves the exact route/version semantics
+- archive/restore, versions, execution, credential mutation, and permanent deletion; only publish/unpublish are implemented in the lifecycle packet
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
 - API-key provisioning, secret injection, or host egress enforcement
 - OAuth installation, API-key rotation, credential validation beyond local configuration shape, or live self-check probe

@@ -32,7 +32,7 @@ use crate::{
     types::{
         ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
         ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary,
-        WorkflowLifecycleInput, WorkflowStateView, WorkflowVersion,
+        WorkflowLifecycleAction, WorkflowLifecycleInput, WorkflowStateView, WorkflowVersion,
     },
 };
 
@@ -201,9 +201,6 @@ struct DraftWritePlan {
     graph_digest: String,
     provider_payload: Value,
 }
-
-const WORKFLOW_LIFECYCLE_UNAVAILABLE: &str =
-    "publish/unpublish provider route and version semantics are not proven by the local contract";
 
 const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
 const MCP_ACCESS_LIST_LIMIT: u64 = 100;
@@ -789,18 +786,6 @@ impl N8nConnector {
             });
         }
 
-        // No exact publish/unpublish provider route or version semantics are
-        // proven by the repository contract yet. Validate target, UUID,
-        // lifecycle precondition, and current-chat approval above, then stop
-        // before client/egress access. A later packet may add one bounded
-        // provider attempt plus independent typed GET readback once discovery
-        // proves the route.
-        if operation == "n8n.workflows.lifecycle" {
-            return Err(
-                N8nError::CapabilityUnavailable(WORKFLOW_LIFECYCLE_UNAVAILABLE).to_fcp_error(),
-            );
-        }
-
         if operation == "n8n.mcp_access.reconcile" {
             let reconcile = parse_mcp_access_input(&input).map_err(|error| error.to_fcp_error())?;
             if !reconcile.dry_run {
@@ -870,6 +855,10 @@ impl N8nConnector {
                     Some(context),
                 )
                 .await
+            }
+            "n8n.workflows.lifecycle" => {
+                self.invoke_workflow_lifecycle(client, &input, Some(context))
+                    .await
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -1393,6 +1382,78 @@ impl N8nConnector {
             "activeVersionId": state.active_version_id,
             "isArchived": state.is_archived,
             "published": state.published,
+        }))
+        .map_err(N8nError::from)
+    }
+
+    async fn invoke_workflow_lifecycle(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let typed = parse_workflow_lifecycle_input(input)?;
+        let baseline_workflow = client
+            .get_workflow_typed(&typed.id, context.clone())
+            .await?;
+        if baseline_workflow.id != typed.id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let baseline = normalize_workflow_state(baseline_workflow.clone())?;
+        verify_workflow_lifecycle_precondition(
+            &typed.guard.precondition,
+            &baseline_workflow,
+            &baseline,
+        )?;
+        if typed.action == WorkflowLifecycleAction::Publish && baseline.is_archived {
+            return Err(N8nError::PreconditionFailed(
+                "publishing an archived workflow would require an incidental restore",
+            ));
+        }
+
+        let provider_workflow = match typed.action {
+            WorkflowLifecycleAction::Publish => client
+                .publish_workflow(&typed.id, typed.version_id.as_deref(), context.clone())
+                .await
+                .map_err(classify_lifecycle_attempt_error)?,
+            WorkflowLifecycleAction::Unpublish => client
+                .unpublish_workflow(&typed.id, context.clone())
+                .await
+                .map_err(classify_lifecycle_attempt_error)?,
+        };
+        if provider_workflow.id != typed.id {
+            return Err(N8nError::UnknownOutcome);
+        }
+        let provider_state =
+            normalize_workflow_state(provider_workflow).map_err(|_| N8nError::UnknownOutcome)?;
+
+        let readback_workflow = client
+            .get_workflow_typed(&typed.id, context)
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        if readback_workflow.id != typed.id {
+            return Err(N8nError::ReadbackMismatch);
+        }
+        let readback =
+            normalize_workflow_state(readback_workflow).map_err(|_| N8nError::UnknownOutcome)?;
+
+        verify_workflow_lifecycle_readback(
+            typed.action,
+            typed.version_id.as_deref(),
+            &baseline,
+            &provider_state,
+            &readback,
+        )?;
+
+        serde_json::to_value(json!({
+            "status": "verified",
+            "operation": "n8n.workflows.lifecycle",
+            "action": typed.action.as_str(),
+            "provider": "rest",
+            "retry": "never_automatic",
+            "readback": "independent_get",
+            "before": baseline,
+            "after": readback,
         }))
         .map_err(N8nError::from)
     }
@@ -2891,7 +2952,105 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
             "workflow lifecycle activeVersionId is invalid".into(),
         ));
     }
+    if let Some(version_id) = typed.version_id.as_deref()
+        && (version_id.is_empty() || version_id.len() > 256 || version_id.trim() != version_id)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow lifecycle versionId is invalid".into(),
+        ));
+    }
+    if typed.action == WorkflowLifecycleAction::Unpublish && typed.version_id.is_some() {
+        return Err(N8nError::InvalidInput(
+            "unpublish must not include a versionId".into(),
+        ));
+    }
     Ok(typed)
+}
+
+fn classify_lifecycle_attempt_error(error: N8nError) -> N8nError {
+    match error {
+        N8nError::Http(_)
+        | N8nError::Json(_)
+        | N8nError::MalformedProviderResponse
+        | N8nError::UnknownOutcome
+        | N8nError::RateLimited { .. } => N8nError::UnknownOutcome,
+        N8nError::Api { status_code, .. } if status_code == 409 || status_code >= 500 => {
+            N8nError::UnknownOutcome
+        }
+        other => other,
+    }
+}
+
+fn verify_workflow_lifecycle_precondition(
+    precondition: &crate::types::WorkflowLifecyclePrecondition,
+    workflow: &WorkflowDetail,
+    state: &WorkflowStateView,
+) -> N8nResult<()> {
+    if precondition.version_id != workflow.version_id
+        || precondition.active_version_id != workflow.active_version_id
+        || precondition.active != workflow.active
+        || precondition.is_archived != workflow.is_archived
+        || precondition.state_digest != state.state_digest
+    {
+        return Err(N8nError::PreconditionFailed(
+            "workflow lifecycle precondition is stale",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_workflow_lifecycle_readback(
+    action: WorkflowLifecycleAction,
+    requested_version_id: Option<&str>,
+    baseline: &WorkflowStateView,
+    provider: &WorkflowStateView,
+    readback: &WorkflowStateView,
+) -> N8nResult<()> {
+    if provider.draft != baseline.draft {
+        return Err(N8nError::UnknownOutcome);
+    }
+    match action {
+        WorkflowLifecycleAction::Publish => {
+            let target_version_id = requested_version_id
+                .or(provider.active_version_id.as_deref())
+                .ok_or(N8nError::UnknownOutcome)?;
+            if !provider.active
+                || provider.active_version_id.as_deref() != Some(target_version_id)
+                || provider
+                    .published
+                    .as_ref()
+                    .is_none_or(|published| published.version_id.as_str() != target_version_id)
+            {
+                return Err(N8nError::UnknownOutcome);
+            }
+            if !readback.active
+                || readback.is_archived
+                || readback.active_version_id.as_deref() != Some(target_version_id)
+                || readback.published != provider.published
+                || readback
+                    .published
+                    .as_ref()
+                    .is_none_or(|published| published.version_id.as_str() != target_version_id)
+                || readback.draft != baseline.draft
+            {
+                return Err(N8nError::ReadbackMismatch);
+            }
+        }
+        WorkflowLifecycleAction::Unpublish => {
+            if provider.active || provider.active_version_id.is_some() {
+                return Err(N8nError::UnknownOutcome);
+            }
+            if readback.active
+                || readback.active_version_id.is_some()
+                || readback.is_archived != baseline.is_archived
+                || readback.published != provider.published
+                || readback.draft != baseline.draft
+            {
+                return Err(N8nError::ReadbackMismatch);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_blake3_digest(value: &str) -> bool {
@@ -3795,6 +3954,7 @@ fn workflow_lifecycle_input_schema() -> serde_json::Value {
         "properties": {
             "id": {"type": "string", "minLength": 1, "maxLength": 256},
             "action": {"type": "string", "enum": ["publish", "unpublish"]},
+            "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
             "guard": {
                 "type": "object",
                 "additionalProperties": false,
@@ -4158,10 +4318,11 @@ fn operations_info() -> Vec<OperationInfo> {
                 when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval.".into(),
                 common_mistakes: vec![
                     "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.".into(),
-                    "The local connector validates the typed request and approval but fails closed until capability discovery proves the provider route and version semantics; it never guesses an endpoint or retries.".into(),
+                    "Publish uses POST /workflows/{id}/publish with optional versionId; unpublish uses POST /workflows/{id}/unpublish with no body. No legacy route is guessed.".into(),
+                    "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.".into(),
                     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
                 ],
-                examples: vec![r#"{"id":"1001","action":"publish","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000003","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                examples: vec![r#"{"id":"1001","action":"publish","versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000003","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.activate"),
@@ -6526,7 +6687,7 @@ mod tests {
             }
         });
         assert!(parse_workflow_lifecycle_input(&input).is_err());
-        let error = N8nError::CapabilityUnavailable(WORKFLOW_LIFECYCLE_UNAVAILABLE);
+        let error = N8nError::CapabilityUnavailable("unsupported lifecycle semantics");
         assert!(!error.is_retryable());
         assert!(matches!(
             error.to_fcp_error(),

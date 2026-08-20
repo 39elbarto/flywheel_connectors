@@ -25,7 +25,7 @@ use fcp_prelude::{
 use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, body_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_n8n::connector::N8nConnector;
@@ -4046,12 +4046,55 @@ async fn workflows_activate_missing_active() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn workflows_lifecycle_validates_and_fails_closed_without_provider_route() {
+async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
     let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001",
+        "name": "Lifecycle test",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let readback = json!({
+        "id": "1001",
+        "name": "Lifecycle test",
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": published.clone()
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .and(body_json(json!({"versionId": "published-v1"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
+    let state_digest = workflow_state_digest_for_fixture(&baseline);
     let c = setup_connector(&server.uri()).await;
     let input = json!({
         "id": "1001",
         "action": "publish",
+        "versionId": "published-v1",
         "guard": {
             "approvalRef": "approval-test",
             "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -4060,19 +4103,19 @@ async fn workflows_lifecycle_validates_and_fails_closed_without_provider_route()
                 "activeVersionId": null,
                 "active": false,
                 "isArchived": false,
-                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                "stateDigest": state_digest
             }
         }
     });
-    let error = invoke(&c, "n8n.workflows.lifecycle", input)
+    let result = invoke(&c, "n8n.workflows.lifecycle", input)
         .await
-        .expect_err("unproven publish route must fail closed");
-    assert!(matches!(
-        error,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("capability_unavailable")
-    ));
-    assert!(server.received_requests().await.unwrap().is_empty());
+        .expect("publish should succeed");
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["after"]["active"], true);
+    assert_eq!(result["after"]["activeVersionId"], "published-v1");
+    assert_eq!(result["after"]["draft"]["versionId"], "draft-v1");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3, "baseline GET, one publish, readback GET");
 }
 
 #[fcp_async_core::runtime::test]
@@ -4092,6 +4135,335 @@ async fn workflows_lifecycle_requires_explicit_active_version_pointer() {
                 "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
             }
         }
+    });
+    assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_unpublishes_without_a_request_body() {
+    let server = MockServer::start().await;
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let baseline = json!({
+        "id": "1001",
+        "name": "Lifecycle test",
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": published
+    });
+    let readback = json!({
+        "id": "1001",
+        "name": "Lifecycle test",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unpublish"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
+    let state_digest = workflow_state_digest_for_fixture(&baseline);
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "unpublish",
+        "guard": {
+            "approvalRef": "approval-unpublish",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000005",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": "published-v1",
+                "active": true,
+                "isArchived": false,
+                "stateDigest": state_digest
+            }
+        }
+    });
+    let result = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect("unpublish should succeed");
+    assert_eq!(result["after"]["active"], false);
+    assert!(result["after"]["activeVersionId"].is_null());
+    assert_eq!(result["after"]["draft"]["versionId"], "draft-v1");
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_publish_uses_provider_version_when_omitted() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001",
+        "name": "Lifecycle omitted",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let published = json!({
+        "versionId": "published-v2",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let readback = json!({
+        "id": "1001",
+        "name": "Lifecycle omitted",
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v2",
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": published.clone()
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
+    let state_digest = workflow_state_digest_for_fixture(&baseline);
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "publish",
+        "guard": {
+            "approvalRef": "approval-omitted",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000006",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": state_digest
+            }
+        }
+    });
+    let result = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect("omitted version publish should succeed");
+    assert_eq!(result["after"]["activeVersionId"], "published-v2");
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_stale_precondition_makes_no_write() {
+    let server = MockServer::start().await;
+    let current = json!({
+        "id": "1001",
+        "name": "Stale lifecycle",
+        "active": false,
+        "versionId": "draft-v2",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [],
+        "connections": {},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(current.clone()))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "publish",
+        "guard": {
+            "approvalRef": "approval-stale",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000007",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&current)
+            }
+        }
+    });
+    assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "stale precondition must stop before POST"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_conflict_is_unknown_without_retry() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001",
+        "name": "Conflict lifecycle",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [],
+        "connections": {},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .respond_with(ResponseTemplate::new(409))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "publish",
+        "guard": {
+            "approvalRef": "approval-conflict",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000008",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect_err("409 must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_timeout_is_unknown_without_retry() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Timeout lifecycle", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": false,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(baseline.clone()),
+        )
+        .mount(&server)
+        .await;
+    let c = setup_connector_with_runtime_config(
+        json!({
+            "api_key": "test-n8n-api-key-123",
+            "server_id": TEST_SERVER_ID,
+            "base_url": format!("{}/api/v1", server.uri())
+        }),
+        ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_millis(20)),
+    )
+    .await;
+    let input = json!({
+        "id": "1001", "action": "publish",
+        "guard": {"approvalRef": "approval-timeout", "idempotencyKey": "00000000-0000-4000-8000-000000000011",
+            "precondition": {"versionId": "draft-v1", "activeVersionId": null, "active": false,
+                "isArchived": false, "stateDigest": workflow_state_digest_for_fixture(&baseline)}}
+    });
+    let error = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect_err("timeout must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_readback_mismatch_does_not_repeat_write() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Mismatch lifecycle", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": false,
+        "nodes": [{"id": "draft"}], "connections": {}, "activeVersion": null
+    });
+    let published = json!({
+        "versionId": "published-v1", "nodes": [{"id": "published"}], "connections": {}
+    });
+    let post_response = json!({
+        "id": "1001", "name": "Mismatch lifecycle", "active": true,
+        "versionId": "draft-v1", "activeVersionId": "published-v1", "isArchived": false,
+        "nodes": [{"id": "draft"}], "connections": {}, "activeVersion": published
+    });
+    let mismatched = baseline.clone();
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            mismatched,
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(post_response))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001", "action": "publish", "versionId": "published-v1",
+        "guard": {"approvalRef": "approval-mismatch", "idempotencyKey": "00000000-0000-4000-8000-000000000009",
+            "precondition": {"versionId": "draft-v1", "activeVersionId": null, "active": false,
+                "isArchived": false, "stateDigest": workflow_state_digest_for_fixture(&baseline)}}
+    });
+    let error = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect_err("readback mismatch must fail");
+    assert!(error.to_string().contains("readback"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_rejects_unsupported_action_without_provider_call() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001", "action": "archive",
+        "guard": {"approvalRef": "approval-archive", "idempotencyKey": "00000000-0000-4000-8000-000000000010",
+            "precondition": {"versionId": "draft-v1", "activeVersionId": null, "active": false,
+                "isArchived": false, "stateDigest": format!("blake3-256:{}", "0".repeat(64))}}
     });
     assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
     assert!(server.received_requests().await.unwrap().is_empty());

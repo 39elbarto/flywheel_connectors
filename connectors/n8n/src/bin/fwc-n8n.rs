@@ -526,9 +526,6 @@ fn execute_host_run_once(
 
     let operation = envelope.operation;
     let server_id = envelope.server_id;
-    if operation == HostRunOnceOperation::WorkflowsLifecycle {
-        return Err(AppError::new("capability_unavailable"));
-    }
     let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
         Some(
             fwc_n8n_update_host::McpAccessReconciliationLedger::production()
@@ -943,9 +940,10 @@ fn validate_host_run_once_input(
             ],
             &["id", "graph", "guard"],
         ),
-        HostRunOnceOperation::WorkflowsLifecycle => {
-            (&["id", "action", "guard"], &["id", "action", "guard"])
-        }
+        HostRunOnceOperation::WorkflowsLifecycle => (
+            &["id", "action", "versionId", "guard"],
+            &["id", "action", "guard"],
+        ),
         HostRunOnceOperation::McpAccessReconcile => (
             &[
                 "scope",
@@ -1016,6 +1014,15 @@ fn validate_workflow_lifecycle_input(
         Some("publish" | "unpublish")
     ) {
         return Err(AppError::new("invalid_operation_input"));
+    }
+    if let Some(version_id) = object.get("versionId") {
+        if object.get("action").and_then(Value::as_str) == Some("unpublish")
+            || version_id
+                .as_str()
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        {
+            return Err(AppError::new("invalid_operation_input"));
+        }
     }
     let guard = object
         .get("guard")
@@ -1901,6 +1908,134 @@ mod tests {
         )
         .expect("validated request must reach the fixed dispatch seam");
         assert_eq!(value.get("status").and_then(Value::as_str), Some("ok"));
+    }
+
+    #[derive(Default)]
+    struct LifecycleBridgeProbe {
+        requests: Vec<String>,
+        readback_mismatch: bool,
+    }
+
+    impl LifecycleBridgeProbe {
+        fn dispatch(
+            &mut self,
+            envelope: HostRunOnceEnvelope,
+            _deadline: Instant,
+        ) -> Result<Value, AppError> {
+            assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle);
+            assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
+            assert_eq!(envelope.resource_uri, "fwc-n8n://eec/workflows/1001");
+            assert_eq!(envelope.input["id"], "1001");
+            assert_eq!(envelope.input["action"], "publish");
+            assert_eq!(
+                envelope.input["guard"]["precondition"]["activeVersionId"],
+                Value::Null
+            );
+
+            self.requests.push("bridge:validated-envelope".to_owned());
+            self.requests
+                .push("child:GET /api/v1/workflows/1001".to_owned());
+            self.requests.push(
+                "child:POST /api/v1/workflows/1001/publish {\"versionId\":\"version-1\"}"
+                    .to_owned(),
+            );
+            self.requests
+                .push("child:GET /api/v1/workflows/1001".to_owned());
+
+            if self.readback_mismatch {
+                return Err(AppError::new("lifecycle_readback_mismatch"));
+            }
+            Ok(json!({
+                "status": "ok",
+                "result": {
+                    "action": "publish",
+                    "active": true,
+                    "activeVersionId": "version-1"
+                }
+            }))
+        }
+    }
+
+    fn lifecycle_host_input() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": {
+                "id": "1001",
+                "action": "publish",
+                "versionId": "version-1",
+                "guard": {
+                    "approvalRef": "chat-approval-1",
+                    "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                    "precondition": {
+                        "versionId": "draft-v1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                    }
+                }
+            },
+            "deadline_ms": 1000
+        }))
+        .expect("lifecycle host input")
+    }
+
+    #[test]
+    fn host_run_once_lifecycle_publish_bridges_exact_write_and_readback_once() {
+        let mut bridge = LifecycleBridgeProbe::default();
+        let value = run_once_from_bytes_at(
+            "n8n.workflows.lifecycle",
+            &lifecycle_host_input(),
+            Instant::now(),
+            |envelope, deadline| bridge.dispatch(envelope, deadline),
+        )
+        .expect("validated lifecycle envelope should reach bridge seam");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(
+            bridge.requests,
+            vec![
+                "bridge:validated-envelope",
+                "child:GET /api/v1/workflows/1001",
+                "child:POST /api/v1/workflows/1001/publish {\"versionId\":\"version-1\"}",
+                "child:GET /api/v1/workflows/1001",
+            ]
+        );
+        assert_eq!(
+            bridge
+                .requests
+                .iter()
+                .filter(|request| request.starts_with("child:POST"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn host_run_once_lifecycle_readback_mismatch_is_terminal_without_second_write() {
+        let mut bridge = LifecycleBridgeProbe {
+            readback_mismatch: true,
+            ..Default::default()
+        };
+        let error = run_once_from_bytes_at(
+            "n8n.workflows.lifecycle",
+            &lifecycle_host_input(),
+            Instant::now(),
+            |envelope, deadline| bridge.dispatch(envelope, deadline),
+        )
+        .expect_err("readback mismatch must fail closed");
+        assert_eq!(error.code, "lifecycle_readback_mismatch");
+        assert_eq!(
+            bridge
+                .requests
+                .iter()
+                .filter(|request| request.starts_with("child:POST"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            bridge.requests.last().map(String::as_str),
+            Some("child:GET /api/v1/workflows/1001")
+        );
     }
 
     #[test]

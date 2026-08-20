@@ -1,6 +1,6 @@
 //! FCP n8n Connector implementation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -205,6 +205,16 @@ struct DraftWritePlan {
 const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
 const MCP_ACCESS_LIST_LIMIT: u64 = 100;
 const MCP_ACCESS_READBACK_DIGEST_DOMAIN_V2: &[u8] = b"fwc-n8n.mcp-access-readback.v2";
+const MCP_ACCESS_RECEIPT_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.mcp-access-receipt.v1";
+const MCP_ACCESS_RECEIPT_RESOURCE_DOMAIN_V1: &[u8] = b"fwc-n8n.mcp-access-resource.v1";
+const MCP_ACCESS_RECEIPT_BINDING_DOMAIN_V1: &[u8] = b"fwc-n8n.mcp-access-binding.v1";
+const MCP_ACCESS_RECEIPT_SCHEMA_V1: &str = "fwc.n8n.mcp-access-receipt.v1";
+const MAX_MCP_ACCESS_RECEIPT_ITEMS: usize = MAX_MCP_ACCESS_WORKFLOWS;
+const MAX_MCP_ACCESS_RECEIPT_BYTES: usize = 256 * 1024;
+const MAX_MCP_ACCESS_RECEIPT_SERVER_ID_LENGTH: usize = 128;
+const MAX_MCP_ACCESS_RECEIPT_SCOPE_LENGTH: usize = 32;
+const MAX_MCP_ACCESS_RECEIPT_OUTCOME_LENGTH: usize = 96;
+const MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH: usize = 75;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -270,6 +280,61 @@ struct McpAccessPlan {
     exceptions: Vec<McpAccessPlanItem>,
     #[serde(rename = "readbackDigest")]
     readback_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum McpAccessReceiptStatus {
+    Planned,
+    Applied,
+    Partial,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct McpAccessReceiptItem {
+    #[serde(rename = "resourceDigest")]
+    resource_digest: String,
+    #[serde(rename = "availableInMCP")]
+    available_in_mcp: Option<bool>,
+    desired: bool,
+    outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Redacted, deterministic result for one bounded reconciliation invocation.
+///
+/// This is intentionally a transient receipt contract. Durable ledger storage,
+/// retention, and replay/readback persistence remain a separate host-owned
+/// packet and are not implemented here.
+struct McpAccessReceipt {
+    schema: &'static str,
+    operation: &'static str,
+    #[serde(rename = "serverId")]
+    server_id: String,
+    scope: String,
+    desired: bool,
+    #[serde(rename = "dryRun")]
+    dry_run: bool,
+    status: McpAccessReceiptStatus,
+    #[serde(rename = "planDigest")]
+    plan_digest: String,
+    #[serde(rename = "readbackDigest")]
+    readback_digest: String,
+    #[serde(rename = "approvalDigest", skip_serializing_if = "Option::is_none")]
+    approval_digest: Option<String>,
+    #[serde(rename = "idempotencyDigest", skip_serializing_if = "Option::is_none")]
+    idempotency_digest: Option<String>,
+    items: Vec<McpAccessReceiptItem>,
+    #[serde(rename = "receiptDigest")]
+    receipt_digest: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct McpAccessResult {
+    #[serde(flatten)]
+    plan: McpAccessPlan,
+    receipt: McpAccessReceipt,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -899,7 +964,21 @@ impl N8nConnector {
         };
         let plan = plan_mcp_access_reconcile(&reconcile, &workflows, server_id)?;
         if reconcile.dry_run {
-            return serde_json::to_value(plan).map_err(N8nError::from);
+            mcp_access_receipt_capacity_guard(
+                &reconcile,
+                server_id,
+                &plan,
+                &plan.readback_digest,
+                None,
+            )?;
+            let receipt = McpAccessReceipt::from_plan(
+                &reconcile,
+                server_id,
+                &plan,
+                &plan.readback_digest,
+                None,
+            )?;
+            return serde_json::to_value(McpAccessResult { plan, receipt }).map_err(N8nError::from);
         }
 
         let guard = reconcile
@@ -911,6 +990,17 @@ impl N8nConnector {
                 "mcp access dry-run digest is stale",
             ));
         }
+
+        // Validate a conservative terminal-outcome capacity before the first
+        // provider write. Every planned item must become one terminal item;
+        // the original planned entries are not included in apply receipts.
+        mcp_access_receipt_capacity_guard(
+            &reconcile,
+            server_id,
+            &plan,
+            &guard.dry_run_digest,
+            Some(guard),
+        )?;
 
         let mut changed = Vec::new();
         let mut skipped = plan.skipped.clone();
@@ -1048,12 +1138,23 @@ impl N8nConnector {
             &skipped,
             &exceptions,
         )?;
-        serde_json::to_value(McpAccessPlan {
+        let result_plan = McpAccessPlan {
             planned: plan.planned,
             changed,
             skipped,
             exceptions,
             readback_digest,
+        };
+        let receipt = McpAccessReceipt::from_plan(
+            &reconcile,
+            server_id,
+            &result_plan,
+            &guard.dry_run_digest,
+            Some(guard),
+        )?;
+        serde_json::to_value(McpAccessResult {
+            plan: result_plan,
+            receipt,
         })
         .map_err(N8nError::from)
     }
@@ -2708,6 +2809,260 @@ fn mcp_access_exception(
     }
 }
 
+impl McpAccessReceipt {
+    fn from_plan(
+        input: &McpAccessReconcileInput,
+        server_id: &str,
+        plan: &McpAccessPlan,
+        plan_digest: &str,
+        guard: Option<&McpAccessReconcileGuard>,
+    ) -> N8nResult<Self> {
+        let items = mcp_access_receipt_items(server_id, plan, input.dry_run)?;
+
+        let (approval_digest, idempotency_digest) = match guard {
+            Some(guard) => (
+                Some(mcp_access_guard_digest(
+                    server_id,
+                    "approval",
+                    &guard.approval_ref,
+                )?),
+                Some(mcp_access_guard_digest(
+                    server_id,
+                    "idempotency",
+                    &guard.idempotency_key,
+                )?),
+            ),
+            None => (None, None),
+        };
+        let status = if input.dry_run {
+            McpAccessReceiptStatus::Planned
+        } else if plan.exceptions.is_empty() {
+            McpAccessReceiptStatus::Applied
+        } else if plan
+            .exceptions
+            .iter()
+            .any(|item| matches!(item.reason, "provider_unknown_outcome" | "readback_unknown"))
+        {
+            McpAccessReceiptStatus::Unknown
+        } else {
+            McpAccessReceiptStatus::Partial
+        };
+
+        let mut receipt = Self {
+            schema: MCP_ACCESS_RECEIPT_SCHEMA_V1,
+            operation: "n8n.mcp_access.reconcile",
+            server_id: server_id.to_owned(),
+            scope: input.scope.as_str().to_owned(),
+            desired: input.desired,
+            dry_run: input.dry_run,
+            status,
+            plan_digest: plan_digest.to_owned(),
+            readback_digest: plan.readback_digest.clone(),
+            approval_digest,
+            idempotency_digest,
+            items,
+            receipt_digest: String::new(),
+        };
+        receipt.receipt_digest = receipt.compute_digest()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn compute_digest(&self) -> N8nResult<String> {
+        let mut value = serde_json::to_value(self)?;
+        let object = value
+            .as_object_mut()
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        object.insert("receiptDigest".into(), Value::Null);
+        digest_canonical_json(MCP_ACCESS_RECEIPT_DIGEST_DOMAIN_V1, &value)
+    }
+
+    fn validate(&self) -> N8nResult<()> {
+        if self.schema != MCP_ACCESS_RECEIPT_SCHEMA_V1
+            || self.operation != "n8n.mcp_access.reconcile"
+            || self.items.len() > MAX_MCP_ACCESS_RECEIPT_ITEMS
+            || self.server_id.len() > MAX_MCP_ACCESS_RECEIPT_SERVER_ID_LENGTH
+            || self.scope.len() > MAX_MCP_ACCESS_RECEIPT_SCOPE_LENGTH
+            || !is_blake3_digest(&self.plan_digest)
+            || !is_blake3_digest(&self.readback_digest)
+            || !is_blake3_digest(&self.receipt_digest)
+            || self.plan_digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+            || self.readback_digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+            || self.receipt_digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+            || self.approval_digest.as_deref().is_some_and(|digest| {
+                !is_blake3_digest(digest) || digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+            })
+            || self.idempotency_digest.as_deref().is_some_and(|digest| {
+                !is_blake3_digest(digest) || digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+            })
+            || self.items.iter().any(|item| {
+                item.resource_digest.len() > MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH
+                    || item.outcome.len() > MAX_MCP_ACCESS_RECEIPT_OUTCOME_LENGTH
+            })
+        {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let encoded = serde_json::to_vec(self)?;
+        if encoded.len() > MAX_MCP_ACCESS_RECEIPT_BYTES
+            || self.compute_digest()? != self.receipt_digest
+        {
+            return Err(N8nError::InvalidInput(
+                "mcp access receipt exceeds its deterministic bounds".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn mcp_access_receipt_items(
+    server_id: &str,
+    plan: &McpAccessPlan,
+    include_planned: bool,
+) -> N8nResult<Vec<McpAccessReceiptItem>> {
+    // The public plan intentionally keeps `planned` alongside final outcome
+    // arrays for per-resource diagnostics. Dry-run receipts retain planned
+    // representation; apply receipts contain only terminal outcomes. In both
+    // cases one hashed resource may occur only once, with precedence
+    // exception > changed > skipped > planned.
+    let mut by_resource = BTreeMap::<String, (u8, McpAccessReceiptItem)>::new();
+    let sources = if include_planned {
+        vec![
+            (0_u8, "planned", plan.planned.as_slice()),
+            (1_u8, "skipped", plan.skipped.as_slice()),
+            (2_u8, "changed", plan.changed.as_slice()),
+            (3_u8, "exception", plan.exceptions.as_slice()),
+        ]
+    } else {
+        vec![
+            (1_u8, "skipped", plan.skipped.as_slice()),
+            (2_u8, "changed", plan.changed.as_slice()),
+            (3_u8, "exception", plan.exceptions.as_slice()),
+        ]
+    };
+    for (priority, outcome, source) in sources {
+        for item in source {
+            let resource_digest = mcp_access_resource_digest(server_id, &item.id)?;
+            let candidate = McpAccessReceiptItem {
+                resource_digest: resource_digest.clone(),
+                available_in_mcp: item.available_in_mcp,
+                desired: item.desired,
+                outcome: format!("{outcome}:{}", item.reason),
+            };
+            if by_resource
+                .get(&resource_digest)
+                .is_none_or(|(existing_priority, _)| priority >= *existing_priority)
+            {
+                by_resource.insert(resource_digest, (priority, candidate));
+            }
+        }
+    }
+    if by_resource.len() > MAX_MCP_ACCESS_RECEIPT_ITEMS {
+        return Err(N8nError::InvalidInput(
+            "mcp access receipt exceeds the bounded item limit".into(),
+        ));
+    }
+    let mut items = by_resource
+        .into_values()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.resource_digest
+            .cmp(&right.resource_digest)
+            .then_with(|| left.outcome.cmp(&right.outcome))
+            .then_with(|| left.desired.cmp(&right.desired))
+    });
+    Ok(items)
+}
+
+fn mcp_access_receipt_capacity_guard(
+    input: &McpAccessReconcileInput,
+    server_id: &str,
+    plan: &McpAccessPlan,
+    plan_digest: &str,
+    guard: Option<&McpAccessReconcileGuard>,
+) -> N8nResult<()> {
+    if server_id.len() > MAX_MCP_ACCESS_RECEIPT_SERVER_ID_LENGTH
+        || input.scope.as_str().len() > MAX_MCP_ACCESS_RECEIPT_SCOPE_LENGTH
+    {
+        return Err(N8nError::InvalidInput(
+            "mcp access receipt field exceeds its bounded length".into(),
+        ));
+    }
+    let item_count = if input.dry_run {
+        mcp_access_receipt_items(server_id, plan, true)?.len()
+    } else {
+        plan.planned
+            .len()
+            .saturating_add(plan.changed.len())
+            .saturating_add(plan.skipped.len())
+            .saturating_add(plan.exceptions.len())
+    };
+    if item_count > MAX_MCP_ACCESS_RECEIPT_ITEMS {
+        return Err(N8nError::InvalidInput(
+            "mcp access receipt exceeds the bounded item capacity".into(),
+        ));
+    }
+
+    let (approval_digest, idempotency_digest) = match guard {
+        Some(guard) => (
+            Some(mcp_access_guard_digest(
+                server_id,
+                "approval",
+                &guard.approval_ref,
+            )?),
+            Some(mcp_access_guard_digest(
+                server_id,
+                "idempotency",
+                &guard.idempotency_key,
+            )?),
+        ),
+        None => (None, None),
+    };
+    let worst_case = McpAccessReceipt {
+        schema: MCP_ACCESS_RECEIPT_SCHEMA_V1,
+        operation: "n8n.mcp_access.reconcile",
+        server_id: server_id.to_owned(),
+        scope: input.scope.as_str().to_owned(),
+        desired: input.desired,
+        dry_run: input.dry_run,
+        status: McpAccessReceiptStatus::Unknown,
+        plan_digest: plan_digest.to_owned(),
+        readback_digest: plan.readback_digest.clone(),
+        approval_digest,
+        idempotency_digest,
+        items: vec![
+            McpAccessReceiptItem {
+                resource_digest: format!("blake3-256:{}", "f".repeat(64)),
+                available_in_mcp: Some(true),
+                desired: true,
+                outcome: "x".repeat(MAX_MCP_ACCESS_RECEIPT_OUTCOME_LENGTH),
+            };
+            item_count
+        ],
+        receipt_digest: format!("blake3-256:{}", "f".repeat(64)),
+    };
+    if serde_json::to_vec(&worst_case)?.len() > MAX_MCP_ACCESS_RECEIPT_BYTES {
+        return Err(N8nError::InvalidInput(
+            "mcp access receipt exceeds its bounded byte capacity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn mcp_access_resource_digest(server_id: &str, workflow_id: &str) -> N8nResult<String> {
+    digest_canonical_json(
+        MCP_ACCESS_RECEIPT_RESOURCE_DOMAIN_V1,
+        &json!({"serverId": server_id, "workflowId": workflow_id}),
+    )
+}
+
+fn mcp_access_guard_digest(server_id: &str, kind: &str, value: &str) -> N8nResult<String> {
+    digest_canonical_json(
+        MCP_ACCESS_RECEIPT_BINDING_DOMAIN_V1,
+        &json!({"kind": kind, "serverId": server_id, "value": value}),
+    )
+}
+
 const fn mcp_access_error_reason(error: &N8nError) -> &'static str {
     match error {
         N8nError::UnknownOutcome => "provider_unknown_outcome",
@@ -3376,10 +3731,99 @@ fn mcp_access_reconcile_output_schema() -> serde_json::Value {
             "reason": {"type": "string"},
         },
     });
+    let receipt_item = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resourceDigest", "availableInMCP", "desired", "outcome"],
+        "properties": {
+            "resourceDigest": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "availableInMCP": {"type": ["boolean", "null"]},
+            "desired": {"type": "boolean"},
+            "outcome": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_OUTCOME_LENGTH,
+            },
+        },
+    });
+    let receipt = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "schema",
+            "operation",
+            "serverId",
+            "scope",
+            "desired",
+            "dryRun",
+            "status",
+            "planDigest",
+            "readbackDigest",
+            "items",
+            "receiptDigest",
+        ],
+        "properties": {
+            "schema": {
+                "const": MCP_ACCESS_RECEIPT_SCHEMA_V1,
+                "maxLength": MCP_ACCESS_RECEIPT_SCHEMA_V1.len(),
+            },
+            "operation": {
+                "const": "n8n.mcp_access.reconcile",
+                "maxLength": "n8n.mcp_access.reconcile".len(),
+            },
+            "serverId": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_SERVER_ID_LENGTH,
+            },
+            "scope": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_SCOPE_LENGTH,
+            },
+            "desired": {"type": "boolean"},
+            "dryRun": {"type": "boolean"},
+            "status": {
+                "type": "string",
+                "enum": ["planned", "applied", "partial", "unknown"],
+            },
+            "planDigest": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "readbackDigest": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "approvalDigest": {
+                "type": ["string", "null"],
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "idempotencyDigest": {
+                "type": ["string", "null"],
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+            "items": {
+                "type": "array",
+                "maxItems": MAX_MCP_ACCESS_RECEIPT_ITEMS,
+                "items": receipt_item,
+            },
+            "receiptDigest": {
+                "type": "string",
+                "maxLength": MAX_MCP_ACCESS_RECEIPT_DIGEST_LENGTH,
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+            },
+        },
+    });
     json!({
         "type": "object",
         "additionalProperties": false,
-        "required": ["planned", "changed", "skipped", "exceptions", "readbackDigest"],
+        "required": ["planned", "changed", "skipped", "exceptions", "readbackDigest", "receipt"],
         "properties": {
             "planned": {"type": "array", "items": item},
             "changed": {"type": "array", "items": item},
@@ -3389,6 +3833,7 @@ fn mcp_access_reconcile_output_schema() -> serde_json::Value {
                 "type": "string",
                 "pattern": "^blake3-256:[0-9a-f]{64}$",
             },
+            "receipt": receipt,
         },
     })
 }
@@ -4317,6 +4762,359 @@ mod tests {
                 "projectId": "project-1",
             }))
             .is_err()
+        );
+    }
+
+    fn mcp_access_receipt_test_digest() -> String {
+        format!("blake3-256:{}", "0".repeat(64))
+    }
+
+    fn mcp_access_receipt_test_plan(
+        planned: Vec<McpAccessPlanItem>,
+        changed: Vec<McpAccessPlanItem>,
+        skipped: Vec<McpAccessPlanItem>,
+        exceptions: Vec<McpAccessPlanItem>,
+    ) -> McpAccessPlan {
+        McpAccessPlan {
+            planned,
+            changed,
+            skipped,
+            exceptions,
+            readback_digest: mcp_access_receipt_test_digest(),
+        }
+    }
+
+    fn mcp_access_receipt_test_item(
+        id: &str,
+        available_in_mcp: Option<bool>,
+        desired: bool,
+        reason: &'static str,
+    ) -> McpAccessPlanItem {
+        McpAccessPlanItem {
+            id: id.into(),
+            available_in_mcp,
+            desired,
+            reason,
+        }
+    }
+
+    #[test]
+    fn mcp_access_receipt_preflight_rejects_oversized_before_provider_write() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "all_current",
+            "desired": true,
+            "dryRun": false,
+            "guard": {
+                "approvalRef": "approval-redacted",
+                "dryRunDigest": mcp_access_receipt_test_digest(),
+                "idempotencyKey": "00000000-0000-4000-8000-000000000010"
+            }
+        }))
+        .unwrap();
+        let oversized_plan = mcp_access_receipt_test_plan(
+            (0..=MAX_MCP_ACCESS_RECEIPT_ITEMS)
+                .map(|index| {
+                    mcp_access_receipt_test_item(
+                        &format!("wf-preflight-{index}"),
+                        Some(false),
+                        true,
+                        "requires_change",
+                    )
+                })
+                .collect(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        let guard = McpAccessReconcileGuard {
+            approval_ref: "approval-redacted".into(),
+            dry_run_digest: mcp_access_receipt_test_digest(),
+            idempotency_key: "00000000-0000-4000-8000-000000000010".into(),
+        };
+        let mut provider_writes = 0;
+        let preflight = mcp_access_receipt_capacity_guard(
+            &input,
+            "eec",
+            &oversized_plan,
+            &guard.dry_run_digest,
+            Some(&guard),
+        );
+        // Keep the write counter explicit: a caller must not reach its first
+        // provider write when the preflight receipt is rejected.
+        if preflight.is_ok() {
+            provider_writes += 1;
+        }
+        assert!(preflight.is_err());
+        assert_eq!(provider_writes, 0);
+    }
+
+    #[test]
+    fn mcp_access_receipt_is_redacted_bounded_and_deterministic() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "workflow_ids",
+            "workflowIds": ["wf-sensitive"],
+            "desired": true,
+            "dryRun": true,
+        }))
+        .unwrap();
+        let first = mcp_access_receipt_test_plan(
+            vec![mcp_access_receipt_test_item(
+                "wf-sensitive",
+                Some(false),
+                true,
+                "requires_change",
+            )],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let second = mcp_access_receipt_test_plan(
+            vec![mcp_access_receipt_test_item(
+                "wf-sensitive",
+                Some(false),
+                true,
+                "requires_change",
+            )],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let first_receipt =
+            McpAccessReceipt::from_plan(&input, "eec", &first, &first.readback_digest, None)
+                .unwrap();
+        let second_receipt =
+            McpAccessReceipt::from_plan(&input, "eec", &second, &second.readback_digest, None)
+                .unwrap();
+        assert_eq!(first_receipt, second_receipt);
+        let encoded = serde_json::to_string(&first_receipt).unwrap();
+        assert!(!encoded.contains("wf-sensitive"));
+        assert!(!encoded.contains("credentials"));
+        assert!(!encoded.contains("Code node"));
+        assert!(encoded.contains("resourceDigest"));
+        assert!(encoded.len() <= MAX_MCP_ACCESS_RECEIPT_BYTES);
+
+        let mut oversized = first_receipt.clone();
+        oversized.items[0].outcome = "x".repeat(MAX_MCP_ACCESS_RECEIPT_BYTES);
+        assert!(oversized.validate().is_err());
+
+        let too_many = mcp_access_receipt_test_plan(
+            (0..=MAX_MCP_ACCESS_RECEIPT_ITEMS)
+                .map(|index| {
+                    mcp_access_receipt_test_item(
+                        &format!("wf-too-many-{index}"),
+                        Some(false),
+                        true,
+                        "requires_change",
+                    )
+                })
+                .collect(),
+            vec![],
+            vec![],
+            vec![],
+        );
+        assert!(
+            McpAccessReceipt::from_plan(&input, "eec", &too_many, &too_many.readback_digest, None,)
+                .is_err()
+        );
+
+        let overlapping = mcp_access_receipt_test_plan(
+            (0..600)
+                .map(|index| {
+                    mcp_access_receipt_test_item(
+                        &format!("wf-{index}"),
+                        Some(false),
+                        true,
+                        "requires_change",
+                    )
+                })
+                .collect(),
+            (0..600)
+                .map(|index| {
+                    mcp_access_receipt_test_item(
+                        &format!("wf-{index}"),
+                        Some(true),
+                        true,
+                        "updated_and_verified",
+                    )
+                })
+                .collect(),
+            vec![],
+            vec![],
+        );
+        let receipt = McpAccessReceipt::from_plan(
+            &input,
+            "eec",
+            &overlapping,
+            &overlapping.readback_digest,
+            None,
+        )
+        .expect("overlapping planned/changed entries count once");
+        assert_eq!(receipt.items.len(), 600);
+        assert!(
+            receipt
+                .items
+                .iter()
+                .all(|item| item.outcome == "changed:updated_and_verified")
+        );
+    }
+
+    #[test]
+    fn mcp_access_receipt_apply_uses_terminal_accounting_only() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "workflow_ids",
+            "workflowIds": ["wf-changed", "wf-skipped", "wf-exception"],
+            "desired": true,
+            "dryRun": false,
+            "guard": {
+                "approvalRef": "approval-redacted",
+                "dryRunDigest": mcp_access_receipt_test_digest(),
+                "idempotencyKey": "00000000-0000-4000-8000-000000000011"
+            }
+        }))
+        .unwrap();
+        let guard = McpAccessReconcileGuard {
+            approval_ref: "approval-redacted".into(),
+            dry_run_digest: mcp_access_receipt_test_digest(),
+            idempotency_key: "00000000-0000-4000-8000-000000000011".into(),
+        };
+        let plan = mcp_access_receipt_test_plan(
+            vec![mcp_access_receipt_test_item(
+                "wf-changed",
+                Some(false),
+                true,
+                "requires_change",
+            )],
+            vec![mcp_access_receipt_test_item(
+                "wf-changed",
+                Some(true),
+                true,
+                "updated_and_verified",
+            )],
+            vec![mcp_access_receipt_test_item(
+                "wf-skipped",
+                Some(true),
+                true,
+                "already_desired_on_recheck",
+            )],
+            vec![mcp_access_receipt_test_item(
+                "wf-exception",
+                Some(false),
+                true,
+                "provider_forbidden",
+            )],
+        );
+        let receipt =
+            McpAccessReceipt::from_plan(&input, "eec", &plan, &guard.dry_run_digest, Some(&guard))
+                .unwrap();
+        assert_eq!(receipt.items.len(), 3);
+        assert!(receipt.items.iter().all(|item| {
+            !item.outcome.starts_with("planned:")
+                && (item.outcome.starts_with("changed:")
+                    || item.outcome.starts_with("skipped:")
+                    || item.outcome.starts_with("exception:"))
+        }));
+    }
+
+    #[test]
+    fn mcp_access_receipt_statuses_cover_success_partial_unknown_and_revoke() {
+        let guard = McpAccessReconcileGuard {
+            approval_ref: "approval-redacted".into(),
+            dry_run_digest: mcp_access_receipt_test_digest(),
+            idempotency_key: "00000000-0000-4000-8000-000000000009".into(),
+        };
+        let input = parse_mcp_access_input(&json!({
+            "scope": "workflow_ids",
+            "workflowIds": ["wf-revoke"],
+            "desired": false,
+            "dryRun": false,
+            "guard": {
+                "approvalRef": "approval-redacted",
+                "dryRunDigest": mcp_access_receipt_test_digest(),
+                "idempotencyKey": "00000000-0000-4000-8000-000000000009"
+            }
+        }))
+        .unwrap();
+        let success_plan = mcp_access_receipt_test_plan(
+            vec![],
+            vec![mcp_access_receipt_test_item(
+                "wf-revoke",
+                Some(false),
+                false,
+                "updated_and_verified",
+            )],
+            vec![],
+            vec![],
+        );
+        let success = McpAccessReceipt::from_plan(
+            &input,
+            "eec",
+            &success_plan,
+            &guard.dry_run_digest,
+            Some(&guard),
+        )
+        .unwrap();
+        assert_eq!(success.status, McpAccessReceiptStatus::Applied);
+        assert!(!success.dry_run);
+        assert!(!success.desired);
+        assert!(success.approval_digest.is_some());
+        assert!(success.idempotency_digest.is_some());
+        assert_eq!(success.items[0].available_in_mcp, Some(false));
+
+        let partial_plan = mcp_access_receipt_test_plan(
+            vec![],
+            vec![],
+            vec![],
+            vec![mcp_access_receipt_test_item(
+                "wf-partial",
+                Some(true),
+                false,
+                "provider_forbidden",
+            )],
+        );
+        let partial = McpAccessReceipt::from_plan(
+            &input,
+            "eec",
+            &partial_plan,
+            &guard.dry_run_digest,
+            Some(&guard),
+        )
+        .unwrap();
+        assert_eq!(partial.status, McpAccessReceiptStatus::Partial);
+
+        let unknown_plan = mcp_access_receipt_test_plan(
+            vec![],
+            vec![],
+            vec![],
+            vec![mcp_access_receipt_test_item(
+                "wf-unknown",
+                Some(true),
+                false,
+                "provider_unknown_outcome",
+            )],
+        );
+        let unknown = McpAccessReceipt::from_plan(
+            &input,
+            "eec",
+            &unknown_plan,
+            &guard.dry_run_digest,
+            Some(&guard),
+        )
+        .unwrap();
+        assert_eq!(unknown.status, McpAccessReceiptStatus::Unknown);
+    }
+
+    #[test]
+    fn mcp_access_receipt_schema_exposes_only_hashed_resource_items() {
+        let schema = mcp_access_reconcile_output_schema();
+        let receipt = schema.pointer("/properties/receipt").unwrap();
+        let item = receipt.pointer("/properties/items/items").unwrap();
+        assert!(item.pointer("/properties/resourceDigest").is_some());
+        assert!(item.pointer("/properties/id").is_none());
+        assert!(
+            receipt
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|field| field == "receiptDigest"))
         );
     }
 

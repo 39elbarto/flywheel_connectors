@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:019f000b7601f2e77de6b0fde2cb5d8eecc3e259da75585064b509d390688a7f"
+interface_hash = "blake3-256:fcp.interface.v2:995cf53a48a5198d01fbe08e3d2d396d9eb7ebb472571e5dd40a185fd659e02d"
 
 [connector]
 id = "fcp.n8n"
@@ -684,6 +684,7 @@ required = [
     "skipped",
     "exceptions",
     "readbackDigest",
+    "receipt",
 ]
 type = "object"
 
@@ -772,6 +773,98 @@ type = "string"
 type = "string"
 
 [provides.operations."n8n.mcp_access.reconcile".output_schema.properties.readbackDigest]
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt]
+additionalProperties = false
+required = [
+    "schema",
+    "operation",
+    "serverId",
+    "scope",
+    "desired",
+    "dryRun",
+    "status",
+    "planDigest",
+    "readbackDigest",
+    "items",
+    "receiptDigest",
+]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.schema]
+const = "fwc.n8n.mcp-access-receipt.v1"
+maxLength = 29
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.operation]
+const = "n8n.mcp_access.reconcile"
+maxLength = 24
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.serverId]
+maxLength = 128
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.scope]
+maxLength = 32
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.dryRun]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.status]
+enum = ["planned", "applied", "partial", "unknown"]
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.planDigest]
+maxLength = 75
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.readbackDigest]
+maxLength = 75
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.approvalDigest]
+maxLength = 75
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = ["string", "null"]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.idempotencyDigest]
+maxLength = 75
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = ["string", "null"]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items]
+maxItems = 1000
+type = "array"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items.items]
+additionalProperties = false
+required = ["resourceDigest", "availableInMCP", "desired", "outcome"]
+type = "object"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items.items.properties.resourceDigest]
+maxLength = 75
+pattern = "^blake3-256:[0-9a-f]{64}$"
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items.items.properties.availableInMCP]
+type = ["boolean", "null"]
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items.items.properties.desired]
+type = "boolean"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.items.items.properties.outcome]
+maxLength = 96
+type = "string"
+
+[provides.operations."n8n.mcp_access.reconcile".output_schema.properties.receipt.properties.receiptDigest]
+maxLength = 75
 pattern = "^blake3-256:[0-9a-f]{64}$"
 type = "string"
 

@@ -368,7 +368,7 @@ The table specifies the exact operation-specific `data` shape.
 | `data_tables.mutate` | exact table target or target project for create, `action`, `guard` | action payload | `{before?,after,affectedRows?,schemaDigest}` |
 | `evaluations.manage` | exact workflow target, `action` | `runId`, `status`, `page`, `guard` | action-specific `{evaluationUri?,status?,runs?,cases?,summary?}` |
 | `audit.inspect` | `target.server` | `categories[]`, `detail` | `{summary,findings:[{category,severity,resourceUri?,code,message}]}` |
-| `mcp_access.reconcile` | `target.server`, `scope`, `desired`, `dryRun` | `guard`, `projectId`, `folderId`, `workflowIds[]` | `{planned,changed,skipped,exceptions,readbackDigest}` |
+| `mcp_access.reconcile` | `target.server`, `scope`, `desired`, `dryRun` | `guard`, `projectId`, `folderId`, `workflowIds[]` | `{planned,changed,skipped,exceptions,readbackDigest,receipt}` |
 
 `knowledge.query.action` is one of:
 

@@ -135,6 +135,8 @@ enum HostRunOnceOperation {
     WorkflowsCreateDraft,
     #[serde(rename = "n8n.workflows.update_draft")]
     WorkflowsUpdateDraft,
+    #[serde(rename = "n8n.workflows.lifecycle")]
+    WorkflowsLifecycle,
     #[serde(rename = "n8n.mcp_access.reconcile")]
     McpAccessReconcile,
 }
@@ -154,6 +156,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsList => "n8n.workflows.list",
             Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
+            Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
             Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
         }
     }
@@ -172,6 +175,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
+            "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
             "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
             _ => Err(AppError::new("operation_not_allowed")),
         }
@@ -191,6 +195,7 @@ impl HostRunOnceOperation {
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
+            | Self::WorkflowsLifecycle
             | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
         }
     }
@@ -521,6 +526,9 @@ fn execute_host_run_once(
 
     let operation = envelope.operation;
     let server_id = envelope.server_id;
+    if operation == HostRunOnceOperation::WorkflowsLifecycle {
+        return Err(AppError::new("capability_unavailable"));
+    }
     let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
         Some(
             fwc_n8n_update_host::McpAccessReconciliationLedger::production()
@@ -935,6 +943,9 @@ fn validate_host_run_once_input(
             ],
             &["id", "graph", "guard"],
         ),
+        HostRunOnceOperation::WorkflowsLifecycle => {
+            (&["id", "action", "guard"], &["id", "action", "guard"])
+        }
         HostRunOnceOperation::McpAccessReconcile => (
             &[
                 "scope",
@@ -986,8 +997,92 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
             validate_workflow_draft_input(operation, input, object)
         }
+        HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
+}
+
+fn validate_workflow_lifecycle_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    host_run_once_input_id(&json!({"id": id}), "id")?;
+    if !matches!(
+        object.get("action").and_then(Value::as_str),
+        Some("publish" | "unpublish")
+    ) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            value
+                .as_str()
+                .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
+                || !(value.is_null() || value.is_string())
+        })
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    Ok(())
 }
 
 fn validate_mcp_access_input(
@@ -1226,12 +1321,12 @@ fn expected_host_run_once_resource_uri(
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList
         | HostRunOnceOperation::McpAccessReconcile => Ok(root),
-        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
-            Ok(format!(
-                "{root}/workflows/{}",
-                encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-            ))
-        }
+        HostRunOnceOperation::WorkflowsGet
+        | HostRunOnceOperation::WorkflowsUpdateDraft
+        | HostRunOnceOperation::WorkflowsLifecycle => Ok(format!(
+            "{root}/workflows/{}",
+            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+        )),
         HostRunOnceOperation::WorkflowsCreateDraft => input
             .get("project_id")
             .map(|_| {
@@ -2270,6 +2365,43 @@ mod tests {
         let error = HostRunOnceOperation::parse("n8n.workflows.activate")
             .expect_err("writes must be denied");
         assert_eq!(error.code, "operation_not_allowed");
+
+        let lifecycle = json!({
+            "id": "1001",
+            "action": "publish",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let lifecycle_operation = HostRunOnceOperation::parse("n8n.workflows.lifecycle")
+            .expect("typed lifecycle operation is admitted");
+        assert!(
+            build_host_run_once_envelope(
+                lifecycle_operation,
+                host_input(HostRunOnceServerId::Eec, lifecycle.clone())
+            )
+            .is_ok()
+        );
+        let mut missing_pointer = lifecycle;
+        missing_pointer["guard"]["precondition"]
+            .as_object_mut()
+            .expect("precondition object")
+            .remove("activeVersionId");
+        assert!(
+            build_host_run_once_envelope(
+                lifecycle_operation,
+                host_input(HostRunOnceServerId::Eec, missing_pointer)
+            )
+            .is_err()
+        );
 
         for (operation, input) in [
             ("n8n.workflows.get", json!({"id": "id/../admin"})),

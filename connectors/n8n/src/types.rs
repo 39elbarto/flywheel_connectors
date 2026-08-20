@@ -239,6 +239,62 @@ pub struct WorkflowDraftMutationInput {
     pub guard: DraftMutationGuard,
 }
 
+/// The only lifecycle actions admitted by the first typed lifecycle packet.
+/// Archive/restore and activation remain separate, deferred operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowLifecycleAction {
+    Publish,
+    Unpublish,
+}
+
+impl WorkflowLifecycleAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Unpublish => "unpublish",
+        }
+    }
+}
+
+/// Exact current state required before a lifecycle mutation may be attempted.
+/// `activeVersionId` is intentionally presence-aware: explicit JSON `null` is
+/// distinct from a missing provider field.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowLifecyclePrecondition {
+    #[serde(rename = "versionId")]
+    pub version_id: String,
+    #[serde(rename = "activeVersionId")]
+    pub active_version_id: RequiredNullable<String>,
+    pub active: bool,
+    #[serde(rename = "isArchived")]
+    pub is_archived: bool,
+    #[serde(rename = "stateDigest")]
+    pub state_digest: String,
+}
+
+/// Interactive approval and idempotency binding for a lifecycle mutation.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowLifecycleGuard {
+    #[serde(rename = "approvalRef")]
+    pub approval_ref: String,
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: String,
+    pub precondition: WorkflowLifecyclePrecondition,
+}
+
+/// Typed input for `n8n.workflows.lifecycle`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowLifecycleInput {
+    pub id: String,
+    pub action: WorkflowLifecycleAction,
+    pub guard: WorkflowLifecycleGuard,
+}
+
 /// Deserialize-only provider workflow tag DTO.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tag {

@@ -58,7 +58,7 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             let folder_id = utf8_percent_encode(folder_id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/folders/{folder_id}")
         }
-        "n8n.workflows.get" | "n8n.workflows.activate" => {
+        "n8n.workflows.get" | "n8n.workflows.activate" | "n8n.workflows.lifecycle" => {
             let id = input["id"].as_str().expect("workflow id for test token");
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{id}")
@@ -114,6 +114,7 @@ fn capability_token_with_options(
         "n8n.workflows.activate" | "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             "n8n.workflows.write"
         }
+        "n8n.workflows.lifecycle" => "n8n.workflows.lifecycle",
         "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
         "n8n.executions.list" | "n8n.executions.get" => "n8n.executions.read",
@@ -316,7 +317,10 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
         params["approval_tokens"] = json!([approval_token(input)]);
     } else if matches!(
         operation,
-        "n8n.workflows.create_draft" | "n8n.workflows.update_draft" | "n8n.mcp_access.reconcile"
+        "n8n.workflows.create_draft"
+            | "n8n.workflows.update_draft"
+            | "n8n.workflows.lifecycle"
+            | "n8n.mcp_access.reconcile"
     ) && (operation != "n8n.mcp_access.reconcile" || input["dryRun"] == json!(false))
     {
         params["approval_tokens"] = json!([draft_approval_token(operation, input)]);
@@ -397,7 +401,8 @@ async fn setup_connector_with_runtime_config(
             "n8n.credentials.metadata.read",
             "n8n.tags.read",
             "n8n.folders.read",
-            "n8n.mcp_access.write"
+            "n8n.mcp_access.write",
+            "n8n.workflows.lifecycle",
         ],
         "requested_instance_id": TEST_INSTANCE_ID
     }))
@@ -4038,6 +4043,58 @@ async fn workflows_activate_missing_active() {
         .await
         .is_err()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_validates_and_fails_closed_without_provider_route() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "publish",
+        "guard": {
+            "approvalRef": "approval-test",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.lifecycle", input)
+        .await
+        .expect_err("unproven publish route must fail closed");
+    assert!(matches!(
+        error,
+        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
+            if reason.contains("capability_unavailable")
+    ));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_lifecycle_requires_explicit_active_version_pointer() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "action": "unpublish",
+        "guard": {
+            "approvalRef": "approval-test",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000004",
+            "precondition": {
+                "versionId": "draft-v1",
+                "active": true,
+                "isArchived": false,
+                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        }
+    });
+    assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 // -- Executions List --

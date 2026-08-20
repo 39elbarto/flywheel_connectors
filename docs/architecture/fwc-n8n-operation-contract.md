@@ -65,6 +65,14 @@ intent/outcome receipts. The installed bundle passed owner-gated disposable
 enable/disable/readback acceptance on EEC and Hetzner. The private web bulk
 endpoint remains an unaccepted provider surface; future workflows require a
 later bounded reconciliation run rather than a daemon or implicit policy.
+The first Phase-3 lifecycle packet represents `n8n.workflows.lifecycle` as
+typed `publish`/`unpublish` input with exact workflow targeting, UUID
+idempotency, full lifecycle/state-digest preconditions, and current-chat
+approval binding. Because this repository has no authoritative provider route
+and version-semantics fixture for either action, execution fails closed with
+`capability_unavailable` before client/provider access; no endpoint is guessed.
+The future execution packet must add one provider attempt and an independent
+typed GET readback only after capability discovery proves those semantics.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
@@ -327,7 +335,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.compare` | `n8n.workflows.read` | Safe / Medium | None | None | official MCP | both version URIs/digests | 512 KiB |
 | `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
-| `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | REST or official MCP | all normalized state fields | 256 KiB |
+| `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | typed boundary; provider route/version discovery required | all normalized state fields | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | action-dependent | action-dependent | action-dependent | official MCP | workflow version and execution URI | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
@@ -358,7 +366,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
 | `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
-| `workflows.lifecycle` | exact workflow target, `action`, `guard` | `versionId` for publish | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` |
+| `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | `versionId`, explicit `activeVersionId`, `active`, `isArchived`, and `stateDigest` | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}`; current packet fails closed until provider route/version discovery |
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
 | `workflows.execute` | exact workflow target, `mode` | `guard`, `versionId`, `inputs`, `pinData`, `triggerNodeName`, `wait=false` | `{executionUri?,executionId?,mode,status,errorClass?,pinSchemas?}` |
 | `executions.search` | `target.server` | `workflowId`, `status[]`, `startedAfter`, `startedBefore`, `page` | `{executions:[{resourceUri,id,workflowId,status,mode,startedAt?,stoppedAt?}]}` |

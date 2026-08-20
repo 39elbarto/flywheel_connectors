@@ -62,6 +62,11 @@ pub enum N8nError {
     /// The guarded state changed or an in-process resource lock is held.
     #[error("n8n operation precondition failed: {0}")]
     PreconditionFailed(&'static str),
+
+    /// The requested lifecycle action has no verified provider route/version
+    /// contract in this connector build. No provider attempt was made.
+    #[error("n8n workflow lifecycle capability is unavailable: {0}")]
+    CapabilityUnavailable(&'static str),
 }
 
 impl N8nError {
@@ -88,6 +93,9 @@ impl N8nError {
             Self::ReadbackMismatch => "n8n draft readback did not match the guarded write".into(),
             Self::PreconditionFailed(reason) => {
                 format!("n8n operation precondition failed: {reason}")
+            }
+            Self::CapabilityUnavailable(reason) => {
+                format!("n8n workflow lifecycle capability unavailable: {reason}")
             }
         }
     }
@@ -190,6 +198,10 @@ impl N8nError {
                 status_code: Some(409),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::CapabilityUnavailable(reason) => FcpError::CapabilityDenied {
+                capability: "n8n.workflows.lifecycle".into(),
+                reason: format!("capability_unavailable: {reason}"),
             },
         }
     }

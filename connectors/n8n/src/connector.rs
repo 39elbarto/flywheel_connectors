@@ -32,7 +32,7 @@ use crate::{
     types::{
         ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
         ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary,
-        WorkflowStateView, WorkflowVersion,
+        WorkflowLifecycleInput, WorkflowStateView, WorkflowVersion,
     },
 };
 
@@ -201,6 +201,9 @@ struct DraftWritePlan {
     graph_digest: String,
     provider_payload: Value,
 }
+
+const WORKFLOW_LIFECYCLE_UNAVAILABLE: &str =
+    "publish/unpublish provider route and version semantics are not proven by the local contract";
 
 const MAX_MCP_ACCESS_WORKFLOWS: usize = 1_000;
 const MCP_ACCESS_LIST_LIMIT: u64 = 100;
@@ -772,12 +775,30 @@ impl N8nConnector {
             None
         };
 
+        if operation == "n8n.workflows.lifecycle" {
+            let lifecycle =
+                parse_workflow_lifecycle_input(&input).map_err(|error| error.to_fcp_error())?;
+            self.require_workflow_lifecycle_approval(&lifecycle, &input, &params)?;
+        }
+
         if operation == "n8n.workflows.activate" {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.write".into(),
                 reason: "workflow activation lifecycle is deferred to the mediated n8n write path"
                     .into(),
             });
+        }
+
+        // No exact publish/unpublish provider route or version semantics are
+        // proven by the repository contract yet. Validate target, UUID,
+        // lifecycle precondition, and current-chat approval above, then stop
+        // before client/egress access. A later packet may add one bounded
+        // provider attempt plus independent typed GET readback once discovery
+        // proves the route.
+        if operation == "n8n.workflows.lifecycle" {
+            return Err(
+                N8nError::CapabilityUnavailable(WORKFLOW_LIFECYCLE_UNAVAILABLE).to_fcp_error(),
+            );
         }
 
         if operation == "n8n.mcp_access.reconcile" {
@@ -1649,6 +1670,49 @@ impl N8nConnector {
         Ok(())
     }
 
+    fn require_workflow_lifecycle_approval(
+        &self,
+        input: &WorkflowLifecycleInput,
+        raw_input: &Value,
+        params: &Value,
+    ) -> FcpResult<()> {
+        let approval_values = params
+            .get("approval_tokens")
+            .and_then(Value::as_array)
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: "n8n.workflows.lifecycle".into(),
+                reason: "workflow lifecycle requires approval_tokens".into(),
+            })?;
+        let approvals: Vec<ApprovalToken> = approval_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<_, _>>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid approval token".into(),
+            })?;
+        let matching = approvals
+            .iter()
+            .filter(|approval| {
+                is_matching_draft_approval(
+                    approval,
+                    "n8n.workflows.lifecycle",
+                    &input.guard.approval_ref,
+                    self.zone_id.as_ref(),
+                    raw_input,
+                    current_time_ms(),
+                )
+            })
+            .count();
+        if matching != 1 {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.lifecycle".into(),
+                reason: "workflow lifecycle requires exactly one matching approval bound to server, workflow, action, precondition, and expiry".into(),
+            });
+        }
+        Ok(())
+    }
+
     fn require_mcp_access_approval(
         &self,
         input: &McpAccessReconcileInput,
@@ -1739,7 +1803,10 @@ impl N8nConnector {
                 folder_resource_uri(server_id, folder_input.folder_id)
                     .map_err(|error| error.to_fcp_error())?
             }
-            "n8n.workflows.get" | "n8n.workflows.activate" | "n8n.workflows.update_draft" => {
+            "n8n.workflows.get"
+            | "n8n.workflows.activate"
+            | "n8n.workflows.update_draft"
+            | "n8n.workflows.lifecycle" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
                     .map_err(|error| error.to_fcp_error())?
@@ -2672,6 +2739,7 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
                 })?;
             Ok(())
         }
+        "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             validate_draft_input_presence(operation, input)?;
             let typed: WorkflowDraftMutationInput =
@@ -2784,6 +2852,44 @@ fn parse_mcp_access_input(input: &Value) -> N8nResult<McpAccessReconcileInput> {
                 ));
             }
         }
+    }
+    Ok(typed)
+}
+
+fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleInput> {
+    let typed: WorkflowLifecycleInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "workflow lifecycle input requires id, action, and exact guard precondition".into(),
+        )
+    })?;
+    sanitize_path_segment(&typed.id, "workflow id")?;
+    if typed.guard.approval_ref.is_empty()
+        || typed.guard.approval_ref.len() > 256
+        || typed.guard.approval_ref.trim() != typed.guard.approval_ref
+        || typed.guard.approval_ref.chars().any(char::is_control)
+        || uuid::Uuid::parse_str(&typed.guard.idempotency_key).is_err()
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow lifecycle approvalRef and idempotencyKey are invalid".into(),
+        ));
+    }
+    let precondition = &typed.guard.precondition;
+    if precondition.version_id.is_empty()
+        || precondition.version_id.len() > 256
+        || precondition.version_id.trim() != precondition.version_id
+        || precondition.state_digest.len() > 256
+        || !is_blake3_digest(&precondition.state_digest)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow lifecycle versionId and stateDigest are invalid".into(),
+        ));
+    }
+    if let crate::types::RequiredNullable::Value(value) = &precondition.active_version_id
+        && (value.is_empty() || value.len() > 256 || value.trim() != value)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow lifecycle activeVersionId is invalid".into(),
+        ));
     }
     Ok(typed)
 }
@@ -3075,6 +3181,7 @@ const fn mcp_access_error_reason(error: &N8nError) -> &'static str {
         N8nError::Json(_) | N8nError::MalformedProviderResponse => "provider_malformed",
         N8nError::InvalidInput(_) => "provider_invalid_input",
         N8nError::PreconditionFailed(_) => "precondition_failed",
+        N8nError::CapabilityUnavailable(_) => "provider_capability_unavailable",
     }
 }
 
@@ -3294,7 +3401,7 @@ fn op_info(
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 ApprovalMode::Interactive
             }
-            "n8n.mcp_access.reconcile" => ApprovalMode::Interactive,
+            "n8n.mcp_access.reconcile" | "n8n.workflows.lifecycle" => ApprovalMode::Interactive,
             _ => ApprovalMode::None,
         }),
         safety_tier,
@@ -3680,6 +3787,90 @@ fn workflow_draft_output_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_lifecycle_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "action", "guard"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "action": {"type": "string", "enum": ["publish", "unpublish"]},
+            "guard": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approvalRef", "idempotencyKey", "precondition"],
+                "properties": {
+                    "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "idempotencyKey": {"type": "string", "format": "uuid"},
+                    "precondition": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"],
+                        "properties": {
+                            "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
+                            "active": {"type": "boolean"},
+                            "isArchived": {"type": "boolean"},
+                            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
+                        },
+                    },
+                },
+            },
+        },
+    })
+}
+
+fn workflow_lifecycle_output_schema() -> serde_json::Value {
+    let draft = workflow_lifecycle_graph_summary_schema(false);
+    let published = workflow_lifecycle_graph_summary_schema(true);
+    let state = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "versionId", "active", "activeVersionId", "isArchived", "draft", "published", "stateDigest", "updatedAt"],
+        "properties": {
+            "id": {"type": "string", "maxLength": 256},
+            "name": {"type": ["string", "null"], "maxLength": 256},
+            "projectId": {"type": ["string", "null"], "maxLength": 256},
+            "folderId": {"type": ["string", "null"], "maxLength": 256},
+            "versionId": {"type": "string", "maxLength": 256},
+            "active": {"type": "boolean"},
+            "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
+            "isArchived": {"type": "boolean"},
+            "draft": draft,
+            "published": published,
+            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
+            "updatedAt": {"type": ["string", "null"], "maxLength": 128},
+        },
+    });
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "operation", "action", "provider", "retry", "readback", "before", "after"],
+        "properties": {
+            "status": {"type": "string", "enum": ["verified", "unknown"]},
+            "operation": {"const": "n8n.workflows.lifecycle"},
+            "action": {"type": "string", "enum": ["publish", "unpublish"]},
+            "provider": {"type": "string", "enum": ["rest", "official_mcp"]},
+            "retry": {"type": "string", "enum": ["never_automatic"]},
+            "readback": {"type": "string", "enum": ["independent_get"]},
+            "before": state.clone(),
+            "after": state,
+        },
+    })
+}
+
+fn workflow_lifecycle_graph_summary_schema(nullable: bool) -> serde_json::Value {
+    json!({
+        "type": if nullable { json!(["object", "null"]) } else { json!("object") },
+        "additionalProperties": false,
+        "required": ["versionId", "graphDigest"],
+        "properties": {
+            "versionId": {"type": "string", "maxLength": 256},
+            "graphDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
+        },
+    })
+}
+
 fn mcp_access_reconcile_input_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -3951,6 +4142,29 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.list"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.lifecycle",
+            "Publish or unpublish a workflow only after exact lifecycle approval and state precondition validation",
+            workflow_lifecycle_input_schema(),
+            workflow_lifecycle_output_schema(),
+            "n8n.workflows.lifecycle",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval.".into(),
+                common_mistakes: vec![
+                    "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.".into(),
+                    "The local connector validates the typed request and approval but fails closed until capability discovery proves the provider route and version semantics; it never guesses an endpoint or retries.".into(),
+                    "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","action":"publish","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000003","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.activate"),
                 ],
             },
         ),
@@ -4663,9 +4877,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_13_operations() {
+    fn operations_info_has_14_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 14);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -4675,6 +4889,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.credentials.list"));
         assert!(operation_ids.contains(&"n8n.workflows.create_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
+        assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
         assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
     }
 
@@ -6255,5 +6470,68 @@ mod tests {
                 .safe_summary()
                 .contains("do not retry")
         );
+    }
+
+    #[test]
+    fn lifecycle_input_requires_full_explicit_precondition_and_uuid() {
+        let input = json!({
+            "id": "1001",
+            "action": "publish",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let parsed = parse_workflow_lifecycle_input(&input).expect("valid lifecycle input");
+        assert_eq!(parsed.action.as_str(), "publish");
+        assert!(matches!(
+            parsed.guard.precondition.active_version_id,
+            crate::types::RequiredNullable::Null
+        ));
+
+        let mut missing_pointer = input.clone();
+        missing_pointer["guard"]["precondition"]
+            .as_object_mut()
+            .expect("precondition object")
+            .remove("activeVersionId");
+        assert!(parse_workflow_lifecycle_input(&missing_pointer).is_err());
+
+        let mut bad_uuid = input;
+        bad_uuid["guard"]["idempotencyKey"] = json!("not-a-uuid");
+        assert!(parse_workflow_lifecycle_input(&bad_uuid).is_err());
+    }
+
+    #[test]
+    fn lifecycle_rejects_out_of_scope_actions_and_is_fail_closed() {
+        let input = json!({
+            "id": "1001",
+            "action": "archive",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        assert!(parse_workflow_lifecycle_input(&input).is_err());
+        let error = N8nError::CapabilityUnavailable(WORKFLOW_LIFECYCLE_UNAVAILABLE);
+        assert!(!error.is_retryable());
+        assert!(matches!(
+            error.to_fcp_error(),
+            FcpError::CapabilityDenied { reason, .. }
+                if reason.starts_with("capability_unavailable:")
+        ));
     }
 }

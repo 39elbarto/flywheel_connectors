@@ -88,12 +88,31 @@ Important runtime truths:
   matching interactive approval, a UUID idempotency key, a host run-once
   server-wide lock, one full required workflow PUT whose only logical change is
   `settings.availableInMCP`, and an independent detail readback. The host writes
-  redacted intent/outcome receipts under its private transient runtime tree. A
-  stale digest, unknown provider outcome, or readback mismatch fails closed for
-  that workflow and is never retried. The installed bundle has passed the
-  owner-gated disposable EEC and Hetzner enable/disable/readback acceptance.
-  This is not a durable reconciliation ledger; future workflows still require
-  a later bounded run.
+  redacted outcome receipts to the installer-provisioned private append-only
+  ledger at `/var/lib/fwc-n8n/mcp-access-ledger/receipts` (owned by the
+  runtime user, mode `0700`; records are mode `0600`, bounded to 1024 records
+  and seven-day retention). The launcher runs as a user scope, so the
+  installer must provision this fixed directory for that exact runtime user;
+  the connector refuses a different owner or permissive mode. The apply path
+  claims the exact idempotency binding before broker
+  or provider access; an exact replay returns the prior redacted receipt without
+  another provider attempt, a different binding collides, and an interrupted
+  claim remains unknown and is never retried automatically. Expired committed
+  receipts and safe temporary outcome files are reaped under the ledger lock;
+  pending unknown claims are retained and continue to fail closed. Dry-run
+  receipts are claimed and committed under a deterministic request binding for
+  bounded history. Ledger
+  provisioning is part of the host installer trust root; an unavailable,
+  malformed, stale, or over-bound
+  ledger fails closed. A stale digest, unknown provider outcome, or readback
+  mismatch fails closed for that workflow and is never retried. The installed
+  bundle has passed the owner-gated disposable EEC and Hetzner
+  enable/disable/readback acceptance. `all_current` is an explicit, bounded
+  one-shot reconciliation of the workflows visible when that invocation starts;
+  a newly created workflow is considered only on the next explicit
+  `all_current` request. There is no daemon, scheduler, or persistent policy
+  that silently tracks future workflows, and daemonized replay remains out of
+  scope.
 - Large workflow pages use an operation-scoped transport budget: the typed
   `n8n.workflows.list` and `n8n.mcp_access.reconcile` paths allow at most
   `512 KiB` for the compact inter-process result. Their owned invocation
@@ -224,6 +243,9 @@ root-workspace `target/release` path.
 
 ```text
 getent group fwc-n8n-broker
+# The user-scope launcher must own its durable reconciliation ledger.
+install -d -o ubuntu -g ubuntu -m 0700 /var/lib/fwc-n8n/mcp-access-ledger/receipts
+stat -c '%U %G %a %F %n' /var/lib/fwc-n8n/mcp-access-ledger/receipts
 install -o root -g root -m 0755 /path/to/verified/fwc-n8n-secret-broker /usr/local/libexec/fwc-n8n-secret-broker
 install -o root -g root -m 0644 deploy/tmpfiles.d/fwc-n8n-secret-broker.conf /etc/tmpfiles.d/fwc-n8n-secret-broker.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/fwc-n8n-secret-broker.conf

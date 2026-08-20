@@ -140,6 +140,24 @@ enum HostRunOnceOperation {
 }
 
 impl HostRunOnceOperation {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CapabilitiesInspect => "n8n.capabilities.inspect",
+            Self::CredentialsList => "n8n.credentials.list",
+            Self::ExecutionsGet => "n8n.executions.get",
+            Self::ExecutionsList => "n8n.executions.list",
+            Self::FoldersGet => "n8n.folders.get",
+            Self::FoldersList => "n8n.folders.list",
+            Self::ProjectsList => "n8n.projects.list",
+            Self::TagsList => "n8n.tags.list",
+            Self::WorkflowsGet => "n8n.workflows.get",
+            Self::WorkflowsList => "n8n.workflows.list",
+            Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
+            Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
+            Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
+        }
+    }
+
     fn parse(value: &str) -> Result<Self, AppError> {
         match value {
             "n8n.capabilities.inspect" => Ok(Self::CapabilitiesInspect),
@@ -501,45 +519,185 @@ fn execute_host_run_once(
         .map_err(|_| AppError::new("bundle_unavailable"))?;
     ensure_request_deadline(request_deadline_at)?;
 
-    let server = match envelope.server_id {
-        HostRunOnceServerId::Eec => BrokerServer::Eec,
-        HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
-    };
-    let credential_purpose = envelope.operation.credential_purpose();
-    let client = BrokerClient::fixed();
-    #[cfg(unix)]
-    let credential = {
-        let mut transport = client
-            .connect(request_deadline_at)
-            .map_err(map_broker_error)?;
-        client
-            .request(
-                &mut transport,
-                BrokerRequest {
-                    server,
-                    purpose: credential_purpose,
-                },
-                request_deadline_at,
-            )
-            .map_err(map_broker_error)?
-    };
-    #[cfg(not(unix))]
-    let credential = {
-        let _ = (client, server);
-        return Err(AppError::new("credential_broker_unavailable"));
-    };
-
-    envelope.deadline_ms = Some(remaining_deadline_ms(request_deadline_at)?);
     let operation = envelope.operation;
     let server_id = envelope.server_id;
-    let response = fwc_n8n_bridge::run_verified_host_bridge(
-        &bundle,
-        &envelope,
-        credential,
-        request_deadline_at,
-    )
-    .map_err(|error| AppError::new(error.code()))?;
-    normalize_host_run_once_response(operation, server_id, response)
+    let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
+        Some(
+            fwc_n8n_update_host::McpAccessReconciliationLedger::production()
+                .map_err(|error| AppError::new(error.code()))?,
+        )
+    } else {
+        None
+    };
+    let reconciliation_binding = if operation == HostRunOnceOperation::McpAccessReconcile {
+        fwc_n8n_update_host::derive_mcp_access_binding(
+            operation.as_str(),
+            server_id.as_str(),
+            &envelope.input,
+        )
+        .map_err(|error| AppError::new(error.code()))?
+    } else {
+        None
+    };
+    let reconciliation_expectation = if operation == HostRunOnceOperation::McpAccessReconcile {
+        Some(
+            fwc_n8n_update_host::derive_mcp_access_receipt_expectation(
+                server_id.as_str(),
+                &envelope.input,
+            )
+            .map_err(|error| AppError::new(error.code()))?,
+        )
+    } else {
+        None
+    };
+    let mut dispatch_provider = || -> Result<Value, AppError> {
+        let server = match envelope.server_id {
+            HostRunOnceServerId::Eec => BrokerServer::Eec,
+            HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
+        };
+        let credential_purpose = envelope.operation.credential_purpose();
+        let client = BrokerClient::fixed();
+        #[cfg(unix)]
+        let credential = {
+            let mut transport = client
+                .connect(request_deadline_at)
+                .map_err(map_broker_error)?;
+            client
+                .request(
+                    &mut transport,
+                    BrokerRequest {
+                        server,
+                        purpose: credential_purpose,
+                    },
+                    request_deadline_at,
+                )
+                .map_err(map_broker_error)?
+        };
+        #[cfg(not(unix))]
+        let credential = {
+            let _ = (client, server);
+            return Err(AppError::new("credential_broker_unavailable"));
+        };
+
+        envelope.deadline_ms = Some(remaining_deadline_ms(request_deadline_at)?);
+        let response = fwc_n8n_bridge::run_verified_host_bridge(
+            &bundle,
+            &envelope,
+            credential,
+            request_deadline_at,
+        )
+        .map_err(|error| AppError::new(error.code()))?;
+        normalize_host_run_once_response(operation, server_id, response)
+    };
+
+    if operation == HostRunOnceOperation::McpAccessReconcile {
+        let ledger = reconciliation_ledger
+            .as_mut()
+            .ok_or_else(|| AppError::new("mcp_access_ledger_unavailable"))?;
+        let binding = reconciliation_binding
+            .as_ref()
+            .ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
+        let expectation = reconciliation_expectation
+            .as_ref()
+            .ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
+        dispatch_mcp_access_once(ledger, binding, expectation, dispatch_provider)
+    } else {
+        dispatch_provider()
+    }
+}
+
+trait McpAccessLedgerPort {
+    fn begin_for_request(
+        &mut self,
+        binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+        expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+    ) -> Result<fwc_n8n_update_host::McpAccessLedgerBegin, fwc_n8n_update_host::McpAccessLedgerError>;
+
+    fn commit_for_request(
+        &mut self,
+        binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+        receipt: &Value,
+        expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+    ) -> Result<(), fwc_n8n_update_host::McpAccessLedgerError>;
+}
+
+impl McpAccessLedgerPort for fwc_n8n_update_host::McpAccessReconciliationLedger {
+    fn begin_for_request(
+        &mut self,
+        binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+        expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+    ) -> Result<fwc_n8n_update_host::McpAccessLedgerBegin, fwc_n8n_update_host::McpAccessLedgerError>
+    {
+        fwc_n8n_update_host::McpAccessReconciliationLedger::begin_for_request(
+            self,
+            binding,
+            Some(expectation),
+        )
+    }
+
+    fn commit_for_request(
+        &mut self,
+        binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+        receipt: &Value,
+        expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+    ) -> Result<(), fwc_n8n_update_host::McpAccessLedgerError> {
+        fwc_n8n_update_host::McpAccessReconciliationLedger::commit_for_request(
+            self,
+            binding,
+            receipt,
+            Some(expectation),
+        )
+    }
+}
+
+fn dispatch_mcp_access_once<L, F>(
+    ledger: &mut L,
+    binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+    expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+    provider_attempt: F,
+) -> Result<Value, AppError>
+where
+    L: McpAccessLedgerPort,
+    F: FnOnce() -> Result<Value, AppError>,
+{
+    match ledger
+        .begin_for_request(binding, expectation)
+        .map_err(|error| AppError::new(error.code()))?
+    {
+        fwc_n8n_update_host::McpAccessLedgerBegin::Claimed => {}
+        fwc_n8n_update_host::McpAccessLedgerBegin::Replayed(receipt) => {
+            return Ok(replay_mcp_access_response(receipt));
+        }
+    }
+    let response = provider_attempt()?;
+    let receipt = response
+        .get("result")
+        .and_then(Value::as_object)
+        .and_then(|result| result.get("receipt"))
+        .cloned()
+        .ok_or_else(|| AppError::new("mcp_access_receipt_missing"))?;
+    ledger
+        .commit_for_request(binding, &receipt, expectation)
+        .map_err(|error| AppError::new(error.code()))?;
+    Ok(response)
+}
+
+fn replay_mcp_access_response(receipt: Value) -> Value {
+    let readback_digest = receipt
+        .get("readbackDigest")
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "status": "ok",
+        "result": {
+            "planned": [],
+            "changed": [],
+            "skipped": [],
+            "exceptions": [],
+            "readbackDigest": readback_digest,
+            "receipt": receipt,
+        }
+    })
 }
 
 fn normalize_host_run_once_response(
@@ -1661,6 +1819,166 @@ mod tests {
         )
         .expect_err("expired request");
         assert_eq!(error.code, "deadline_exceeded");
+    }
+
+    #[derive(Default)]
+    struct MockMcpLedger {
+        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        replay: Option<Value>,
+        commit_error: Option<fwc_n8n_update_host::McpAccessLedgerError>,
+        pending: bool,
+    }
+
+    impl McpAccessLedgerPort for MockMcpLedger {
+        fn begin_for_request(
+            &mut self,
+            _binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+            _expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+        ) -> Result<
+            fwc_n8n_update_host::McpAccessLedgerBegin,
+            fwc_n8n_update_host::McpAccessLedgerError,
+        > {
+            self.events.lock().expect("events lock").push("claim");
+            if self.pending {
+                return Err(fwc_n8n_update_host::McpAccessLedgerError::Unknown);
+            }
+            if let Some(receipt) = self.replay.take() {
+                Ok(fwc_n8n_update_host::McpAccessLedgerBegin::Replayed(receipt))
+            } else {
+                self.pending = true;
+                Ok(fwc_n8n_update_host::McpAccessLedgerBegin::Claimed)
+            }
+        }
+
+        fn commit_for_request(
+            &mut self,
+            _binding: &fwc_n8n_update_host::McpAccessLedgerBinding,
+            _receipt: &Value,
+            _expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
+        ) -> Result<(), fwc_n8n_update_host::McpAccessLedgerError> {
+            self.events.lock().expect("events lock").push("commit");
+            if let Some(error) = self.commit_error {
+                return Err(error);
+            }
+            self.pending = false;
+            Ok(())
+        }
+    }
+
+    fn mock_mcp_binding_and_expectation() -> (
+        fwc_n8n_update_host::McpAccessLedgerBinding,
+        fwc_n8n_update_host::McpAccessReceiptExpectation,
+    ) {
+        let binding = fwc_n8n_update_host::McpAccessLedgerBinding {
+            key_digest:
+                "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            binding_digest:
+                "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        };
+        let expectation = fwc_n8n_update_host::McpAccessReceiptExpectation {
+            binding_digest: binding.binding_digest.clone(),
+            server_id: "eec".into(),
+            scope: "all_current".into(),
+            desired: true,
+            dry_run: true,
+            plan_digest: None,
+            approval_digest: None,
+            idempotency_digest: None,
+        };
+        (binding, expectation)
+    }
+
+    fn mock_mcp_response() -> Value {
+        json!({
+            "status": "ok",
+            "result": {
+                "receipt": {
+                    "schema": "fwc.n8n.mcp-access-receipt.v1",
+                    "operation": "n8n.mcp_access.reconcile",
+                    "serverId": "eec",
+                    "scope": "all_current",
+                    "desired": true,
+                    "dryRun": true,
+                    "status": "planned",
+                    "planDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "readbackDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "items": [],
+                    "receiptDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn host_reconciliation_claims_before_provider_access() {
+        let (binding, expectation) = mock_mcp_binding_and_expectation();
+        let mut ledger = MockMcpLedger::default();
+        let events = Arc::clone(&ledger.events);
+        let result = dispatch_mcp_access_once(&mut ledger, &binding, &expectation, || {
+            events.lock().expect("events lock").push("provider");
+            Ok(mock_mcp_response())
+        })
+        .expect("mock reconciliation");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            ledger.events.lock().expect("events lock").as_slice(),
+            ["claim", "provider", "commit"]
+        );
+    }
+
+    #[test]
+    fn host_reconciliation_replay_skips_provider_attempt() {
+        let (binding, expectation) = mock_mcp_binding_and_expectation();
+        let mut ledger = MockMcpLedger {
+            replay: Some(json!({"status": "replayed"})),
+            ..Default::default()
+        };
+        let result = dispatch_mcp_access_once(&mut ledger, &binding, &expectation, || {
+            panic!("exact replay must not call provider")
+        })
+        .expect("replay");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            ledger.events.lock().expect("events lock").as_slice(),
+            ["claim"]
+        );
+    }
+
+    #[test]
+    fn host_reconciliation_commit_failure_is_not_a_success() {
+        let (binding, expectation) = mock_mcp_binding_and_expectation();
+        let mut ledger = MockMcpLedger {
+            commit_error: Some(fwc_n8n_update_host::McpAccessLedgerError::Unavailable),
+            ..Default::default()
+        };
+        let error = dispatch_mcp_access_once(&mut ledger, &binding, &expectation, || {
+            Ok(mock_mcp_response())
+        })
+        .expect_err("commit failure");
+        assert_eq!(error.code, "mcp_access_ledger_unavailable");
+        assert!(ledger.pending, "failed commit leaves pending unknown");
+        let retry = dispatch_mcp_access_once(&mut ledger, &binding, &expectation, || {
+            panic!("unknown outcome must not retry provider")
+        })
+        .expect_err("pending claim is unknown");
+        assert_eq!(retry.code, "mcp_access_unknown_outcome");
+    }
+
+    #[test]
+    fn host_reconciliation_durable_commit_precedes_response() {
+        let (binding, expectation) = mock_mcp_binding_and_expectation();
+        let mut ledger = MockMcpLedger::default();
+        let events = Arc::clone(&ledger.events);
+        let result = dispatch_mcp_access_once(&mut ledger, &binding, &expectation, || {
+            events.lock().expect("events lock").push("provider");
+            Ok(mock_mcp_response())
+        })
+        .expect("durable dry-run receipt");
+        assert_eq!(
+            ledger.events.lock().expect("events lock").as_slice(),
+            ["claim", "provider", "commit"]
+        );
+        assert_eq!(result["status"], "ok");
     }
 
     #[cfg(target_os = "linux")]

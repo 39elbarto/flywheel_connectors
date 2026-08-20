@@ -505,7 +505,9 @@ are discovered; absence returns `capability_unavailable`, not a fallback guess.
 execution content is not part of the audit result.
 
 `mcp_access.reconcile.scope` is exactly `workflow_ids`, `project`, `folder`, or
-`all_current`; `desired` is a boolean. `dryRun=true` requires no approval and
+`all_current`; `desired` is a boolean. `all_current` is an explicit bounded
+one-shot snapshot of workflows visible when the invocation starts; it is not a
+future-workflow policy or daemon trigger. `dryRun=true` requires no approval and
 performs no writes. `dryRun=false` requires a matching interactive approval and
 the exact digest from a current dry-run with the same server, scope, selectors,
 desired value, and observed workflow states. Apply sends one full required
@@ -513,10 +515,16 @@ workflow PUT per changed workflow; only `settings.availableInMCP` may change
 logically. It independently reads the workflow back, preserves
 graph/lifecycle invariants, and returns per-workflow exceptions for unknown
 outcomes or mismatches without automatic retry. Host run-once provides the
-cross-process server lock and transient redacted receipts; a durable
-reconciliation receipt/ledger is not yet implemented. Project/folder/all-current
-scopes apply only to workflows present at that time; future workflows require a
-later reconciliation.
+cross-process server lock and the durable redacted reconciliation ledger at
+`/var/lib/fwc-n8n/mcp-access-ledger/receipts`, owned by the runtime user with
+mode `0700` and records at `0600`. Exact idempotency replay returns the prior
+receipt without another provider attempt; a different binding collides, and a
+pending claim remains `unknown` even after retention expiry. Committed receipts
+and safe temporary outcome files are reaped under the ledger lock; malformed or
+unavailable ledger state fails closed. Project/folder/all-current scopes apply
+only to workflows present at that time; a newly created workflow is handled on
+the next explicit bounded `all_current` invocation. No daemon, scheduler, or
+implicit future-workflow policy is part of this operation.
 
 The current host implementation keeps the generic owned connector frame and
 RPC timeout at `64 KiB` and `10 seconds`. Only typed

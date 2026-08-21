@@ -174,7 +174,6 @@ use hyper_util::{
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
 
@@ -10774,25 +10773,6 @@ fn build_n8n_official_mcp_run_once_plan(
     })
 }
 
-fn mcp_tools_call_payload_digest(input: &Value) -> HostResult<[u8; 32]> {
-    let normalized = json!({
-        "name": input.get("name").ok_or_else(|| {
-            HostError::InvalidFilter("official MCP tool name is missing".to_string())
-        })?,
-        "arguments": input.get("arguments").ok_or_else(|| {
-            HostError::InvalidFilter("official MCP tool arguments are missing".to_string())
-        })?,
-    });
-    let canonical = canonical_json_for_n8n_run_once(&normalized);
-    let bytes = serde_json::to_vec(&canonical).map_err(|_| {
-        HostError::Internal("official MCP approval payload could not be canonicalized".to_string())
-    })?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"FCP/MCP-Bridge/approval-payload/v1\0");
-    hasher.update(bytes);
-    Ok(hasher.finalize().into())
-}
-
 fn mint_n8n_official_mcp_approval(
     plan: &N8nOfficialMcpRunOncePlan,
     high_level_input: &Value,
@@ -10804,25 +10784,15 @@ fn mint_n8n_official_mcp_approval(
         .ok_or_else(|| {
             HostError::InvalidFilter("n8n lifecycle approvalRef is missing".to_string())
         })?;
-    let payload_digest = mcp_tools_call_payload_digest(&plan.input)?;
     let request_input_digest = request_input_hash(&plan.input)?;
-    let normalized = json!({
-        "server_id": plan.server_id.as_str(),
-        "resource_uri": plan.resource_uri,
-        "operation": plan.operation.as_str(),
-        "provider": "mcp",
-        "payload_sha256": hex::encode(payload_digest),
-        "tool_name": plan.input.get("name").cloned().unwrap_or(Value::Null),
-    });
-    let input_constraints = normalized
-        .as_object()
-        .ok_or_else(|| HostError::Internal("official MCP approval target is invalid".to_string()))?
-        .iter()
-        .map(|(field, expected)| InputConstraint {
-            pointer: format!("/{field}"),
-            expected: expected.clone(),
-        })
-        .collect();
+    let input_constraints = vec![InputConstraint {
+        // Policy evaluates the MCP bridge request input itself, whose stable
+        // top-level shape is {"name": ..., "arguments": ...}. The complete
+        // payload remains bound by request_input_digest below; this additional
+        // constraint must therefore point into that actual request shape.
+        pointer: "/name".to_string(),
+        expected: plan.input.get("name").cloned().unwrap_or(Value::Null),
+    }];
     let issued_at_ms = n8n_run_once_now_ms();
     let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
     let mut token = ApprovalToken::approved(
@@ -32824,7 +32794,8 @@ done"#;
         let ApprovalScope::Execution(scope) = &approval.scope else {
             panic!("lifecycle approval must carry execution scope");
         };
-        assert_eq!(scope.input_constraints.len(), 6);
+        assert_eq!(scope.input_constraints.len(), 1);
+        assert_eq!(scope.input_constraints[0].pointer, "/name");
         assert_eq!(
             scope.input_hash,
             Some(request_input_hash(&plan.input).expect("canonical request input hash"))

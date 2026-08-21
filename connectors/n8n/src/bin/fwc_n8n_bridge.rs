@@ -65,6 +65,11 @@ const CREATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approve
 #[cfg(target_os = "linux")]
 const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.update_draft"}"#;
 #[cfg(target_os = "linux")]
+// The supervised host performs the side effect as this nested request.  The
+// parent fcp.n8n lifecycle envelope is validated before this process is
+// spawned; the admission gate must bind the actual child request exactly.
+const WORKFLOWS_LIFECYCLE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.mcp-bridge","operation":"mcp.tools.call"}"#;
+#[cfg(target_os = "linux")]
 const MCP_ACCESS_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.mcp_access.reconcile"}"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -260,6 +265,7 @@ fn process_spec(
     let official_mcp = matches!(
         envelope.operation,
         super::HostRunOnceOperation::CapabilitiesInspect
+            | super::HostRunOnceOperation::WorkflowsLifecycle
     );
     let mcp_access_dry_run = matches!(
         envelope.operation,
@@ -269,6 +275,9 @@ fn process_spec(
     let owner_admission = match envelope.operation {
         super::HostRunOnceOperation::WorkflowsCreateDraft => Some(CREATE_DRAFT_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
+        super::HostRunOnceOperation::WorkflowsLifecycle => {
+            Some(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION)
+        }
         super::HostRunOnceOperation::McpAccessReconcile => Some(MCP_ACCESS_OWNER_ADMISSION),
         _ => None,
     };
@@ -320,7 +329,11 @@ fn process_spec(
 
 #[cfg(target_os = "linux")]
 const fn max_output_bytes(operation: super::HostRunOnceOperation) -> usize {
-    if matches!(operation, super::HostRunOnceOperation::CapabilitiesInspect) {
+    if matches!(
+        operation,
+        super::HostRunOnceOperation::CapabilitiesInspect
+            | super::HostRunOnceOperation::WorkflowsLifecycle
+    ) {
         MAX_OFFICIAL_MCP_OUTPUT_BYTES
     } else if matches!(
         operation,
@@ -1691,6 +1704,33 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
             Some(&OsString::from(UPDATE_DRAFT_OWNER_ADMISSION))
         );
+
+        let lifecycle = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsLifecycle,
+                Value::Null,
+            ),
+        )
+        .expect("workflow lifecycle write spec");
+        assert_eq!(
+            lifecycle.fixed_args,
+            vec![OsString::from("n8n-official-mcp-run-once-supervised")]
+        );
+        assert_eq!(
+            lifecycle
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION))
+        );
+        let lifecycle_admission: Value = serde_json::from_str(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION)
+            .expect("lifecycle child admission must remain valid JSON");
+        assert_eq!(lifecycle_admission["version"], 1);
+        assert_eq!(lifecycle_admission["mode"], "owner-approved-single-host");
+        assert_eq!(lifecycle_admission["zone_id"], "z:work");
+        assert_eq!(lifecycle_admission["connector_id"], "fcp.mcp-bridge");
+        assert_eq!(lifecycle_admission["operation"], "mcp.tools.call");
 
         let mcp_access = process_spec(
             &bundle,

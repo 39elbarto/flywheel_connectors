@@ -4307,7 +4307,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.lifecycle",
-            "Publish or unpublish a workflow only after exact lifecycle approval and state precondition validation",
+            "Publish or unpublish through the exact official n8n MCP lifecycle tool only after fresh capability-policy validation, exact lifecycle approval, and independent REST GET readback",
             workflow_lifecycle_input_schema(),
             workflow_lifecycle_output_schema(),
             "n8n.workflows.lifecycle",
@@ -4315,10 +4315,10 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval.".into(),
+                when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests.".into(),
                 common_mistakes: vec![
                     "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.".into(),
-                    "Publish uses POST /workflows/{id}/publish with optional versionId; unpublish uses POST /workflows/{id}/unpublish with no body. No legacy route is guessed.".into(),
+                    "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.".into(),
                     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.".into(),
                     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
                 ],

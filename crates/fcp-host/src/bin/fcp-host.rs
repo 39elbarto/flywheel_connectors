@@ -137,10 +137,10 @@ use fcp_policy::{
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityVerifier,
     ConnectorStateCanonicalStatus, CorrelationId, CostEstimateConfidence, CredentialId, Decision,
-    ExecutionScope, FcpError, InstanceId, Lease as CoreLease, LeasePurpose as CoreLeasePurpose,
-    ObjectId, ObjectIdKey, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
-    StoredObject, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind, Uuid, ZoneId,
-    ZonePolicyObject, simulate_policy_decision,
+    ExecutionScope, FcpError, InputConstraint, InstanceId, Lease as CoreLease,
+    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
+    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
+    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
@@ -174,6 +174,7 @@ use hyper_util::{
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
 
@@ -361,6 +362,17 @@ const N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN: &str = "n8n-write-run-once-supervised
 const N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN: &str = "n8n-official-mcp-run-once-supervised";
 const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
+const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
+const N8N_OFFICIAL_MCP_PUBLISH_TOOL: &str = "publish_workflow";
+const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
+const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
 #[cfg(target_os = "linux")]
@@ -388,12 +400,13 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 3] = [
+const N8N_WRITE_OPERATIONS: [&str; 4] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
+    "n8n.workflows.lifecycle",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 12] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 13] = [
     "n8n.credentials.list",
     "n8n.executions.get",
     "n8n.executions.list",
@@ -406,6 +419,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 12] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
+    "n8n.workflows.lifecycle",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,9 +491,11 @@ struct N8nOfficialMcpRunOncePlan {
     operation: OperationId,
     zone_id: ZoneId,
     resource_uri: String,
+    input: Value,
     deadline_ms: u64,
     correlation_id: Option<CorrelationId>,
     credential_binding: RunOnceCredentialBinding,
+    approval_token: Option<ApprovalToken>,
 }
 
 /// Host-only resource scope carried beside an internally built invoke request.
@@ -522,6 +538,40 @@ impl TrustedResourceBinding {
                         .is_some_and(serde_json::Map::is_empty) =>
             {
                 format!("fwc-mcp-bridge://{}", self.server_id.as_str())
+            }
+            "fcp.mcp-bridge" if request.operation.as_str() == N8N_OFFICIAL_MCP_CALL_OPERATION => {
+                let object = request.input.as_object().ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "trusted n8n MCP tool call input must be an object".to_string(),
+                    )
+                })?;
+                if object.len() != 2
+                    || !object.contains_key("name")
+                    || !object.contains_key("arguments")
+                {
+                    return Err(HostError::PreflightFailed(
+                        "trusted n8n MCP tool call input shape was denied".to_string(),
+                    ));
+                }
+                let name = object.get("name").and_then(Value::as_str).ok_or_else(|| {
+                    HostError::PreflightFailed(
+                        "trusted n8n MCP tool call name was denied".to_string(),
+                    )
+                })?;
+                if !matches!(
+                    name,
+                    N8N_OFFICIAL_MCP_PUBLISH_TOOL | N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+                ) || !object.get("arguments").is_some_and(Value::is_object)
+                {
+                    return Err(HostError::PreflightFailed(
+                        "trusted n8n MCP tool call is not an approved lifecycle tool".to_string(),
+                    ));
+                }
+                format!(
+                    "fwc-mcp-bridge://{}/tools/{}",
+                    self.server_id.as_str(),
+                    encode_n8n_resource_segment(name)
+                )
             }
             _ => {
                 return Err(HostError::PreflightFailed(
@@ -4363,7 +4413,10 @@ fn owned_handshake_zone_dir(
             && (N8N_READ_ONLY_OPERATIONS.contains(&operation.as_str())
                 || N8N_WRITE_OPERATIONS.contains(&operation.as_str())))
             || (connector_id.as_str() == "fcp.mcp-bridge"
-                && operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION);
+                && matches!(
+                    operation.as_str(),
+                    N8N_OFFICIAL_MCP_PROVIDER_OPERATION | N8N_OFFICIAL_MCP_CALL_OPERATION
+                ));
         if !approved {
             return Err(HostError::PreflightFailed(
                 "fixed read-only owned handshake is restricted to approved operations".to_string(),
@@ -4488,7 +4541,10 @@ fn owned_invocation_config(
 ) -> OwnedInvocationConfig {
     let mut config = OwnedInvocationConfig::default();
     if connector_id.as_str() == "fcp.mcp-bridge"
-        && operation.as_str() == N8N_OFFICIAL_MCP_PROVIDER_OPERATION
+        && matches!(
+            operation.as_str(),
+            N8N_OFFICIAL_MCP_PROVIDER_OPERATION | N8N_OFFICIAL_MCP_CALL_OPERATION
+        )
     {
         // Official n8n emits its tools catalog as one buffered SSE response.
         // Keep the general connector RPC ceiling conservative while allowing
@@ -4635,7 +4691,13 @@ mod owned_per_invocation_unit_tests {
                 .expect("official n8n MCP tools/list handshake")
                 .is_none()
         );
-        for denied in ["mcp.tools.call", "mcp.resources.list", "mcp.server.metrics"] {
+        let tools_call = OperationId::from_static(N8N_OFFICIAL_MCP_CALL_OPERATION);
+        assert!(
+            owned_handshake_zone_dir(&mcp_connector, &tools_call, &zone_id, None, true)
+                .expect("official n8n MCP lifecycle tools/call handshake")
+                .is_none()
+        );
+        for denied in ["mcp.resources.list", "mcp.server.metrics"] {
             assert!(
                 owned_handshake_zone_dir(
                     &mcp_connector,
@@ -10099,6 +10161,133 @@ fn validate_n8n_draft_input(operation: &str, input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_workflow_lifecycle_input(input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n workflow lifecycle input must be an object".to_string())
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "action" | "versionId" | "guard"))
+        || !["id", "action", "guard"]
+            .iter()
+            .all(|field| object.contains_key(*field))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle input contains unsupported or missing fields".to_string(),
+        ));
+    }
+    let workflow_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle id is invalid".to_string())
+        })?;
+    n8n_read_only_input_id(&json!({"id": workflow_id}), "id")?;
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle action is invalid".to_string())
+        })?;
+    if !matches!(action, "publish" | "unpublish") {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle action is invalid".to_string(),
+        ));
+    }
+    if let Some(version_id) = object.get("versionId") {
+        if action == "unpublish"
+            || version_id
+                .as_str()
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        {
+            return Err(HostError::InvalidFilter(
+                "n8n workflow lifecycle versionId is invalid".to_string(),
+            ));
+        }
+    }
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle guard is invalid".to_string())
+        })?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle guard contains unsupported fields".to_string(),
+        ));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle approvalRef is invalid".to_string())
+        })?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| Uuid::parse_str(value).is_err())
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle guard is invalid".to_string(),
+        ));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle precondition is invalid".to_string())
+        })?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED
+            .iter()
+            .any(|field| !precondition.contains_key(*field))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            value
+                .as_str()
+                .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
+                || !(value.is_null() || value.is_string())
+        })
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle precondition is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_n8n_mcp_access_input(input: &Value) -> HostResult<()> {
     let object = input.as_object().ok_or_else(|| {
         HostError::InvalidFilter("n8n MCP access input must be an object".to_string())
@@ -10291,6 +10480,10 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.lifecycle" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.mcp_access.reconcile" => Ok(root),
         "n8n.executions.get" => Ok(format!(
             "{root}/workflows/{}/executions/{}",
@@ -10325,6 +10518,8 @@ fn build_n8n_read_only_run_once_plan(
     }
     if input.operation == "n8n.mcp_access.reconcile" {
         validate_n8n_mcp_access_input(&input.input)?;
+    } else if input.operation == "n8n.workflows.lifecycle" {
+        validate_n8n_workflow_lifecycle_input(&input.input)?;
     } else if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
         validate_n8n_draft_input(&input.operation, &input.input)?;
     }
@@ -10399,30 +10594,128 @@ fn build_n8n_read_only_run_once_plan(
     })
 }
 
+fn official_mcp_policy_allows_lifecycle_tool(
+    config: &ManagedConnectorConfig,
+    tool_name: &str,
+) -> bool {
+    let Some(Value::Object(config)) = config.config.as_ref() else {
+        return false;
+    };
+    let Some(Value::Object(policy)) = config.get("capability_policy") else {
+        return false;
+    };
+    let (expected_input_digest, expected_output_digest) = match tool_name {
+        N8N_OFFICIAL_MCP_PUBLISH_TOOL => (
+            N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+            N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+        ),
+        N8N_OFFICIAL_MCP_UNPUBLISH_TOOL => (
+            N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+            N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+        ),
+        _ => return false,
+    };
+    policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                let Some(tool) = tool.as_object() else {
+                    return false;
+                };
+                tool.len() == 4
+                    && tool.get("name").and_then(Value::as_str) == Some(tool_name)
+                    && tool.get("class").and_then(Value::as_str) == Some("write")
+                    && tool.get("input_schema_digest").and_then(Value::as_str)
+                        == Some(expected_input_digest)
+                    && tool.get("output_schema_digest").and_then(Value::as_str)
+                        == Some(expected_output_digest)
+            })
+        })
+}
+
 fn build_n8n_official_mcp_run_once_plan(
     input: N8nReadOnlyRunOnceInput,
     config: &ManagedConnectorConfig,
 ) -> HostResult<N8nOfficialMcpRunOncePlan> {
-    if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA
-        || input.operation != N8N_CAPABILITIES_INSPECT_OPERATION
-        || !input
-            .input
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    {
+    if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA {
         return Err(HostError::InvalidFilter(
             "n8n official MCP run-once operation is not allowed".to_string(),
         ));
     }
-    let expected_resource_uri = format!("fwc-mcp-bridge://{}", input.server_id.as_str());
-    if input.resource_uri != expected_resource_uri {
-        return Err(HostError::PreflightFailed(
-            "n8n official MCP run-once resource binding was denied".to_string(),
+    let (operation, resource_uri, provider_input) = if input.operation
+        == N8N_CAPABILITIES_INSPECT_OPERATION
+    {
+        if !input
+            .input
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            return Err(HostError::InvalidFilter(
+                "n8n official MCP catalog input is not allowed".to_string(),
+            ));
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_PROVIDER_OPERATION).map_err(|_| {
+                HostError::InvalidFilter(
+                    "n8n official MCP provider operation is invalid".to_string(),
+                )
+            })?,
+            format!("fwc-mcp-bridge://{}", input.server_id.as_str()),
+            json!({}),
+        )
+    } else if input.operation == "n8n.workflows.lifecycle" {
+        validate_n8n_workflow_lifecycle_input(&input.input)?;
+        let object = input.input.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle input is invalid".to_string())
+        })?;
+        let action = object
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("n8n workflow lifecycle action is invalid".to_string())
+            })?;
+        let tool_name = match action {
+            "publish" => N8N_OFFICIAL_MCP_PUBLISH_TOOL,
+            "unpublish" => N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
+            _ => {
+                return Err(HostError::PreflightFailed(
+                    "n8n lifecycle action is not an approved MCP tool".to_string(),
+                ));
+            }
+        };
+        if !official_mcp_policy_allows_lifecycle_tool(config, tool_name) {
+            return Err(HostError::PreflightFailed(
+                "official MCP lifecycle tool is absent from the exact capability policy"
+                    .to_string(),
+            ));
+        }
+        let workflow_id = object.get("id").and_then(Value::as_str).ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle id is invalid".to_string())
+        })?;
+        let mut arguments = serde_json::Map::from_iter([(
+            "workflowId".to_string(),
+            Value::String(workflow_id.to_string()),
+        )]);
+        if let Some(version_id) = object.get("versionId") {
+            arguments.insert("versionId".to_string(), version_id.clone());
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_CALL_OPERATION).map_err(|_| {
+                HostError::InvalidFilter("n8n official MCP call operation is invalid".to_string())
+            })?,
+            format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                input.server_id.as_str(),
+                encode_n8n_resource_segment(tool_name)
+            ),
+            json!({"name": tool_name, "arguments": arguments}),
+        )
+    } else {
+        return Err(HostError::InvalidFilter(
+            "n8n official MCP run-once operation is not allowed".to_string(),
         ));
-    }
-    let operation = OperationId::new(N8N_OFFICIAL_MCP_PROVIDER_OPERATION).map_err(|_| {
-        HostError::InvalidFilter("n8n official MCP provider operation is invalid".to_string())
-    })?;
+    };
     if config.lifecycle_mode != ConnectorLifecycleMode::PerInvocation
         || config.allowed_operations.is_empty()
         || !config
@@ -10432,6 +10725,11 @@ fn build_n8n_official_mcp_run_once_plan(
     {
         return Err(HostError::PreflightFailed(
             "n8n official MCP operation is not admitted by trusted configuration".to_string(),
+        ));
+    }
+    if input.resource_uri != resource_uri {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP run-once resource binding was denied".to_string(),
         ));
     }
     let zone_id = input.zone_id.parse::<ZoneId>().map_err(|_| {
@@ -10467,11 +10765,83 @@ fn build_n8n_official_mcp_run_once_plan(
         server_id: input.server_id,
         operation,
         zone_id,
-        resource_uri: input.resource_uri,
+        resource_uri,
+        input: provider_input,
         deadline_ms,
         correlation_id,
         credential_binding,
+        approval_token: None,
     })
+}
+
+fn mcp_tools_call_payload_digest(input: &Value) -> HostResult<[u8; 32]> {
+    let normalized = json!({
+        "name": input.get("name").ok_or_else(|| {
+            HostError::InvalidFilter("official MCP tool name is missing".to_string())
+        })?,
+        "arguments": input.get("arguments").ok_or_else(|| {
+            HostError::InvalidFilter("official MCP tool arguments are missing".to_string())
+        })?,
+    });
+    let canonical = canonical_json_for_n8n_run_once(&normalized);
+    let bytes = serde_json::to_vec(&canonical).map_err(|_| {
+        HostError::Internal("official MCP approval payload could not be canonicalized".to_string())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/MCP-Bridge/approval-payload/v1\0");
+    hasher.update(bytes);
+    Ok(hasher.finalize().into())
+}
+
+fn mint_n8n_official_mcp_approval(
+    plan: &N8nOfficialMcpRunOncePlan,
+    high_level_input: &Value,
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> HostResult<ApprovalToken> {
+    let approval_ref = high_level_input
+        .pointer("/guard/approvalRef")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n lifecycle approvalRef is missing".to_string())
+        })?;
+    let payload_digest = mcp_tools_call_payload_digest(&plan.input)?;
+    let normalized = json!({
+        "server_id": plan.server_id.as_str(),
+        "resource_uri": plan.resource_uri,
+        "operation": plan.operation.as_str(),
+        "provider": "mcp",
+        "payload_sha256": hex::encode(payload_digest),
+        "tool_name": plan.input.get("name").cloned().unwrap_or(Value::Null),
+    });
+    let input_constraints = normalized
+        .as_object()
+        .ok_or_else(|| HostError::Internal("official MCP approval target is invalid".to_string()))?
+        .iter()
+        .map(|(field, expected)| InputConstraint {
+            pointer: format!("/{field}"),
+            expected: expected.clone(),
+        })
+        .collect();
+    let issued_at_ms = n8n_run_once_now_ms();
+    let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
+    let mut token = ApprovalToken::approved(
+        approval_ref,
+        issued_at_ms,
+        expires_at_ms,
+        "host:fwc-n8n",
+        ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.mcp-bridge".to_string(),
+            method_pattern: plan.operation.to_string(),
+            request_object_id: None,
+            input_hash: Some(payload_digest),
+            input_constraints,
+        }),
+        plan.zone_id.clone(),
+        None,
+    );
+    let bytes = approval_token_signing_bytes(&token)?;
+    token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
+    Ok(token)
 }
 
 fn canonical_json_for_n8n_run_once(value: &Value) -> Value {
@@ -10657,6 +11027,72 @@ fn n8n_run_once_approval_material(
             "mutation_digest": mutation_digest,
             "provider": "rest",
             "side_effect": "settings.availableInMCP",
+        });
+        return Ok((material, String::new(), mutation_digest));
+    }
+    if plan.operation.as_str() == "n8n.workflows.lifecycle" {
+        let object = plan.input.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow lifecycle input is invalid".to_string())
+        })?;
+        let guard = object
+            .get("guard")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("n8n workflow lifecycle guard is invalid".to_string())
+            })?;
+        let precondition = guard
+            .get("precondition")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(
+                    "n8n workflow lifecycle precondition is invalid".to_string(),
+                )
+            })?;
+        let resource_digest = n8n_run_once_digest(
+            b"fwc-n8n.resource.v1",
+            &Value::String(plan.resource_uri.clone()),
+        );
+        let workflow_id_digest = n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            object.get("id").unwrap_or(&Value::Null),
+        );
+        let idempotency_key_hash = n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            guard.get("idempotencyKey").unwrap_or(&Value::Null),
+        );
+        let approval_ref_hash = n8n_run_once_digest(
+            b"fwc-n8n.approval-ref.v1",
+            guard.get("approvalRef").unwrap_or(&Value::Null),
+        );
+        let mutation_digest = n8n_run_once_digest(
+            b"fwc-n8n.lifecycle-mutation.v1",
+            &json!({
+                "server_id": plan.server_id.as_str(),
+                "resource_digest": resource_digest.clone(),
+                "workflow_id_digest": workflow_id_digest.clone(),
+                "action": object.get("action").cloned().unwrap_or(Value::Null),
+                "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+                "precondition": precondition,
+            }),
+        );
+        let material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_digest": resource_digest,
+            "operation": plan.operation.as_str(),
+            "workflow_id_digest": workflow_id_digest,
+            "action": object.get("action").cloned().unwrap_or(Value::Null),
+            "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+            "precondition_version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+            "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
+            "active_version_id_present": precondition.contains_key("activeVersionId"),
+            "active": precondition.get("active").cloned().unwrap_or(Value::Null),
+            "is_archived": precondition.get("isArchived").cloned().unwrap_or(Value::Null),
+            "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+            "approval_ref_hash": approval_ref_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest.clone(),
+            "provider": "rest",
+            "side_effect": "workflow_lifecycle",
         });
         return Ok((material, String::new(), mutation_digest));
     }
@@ -11921,13 +12357,16 @@ fn run_once_n8n_official_mcp_credential_binding_for_zone(
             "run-once official MCP credential config is invalid".to_string(),
         ));
     };
-    if config.len() != 4
+    if !(4..=5).contains(&config.len())
         || config.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "credential_id" | "mcp_url" | "server_id" | "security"
+                "credential_id" | "mcp_url" | "server_id" | "security" | "capability_policy"
             )
         })
+        || config
+            .get("capability_policy")
+            .is_some_and(|policy| !policy.is_object())
         || config
             .get("security")
             .and_then(Value::as_object)
@@ -12234,7 +12673,7 @@ fn build_n8n_official_mcp_invoke_request(
         connector_id,
         operation: plan.operation,
         zone_id: plan.zone_id,
-        input: serde_json::json!({}),
+        input: plan.input,
         capability_token,
         holder_proof: None,
         context: None,
@@ -12243,7 +12682,7 @@ fn build_n8n_official_mcp_invoke_request(
         deadline_ms: Some(plan.deadline_ms),
         correlation_id: plan.correlation_id,
         provenance: None,
-        approval_tokens: Vec::new(),
+        approval_tokens: plan.approval_token.into_iter().collect(),
     };
     (request, trusted_resource)
 }
@@ -12615,6 +13054,8 @@ async fn async_n8n_official_mcp_run_once(
 ) -> HostResult<InvokeResponse> {
     let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
+    let lifecycle_input = (high_level_input.operation == "n8n.workflows.lifecycle")
+        .then(|| high_level_input.input.clone());
     let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
     let configs = load_connector_configs()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
@@ -12625,8 +13066,17 @@ async fn async_n8n_official_mcp_run_once(
         .first()
         .cloned()
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
-    let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
+    let mut plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    let approval_signing_key = lifecycle_input
+        .as_ref()
+        .map(|_| fcp_crypto::ed25519::Ed25519SigningKey::generate());
+    if let (Some(input), Some(signing_key)) = (&lifecycle_input, approval_signing_key.as_ref()) {
+        plan.approval_token = Some(
+            mint_n8n_official_mcp_approval(&plan, input, signing_key)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        );
+    }
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -12656,7 +13106,9 @@ async fn async_n8n_official_mcp_run_once(
         telemetry_config,
         loaded_configs,
         Some(signing_key.verifying_key()),
-        None,
+        approval_signing_key
+            .as_ref()
+            .map(fcp_crypto::ed25519::Ed25519SigningKey::verifying_key),
         zone_policies,
     )
     .await
@@ -32243,6 +32695,73 @@ done"#;
         }
     }
 
+    fn n8n_official_mcp_lifecycle_test_input(action: &str) -> N8nReadOnlyRunOnceInput {
+        let mut input = json!({
+            "id": "workflow-1",
+            "action": action,
+            "versionId": "version-1",
+            "guard": {
+                "approvalRef": "chat-lifecycle-approval",
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": if action == "unpublish" { json!("version-1") } else { Value::Null },
+                    "active": action == "unpublish",
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        });
+        if action == "unpublish" {
+            input
+                .as_object_mut()
+                .expect("lifecycle input object")
+                .remove("versionId");
+        }
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.lifecycle".to_string(),
+            zone_id: ZoneId::private().to_string(),
+            resource_uri: format!(
+                "fwc-mcp-bridge://eec/tools/{}",
+                if action == "publish" {
+                    "publish%5Fworkflow"
+                } else {
+                    "unpublish%5Fworkflow"
+                }
+            ),
+            input,
+            deadline_ms: None,
+            correlation_id: None,
+        }
+    }
+
+    fn run_once_n8n_official_mcp_lifecycle_test_config() -> ManagedConnectorConfig {
+        let mut config = run_once_n8n_official_mcp_test_config();
+        config.allowed_operations = vec![N8N_OFFICIAL_MCP_CALL_OPERATION.to_string()];
+        config.config.as_mut().expect("config")["capability_policy"] = json!({
+            "n8n_version": "2.34.4",
+            "auth_mode": "access_token",
+            "api_scope_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "approved_tools": [
+                {
+                    "name": N8N_OFFICIAL_MCP_PUBLISH_TOOL,
+                    "class": "write",
+                    "input_schema_digest": "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf",
+                    "output_schema_digest": "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf"
+                },
+                {
+                    "name": N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
+                    "class": "write",
+                    "input_schema_digest": "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115",
+                    "output_schema_digest": "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c"
+                }
+            ]
+        });
+        config
+    }
+
     #[test]
     fn n8n_official_mcp_plan_is_tools_list_only_and_bearer_bound() {
         let config = run_once_n8n_official_mcp_test_config();
@@ -32275,6 +32794,75 @@ done"#;
             build_n8n_official_mcp_run_once_plan(n8n_official_mcp_test_input(), &unsafe_scan,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn n8n_official_mcp_lifecycle_plan_is_fixed_tool_and_policy_bound() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let plan = build_n8n_official_mcp_run_once_plan(
+            n8n_official_mcp_lifecycle_test_input("publish"),
+            &config,
+        )
+        .expect("closed official MCP lifecycle plan");
+        assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
+        assert_eq!(
+            plan.resource_uri,
+            "fwc-mcp-bridge://eec/tools/publish%5Fworkflow"
+        );
+        assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_PUBLISH_TOOL);
+        assert_eq!(plan.input["arguments"]["workflowId"], "workflow-1");
+        assert_eq!(plan.input["arguments"]["versionId"], "version-1");
+
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let approval = mint_n8n_official_mcp_approval(
+            &plan,
+            &n8n_official_mcp_lifecycle_test_input("publish").input,
+            &signing_key,
+        )
+        .expect("exact lifecycle approval");
+        let ApprovalScope::Execution(scope) = &approval.scope else {
+            panic!("lifecycle approval must carry execution scope");
+        };
+        assert_eq!(scope.input_constraints.len(), 6);
+        assert_eq!(scope.input_hash.as_ref().map(|hash| hash.len()), Some(32));
+
+        let mut denied = config;
+        denied.config.as_mut().expect("config")["capability_policy"]["approved_tools"] = json!([]);
+        assert!(
+            build_n8n_official_mcp_run_once_plan(
+                n8n_official_mcp_lifecycle_test_input("publish"),
+                &denied,
+            )
+            .is_err()
+        );
+
+        let mut wrong_digest = run_once_n8n_official_mcp_lifecycle_test_config();
+        wrong_digest.config.as_mut().expect("config")["capability_policy"]["approved_tools"][0]["input_schema_digest"] =
+            json!("sha256:wrong");
+        assert!(
+            build_n8n_official_mcp_run_once_plan(
+                n8n_official_mcp_lifecycle_test_input("publish"),
+                &wrong_digest,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn n8n_official_mcp_unpublish_plan_uses_exact_tool_without_body() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let plan = build_n8n_official_mcp_run_once_plan(
+            n8n_official_mcp_lifecycle_test_input("unpublish"),
+            &config,
+        )
+        .expect("closed official MCP unpublish plan");
+        assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
+        assert_eq!(
+            plan.resource_uri,
+            "fwc-mcp-bridge://eec/tools/unpublish%5Fworkflow"
+        );
+        assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_UNPUBLISH_TOOL);
+        assert_eq!(plan.input["arguments"], json!({"workflowId": "workflow-1"}));
     }
 
     #[test]
@@ -32721,6 +33309,65 @@ done"#;
         let mut non_object = base;
         non_object["graph"]["settings"] = json!(true);
         assert!(validate_n8n_draft_input("n8n.workflows.create_draft", &non_object).is_err());
+    }
+
+    #[test]
+    fn n8n_workflow_lifecycle_plan_is_strictly_bound_and_redacted() {
+        let config = run_once_n8n_draft_test_config();
+        let state_digest = format!("blake3-256:{}", "a".repeat(64));
+        let input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.lifecycle".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-n8n://eec/workflows/workflow%2D1".to_string(),
+            input: json!({
+                "id": "workflow-1",
+                "action": "publish",
+                "versionId": "version-1",
+                "guard": {
+                    "approvalRef": "lifecycle-approval",
+                    "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                    "precondition": {
+                        "versionId": "draft-v1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": state_digest
+                    }
+                }
+            }),
+            deadline_ms: None,
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        };
+        let plan = build_n8n_read_only_run_once_plan(input.clone(), &config)
+            .expect("lifecycle input must be admitted");
+        assert_eq!(plan.resource_uri, "fwc-n8n://eec/workflows/workflow%2D1");
+        let (material, graph_digest, mutation_digest) =
+            n8n_run_once_approval_material(&plan).expect("lifecycle approval material");
+        assert!(graph_digest.is_empty());
+        assert!(mutation_digest.starts_with("blake3-256:"));
+        let material_text = material.to_string();
+        for private_value in [
+            "lifecycle-approval",
+            "00000000-0000-4000-8000-000000000003",
+            "workflow-1",
+        ] {
+            assert!(!material_text.contains(private_value));
+        }
+        assert!(material.get("workflow_id_digest").is_some());
+        assert!(material.get("idempotency_key_hash").is_some());
+
+        let mut unsupported_action = input.clone();
+        unsupported_action.input["action"] = json!("activate");
+        assert!(build_n8n_read_only_run_once_plan(unsupported_action, &config).is_err());
+
+        let mut missing_lifecycle_pointer = input;
+        missing_lifecycle_pointer.input["guard"]["precondition"]
+            .as_object_mut()
+            .expect("precondition object")
+            .remove("activeVersionId");
+        assert!(build_n8n_read_only_run_once_plan(missing_lifecycle_pointer, &config).is_err());
     }
 
     #[test]
@@ -33456,6 +34103,72 @@ done"#;
             "operation": "drive.create_folder"
         }))
         .expect("serialize owner admission")
+    }
+
+    fn owner_single_host_mcp_child_request() -> InvokeRequest {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[32_u8; 32])
+            .expect("test signing key");
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("fcp.mcp-bridge"),
+            operation: OperationId::from_static("mcp.tools.call"),
+            zone_id: ZoneId::work(),
+            input: json!({
+                "name": "publish_workflow",
+                "arguments": {"workflowId": "1001"}
+            }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "mcp.tools.write",
+                "mcp.tools.call",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    fn owner_single_host_mcp_child_admission() -> String {
+        serde_json::to_string(&json!({
+            "version": 1,
+            "mode": OWNER_SINGLE_HOST_ADMISSION_MODE,
+            "zone_id": "z:work",
+            "connector_id": "fcp.mcp-bridge",
+            "operation": "mcp.tools.call"
+        }))
+        .expect("serialize MCP child admission")
+    }
+
+    #[test]
+    fn owner_single_host_admission_binds_the_nested_official_mcp_child() {
+        let child = owner_single_host_mcp_child_request();
+        let admission = owner_single_host_mcp_child_admission();
+        assert!(
+            owner_single_host_admission_allows(&child, SafetyTier::Risky, Some(&admission))
+                .expect("exact child admission")
+        );
+
+        let mut parent = child.clone();
+        parent.connector_id = ConnectorId::from_static("fcp.n8n");
+        parent.operation = OperationId::from_static("n8n.workflows.lifecycle");
+        assert!(
+            !owner_single_host_admission_allows(&parent, SafetyTier::Risky, Some(&admission))
+                .expect("parent binding must not be accepted as child")
+        );
+
+        let mut wrong_child = child;
+        wrong_child.operation = OperationId::from_static("mcp.tools.list");
+        assert!(
+            !owner_single_host_admission_allows(&wrong_child, SafetyTier::Risky, Some(&admission))
+                .expect("wrong child operation must be denied")
+        );
     }
 
     #[test]

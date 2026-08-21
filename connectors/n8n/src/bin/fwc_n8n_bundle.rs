@@ -41,6 +41,14 @@ const EXECUTABLE_ARTIFACTS: [&str; 4] = [
     "bin/fcp-n8n",
     "bin/fcp-mcp-bridge",
 ];
+const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BundleErrorCode {
@@ -503,36 +511,104 @@ fn verify_inventory_binding(
         return Err(BundleError::new(BundleErrorCode::InventoryBinding));
     }
     if expected_connector_id == "fcp.mcp-bridge" {
-        let (expected_url, expected_host, expected_port) = match expected_server_id {
-            "eec" => (
-                "https://n8n.europeaneyecenter.com/mcp-server/http",
-                "n8n.europeaneyecenter.com",
-                443,
-            ),
-            "hetzner" => (
-                "https://n8nhet.levilaser.com:8443/mcp-server/http",
-                "n8nhet.levilaser.com",
-                8443,
-            ),
-            _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
+        let (expected_url, expected_host, expected_port, expected_n8n_version) =
+            match expected_server_id {
+                "eec" => (
+                    "https://n8n.europeaneyecenter.com/mcp-server/http",
+                    "n8n.europeaneyecenter.com",
+                    443,
+                    "2.34.4",
+                ),
+                "hetzner" => (
+                    "https://n8nhet.levilaser.com:8443/mcp-server/http",
+                    "n8nhet.levilaser.com",
+                    8443,
+                    "2.34.6",
+                ),
+                _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
+            };
+        let exact_network = |operation: &str| {
+            let exact_host = entry
+                .pointer(&format!(
+                    "/operation_network_constraints/{operation}/host_allow"
+                ))
+                .and_then(Value::as_array)
+                .is_some_and(|hosts| hosts.len() == 1 && hosts[0].as_str() == Some(expected_host));
+            let exact_port = entry
+                .pointer(&format!(
+                    "/operation_network_constraints/{operation}/port_allow"
+                ))
+                .and_then(Value::as_array)
+                .is_some_and(|ports| ports.len() == 1 && ports[0].as_u64() == Some(expected_port));
+            exact_host && exact_port
         };
-        let exact_host = entry
-            .pointer("/operation_network_constraints/mcp.tools.list/host_allow")
-            .and_then(Value::as_array)
-            .is_some_and(|hosts| hosts.len() == 1 && hosts[0].as_str() == Some(expected_host));
-        let exact_port = entry
-            .pointer("/operation_network_constraints/mcp.tools.list/port_allow")
-            .and_then(Value::as_array)
-            .is_some_and(|ports| ports.len() == 1 && ports[0].as_u64() == Some(expected_port));
+        let exact_approved_tool = |policy: &serde_json::Map<String, Value>,
+                                   name: &str,
+                                   input_digest: &str,
+                                   output_digest: &str| {
+            policy
+                .get("approved_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        let Some(tool) = tool.as_object() else {
+                            return false;
+                        };
+                        tool.len() == 4
+                            && tool.get("name").and_then(Value::as_str) == Some(name)
+                            && tool.get("class").and_then(Value::as_str) == Some("write")
+                            && tool.get("input_schema_digest").and_then(Value::as_str)
+                                == Some(input_digest)
+                            && tool.get("output_schema_digest").and_then(Value::as_str)
+                                == Some(output_digest)
+                    })
+                })
+        };
+        let exact_policy = entry
+            .pointer("/config/capability_policy")
+            .and_then(Value::as_object)
+            .is_some_and(|policy| {
+                policy.len() == 4
+                    && policy.get("n8n_version").and_then(Value::as_str)
+                        == Some(expected_n8n_version)
+                    && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
+                    && policy
+                        .get("api_scope_digest")
+                        .and_then(Value::as_str)
+                        .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
+                    && policy
+                        .get("approved_tools")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tools| tools.len() == 2)
+                    && exact_approved_tool(
+                        policy,
+                        "publish_workflow",
+                        OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                        OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+                    )
+                    && exact_approved_tool(
+                        policy,
+                        "unpublish_workflow",
+                        OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                        OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+                    )
+            });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
-            || !exact_host
-            || !exact_port
+            || !exact_policy
+            || !exact_network("mcp.tools.list")
+            || !exact_network("mcp.tools.call")
             || entry
                 .pointer("/allowed_operations")
                 .and_then(Value::as_array)
                 .is_none_or(|operations| {
-                    operations.len() != 1 || operations[0].as_str() != Some("mcp.tools.list")
+                    operations.len() != 2
+                        || !operations
+                            .iter()
+                            .any(|value| value.as_str() == Some("mcp.tools.list"))
+                        || !operations
+                            .iter()
+                            .any(|value| value.as_str() == Some("mcp.tools.call"))
                 })
         {
             return Err(BundleError::new(BundleErrorCode::InventoryBinding));
@@ -875,6 +951,11 @@ mod tests {
                 "hetzner" => ("n8nhet.levilaser.com", 8443),
                 _ => panic!("unsupported fixture server"),
             };
+            let n8n_version = match server_id {
+                "eec" => "2.34.4",
+                "hetzner" => "2.34.6",
+                _ => panic!("unsupported fixture server"),
+            };
             let value = serde_json::json!([{
                 "id": "fcp.mcp-bridge",
                 "binary": executable,
@@ -884,11 +965,34 @@ mod tests {
                     "credential_id": "550e8400-e29b-41d4-a716-446655440000",
                     "mcp_url": mcp_url,
                     "security": {"description_scan": "block"},
+                    "capability_policy": {
+                        "n8n_version": n8n_version,
+                        "auth_mode": "access_token",
+                        "api_scope_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        "approved_tools": [
+                            {
+                                "name": "publish_workflow",
+                                "class": "write",
+                                "input_schema_digest": OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                                "output_schema_digest": OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST
+                            },
+                            {
+                                "name": "unpublish_workflow",
+                                "class": "write",
+                                "input_schema_digest": OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                                "output_schema_digest": OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST
+                            }
+                        ]
+                    }
                 },
                 "allowed_zones": ["z:work"],
-                "allowed_operations": ["mcp.tools.list"],
+                "allowed_operations": ["mcp.tools.list", "mcp.tools.call"],
                 "operation_network_constraints": {
                     "mcp.tools.list": {
+                        "host_allow": [mcp_host],
+                        "port_allow": [mcp_port]
+                    },
+                    "mcp.tools.call": {
                         "host_allow": [mcp_host],
                         "port_allow": [mcp_port]
                     }
@@ -1076,6 +1180,51 @@ mod tests {
                 wrong_official_port.owner,
             )
             .expect_err("wrong official port binding")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let missing_policy = ReleaseFixture::new();
+        let inventory_path = missing_policy.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]
+            .as_object_mut()
+            .expect("config object")
+            .remove("capability_policy");
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode missing policy inventory"),
+        )
+        .expect("write missing policy inventory");
+        missing_policy.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(&missing_policy.executable, missing_policy.owner)
+                .expect_err("missing official MCP policy")
+                .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let wrong_policy_digest = ReleaseFixture::new();
+        let inventory_path = wrong_policy_digest.artifact("inventory/hetzner-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["capability_policy"]["approved_tools"][0]["input_schema_digest"] =
+            Value::String("sha256:wrong".to_string());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode wrong policy inventory"),
+        )
+        .expect("write wrong policy inventory");
+        wrong_policy_digest.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &wrong_policy_digest.executable,
+                wrong_policy_digest.owner,
+            )
+            .expect_err("wrong official MCP schema digest")
             .code(),
             BundleErrorCode::InventoryBinding
         );

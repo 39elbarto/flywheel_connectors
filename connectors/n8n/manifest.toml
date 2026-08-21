@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:8ccc6927778733969c9893d97edf263732806a58c668915c88cc9a492ab920c4"
+interface_hash = "blake3-256:fcp.interface.v2:319cc96ce904787c91a3aa52fedc5a3c880e80ff91ac2389a5be20c3f6e71777"
 
 [connector]
 id = "fcp.n8n"
@@ -1154,7 +1154,7 @@ related = [
 ]
 
 [provides.operations."n8n.workflows.lifecycle"]
-description = "Publish or unpublish a workflow only after exact lifecycle approval and state precondition validation"
+description = "Publish or unpublish through the exact official n8n MCP lifecycle tool only after fresh capability-policy validation, exact lifecycle approval, and independent REST GET readback"
 capability = "n8n.workflows.lifecycle"
 risk_level = "high"
 safety_tier = "risky"
@@ -1412,10 +1412,10 @@ total_timeout_ms = 15000
 max_response_bytes = 1048576
 
 [provides.operations."n8n.workflows.lifecycle".ai_hints]
-when_to_use = "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval."
+when_to_use = "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests."
 common_mistakes = [
     "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.",
-    "Publish uses POST /workflows/{id}/publish with optional versionId; unpublish uses POST /workflows/{id}/unpublish with no body. No legacy route is guessed.",
+    "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.",
     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.",
     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.",
 ]

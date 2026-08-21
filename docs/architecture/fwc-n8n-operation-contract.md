@@ -68,12 +68,19 @@ later bounded reconciliation run rather than a daemon or implicit policy.
 The Phase-3 lifecycle packet represents `n8n.workflows.lifecycle` as typed
 `publish`/`unpublish` input with exact workflow targeting, UUID idempotency,
 full lifecycle/state-digest preconditions, and current-chat approval binding.
-`publish` uses only the proven `POST /workflows/{id}/publish` route with an
-optional JSON `versionId`; `unpublish` uses only `POST /workflows/{id}/unpublish`
-with no body. Each operation makes one provider attempt, decodes the typed
-response, and performs an independent typed `GET /workflows/{id}` readback.
-Timeout, disconnect, 409, 5xx, malformed/ambiguous responses, and uncertain
-readback are classified unknown and never retried automatically. Activation,
+The host now builds only the exact official MCP `publish_workflow` or
+`unpublish_workflow` call after fresh `tools/list` discovery and an owner-
+reviewed policy entry containing both schema digests; each operation makes one
+side-effecting provider attempt, decodes the typed response, and performs an
+independent REST `GET /workflows/{id}` readback. The connector's direct REST
+routes remain an explicit route only where proven and fail closed otherwise.
+Only bounded categories for failures proven before the provider side effect
+(`official_mcp_policy_failed`, `official_mcp_capability_failed`, and related
+preflight classes) may be exposed; invocation, timeout, teardown,
+malformed/ambiguous response, and all other uncertain cases remain
+`unknown_outcome` and are never retried automatically.
+Uncertain readback is classified unknown and never retried automatically.
+Activation,
 archive/restore, versions, execution, credential mutation, and permanent
 deletion remain outside this packet; no legacy route is guessed.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
@@ -338,7 +345,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.compare` | `n8n.workflows.read` | Safe / Medium | None | None | official MCP | both version URIs/digests | 512 KiB |
 | `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
-| `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | typed REST publish/unpublish with independent GET readback | all normalized state fields | 256 KiB |
+| `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | action-dependent | action-dependent | action-dependent | official MCP | workflow version and execution URI | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
@@ -349,6 +356,24 @@ guarantees, not permission to replay.
 | `n8n.evaluations.manage` | `n8n.evaluations.manage` | action-dependent | action-dependent | action-dependent | local MCP | evaluation URI/status | 256 KiB |
 | `n8n.audit.inspect` | `n8n.audit.read` | Safe / High | None | None | REST/local MCP | instance URI; redacted findings | 512 KiB |
 | `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 512 KiB operation-scoped; 60 s all-current budget |
+
+Live acceptance boundary (2026-08-21): the installed owner-gated bundle
+passed read-only and MCP-availability reconciliation checks on EEC and
+Hetzner, with disposable workflows removed after exact DELETE/404 readback.
+The typed official-MCP lifecycle path is not yet live-accepted: one exact EEC
+webhook publish attempt returned `unknown_outcome`, the independent REST
+readback remained inactive, and the contract correctly performed no retry.
+This does not authorize REST lifecycle fallback or activation/archive/execution
+operations.
+
+The provider result is fail-closed unless it contains typed `active`,
+`isArchived`, `activeVersionId`, draft/published graph summaries, and
+`stateDigest` fields. Publish must confirm the requested/selected version and
+active publication state; unpublish must confirm inactive state, a null active
+version, and a null published graph. The provider draft must equal the baseline,
+and every provider lifecycle field and digest must match the independent REST
+readback. Provider-side disagreement is `unknown_outcome`; provider/readback
+disagreement is `readback_mismatch`.
 
 ### 5.1 Exact operation inputs and outputs
 
@@ -369,7 +394,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
 | `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
-| `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact provider POST and independent GET readback |
+| `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact official-MCP call and independent REST GET readback |
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
 | `workflows.execute` | exact workflow target, `mode` | `guard`, `versionId`, `inputs`, `pinData`, `triggerNodeName`, `wait=false` | `{executionUri?,executionId?,mode,status,errorClass?,pinSchemas?}` |
 | `executions.search` | `target.server` | `workflowId`, `status[]`, `startedAfter`, `startedBefore`, `page` | `{executions:[{resourceUri,id,workflowId,status,mode,startedAt?,stoppedAt?}]}` |

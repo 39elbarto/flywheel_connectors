@@ -12,6 +12,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
+use fcp_crypto::ZeroizingSecret;
 use fcp_host::{
     LocalMcpProvider, LocalN8nDispatchErrorCode, LocalN8nDispatchRequest, LocalN8nDispatcher,
 };
@@ -195,8 +196,8 @@ impl HostRunOnceOperation {
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
-            | Self::WorkflowsLifecycle
             | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
+            Self::WorkflowsLifecycle => BrokerCredentialPurpose::OfficialMcp,
         }
     }
 }
@@ -516,6 +517,432 @@ where
     dispatch(envelope, request_deadline_at)
 }
 
+fn broker_credential_for(
+    server_id: HostRunOnceServerId,
+    purpose: BrokerCredentialPurpose,
+    deadline: Instant,
+) -> Result<ZeroizingSecret, AppError> {
+    let server = match server_id {
+        HostRunOnceServerId::Eec => BrokerServer::Eec,
+        HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
+    };
+    let client = BrokerClient::fixed();
+    #[cfg(unix)]
+    {
+        let mut transport = client.connect(deadline).map_err(map_broker_error)?;
+        client
+            .request(&mut transport, BrokerRequest { server, purpose }, deadline)
+            .map_err(map_broker_error)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (client, server, purpose, deadline);
+        Err(AppError::new("credential_broker_unavailable"))
+    }
+}
+
+fn run_host_bridge_once(
+    bundle: &fwc_n8n_bundle::VerifiedBundle,
+    envelope: &HostRunOnceEnvelope,
+    purpose: BrokerCredentialPurpose,
+    deadline: Instant,
+) -> Result<Value, AppError> {
+    let credential = broker_credential_for(envelope.server_id, purpose, deadline)?;
+    let mut envelope = envelope.clone();
+    envelope.deadline_ms = Some(remaining_deadline_ms(deadline)?);
+    fwc_n8n_bridge::run_verified_host_bridge(bundle, &envelope, credential, deadline).map_err(
+        |error| {
+            if matches!(purpose, BrokerCredentialPurpose::OfficialMcp)
+                && matches!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle)
+            {
+                AppError::new(official_mcp_lifecycle_bridge_error_code(error.code()))
+            } else {
+                AppError::new(error.code())
+            }
+        },
+    )
+}
+
+fn official_mcp_lifecycle_bridge_error_code(code: &str) -> &'static str {
+    match code {
+        "host_connector_not_found" => "official_mcp_connector_not_found",
+        "host_preflight_denied" => "official_mcp_preflight_denied",
+        "host_connector_unavailable" => "official_mcp_connector_unavailable",
+        "host_connector_frame_limit" => "official_mcp_connector_frame_limit",
+        "host_n8n_input_failed" => "official_mcp_input_failed",
+        "host_n8n_config_failed" => "official_mcp_config_failed",
+        "host_n8n_plan_failed" => "official_mcp_plan_failed",
+        "host_n8n_credential_failed" => "official_mcp_credential_failed",
+        "host_n8n_policy_failed" => "official_mcp_policy_failed",
+        "host_n8n_runtime_state_failed" => "official_mcp_runtime_state_failed",
+        "host_n8n_manifest_failed" => "official_mcp_manifest_failed",
+        "host_n8n_capability_failed" => "official_mcp_capability_failed",
+        // The child may have reached the provider, or may have failed while
+        // decoding/transporting its result. Keep these fail-closed and
+        // indistinguishable from an unknown side-effect outcome.
+        _ => "unknown_outcome",
+    }
+}
+
+fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceEnvelope, AppError> {
+    let id = envelope
+        .input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let mut get = envelope.clone();
+    get.operation = HostRunOnceOperation::WorkflowsGet;
+    get.resource_uri = expected_host_run_once_resource_uri(
+        envelope.server_id,
+        HostRunOnceOperation::WorkflowsGet,
+        &json!({"id": id}),
+    )?;
+    get.input = json!({"id": id});
+    Ok(get)
+}
+
+fn response_result(response: Value, unknown_code: &'static str) -> Result<Value, AppError> {
+    if response.get("status").and_then(Value::as_str) != Some("ok")
+        || response.get("error").is_some_and(|error| !error.is_null())
+    {
+        return Err(AppError::new(unknown_code));
+    }
+    response
+        .get("result")
+        .cloned()
+        .filter(Value::is_object)
+        .ok_or_else(|| AppError::new(unknown_code))
+}
+
+fn verify_lifecycle_baseline(input: &Value, state: &Value) -> Result<(), AppError> {
+    let id = input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let precondition = input
+        .pointer("/guard/precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if state.get("id").and_then(Value::as_str) != Some(id)
+        || state.get("versionId") != precondition.get("versionId")
+        || state.get("activeVersionId").is_none()
+        || state.get("activeVersionId") != precondition.get("activeVersionId")
+        || state.get("active") != precondition.get("active")
+        || state.get("isArchived") != precondition.get("isArchived")
+        || state.get("stateDigest") != precondition.get("stateDigest")
+    {
+        return Err(AppError::new("stale_precondition"));
+    }
+    Ok(())
+}
+
+fn decode_official_mcp_lifecycle_result(
+    response: Value,
+    action: &str,
+    workflow_id: &str,
+) -> Result<Value, AppError> {
+    let mut result = response_result(response, "unknown_outcome")?;
+    if let Some(structured) = result.get("structuredContent").cloned() {
+        result = structured;
+    } else if let Some(content) = result.get("content").and_then(Value::as_array) {
+        let text = content.iter().find_map(|item| {
+            (item.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| item.get("text").and_then(Value::as_str))
+                .flatten()
+        });
+        let text = text.ok_or_else(|| AppError::new("unknown_outcome"))?;
+        result = serde_json::from_str(text).map_err(|_| AppError::new("unknown_outcome"))?;
+    }
+    let object = result
+        .as_object()
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if !matches!(action, "publish" | "unpublish") {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    if object.get("success").and_then(Value::as_bool) != Some(true)
+        || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    if object.get("active").and_then(Value::as_bool).is_none()
+        || object.get("isArchived").and_then(Value::as_bool).is_none()
+        || !object.contains_key("activeVersionId")
+        || object
+            .get("activeVersionId")
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
+        || !object.contains_key("draft")
+        || !object.contains_key("published")
+        || !object
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_some_and(is_lifecycle_blake3_digest)
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let active = object
+        .get("active")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    let active_version_id = object
+        .get("activeVersionId")
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    let published = object
+        .get("published")
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if action == "publish"
+        && (active_version_id.as_str().is_none_or(str::is_empty) || !active || published.is_null())
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    if action == "unpublish" && (active || !active_version_id.is_null() || !published.is_null()) {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let mut safe = serde_json::Map::new();
+    safe.insert("success".to_string(), Value::Bool(true));
+    safe.insert(
+        "workflowId".to_string(),
+        Value::String(workflow_id.to_string()),
+    );
+    safe.insert("active".to_string(), Value::Bool(active));
+    safe.insert(
+        "isArchived".to_string(),
+        object
+            .get("isArchived")
+            .cloned()
+            .ok_or_else(|| AppError::new("unknown_outcome"))?,
+    );
+    safe.insert("activeVersionId".to_string(), active_version_id.clone());
+    let draft = object
+        .get("draft")
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    validate_lifecycle_graph_summary(draft, false)?;
+    safe.insert("draft".to_string(), draft.clone());
+    validate_lifecycle_graph_summary(published, true)?;
+    safe.insert("published".to_string(), published.clone());
+    safe.insert(
+        "stateDigest".to_string(),
+        object
+            .get("stateDigest")
+            .cloned()
+            .ok_or_else(|| AppError::new("unknown_outcome"))?,
+    );
+    Ok(Value::Object(safe))
+}
+
+fn is_lifecycle_blake3_digest(value: &str) -> bool {
+    value.len() == 75
+        && value.starts_with("blake3-256:")
+        && value[11..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_lifecycle_graph_summary(value: &Value, nullable: bool) -> Result<(), AppError> {
+    if nullable && value.is_null() {
+        return Ok(());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if object.len() != 2
+        || object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "versionId" | "graphDigest"))
+        || object
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || !object
+            .get("graphDigest")
+            .and_then(Value::as_str)
+            .is_some_and(is_lifecycle_blake3_digest)
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_state_summary(state: &Value) -> Result<(), AppError> {
+    let object = state
+        .as_object()
+        .ok_or_else(|| AppError::new("readback_mismatch"))?;
+    if object
+        .get("id")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        || object
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || object.get("active").and_then(Value::as_bool).is_none()
+        || !object.contains_key("activeVersionId")
+        || object
+            .get("activeVersionId")
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
+        || object.get("isArchived").and_then(Value::as_bool).is_none()
+        || !object
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_some_and(is_lifecycle_blake3_digest)
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    validate_lifecycle_graph_summary(
+        object
+            .get("draft")
+            .ok_or_else(|| AppError::new("readback_mismatch"))?,
+        false,
+    )
+    .map_err(|_| AppError::new("readback_mismatch"))?;
+    validate_lifecycle_graph_summary(
+        object
+            .get("published")
+            .ok_or_else(|| AppError::new("readback_mismatch"))?,
+        true,
+    )
+    .map_err(|_| AppError::new("readback_mismatch"))
+}
+
+fn verify_lifecycle_readback(
+    input: &Value,
+    baseline: &Value,
+    provider: &Value,
+    readback: &Value,
+) -> Result<String, AppError> {
+    let action = input
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    validate_lifecycle_state_summary(baseline)?;
+    validate_lifecycle_state_summary(readback)?;
+    if baseline.get("id") != readback.get("id")
+        || baseline.get("versionId") != readback.get("versionId")
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    if baseline.get("draft") != readback.get("draft") {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    if provider.get("draft") != baseline.get("draft") {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let expected_version = if action == "publish" {
+        input
+            .get("versionId")
+            .and_then(Value::as_str)
+            .or_else(|| provider.get("activeVersionId").and_then(Value::as_str))
+            .ok_or_else(|| AppError::new("unknown_outcome"))?
+    } else {
+        ""
+    };
+    if action == "publish" {
+        if provider.get("active").and_then(Value::as_bool) != Some(true)
+            || provider.get("isArchived").and_then(Value::as_bool) != Some(false)
+            || provider.get("activeVersionId").and_then(Value::as_str) != Some(expected_version)
+            || provider
+                .pointer("/published/versionId")
+                .and_then(Value::as_str)
+                != Some(expected_version)
+        {
+            return Err(AppError::new("unknown_outcome"));
+        }
+    } else if action == "unpublish" {
+        if provider.get("active").and_then(Value::as_bool) != Some(false)
+            || !provider.get("activeVersionId").is_some_and(Value::is_null)
+            || !provider.get("published").is_some_and(Value::is_null)
+            || provider.get("isArchived") != baseline.get("isArchived")
+        {
+            return Err(AppError::new("unknown_outcome"));
+        }
+    } else {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if provider.get("published") != readback.get("published")
+        || provider.get("stateDigest") != readback.get("stateDigest")
+        || provider.get("active") != readback.get("active")
+        || provider.get("activeVersionId") != readback.get("activeVersionId")
+        || provider.get("isArchived") != readback.get("isArchived")
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    if action == "publish" {
+        if readback.get("active").and_then(Value::as_bool) != Some(true)
+            || readback.get("isArchived").and_then(Value::as_bool) != Some(false)
+            || readback.get("activeVersionId").and_then(Value::as_str) != Some(expected_version)
+            || readback
+                .pointer("/published/versionId")
+                .and_then(Value::as_str)
+                != Some(expected_version)
+            || readback
+                .pointer("/published/graphDigest")
+                .and_then(Value::as_str)
+                .is_none_or(|digest| !is_lifecycle_blake3_digest(digest))
+        {
+            return Err(AppError::new("readback_mismatch"));
+        }
+    } else if readback.get("active").and_then(Value::as_bool) != Some(false)
+        || !readback.get("activeVersionId").is_some_and(Value::is_null)
+        || readback.get("isArchived") != baseline.get("isArchived")
+        || !readback.get("published").is_some_and(Value::is_null)
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    Ok(expected_version.to_string())
+}
+
+fn execute_workflow_lifecycle_official_mcp(
+    bundle: &fwc_n8n_bundle::VerifiedBundle,
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+) -> Result<Value, AppError> {
+    let get = lifecycle_get_envelope(&envelope)?;
+    let baseline_response = run_host_bridge_once(
+        bundle,
+        &get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    )?;
+    let baseline = response_result(baseline_response, "unknown_outcome")?;
+    verify_lifecycle_baseline(&envelope.input, &baseline)?;
+
+    let provider_response = run_host_bridge_once(
+        bundle,
+        &envelope,
+        BrokerCredentialPurpose::OfficialMcp,
+        request_deadline_at,
+    )?;
+    let workflow_id = envelope
+        .input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let action = envelope
+        .input
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let provider = decode_official_mcp_lifecycle_result(provider_response, action, workflow_id)?;
+
+    let readback_response = run_host_bridge_once(
+        bundle,
+        &get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    )?;
+    let readback = response_result(readback_response, "unknown_outcome")?;
+    let _ = verify_lifecycle_readback(&envelope.input, &baseline, &provider, &readback)?;
+    Ok(json!({
+        "status": "verified",
+        "operation": "n8n.workflows.lifecycle",
+        "action": action,
+        "provider": "official_mcp",
+        "retry": "never_automatic",
+        "readback": "independent_get",
+        "before": baseline,
+        "after": readback,
+    }))
+}
+
 fn execute_host_run_once(
     mut envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
@@ -526,6 +953,9 @@ fn execute_host_run_once(
 
     let operation = envelope.operation;
     let server_id = envelope.server_id;
+    if operation == HostRunOnceOperation::WorkflowsLifecycle {
+        return execute_workflow_lifecycle_official_mcp(&bundle, envelope, request_deadline_at);
+    }
     let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
         Some(
             fwc_n8n_update_host::McpAccessReconciliationLedger::production()
@@ -1936,7 +2366,7 @@ mod tests {
             self.requests
                 .push("child:GET /api/v1/workflows/1001".to_owned());
             self.requests.push(
-                "child:POST /api/v1/workflows/1001/publish {\"versionId\":\"version-1\"}"
+                "child:MCP tools/call publish_workflow {\"workflowId\":\"1001\",\"versionId\":\"version-1\"}"
                     .to_owned(),
             );
             self.requests
@@ -1996,7 +2426,7 @@ mod tests {
             vec![
                 "bridge:validated-envelope",
                 "child:GET /api/v1/workflows/1001",
-                "child:POST /api/v1/workflows/1001/publish {\"versionId\":\"version-1\"}",
+                "child:MCP tools/call publish_workflow {\"workflowId\":\"1001\",\"versionId\":\"version-1\"}",
                 "child:GET /api/v1/workflows/1001",
             ]
         );
@@ -2004,7 +2434,7 @@ mod tests {
             bridge
                 .requests
                 .iter()
-                .filter(|request| request.starts_with("child:POST"))
+                .filter(|request| request.starts_with("child:MCP tools/call"))
                 .count(),
             1
         );
@@ -2028,7 +2458,7 @@ mod tests {
             bridge
                 .requests
                 .iter()
-                .filter(|request| request.starts_with("child:POST"))
+                .filter(|request| request.starts_with("child:MCP tools/call"))
                 .count(),
             1
         );
@@ -2036,6 +2466,326 @@ mod tests {
             bridge.requests.last().map(String::as_str),
             Some("child:GET /api/v1/workflows/1001")
         );
+    }
+
+    fn lifecycle_state(active: bool, active_version_id: Value, is_archived: bool) -> Value {
+        json!({
+            "id": "1001",
+            "name": null,
+            "projectId": null,
+            "folderId": null,
+            "versionId": "draft-v1",
+            "active": active,
+            "activeVersionId": active_version_id,
+            "isArchived": is_archived,
+            "draft": {"versionId": "draft-v1", "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            "published": if active {
+                json!({"versionId": "version-1", "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
+            } else {
+                Value::Null
+            },
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000",
+            "updatedAt": null,
+        })
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_result_is_strictly_decoded_and_redacted() {
+        let provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": true,
+            "isArchived": false,
+            "activeVersionId": "version-1",
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": {
+                "versionId": "version-1",
+                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "secret": "drop-me"
+        });
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&provider).expect("provider JSON")
+                }]
+            }
+        });
+        let safe = decode_official_mcp_lifecycle_result(response, "publish", "1001")
+            .expect("official lifecycle response");
+        assert_eq!(
+            safe,
+            json!({
+                "success": true,
+                "workflowId": "1001",
+                "active": true,
+                "isArchived": false,
+                "activeVersionId": "version-1",
+                "draft": {
+                    "versionId": "draft-v1",
+                    "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "published": {
+                    "versionId": "version-1",
+                    "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            })
+        );
+        assert!(
+            decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": {"success": true, "workflowId": "other"}}),
+                "publish",
+                "1001"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_readback_requires_preserved_draft_and_action_state() {
+        let input = json!({"id": "1001", "action": "publish", "versionId": "version-1"});
+        let baseline = lifecycle_state(false, Value::Null, false);
+        let provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": true,
+            "isArchived": false,
+            "activeVersionId": "version-1",
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": {
+                "versionId": "version-1",
+                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        });
+        let after = lifecycle_state(true, json!("version-1"), false);
+        let mut after = after;
+        after["stateDigest"] = provider["stateDigest"].clone();
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect("publish readback"),
+            "version-1"
+        );
+
+        let mut mismatched = after;
+        mismatched["draft"]["graphDigest"] = json!("blake3-256:changed");
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &mismatched)
+                .expect_err("draft mutation must fail closed")
+                .code,
+            "readback_mismatch"
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_readback_rejects_published_or_state_digest_drift() {
+        let input = json!({"id": "1001", "action": "publish", "versionId": "version-1"});
+        let baseline = lifecycle_state(false, Value::Null, false);
+        let provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": true,
+            "isArchived": false,
+            "activeVersionId": "version-1",
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": {
+                "versionId": "version-1",
+                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        });
+        let mut after = lifecycle_state(true, json!("version-1"), false);
+        after["stateDigest"] = provider["stateDigest"].clone();
+        after["published"]["graphDigest"] =
+            json!("blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("published graph drift must fail closed")
+                .code,
+            "readback_mismatch"
+        );
+
+        let mut after = lifecycle_state(true, json!("version-1"), false);
+        after["stateDigest"] =
+            json!("blake3-256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("state digest drift must fail closed")
+                .code,
+            "readback_mismatch"
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_rejects_provider_version_or_draft_drift() {
+        let input = json!({"id": "1001", "action": "publish", "versionId": "version-1"});
+        let baseline = lifecycle_state(false, Value::Null, false);
+        let mut provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": true,
+            "isArchived": false,
+            "activeVersionId": "version-2",
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": {
+                "versionId": "version-2",
+                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        });
+        let mut after = lifecycle_state(true, json!("version-2"), false);
+        after["stateDigest"] = provider["stateDigest"].clone();
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("provider version drift must be unknown")
+                .code,
+            "unknown_outcome"
+        );
+
+        provider["activeVersionId"] = json!("version-1");
+        provider["published"]["versionId"] = json!("version-1");
+        provider["draft"]["graphDigest"] =
+            json!("blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        after = lifecycle_state(true, json!("version-1"), false);
+        after["stateDigest"] = provider["stateDigest"].clone();
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("provider draft drift must be unknown")
+                .code,
+            "unknown_outcome"
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_rejects_unpublish_provider_still_active() {
+        let input = json!({"id": "1001", "action": "unpublish"});
+        let baseline = lifecycle_state(true, json!("version-1"), false);
+        let mut provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": true,
+            "isArchived": false,
+            "activeVersionId": "version-1",
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": {
+                "versionId": "version-1",
+                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "stateDigest": "blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        });
+        let mut after = lifecycle_state(false, Value::Null, false);
+        after["stateDigest"] = provider["stateDigest"].clone();
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("provider active state must be unknown")
+                .code,
+            "unknown_outcome"
+        );
+
+        provider["active"] = json!(false);
+        provider["activeVersionId"] = Value::Null;
+        provider["published"] = Value::Null;
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect("normalized unpublish provider"),
+            ""
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_unpublish_preserves_draft_and_normalized_state() {
+        let input = json!({"id": "1001", "action": "unpublish"});
+        let baseline = lifecycle_state(true, json!("version-1"), false);
+        let provider = json!({
+            "success": true,
+            "workflowId": "1001",
+            "active": false,
+            "isArchived": false,
+            "activeVersionId": null,
+            "draft": {
+                "versionId": "draft-v1",
+                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "published": null,
+            "stateDigest": "blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        });
+        let mut after = lifecycle_state(false, Value::Null, false);
+        after["stateDigest"] = provider["stateDigest"].clone();
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect("unpublish readback"),
+            ""
+        );
+
+        after["draft"]["graphDigest"] =
+            json!("blake3-256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect_err("unpublish draft drift must fail closed")
+                .code,
+            "readback_mismatch"
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_unknown_result_is_terminal() {
+        let error = decode_official_mcp_lifecycle_result(
+            json!({"status": "error", "error": {"code": "timeout"}}),
+            "publish",
+            "1001",
+        )
+        .expect_err("provider ambiguity must be unknown");
+        assert_eq!(error.code, "unknown_outcome");
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_exposes_only_safe_preflight_categories() {
+        let safe_categories = [
+            ("host_n8n_policy_failed", "official_mcp_policy_failed"),
+            (
+                "host_n8n_capability_failed",
+                "official_mcp_capability_failed",
+            ),
+            ("host_n8n_manifest_failed", "official_mcp_manifest_failed"),
+            ("host_n8n_plan_failed", "official_mcp_plan_failed"),
+        ];
+        for (bridge_code, public_code) in safe_categories {
+            assert_eq!(
+                official_mcp_lifecycle_bridge_error_code(bridge_code),
+                public_code
+            );
+        }
+        for ambiguous_code in [
+            "host_n8n_invoke_failed",
+            "child_failed",
+            "timeout",
+            "output_invalid",
+            "process_spawn_failed",
+        ] {
+            assert_eq!(
+                official_mcp_lifecycle_bridge_error_code(ambiguous_code),
+                "unknown_outcome"
+            );
+        }
     }
 
     #[test]

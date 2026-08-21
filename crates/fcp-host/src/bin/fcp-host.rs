@@ -10805,6 +10805,7 @@ fn mint_n8n_official_mcp_approval(
             HostError::InvalidFilter("n8n lifecycle approvalRef is missing".to_string())
         })?;
     let payload_digest = mcp_tools_call_payload_digest(&plan.input)?;
+    let request_input_digest = request_input_hash(&plan.input)?;
     let normalized = json!({
         "server_id": plan.server_id.as_str(),
         "resource_uri": plan.resource_uri,
@@ -10833,7 +10834,7 @@ fn mint_n8n_official_mcp_approval(
             connector_id: "fcp.mcp-bridge".to_string(),
             method_pattern: plan.operation.to_string(),
             request_object_id: None,
-            input_hash: Some(payload_digest),
+            input_hash: Some(request_input_digest),
             input_constraints,
         }),
         plan.zone_id.clone(),
@@ -32824,7 +32825,10 @@ done"#;
             panic!("lifecycle approval must carry execution scope");
         };
         assert_eq!(scope.input_constraints.len(), 6);
-        assert_eq!(scope.input_hash.as_ref().map(|hash| hash.len()), Some(32));
+        assert_eq!(
+            scope.input_hash,
+            Some(request_input_hash(&plan.input).expect("canonical request input hash"))
+        );
 
         let mut denied = config;
         denied.config.as_mut().expect("config")["capability_policy"]["approved_tools"] = json!([]);

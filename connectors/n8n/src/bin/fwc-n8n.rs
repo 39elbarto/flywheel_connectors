@@ -1709,12 +1709,24 @@ fn expected_host_run_once_resource_uri(
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList
         | HostRunOnceOperation::McpAccessReconcile => Ok(root),
-        HostRunOnceOperation::WorkflowsGet
-        | HostRunOnceOperation::WorkflowsUpdateDraft
-        | HostRunOnceOperation::WorkflowsLifecycle => Ok(format!(
-            "{root}/workflows/{}",
-            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-        )),
+        HostRunOnceOperation::WorkflowsLifecycle => {
+            let tool = match input.get("action").and_then(Value::as_str) {
+                Some("publish") => "publish_workflow",
+                Some("unpublish") => "unpublish_workflow",
+                _ => return Err(AppError::new("invalid_operation_input")),
+            };
+            Ok(format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                server_id.as_str(),
+                encode_host_resource_segment(tool)
+            ))
+        }
+        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
+            Ok(format!(
+                "{root}/workflows/{}",
+                encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+            ))
+        }
         HostRunOnceOperation::WorkflowsCreateDraft => input
             .get("project_id")
             .map(|_| {
@@ -3057,6 +3069,44 @@ mod tests {
                 "n8n.workflows.get",
                 json!({"id": "workflow-1"}),
                 "fwc-n8n://eec/workflows/workflow%2D1",
+            ),
+            (
+                "n8n.workflows.lifecycle",
+                json!({
+                    "id": "workflow-1",
+                    "action": "publish",
+                    "guard": {
+                        "approvalRef": "chat-approval-publish",
+                        "idempotencyKey": "33333333-4444-4555-8666-777777777777",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }),
+                "fwc-mcp-bridge://eec/tools/publish%5Fworkflow",
+            ),
+            (
+                "n8n.workflows.lifecycle",
+                json!({
+                    "id": "workflow-1",
+                    "action": "unpublish",
+                    "guard": {
+                        "approvalRef": "chat-approval-unpublish",
+                        "idempotencyKey": "44444444-5555-4666-8777-888888888888",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": "version-1",
+                            "active": true,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        }
+                    }
+                }),
+                "fwc-mcp-bridge://eec/tools/unpublish%5Fworkflow",
             ),
             ("n8n.workflows.list", json!({}), "fwc-n8n://eec"),
             (

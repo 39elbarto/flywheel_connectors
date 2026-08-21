@@ -174,6 +174,7 @@ use hyper_util::{
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tower::ServiceExt;
 
@@ -8989,11 +8990,15 @@ async fn verify_live_request_with_resource(
         .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
     let mcp_access_dry_run = request.operation.as_str() == "n8n.mcp_access.reconcile"
         && request.input.get("dryRun").and_then(Value::as_bool) == Some(true);
-    let request_input_hash = request_input_hash(&request.input)?;
+    let (policy_request, policy_input_hash) = n8n_official_mcp_policy_request(
+        request,
+        trusted_resource,
+        constraint_resource_uri.as_deref(),
+    )?;
     let zone_policy = state.lookup_zone_policy(&request.zone_id).await?;
     let receipt = simulate_policy_decision(&PolicySimulationInput {
         zone_policy,
-        invoke_request: request.clone(),
+        invoke_request: policy_request,
         transport: TransportMode::Lan,
         checkpoint_fresh: true,
         revocation_fresh: true,
@@ -9001,7 +9006,7 @@ async fn verify_live_request_with_resource(
         sanitizer_receipts: Vec::new(),
         related_object_ids: Vec::new(),
         request_object_id: None,
-        request_input_hash: Some(request_input_hash),
+        request_input_hash: Some(policy_input_hash),
         safety_tier: tool.safety_tier,
         principal: Some(principal.to_owned()),
         capability_id: Some(tool.capability.to_string()),
@@ -9035,6 +9040,42 @@ async fn verify_live_request_with_resource(
         safety_tier: tool.safety_tier,
         per_invocation_plan: live_snapshot.per_invocation_plan,
     })
+}
+
+fn n8n_official_mcp_policy_request(
+    request: &InvokeRequest,
+    trusted_resource: Option<&TrustedResourceBinding>,
+    resource_uri: Option<&str>,
+) -> HostResult<(InvokeRequest, [u8; 32])> {
+    if request.connector_id.as_str() != "fcp.mcp-bridge"
+        || request.operation.as_str() != N8N_OFFICIAL_MCP_CALL_OPERATION
+    {
+        return Ok((request.clone(), request_input_hash(&request.input)?));
+    }
+
+    let binding = trusted_resource.ok_or_else(|| {
+        HostError::PreflightFailed(
+            "official MCP approval requires a trusted resource binding".to_string(),
+        )
+    })?;
+    let resource_uri = resource_uri.ok_or_else(|| {
+        HostError::PreflightFailed(
+            "official MCP approval requires a verified resource URI".to_string(),
+        )
+    })?;
+    let payload_digest = mcp_tools_call_payload_digest(&request.input)?;
+    let tool_name = request.input.get("name").cloned().unwrap_or(Value::Null);
+    let normalized = json!({
+        "server_id": binding.server_id.as_str(),
+        "resource_uri": resource_uri,
+        "operation": request.operation.as_str(),
+        "provider": "mcp",
+        "payload_sha256": hex::encode(payload_digest),
+        "tool_name": tool_name,
+    });
+    let mut policy_request = request.clone();
+    policy_request.input = normalized;
+    Ok((policy_request, payload_digest))
 }
 
 fn preflight_response_from_error(error: HostError) -> PreflightResponse {
@@ -10773,6 +10814,25 @@ fn build_n8n_official_mcp_run_once_plan(
     })
 }
 
+fn mcp_tools_call_payload_digest(input: &Value) -> HostResult<[u8; 32]> {
+    let normalized = json!({
+        "name": input.get("name").ok_or_else(|| {
+            HostError::InvalidFilter("official MCP tool name is missing".to_string())
+        })?,
+        "arguments": input.get("arguments").ok_or_else(|| {
+            HostError::InvalidFilter("official MCP tool arguments are missing".to_string())
+        })?,
+    });
+    let canonical = canonical_json_for_n8n_run_once(&normalized);
+    let bytes = serde_json::to_vec(&canonical).map_err(|_| {
+        HostError::Internal("official MCP approval payload could not be canonicalized".to_string())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/MCP-Bridge/approval-payload/v1\0");
+    hasher.update(bytes);
+    Ok(hasher.finalize().into())
+}
+
 fn mint_n8n_official_mcp_approval(
     plan: &N8nOfficialMcpRunOncePlan,
     high_level_input: &Value,
@@ -10784,15 +10844,24 @@ fn mint_n8n_official_mcp_approval(
         .ok_or_else(|| {
             HostError::InvalidFilter("n8n lifecycle approvalRef is missing".to_string())
         })?;
-    let request_input_digest = request_input_hash(&plan.input)?;
-    let input_constraints = vec![InputConstraint {
-        // Policy evaluates the MCP bridge request input itself, whose stable
-        // top-level shape is {"name": ..., "arguments": ...}. The complete
-        // payload remains bound by request_input_digest below; this additional
-        // constraint must therefore point into that actual request shape.
-        pointer: "/name".to_string(),
-        expected: plan.input.get("name").cloned().unwrap_or(Value::Null),
-    }];
+    let payload_digest = mcp_tools_call_payload_digest(&plan.input)?;
+    let normalized = json!({
+        "server_id": plan.server_id.as_str(),
+        "resource_uri": plan.resource_uri,
+        "operation": plan.operation.as_str(),
+        "provider": "mcp",
+        "payload_sha256": hex::encode(payload_digest),
+        "tool_name": plan.input.get("name").cloned().unwrap_or(Value::Null),
+    });
+    let input_constraints = normalized
+        .as_object()
+        .ok_or_else(|| HostError::Internal("official MCP approval target is invalid".to_string()))?
+        .iter()
+        .map(|(field, expected)| InputConstraint {
+            pointer: format!("/{field}"),
+            expected: expected.clone(),
+        })
+        .collect();
     let issued_at_ms = n8n_run_once_now_ms();
     let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
     let mut token = ApprovalToken::approved(
@@ -10804,7 +10873,7 @@ fn mint_n8n_official_mcp_approval(
             connector_id: "fcp.mcp-bridge".to_string(),
             method_pattern: plan.operation.to_string(),
             request_object_id: None,
-            input_hash: Some(request_input_digest),
+            input_hash: Some(payload_digest),
             input_constraints,
         }),
         plan.zone_id.clone(),
@@ -32794,11 +32863,10 @@ done"#;
         let ApprovalScope::Execution(scope) = &approval.scope else {
             panic!("lifecycle approval must carry execution scope");
         };
-        assert_eq!(scope.input_constraints.len(), 1);
-        assert_eq!(scope.input_constraints[0].pointer, "/name");
+        assert_eq!(scope.input_constraints.len(), 6);
         assert_eq!(
             scope.input_hash,
-            Some(request_input_hash(&plan.input).expect("canonical request input hash"))
+            Some(mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"))
         );
 
         let mut denied = config;

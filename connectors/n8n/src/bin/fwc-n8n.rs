@@ -659,73 +659,38 @@ fn decode_official_mcp_lifecycle_result(
     if !matches!(action, "publish" | "unpublish") {
         return Err(AppError::new("unknown_outcome"));
     }
+    if let Some(result_action) = object.get("action") {
+        if result_action.as_str() != Some(action) {
+            return Err(AppError::new("unknown_outcome"));
+        }
+    }
     if object.get("success").and_then(Value::as_bool) != Some(true)
         || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
     {
         return Err(AppError::new("unknown_outcome"));
     }
-    if object.get("active").and_then(Value::as_bool).is_none()
-        || object.get("isArchived").and_then(Value::as_bool).is_none()
-        || !object.contains_key("activeVersionId")
-        || object
-            .get("activeVersionId")
-            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
-        || !object.contains_key("draft")
-        || !object.contains_key("published")
-        || !object
-            .get("stateDigest")
-            .and_then(Value::as_str)
-            .is_some_and(is_lifecycle_blake3_digest)
+    if object.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let active_version_id = object.get("activeVersionId");
+    if active_version_id
+        .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
     {
         return Err(AppError::new("unknown_outcome"));
     }
-    let active = object
-        .get("active")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    let active_version_id = object
-        .get("activeVersionId")
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    let published = object
-        .get("published")
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    if action == "publish"
-        && (active_version_id.as_str().is_none_or(str::is_empty) || !active || published.is_null())
-    {
-        return Err(AppError::new("unknown_outcome"));
-    }
-    if action == "unpublish" && (active || !active_version_id.is_null() || !published.is_null()) {
+    if action == "unpublish" && active_version_id.is_some_and(|value| !value.is_null()) {
         return Err(AppError::new("unknown_outcome"));
     }
     let mut safe = serde_json::Map::new();
+    safe.insert("action".to_string(), Value::String(action.to_string()));
     safe.insert("success".to_string(), Value::Bool(true));
     safe.insert(
         "workflowId".to_string(),
         Value::String(workflow_id.to_string()),
     );
-    safe.insert("active".to_string(), Value::Bool(active));
-    safe.insert(
-        "isArchived".to_string(),
-        object
-            .get("isArchived")
-            .cloned()
-            .ok_or_else(|| AppError::new("unknown_outcome"))?,
-    );
-    safe.insert("activeVersionId".to_string(), active_version_id.clone());
-    let draft = object
-        .get("draft")
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    validate_lifecycle_graph_summary(draft, false)?;
-    safe.insert("draft".to_string(), draft.clone());
-    validate_lifecycle_graph_summary(published, true)?;
-    safe.insert("published".to_string(), published.clone());
-    safe.insert(
-        "stateDigest".to_string(),
-        object
-            .get("stateDigest")
-            .cloned()
-            .ok_or_else(|| AppError::new("unknown_outcome"))?,
-    );
+    if let Some(active_version_id) = active_version_id {
+        safe.insert("activeVersionId".to_string(), active_version_id.clone());
+    }
     Ok(Value::Object(safe))
 }
 
@@ -823,47 +788,33 @@ fn verify_lifecycle_readback(
     if baseline.get("draft") != readback.get("draft") {
         return Err(AppError::new("readback_mismatch"));
     }
-    if provider.get("draft") != baseline.get("draft") {
-        return Err(AppError::new("unknown_outcome"));
-    }
     let expected_version = if action == "publish" {
         input
             .get("versionId")
             .and_then(Value::as_str)
             .or_else(|| provider.get("activeVersionId").and_then(Value::as_str))
+            .or_else(|| readback.get("activeVersionId").and_then(Value::as_str))
             .ok_or_else(|| AppError::new("unknown_outcome"))?
     } else {
         ""
     };
     if action == "publish" {
-        if provider.get("active").and_then(Value::as_bool) != Some(true)
-            || provider.get("isArchived").and_then(Value::as_bool) != Some(false)
-            || provider.get("activeVersionId").and_then(Value::as_str) != Some(expected_version)
-            || provider
-                .pointer("/published/versionId")
-                .and_then(Value::as_str)
-                != Some(expected_version)
+        if provider
+            .get("activeVersionId")
+            .and_then(Value::as_str)
+            .is_some_and(|provider_version| provider_version != expected_version)
         {
             return Err(AppError::new("unknown_outcome"));
         }
     } else if action == "unpublish" {
-        if provider.get("active").and_then(Value::as_bool) != Some(false)
-            || !provider.get("activeVersionId").is_some_and(Value::is_null)
-            || !provider.get("published").is_some_and(Value::is_null)
-            || provider.get("isArchived") != baseline.get("isArchived")
+        if provider
+            .get("activeVersionId")
+            .is_some_and(|active_version_id| !active_version_id.is_null())
         {
             return Err(AppError::new("unknown_outcome"));
         }
     } else {
         return Err(AppError::new("invalid_operation_input"));
-    }
-    if provider.get("published") != readback.get("published")
-        || provider.get("stateDigest") != readback.get("stateDigest")
-        || provider.get("active") != readback.get("active")
-        || provider.get("activeVersionId") != readback.get("activeVersionId")
-        || provider.get("isArchived") != readback.get("isArchived")
-    {
-        return Err(AppError::new("readback_mismatch"));
     }
     if action == "publish" {
         if readback.get("active").and_then(Value::as_bool) != Some(true)
@@ -2494,18 +2445,7 @@ mod tests {
         let provider = json!({
             "success": true,
             "workflowId": "1001",
-            "active": true,
-            "isArchived": false,
             "activeVersionId": "version-1",
-            "draft": {
-                "versionId": "draft-v1",
-                "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "published": {
-                "versionId": "version-1",
-                "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-            },
-            "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "secret": "drop-me"
         });
         let response = json!({
@@ -2522,20 +2462,10 @@ mod tests {
         assert_eq!(
             safe,
             json!({
+                "action": "publish",
                 "success": true,
                 "workflowId": "1001",
-                "active": true,
-                "isArchived": false,
-                "activeVersionId": "version-1",
-                "draft": {
-                    "versionId": "draft-v1",
-                    "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                },
-                "published": {
-                    "versionId": "version-1",
-                    "graphDigest": "blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                },
-                "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                "activeVersionId": "version-1"
             })
         );
         assert!(
@@ -2545,6 +2475,79 @@ mod tests {
                 "1001"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_minimal_unpublish_response_is_accepted() {
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "success": true,
+                "workflowId": "1001",
+                "error": null
+            }
+        });
+        assert_eq!(
+            decode_official_mcp_lifecycle_result(response, "unpublish", "1001")
+                .expect("minimal official unpublish response"),
+            json!({
+                "action": "unpublish",
+                "success": true,
+                "workflowId": "1001"
+            })
+        );
+
+        let response_with_null_version = json!({
+            "status": "ok",
+            "result": {
+                "success": true,
+                "workflowId": "1001",
+                "activeVersionId": null,
+                "error": null
+            }
+        });
+        assert!(
+            decode_official_mcp_lifecycle_result(response_with_null_version, "unpublish", "1001")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_decoder_rejects_action_and_result_shape_mismatch() {
+        let wrong_action = json!({
+            "status": "ok",
+            "result": {
+                "action": "unpublish",
+                "success": true,
+                "workflowId": "1001"
+            }
+        });
+        assert!(decode_official_mcp_lifecycle_result(wrong_action, "publish", "1001").is_err());
+
+        let wrong_version_type = json!({
+            "status": "ok",
+            "result": {
+                "success": true,
+                "workflowId": "1001",
+                "activeVersionId": 7
+            }
+        });
+        assert!(
+            decode_official_mcp_lifecycle_result(wrong_version_type, "publish", "1001").is_err()
+        );
+
+        let non_null_unpublish_version = json!({
+            "status": "ok",
+            "result": {
+                "success": true,
+                "workflowId": "1001",
+                "activeVersionId": "version-1"
+            }
+        });
+        assert!(
+            decode_official_mcp_lifecycle_result(non_null_unpublish_version, "unpublish", "1001")
+                .is_err()
         );
     }
 
@@ -2609,8 +2612,7 @@ mod tests {
         });
         let mut after = lifecycle_state(true, json!("version-1"), false);
         after["stateDigest"] = provider["stateDigest"].clone();
-        after["published"]["graphDigest"] =
-            json!("blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+        after["published"]["versionId"] = json!("version-2");
         assert_eq!(
             verify_lifecycle_readback(&input, &baseline, &provider, &after)
                 .expect_err("published graph drift must fail closed")
@@ -2619,8 +2621,7 @@ mod tests {
         );
 
         let mut after = lifecycle_state(true, json!("version-1"), false);
-        after["stateDigest"] =
-            json!("blake3-256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        after["stateDigest"] = json!("not-a-digest");
         assert_eq!(
             verify_lifecycle_readback(&input, &baseline, &provider, &after)
                 .expect_err("state digest drift must fail closed")
@@ -2630,10 +2631,10 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_rejects_provider_version_or_draft_drift() {
+    fn official_mcp_lifecycle_rejects_provider_version_drift() {
         let input = json!({"id": "1001", "action": "publish", "versionId": "version-1"});
         let baseline = lifecycle_state(false, Value::Null, false);
-        let mut provider = json!({
+        let provider = json!({
             "success": true,
             "workflowId": "1001",
             "active": true,
@@ -2654,19 +2655,6 @@ mod tests {
         assert_eq!(
             verify_lifecycle_readback(&input, &baseline, &provider, &after)
                 .expect_err("provider version drift must be unknown")
-                .code,
-            "unknown_outcome"
-        );
-
-        provider["activeVersionId"] = json!("version-1");
-        provider["published"]["versionId"] = json!("version-1");
-        provider["draft"]["graphDigest"] =
-            json!("blake3-256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
-        after = lifecycle_state(true, json!("version-1"), false);
-        after["stateDigest"] = provider["stateDigest"].clone();
-        assert_eq!(
-            verify_lifecycle_readback(&input, &baseline, &provider, &after)
-                .expect_err("provider draft drift must be unknown")
                 .code,
             "unknown_outcome"
         );

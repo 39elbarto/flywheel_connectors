@@ -2332,7 +2332,10 @@ mod tests {
         ) -> Result<Value, AppError> {
             assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle);
             assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
-            assert_eq!(envelope.resource_uri, "fwc-n8n://eec/workflows/1001");
+            assert_eq!(
+                envelope.resource_uri,
+                "fwc-mcp-bridge://eec/tools/publish%5Fworkflow"
+            );
             assert_eq!(envelope.input["id"], "1001");
             assert_eq!(envelope.input["action"], "publish");
             assert_eq!(

@@ -137,14 +137,15 @@ use fcp_policy::{
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityVerifier,
     ConnectorStateCanonicalStatus, CorrelationId, CostEstimateConfidence, CredentialId, Decision,
-    ExecutionScope, FcpError, InputConstraint, InstanceId, Lease as CoreLease,
-    LeasePurpose as CoreLeasePurpose, ObjectId, ObjectIdKey, PolicySimulationInput,
-    ResourceAvailability, RolloutPolicy, SafetyTier, StoredObject, TailscaleNodeId, TransportMode,
-    UsageMetric, UsageMetricKind, Uuid, ZoneId, ZonePolicyObject, simulate_policy_decision,
+    FcpError, InputConstraint, InstanceId, Lease as CoreLease, LeasePurpose as CoreLeasePurpose,
+    ObjectId, ObjectIdKey, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
+    StoredObject, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind, Uuid, ZoneId,
+    ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{
-    ConnectorStateModel, DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy,
+    ConnectorStateModel, DecisionReceiptPolicy, ExecutionScope, ObjectHeader, Provenance,
+    ZoneTransportPolicy,
 };
 use fcp_provider_auth::{
     ApiKeyAuth, AuthError, AuthMethod, AuthMethodKind, AuthProfile, AuthProfileStore,
@@ -13241,7 +13242,7 @@ async fn async_n8n_official_mcp_run_once(
     };
     let claim_plan = lifecycle_input
         .as_ref()
-        .map(|input| {
+        .map(|input| -> HostResult<N8nReadOnlyRunOncePlan> {
             let operation = OperationId::new("n8n.workflows.lifecycle").map_err(|_| {
                 HostError::InvalidFilter("n8n lifecycle operation is invalid".to_string())
             })?;

@@ -1695,7 +1695,10 @@ impl N8nConnector {
         canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
-        let server_id = self.configured_server_id()?.to_owned();
+        let server_id = self
+            .configured_server_id()
+            .map_err(|error| error.to_fcp_error())?
+            .to_owned();
         let typed: WorkflowDraftMutationInput =
             serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
                 code: 1003,
@@ -1747,7 +1750,10 @@ impl N8nConnector {
         canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
-        let server_id = self.configured_server_id()?.to_owned();
+        let server_id = self
+            .configured_server_id()
+            .map_err(|error| error.to_fcp_error())?
+            .to_owned();
         let approval_values = params
             .get("approval_tokens")
             .and_then(Value::as_array)
@@ -1794,7 +1800,10 @@ impl N8nConnector {
         canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
-        let server_id = self.configured_server_id()?.to_owned();
+        let server_id = self
+            .configured_server_id()
+            .map_err(|error| error.to_fcp_error())?
+            .to_owned();
         let guard = input
             .guard
             .as_ref()

@@ -61,6 +61,34 @@ keys, sudo, shell, systemd, or release deletion.
 Rollback remains a separate owner-gated boundary, and live installation/current
 acceptance is still not performed by repository tests.
 
+### Offline owner signer (source-only packet)
+
+`fwc-n8n-owner-sign` is a separate, feature-gated operator binary. It is not
+linked into the normal `fwc-n8n` runtime target, including a runtime-only
+`--all-features` build, and the runtime bundle never receives Ed25519 private
+key handling. The signer accepts only an exact release identifier, a bounded
+non-secret `fwc.n8n.provision-request.v1` file, and the Base64 seed on stdin.
+The release identifier is resolved internally to
+`/var/lib/fwc-n8n/staging/<release_id>`; caller-supplied stage paths are not
+accepted.
+
+Before signing, it reuses the provisioner’s complete no-follow unsigned-tree
+validator: ownership/modes, provenance, all twelve artifact digests, inventory
+and policy semantics, and exact EEC/Hetzner schema bindings must pass. The
+derived public key and key ID must match the immutable build-time
+`FWC_N8N_OWNER_PUBLIC_KEY_HEX` trust root. The seed is accepted only as exactly
+32 decoded bytes (44 Base64 characters with at most one final LF), is held in
+zeroizing buffers, is never read from KeePass by the binary, and is never
+accepted from an argument or environment variable.
+
+The signer emits only the signed `provision-receipt.json` bytes on stdout and
+fixed redacted errors on stderr. It does not call n8n, invoke a provider,
+modify workflows, switch `current`, install a release, or write the staged
+tree. A separate owner-controlled provisioning step must place the signed
+receipt into the staged release and perform the already-gated preflight/apply
+flow. The source packet has offline tests only; it does not claim live signing,
+privileged installation, or current-release acceptance.
+
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
 ## Current Runtime Snapshot

@@ -66,9 +66,10 @@ capability remains `unknown`/`unreviewed` and `tools/call` remains unavailable
 through the public surface. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
-concurrent malicious root updater, and it does not claim signature
-verification; a future signed installer/update receipt can strengthen that
-root of trust.
+concurrent malicious root updater. The source packet now verifies an
+owner-signed `provision-receipt.json` when a release is evaluated, but the
+installed release above has no such receipt and therefore makes no
+owner-provisioning claim.
 The source-only `fwc_n8n_provision` packet adds a typed fixed-root preflight
 for owner-staged releases: it checks the existing twelve-artifact receipt,
 the bounded `provision-receipt.json` covering that receipt/provenance and every
@@ -124,6 +125,22 @@ writer window is documented and requires immediate owner-side revalidation
 before the atomic rename/symlink operation. Public-key provisioning, privileged
 invocation, live `current` switching, systemd, and rollback acceptance remain
 separate owner gates.
+The source-only `fwc-n8n-owner-sign` binary is a separate feature-gated
+operator boundary, not part of the runtime connector. It accepts only a safe
+release identifier, a bounded non-secret `fwc.n8n.provision-request.v1` file,
+and an exact Base64 seed on stdin; it derives the fixed
+`/var/lib/fwc-n8n/staging/<release_id>` path internally and rejects caller
+paths. Before producing a receipt it reuses the complete no-follow unsigned
+release validator, including ownership/mode checks, provenance, twelve
+artifact digests, inventory/policy semantics, and exact EEC/Hetzner binding
+equality. The derived Ed25519 public key and key ID must match the immutable
+build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX` trust root. Seed bytes are held in
+zeroizing buffers and never come from an argument, environment variable, or
+the signer’s own KeePass access. The signer emits only the signed receipt and
+does not call n8n, write the stage, install a release, switch `current`, or
+modify workflows. Placing that receipt into a staged tree and running the
+privileged preflight/apply path remain separate owner-controlled steps. This
+packet has offline coverage only; it is not live or privileged acceptance.
 `n8n.targets.resolve`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
 representable by that enum yet. `n8n.mcp_access.reconcile` is now represented

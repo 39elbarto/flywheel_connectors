@@ -13,6 +13,9 @@ authors.workspace = true
 name = "fcp_n8n"
 path = "src/lib.rs"
 
+[features]
+owner-signing = []
+
 [[bin]]
 name = "fcp-n8n"
 path = "src/main.rs"
@@ -20,6 +23,11 @@ path = "src/main.rs"
 [[bin]]
 name = "fwc-n8n"
 path = "src/bin/fwc-n8n.rs"
+
+[[bin]]
+name = "fwc-n8n-owner-sign"
+path = "src/bin/fwc_n8n_owner_sign.rs"
+required-features = ["owner-signing"]
 
 [lints]
 workspace = true
@@ -51,6 +59,7 @@ hex.workspace = true
 percent-encoding.workspace = true
 uuid.workspace = true
 rustix = { version = "1.1", features = ["fs", "process"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true

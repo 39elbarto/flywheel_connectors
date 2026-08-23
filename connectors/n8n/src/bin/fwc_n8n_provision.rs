@@ -21,20 +21,20 @@ use serde_json::Value;
 
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const PROVENANCE_SCHEMA: &str = "fwc.n8n.provenance.v1";
-const PROVISION_RECEIPT_SCHEMA: &str = "fwc.n8n.provision.v1";
-const RECEIPT_FILE: &str = "receipt.json";
-const PROVENANCE_FILE: &str = "provenance.json";
-const PROVISION_RECEIPT_FILE: &str = "provision-receipt.json";
-const MAX_RECEIPT_BYTES: usize = 128 * 1024;
-const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
-const MAX_PROVISION_RECEIPT_BYTES: usize = 256 * 1024;
-const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
-const MAX_POLICY_BYTES: usize = 256 * 1024;
-const DEFAULT_STAGING_ROOT: &str = "/var/lib/fwc-n8n/staging";
+pub(crate) const PROVISION_RECEIPT_SCHEMA: &str = "fwc.n8n.provision.v1";
+pub(crate) const RECEIPT_FILE: &str = "receipt.json";
+pub(crate) const PROVENANCE_FILE: &str = "provenance.json";
+pub(crate) const PROVISION_RECEIPT_FILE: &str = "provision-receipt.json";
+pub(crate) const MAX_RECEIPT_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_PROVISION_RECEIPT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_POLICY_BYTES: usize = 256 * 1024;
+pub(crate) const DEFAULT_STAGING_ROOT: &str = "/var/lib/fwc-n8n/staging";
 const DEFAULT_INSTALL_ROOT: &str = "/usr/local/lib/fwc-n8n";
 
-const ARTIFACTS: [&str; 12] = [
+pub(crate) const ARTIFACTS: [&str; 12] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
@@ -49,7 +49,7 @@ const ARTIFACTS: [&str; 12] = [
     "policy/local-mcp.json",
 ];
 const RELEASE_DIRECTORIES: [&str; 4] = ["bin", "manifests", "inventory", "policy"];
-const EXECUTABLES: [&str; 4] = [
+pub(crate) const EXECUTABLES: [&str; 4] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
@@ -84,7 +84,7 @@ const EEC_N8N_VERSION: &str = "2.34.4";
 const HETZNER_MCP_URL: &str = "https://n8nhet.levilaser.com:8443/mcp-server/http";
 const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_N8N_VERSION: &str = "2.34.6";
-const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
+pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,10 +151,10 @@ impl fmt::Debug for OfficialMcpBinding {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ReleaseSignature {
-    algorithm: String,
-    key_id: String,
-    signature: String,
+pub(crate) struct ReleaseSignature {
+    pub(crate) algorithm: String,
+    pub(crate) key_id: String,
+    pub(crate) signature: String,
 }
 
 impl fmt::Debug for ReleaseSignature {
@@ -196,7 +196,7 @@ impl OwnerVerificationConfig {
         Self::from_immutable_public_key(option_env!("FWC_N8N_OWNER_PUBLIC_KEY_HEX"))
     }
 
-    fn from_immutable_public_key(value: Option<&str>) -> Result<Self, ProvisionError> {
+    pub(crate) fn from_immutable_public_key(value: Option<&str>) -> Result<Self, ProvisionError> {
         let public_key_hex =
             value.ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Signature))?;
         Self::from_public_key_hex(public_key_hex.to_owned())
@@ -210,6 +210,15 @@ impl OwnerVerificationConfig {
             key_id: verifying_key.key_id().to_string(),
             public_key_hex,
         })
+    }
+
+    pub(crate) fn matches_verifying_key(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<bool, ProvisionError> {
+        let configured = decode_hex::<PUBLIC_KEY_SIZE>(&self.public_key_hex)?;
+        Ok(configured == verifying_key.to_bytes()
+            && self.key_id == verifying_key.key_id().to_string())
     }
 
     #[cfg(test)]
@@ -350,6 +359,24 @@ impl ProvisionRequest {
             promotion: Promotion::TemporarySymlinkRename,
         })
     }
+}
+
+/// Derive the only staging path accepted by the owner signer and runtime
+/// provisioner. Callers provide an identifier, never a filesystem path.
+pub(crate) fn fixed_staging_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
+    if !is_safe_release_id(release_id) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
+    }
+    Ok(Path::new(DEFAULT_STAGING_ROOT).join(release_id))
+}
+
+pub(crate) fn fixed_release_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
+    if !is_safe_release_id(release_id) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
+    }
+    Ok(Path::new(DEFAULT_INSTALL_ROOT)
+        .join("releases")
+        .join(release_id))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1109,7 +1136,7 @@ pub struct ProvisionError {
 }
 
 impl ProvisionError {
-    const fn new(code: ProvisionErrorCode) -> Self {
+    pub(crate) const fn new(code: ProvisionErrorCode) -> Self {
         Self { code }
     }
 
@@ -1150,9 +1177,9 @@ struct Receipt {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Artifact {
-    path: String,
-    digest: String,
+pub(crate) struct Artifact {
+    pub(crate) path: String,
+    pub(crate) digest: String,
 }
 
 #[derive(Deserialize)]
@@ -1165,13 +1192,13 @@ struct Provenance {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ProvisionReceipt {
-    schema: String,
-    release_id: String,
-    git_revision: String,
-    bindings: Vec<OfficialMcpBinding>,
-    artifacts: Vec<Artifact>,
-    signature: ReleaseSignature,
+pub(crate) struct ProvisionReceipt {
+    pub(crate) schema: String,
+    pub(crate) release_id: String,
+    pub(crate) git_revision: String,
+    pub(crate) bindings: Vec<OfficialMcpBinding>,
+    pub(crate) artifacts: Vec<Artifact>,
+    pub(crate) signature: ReleaseSignature,
 }
 
 fn validate_request(request: &ProvisionRequest) -> Result<(), ProvisionError> {
@@ -1219,7 +1246,9 @@ fn validate_stage_root_binding(
     Ok(())
 }
 
-fn validate_binding_shape(bindings: &[OfficialMcpBinding]) -> Result<(), ProvisionError> {
+pub(crate) fn validate_binding_shape(
+    bindings: &[OfficialMcpBinding],
+) -> Result<(), ProvisionError> {
     if bindings.len() != 2 {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
@@ -1279,7 +1308,14 @@ fn validate_release_tree(
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
-    validate_release_directories(root, expected_owner)?;
+    validate_unsigned_release_tree(
+        root,
+        release_id,
+        git_revision,
+        bindings,
+        expected_owner,
+        inventory_release_root,
+    )?;
     let provision_receipt: ProvisionReceipt = read_json(
         &root.join(PROVISION_RECEIPT_FILE),
         expected_owner,
@@ -1299,6 +1335,24 @@ fn validate_release_tree(
             return Err(ProvisionError::new(ProvisionErrorCode::Digest));
         }
     }
+    let receipt_digest = hash_file(&root.join(RECEIPT_FILE))?;
+    verify_release_signature(&provision_receipt, &receipt_digest, owner_verification)?;
+    Ok(())
+}
+
+/// Validate the complete unsigned release surface shared by the runtime
+/// verifier and owner signer. The provision receipt is intentionally excluded:
+/// the signer creates its canonical signed form from this validated surface.
+#[cfg(unix)]
+pub(crate) fn validate_unsigned_release_tree(
+    root: &Path,
+    release_id: &str,
+    git_revision: &str,
+    bindings: &[OfficialMcpBinding],
+    expected_owner: u32,
+    inventory_release_root: &Path,
+) -> Result<(), ProvisionError> {
+    validate_release_directories(root, expected_owner)?;
     let provenance: Provenance = read_json(
         &root.join(PROVENANCE_FILE),
         expected_owner,
@@ -1318,8 +1372,6 @@ fn validate_release_tree(
         ProvisionErrorCode::Receipt,
     )?;
     validate_receipt(&receipt, release_id)?;
-    let receipt_digest = hash_file(&root.join(RECEIPT_FILE))?;
-    verify_release_signature(&provision_receipt, &receipt_digest, owner_verification)?;
     for relative_path in ARTIFACTS {
         let path = root.join(relative_path);
         validate_file(
@@ -1449,7 +1501,9 @@ struct UnsignedProvisionReceipt {
     artifacts: Vec<Artifact>,
 }
 
-fn unsigned_provision_receipt_bytes(receipt: &ProvisionReceipt) -> Result<Vec<u8>, ProvisionError> {
+pub(crate) fn unsigned_provision_receipt_bytes(
+    receipt: &ProvisionReceipt,
+) -> Result<Vec<u8>, ProvisionError> {
     let mut bindings = receipt.bindings.clone();
     bindings.sort_by_key(|binding| binding.server);
     let mut artifacts = receipt.artifacts.clone();
@@ -1469,7 +1523,7 @@ fn append_signing_field(payload: &mut Vec<u8>, field: &[u8]) {
     payload.extend_from_slice(field);
 }
 
-fn release_signing_payload(
+pub(crate) fn release_signing_payload(
     receipt: &ProvisionReceipt,
     receipt_digest: &str,
     provision_digest: &str,
@@ -1515,7 +1569,7 @@ fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ProvisionError> {
     Ok(decoded)
 }
 
-fn verify_release_signature(
+pub(crate) fn verify_release_signature(
     receipt: &ProvisionReceipt,
     receipt_digest: &str,
     owner_verification: &OwnerVerificationConfig,
@@ -1563,7 +1617,7 @@ fn validate_receipt(receipt: &Receipt, release_id: &str) -> Result<(), Provision
 }
 
 #[cfg(unix)]
-fn validate_provision_receipt(
+pub(crate) fn validate_provision_receipt(
     receipt: &ProvisionReceipt,
     release_id: &str,
     git_revision: &str,
@@ -2225,6 +2279,40 @@ fn validate_directory(path: &Path, expected_owner: u32) -> Result<Metadata, Prov
 }
 
 #[cfg(unix)]
+fn open_nofollow_regular_file(path: &Path) -> Result<(File, Metadata), std::io::Error> {
+    use rustix::fs::{Mode, OFlags, open};
+    use std::os::unix::fs::MetadataExt;
+
+    let path_metadata = fs::symlink_metadata(path)?;
+    if !path_metadata.file_type().is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    let file = File::from(
+        open(
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| std::io::Error::other("no-follow open failed"))?,
+    );
+    let fd_metadata = file.metadata()?;
+    if !fd_metadata.file_type().is_file()
+        || fd_metadata.dev() != path_metadata.dev()
+        || fd_metadata.ino() != path_metadata.ino()
+        || fd_metadata.nlink() != path_metadata.nlink()
+        || fd_metadata.mode() != path_metadata.mode()
+        || fd_metadata.uid() != path_metadata.uid()
+        || fd_metadata.len() != path_metadata.len()
+    {
+        return Err(std::io::Error::other("file changed during validation"));
+    }
+    if fs::canonicalize(path)? != path {
+        return Err(std::io::Error::other("symlink ancestry"));
+    }
+    Ok((file, fd_metadata))
+}
+
+#[cfg(unix)]
 fn validate_file(
     path: &Path,
     expected_owner: u32,
@@ -2233,18 +2321,14 @@ fn validate_file(
 ) -> Result<Metadata, ProvisionError> {
     use std::os::unix::fs::MetadataExt;
 
-    let metadata =
-        fs::symlink_metadata(path).map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
-    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+    let (_, metadata) = open_nofollow_regular_file(path)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
+    if metadata.len() > max_bytes {
         return Err(ProvisionError::new(ProvisionErrorCode::Layout));
     }
     verify_metadata(&metadata, expected_owner, true)?;
     if executable && metadata.mode() & 0o100 == 0 {
         return Err(ProvisionError::new(ProvisionErrorCode::Permissions));
-    }
-    if fs::canonicalize(path).map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))? != path
-    {
-        return Err(ProvisionError::new(ProvisionErrorCode::Layout));
     }
     Ok(metadata)
 }
@@ -2289,7 +2373,7 @@ fn read_value(path: &Path, max_bytes: usize) -> Result<Value, ProvisionError> {
 
 #[cfg(unix)]
 fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, std::io::Error> {
-    let metadata = fs::metadata(path)?;
+    let (mut file, metadata) = open_nofollow_regular_file(path)?;
     let length = usize::try_from(metadata.len()).map_err(|_| std::io::ErrorKind::InvalidData)?;
     if length > max_bytes {
         return Err(std::io::Error::new(
@@ -2297,7 +2381,6 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, std::io::Error
             "bounded read",
         ));
     }
-    let mut file = File::open(path)?;
     let mut bytes = Vec::with_capacity(length);
     file.read_to_end(&mut bytes)?;
     if bytes.len() > max_bytes {
@@ -2310,8 +2393,9 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, std::io::Error
 }
 
 #[cfg(unix)]
-fn hash_file(path: &Path) -> Result<String, ProvisionError> {
-    let mut file = File::open(path).map_err(|_| ProvisionError::new(ProvisionErrorCode::Digest))?;
+pub(crate) fn hash_file(path: &Path) -> Result<String, ProvisionError> {
+    let (mut file, _) = open_nofollow_regular_file(path)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Digest))?;
     let mut hasher = blake3::Hasher::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
@@ -2324,6 +2408,20 @@ fn hash_file(path: &Path) -> Result<String, ProvisionError> {
         hasher.update(&buffer[..count]);
     }
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[cfg(unix)]
+pub(crate) fn staged_provision_artifacts(root: &Path) -> Result<Vec<Artifact>, ProvisionError> {
+    ARTIFACTS
+        .into_iter()
+        .chain([RECEIPT_FILE, PROVENANCE_FILE])
+        .map(|path| {
+            Ok(Artifact {
+                path: path.to_owned(),
+                digest: hash_file(&root.join(path))?,
+            })
+        })
+        .collect()
 }
 
 fn is_absolute_child(path: &Path, root: &Path) -> bool {
@@ -2363,7 +2461,7 @@ fn reject_symlink_ancestors(path: &Path, include_final: bool) -> Result<(), Prov
     Ok(())
 }
 
-fn is_safe_release_id(value: &str) -> bool {
+pub(crate) fn is_safe_release_id(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
@@ -2373,7 +2471,7 @@ fn is_safe_release_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-fn is_git_revision(value: &str) -> bool {
+pub(crate) fn is_git_revision(value: &str) -> bool {
     (7..=64).contains(&value.len())
         && value
             .bytes()
@@ -3595,7 +3693,7 @@ mod tests {
                 .validate()
                 .expect_err("rollback receipt")
                 .code(),
-            ProvisionErrorCode::Digest
+            ProvisionErrorCode::Receipt
         );
 
         let fixture = Fixture::new();

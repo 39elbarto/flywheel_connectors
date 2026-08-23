@@ -57,16 +57,26 @@ the bounded `provision-receipt.json` covering that receipt/provenance and every
 staged byte, explicit git-revision provenance, canonical non-symlink paths,
 owner/mode and size bounds, strict allowlisted inventory/policy metadata with
 secret-like key/value rejection, and exact per-server official-MCP schema
-bindings before returning a non-mutating atomic-promotion plan. It deliberately
-does not implement the privileged stage rename, `current` symlink switch, or
-rollback command; those remain an owner/root installer boundary and are not
-executable through the connector.
+bindings before returning an atomic-promotion plan. `provision-receipt.json`
+carries an owner Ed25519 signature over domain-separated release/git/receipt/
+provision digests and the canonical complete EEC/Hetzner binding map; the
+verifier accepts only explicit owner public-key/key-id configuration and never
+reads private key material. `InstallPlan::revalidate` consumes the plan into
+an opaque `RevalidatedInstallPlan`; the typed `OwnerAtomicInstaller::promote`
+consumes that proof and exposes only fixed read-only stage/release/current/
+rollback paths. The owner implementation must revalidate the proof once more
+while its root-side concurrency guard is held immediately before promotion.
+The proof cannot establish atomicity against an unrelated concurrent root
+writer. This repository deliberately does not execute privileged stage rename,
+`current` symlink switch, systemd, or production rollback acceptance; those
+remain separate owner gates.
 The rollback target is subjected to the same complete self-relative artifact,
 provenance, provision-receipt, inventory, and policy validation; only its git
 revision may differ from the candidate. The remaining trusted-concurrent-root
 writer window is documented and requires immediate owner-side revalidation
-before the atomic rename/symlink operation. Cryptographic signature
-verification and the privileged installer remain separate owner gates.
+before the atomic rename/symlink operation. Public-key provisioning, privileged
+invocation, live `current` switching, systemd, and rollback acceptance remain
+separate owner gates.
 `n8n.targets.resolve`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
 representable by that enum yet. `n8n.mcp_access.reconcile` is now represented

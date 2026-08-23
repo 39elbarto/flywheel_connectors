@@ -19,11 +19,19 @@ bytes), `provenance.json` (including the exact git revision), BLAKE3 artifact by
 root ownership/restrictive modes, canonical non-symlink paths, strict
 allowlisted inventory/policy metadata with secret-like key/value rejection,
 and exact EEC/Hetzner official-MCP policy bindings for
-`publish_workflow`, `unpublish_workflow`, and `archive_workflow`. The result is
-an `InstallPlan` describing a temporary-symlink atomic promotion and the
-previous verified release for rollback; it has no apply method and performs no
-filesystem mutation. The privileged root installer/current switch remains an
-explicit owner-owned integration seam and is not provided by this repository.
+`publish_workflow`, `unpublish_workflow`, and `archive_workflow`. The
+`provision-receipt.json` must carry an owner Ed25519 signature over
+domain-separated release/git/receipt/provision digests and the canonical full
+server binding map; verification accepts only an explicit owner public key and
+derived key ID and never reads private key material. The result is an
+`InstallPlan` that can be consumed into an opaque `RevalidatedInstallPlan` only
+after a successful immediate revalidation. `OwnerAtomicInstaller::promote`
+accepts and consumes that proof; the owner implementation must revalidate the
+proof once more under its root-side concurrency guard before using its fixed
+read-only stage/release/current/rollback paths. This repository still performs
+no production filesystem mutation:
+privileged staging, atomic `current` switch, systemd invocation, and rollback
+acceptance remain separate owner gates.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 

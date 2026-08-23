@@ -33001,6 +33001,7 @@ done"#;
 
     fn run_once_n8n_official_mcp_lifecycle_test_config() -> ManagedConnectorConfig {
         let mut config = run_once_n8n_official_mcp_test_config();
+        config.allowed_zones = vec![ZoneId::work().to_string()];
         config.allowed_operations = vec![N8N_OFFICIAL_MCP_CALL_OPERATION.to_string()];
         config.config.as_mut().expect("config")["capability_policy"] = json!({
             "n8n_version": "2.34.4",

@@ -266,7 +266,8 @@ fn draft_mutation_digest(operation: &str, input: &Value) -> String {
 
 fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
     let guard = &input["guard"];
-    let input_hash = draft_input_hash(input);
+    let resource_uri = resource_uri(operation, input);
+    let input_hash = approval_binding_hash(operation, &resource_uri, input);
     let now = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current timestamp should fit in u64");
     ApprovalToken::approved(
@@ -286,8 +287,14 @@ fn draft_approval_token(operation: &str, input: &Value) -> ApprovalToken {
     )
 }
 
-fn draft_input_hash(input: &Value) -> [u8; 32] {
-    let input_bytes = to_deterministic_cbor(input).expect("draft approval input CBOR");
+fn approval_binding_hash(operation: &str, resource_uri: &str, input: &Value) -> [u8; 32] {
+    let input_bytes = to_deterministic_cbor(&json!({
+        "server_id": TEST_SERVER_ID,
+        "resource_uri": resource_uri,
+        "operation": operation,
+        "input": input,
+    }))
+    .expect("approval binding CBOR");
     *blake3::hash(&input_bytes).as_bytes()
 }
 
@@ -1917,8 +1924,22 @@ async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw
     let ApprovalScope::Execution(scope) = &approval.scope else {
         panic!("draft approval must use execution scope");
     };
-    assert_eq!(scope.input_hash, Some(draft_input_hash(&original)));
-    assert_ne!(scope.input_hash, Some(draft_input_hash(&changed)));
+    assert_eq!(
+        scope.input_hash,
+        Some(approval_binding_hash(
+            "n8n.workflows.create_draft",
+            &resource_uri("n8n.workflows.create_draft", &original),
+            &original,
+        ))
+    );
+    assert_ne!(
+        scope.input_hash,
+        Some(approval_binding_hash(
+            "n8n.workflows.create_draft",
+            &resource_uri("n8n.workflows.create_draft", &changed),
+            &changed,
+        ))
+    );
     assert!(scope.input_constraints.is_empty());
 
     let proxy = MockServer::start().await;

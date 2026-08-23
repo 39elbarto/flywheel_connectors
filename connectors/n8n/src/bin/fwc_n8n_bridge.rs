@@ -1603,6 +1603,7 @@ mod tests {
             input,
             deadline_ms: Some(30_000),
             correlation_id: None,
+            approval_token: None,
         }
     }
 

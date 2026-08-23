@@ -6,21 +6,33 @@
 > Date: 2026-08-09
 
 This document freezes the accepted public surface for the on-demand n8n
-connector before provider or runtime implementation begins. It is normative for
-the `fwc-n8n` project, but it does not describe current runtime behavior. The
-existing `connectors/n8n` and `connectors/mcp-bridge` READMEs remain the source
-of truth for the code that exists today.
+connector and remains normative for the `fwc-n8n` project. Current runtime and
+installation evidence is called out explicitly below; the
+`connectors/n8n` and `connectors/mcp-bridge` READMEs remain the source of truth
+for implementation details.
 
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
+
+**Current host evidence (2026-08-24, read-only):**
+`/usr/local/lib/fwc-n8n/current` points to
+`release-20260823-5ec43ecbc`, whose installed `fwc-n8n status` reports
+`{"bundleAvailable":true}`. That result proves only the ordinary immutable
+bundle verifier; it does not prove owner provisioning of source commit
+`902f38ec5`. No host-visible `provision-receipt.json` was found, no release
+switch was performed, and no current-release owner-provisioning claim is made.
+The new `provision --mode preflight|apply` implementation is therefore a
+source-level gate awaiting an owner-signed staged receipt, trusted build-time
+public-key configuration, and separate privileged acceptance.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
 `run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
 `status`. `provision` defaults to read-only `preflight`; mutation requires the
 explicit owner-gated `provision --mode apply`. `run-once` supports nine Phase-1
-REST reads, guarded
-REST draft create/update, two local knowledge/validation operations, and one
-official-MCP discovery operation, `n8n.capabilities.inspect`. The draft-write
+REST reads, guarded REST draft create/update, typed source paths for lifecycle
+`publish`/`unpublish` and archive, two local knowledge/validation operations,
+and one official-MCP discovery operation, `n8n.capabilities.inspect`. The
+draft-write
 packet is source-only: the installed immutable release remains the accepted
 read-only/discovery bundle until a separate owner-gated release and disposable
 workflow live acceptance with rollback. Official discovery accepts only EEC or Hetzner and
@@ -45,13 +57,13 @@ command. The implementation status
 and evidence are maintained in `connectors/n8n/README.md`; this document
 continues to define the accepted public contract and owner gates.
 
-The immutable bundle contract now requires twelve exact artifacts, including
+The immutable bundle contract requires twelve exact artifacts, including
 `fcp-mcp-bridge`, its manifest, and separate EEC/Hetzner official-MCP
-inventories. Immutable release `release-20260817-nqm817-34` is installed, the
-distinct `n8n-eec-mcp` / `n8n-hetzner-mcp` owner entries are provisioned, and
-server-by-server read-only capability discovery has passed with 34 tools on
-each server. Every discovered capability remains `unknown`/`unreviewed` and
-`tools/call` remains unavailable through the public surface. Bundle verification currently
+inventories. A historical 2026-08-17 acceptance snapshot recorded the
+distinct `n8n-eec-mcp` / `n8n-hetzner-mcp` owner entries and 34 discovered tools
+per server; that snapshot is not the current release identity. Every discovered
+capability remains `unknown`/`unreviewed` and `tools/call` remains unavailable
+through the public surface. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
 concurrent malicious root updater, and it does not claim signature
@@ -122,7 +134,7 @@ payload, while the logical mutation is allow-listed to
 `settings.availableInMCP`. Lifecycle fields and graph semantics are excluded
 from the mutation and verified by an independent detail readback. Host run-once
 adds a server-wide transient lock, UUID idempotency binding, and redacted
-intent/outcome receipts. The installed bundle passed owner-gated disposable
+intent/outcome receipts. The historical installed bundle passed owner-gated disposable
 enable/disable/readback acceptance on EEC and Hetzner. The private web bulk
 endpoint remains an unaccepted provider surface; future workflows require a
 later bounded reconciliation run rather than a daemon or implicit policy.
@@ -441,7 +453,7 @@ guarantees, not permission to replay.
 | `n8n.audit.inspect` | `n8n.audit.read` | Safe / High | None | None | REST/local MCP | instance URI; redacted findings | 512 KiB |
 | `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 512 KiB operation-scoped; 60 s all-current budget |
 
-Live acceptance boundary (2026-08-21): the installed owner-gated bundle
+Historical live acceptance boundary (2026-08-21): the then-installed owner-gated bundle
 passed read-only and MCP-availability reconciliation checks on EEC and
 Hetzner, with disposable workflows removed after exact DELETE/404 readback.
 The typed official-MCP lifecycle path is not yet live-accepted: one exact EEC

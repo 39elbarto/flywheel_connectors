@@ -26,12 +26,17 @@ server binding map; verification accepts only an explicit owner public key and
 derived key ID and never reads private key material. The result is an
 `InstallPlan` that can be consumed into an opaque `RevalidatedInstallPlan` only
 after a successful immediate revalidation. `OwnerAtomicInstaller::promote`
-accepts and consumes that proof; the owner implementation must revalidate the
-proof once more under its root-side concurrency guard before using its fixed
-read-only stage/release/current/rollback paths. This repository still performs
-no production filesystem mutation:
-privileged staging, atomic `current` switch, systemd invocation, and rollback
-acceptance remain separate owner gates.
+accepts and consumes that proof. On Linux, the concrete
+`FilesystemOwnerAtomicInstaller` derives the install root only from the proof,
+takes an exclusive root lock, revalidates under that lock, uses no-follow
+directory opens and `renameat(..., NOREPLACE)` for stage-to-release promotion,
+then fsyncs and atomically replaces `current` through a temporary relative
+symlink. Its rollback seam uses the same lock/revalidation and never deletes
+releases; partial promotion preserves the immutable release and old `current`
+where possible. Non-Linux fails closed. The default CLI and live `/usr/local`
+install/current/systemd paths still do not invoke this source-only
+implementation; privileged owner wiring and live acceptance remain separate
+gates.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 

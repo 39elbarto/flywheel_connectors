@@ -319,6 +319,10 @@ impl InstallPlan {
         RollbackPlan {
             current_path: self.current_path.clone(),
             target_release: self.previous_release.clone(),
+            expected_current_release: self.release_path.clone(),
+            releases_root: self.releases_root.clone(),
+            owner_verification: self.owner_verification.clone(),
+            expected_owner: self.expected_owner,
             promotion: self.promotion,
         }
     }
@@ -441,6 +445,10 @@ pub trait OwnerAtomicInstaller {
 pub struct RollbackPlan {
     current_path: PathBuf,
     target_release: PathBuf,
+    expected_current_release: PathBuf,
+    releases_root: PathBuf,
+    owner_verification: OwnerVerificationConfig,
+    expected_owner: u32,
     promotion: Promotion,
 }
 
@@ -458,6 +466,466 @@ impl RollbackPlan {
     pub fn promotion(&self) -> Promotion {
         self.promotion
     }
+
+    /// Consume this rollback intent only after proving that `current` still
+    /// points at the release being rolled back and that the target release is
+    /// fully verified.
+    pub fn revalidate(self) -> Result<RevalidatedRollbackPlan, ProvisionError> {
+        self.validate_now()?;
+        Ok(RevalidatedRollbackPlan { plan: self })
+    }
+
+    fn validate_now(&self) -> Result<(), ProvisionError> {
+        #[cfg(not(unix))]
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::UnsupportedPlatform));
+        }
+        #[cfg(unix)]
+        {
+            let current = validate_current_pointer(
+                &self.current_path,
+                &self.releases_root,
+                self.expected_owner,
+                &self.owner_verification,
+            )?;
+            if current != self.expected_current_release {
+                return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+            }
+            validate_release_target(
+                &self.target_release,
+                &self.releases_root,
+                self.expected_owner,
+                &self.owner_verification,
+            )
+        }
+    }
+}
+
+/// Opaque proof for a rollback whose current pointer and target release were
+/// both validated.  It has no public constructor or mutable path state.
+pub struct RevalidatedRollbackPlan {
+    plan: RollbackPlan,
+}
+
+impl RevalidatedRollbackPlan {
+    /// Repeat rollback checks under the owner-side root lock immediately before
+    /// replacing `current`.
+    pub fn revalidate(self) -> Result<Self, ProvisionError> {
+        self.plan.validate_now()?;
+        Ok(self)
+    }
+
+    pub fn promotion(&self) -> Promotion {
+        self.plan.promotion
+    }
+
+    pub fn current_path(&self) -> &Path {
+        &self.plan.current_path
+    }
+
+    pub fn target_release(&self) -> &Path {
+        &self.plan.target_release
+    }
+}
+
+impl fmt::Debug for RevalidatedRollbackPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RevalidatedRollbackPlan")
+            .field("promotion", &self.plan.promotion)
+            .field("target_release_present", &self.plan.target_release.exists())
+            .finish()
+    }
+}
+
+/// Proof-carrying rollback owner boundary.  The implementation must consume
+/// the proof and perform its final revalidation under the same root lock used
+/// for promotion.
+pub trait OwnerAtomicRollback {
+    fn rollback(&self, plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError>;
+}
+
+/// Concrete Linux owner-side implementation for the proof-carrying seam.
+/// Construction accepts no paths: every root and target is derived from a
+/// validated plan.  The default production request still requires the
+/// external privileged owner to invoke this type explicitly.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FilesystemOwnerAtomicInstaller;
+
+impl FilesystemOwnerAtomicInstaller {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl OwnerAtomicInstaller for FilesystemOwnerAtomicInstaller {
+    fn promote(&self, plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
+        #[cfg(target_os = "linux")]
+        {
+            promote_linux(plan)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = plan;
+            Err(ProvisionError::new(ProvisionErrorCode::UnsupportedPlatform))
+        }
+    }
+}
+
+impl OwnerAtomicRollback for FilesystemOwnerAtomicInstaller {
+    fn rollback(&self, plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
+        #[cfg(target_os = "linux")]
+        {
+            rollback_linux(plan)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = plan;
+            Err(ProvisionError::new(ProvisionErrorCode::UnsupportedPlatform))
+        }
+    }
+}
+
+fn owner_install_root(
+    current_path: &Path,
+    releases_root: &Path,
+    release_path: &Path,
+    target_release: &Path,
+) -> Result<PathBuf, ProvisionError> {
+    if !is_safe_absolute_path(current_path)
+        || !is_safe_absolute_path(releases_root)
+        || !is_safe_absolute_path(release_path)
+        || !is_safe_absolute_path(target_release)
+        || current_path.file_name().and_then(|name| name.to_str()) != Some("current")
+        || releases_root.file_name().and_then(|name| name.to_str()) != Some("releases")
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
+    }
+    let install_root = current_path
+        .parent()
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Path))?;
+    if releases_root.parent() != Some(install_root)
+        || release_path.parent() != Some(releases_root)
+        || target_release.parent() != Some(releases_root)
+        || release_path == target_release
+        || !release_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_safe_release_id)
+        || !target_release
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_safe_release_id)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
+    }
+    Ok(install_root.to_path_buf())
+}
+
+#[cfg(target_os = "linux")]
+struct OwnerRootLock(File);
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnerRootLock {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::NonBlockingUnlock);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_owner_directory(path: &Path, expected_owner: u32) -> Result<File, ProvisionError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+
+    let relative = path
+        .strip_prefix("/")
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Path))?;
+    let filesystem_root = open("/", OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::OwnerLock))?;
+    let directory = File::from(
+        openat2(
+            &filesystem_root,
+            relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::OwnerLock))?,
+    );
+    let metadata = directory
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::OwnerLock))?;
+    if !metadata.file_type().is_dir() {
+        return Err(ProvisionError::new(ProvisionErrorCode::OwnerLock));
+    }
+    verify_metadata(&metadata, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::OwnerLock))?;
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn lock_owner_root(
+    install_root: &Path,
+    expected_owner: u32,
+) -> Result<OwnerRootLock, ProvisionError> {
+    use rustix::fs::{FlockOperation, flock};
+
+    let root = open_owner_directory(install_root, expected_owner)?;
+    flock(&root, FlockOperation::NonBlockingLockExclusive)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::OwnerLock))?;
+    Ok(OwnerRootLock(root))
+}
+
+#[cfg(target_os = "linux")]
+fn fsync_owner_directory(root: &File, code: ProvisionErrorCode) -> Result<(), ProvisionError> {
+    rustix::fs::fsync(root).map_err(|_| ProvisionError::new(code))
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_owner_symlink(
+    root: &File,
+    name: &str,
+    code: ProvisionErrorCode,
+) -> Result<(), ProvisionError> {
+    use rustix::fs::{AtFlags, fsync, unlinkat};
+
+    unlinkat(root, name, AtFlags::empty()).map_err(|_| ProvisionError::new(code))?;
+    fsync(root).map_err(|_| ProvisionError::new(code))
+}
+
+#[cfg(target_os = "linux")]
+fn current_matches_release(
+    current_path: &Path,
+    releases_root: &Path,
+    expected_release: &Path,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+) -> bool {
+    validate_current_pointer(
+        current_path,
+        releases_root,
+        expected_owner,
+        owner_verification,
+    )
+    .is_ok_and(|current| current == expected_release)
+}
+
+#[cfg(target_os = "linux")]
+fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open};
+    use rustix::fs::{RenameFlags, fsync, openat2, renameat_with, symlinkat};
+    use std::os::unix::fs::MetadataExt;
+
+    let install_root = owner_install_root(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        plan.release_path(),
+        plan.rollback_target(),
+    )?;
+    let expected_owner = plan.plan.expected_owner;
+    let lock = lock_owner_root(&install_root, expected_owner)?;
+    let plan = plan.revalidate()?;
+    let owner_verification = &plan.plan.owner_verification;
+    let stage_fd = open_owner_directory(plan.stage_root(), expected_owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_identity = stage_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !stage_identity.file_type().is_dir() {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    verify_metadata(&stage_identity, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_dev = stage_identity.dev();
+    let stage_ino = stage_identity.ino();
+
+    let stage_parent = plan
+        .stage_root()
+        .parent()
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_name = plan
+        .stage_root()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let release_name = plan
+        .release_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_parent_relative = stage_parent
+        .strip_prefix("/")
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let filesystem_root = open("/", OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_parent_fd = File::from(
+        openat2(
+            &filesystem_root,
+            stage_parent_relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?,
+    );
+    let stage_parent_metadata = stage_parent_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    verify_metadata(&stage_parent_metadata, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let releases_fd = open_owner_directory(&plan.plan.releases_root, expected_owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_path_metadata = fs::symlink_metadata(plan.stage_root())
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !stage_path_metadata.file_type().is_dir()
+        || stage_path_metadata.dev() != stage_dev
+        || stage_path_metadata.ino() != stage_ino
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    verify_metadata(&stage_path_metadata, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+
+    renameat_with(
+        &stage_parent_fd,
+        stage_name,
+        &releases_fd,
+        release_name,
+        RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    fsync(&stage_parent_fd).map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    fsync(&releases_fd).map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    fsync(&lock.0).map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+
+    let release_fd = open_owner_directory(plan.release_path(), expected_owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let release_identity = release_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !release_identity.file_type().is_dir()
+        || release_identity.dev() != stage_dev
+        || release_identity.ino() != stage_ino
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    validate_release_tree(
+        plan.release_path(),
+        &plan.plan.release_id,
+        &plan.plan.git_revision,
+        &plan.plan.bindings,
+        expected_owner,
+        plan.release_path(),
+        owner_verification,
+    )?;
+
+    if !current_matches_release(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        plan.rollback_target(),
+        expected_owner,
+        owner_verification,
+    ) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    let target = plan
+        .release_path()
+        .strip_prefix(&install_root)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?
+        .to_str()
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let temporary = format!(".current.{}.next", uuid::Uuid::new_v4());
+    symlinkat(target, &lock.0, &temporary)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if fsync(&lock.0).is_err() {
+        let _ = cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion);
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    if !current_matches_release(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        plan.rollback_target(),
+        expected_owner,
+        owner_verification,
+    ) {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion)?;
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    if renameat_with(
+        &lock.0,
+        &temporary,
+        &lock.0,
+        "current",
+        RenameFlags::empty(),
+    )
+    .is_err()
+    {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion)?;
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    fsync_owner_directory(&lock.0, ProvisionErrorCode::Promotion)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
+    use rustix::fs::{RenameFlags, fsync, renameat_with, symlinkat};
+
+    let install_root = owner_install_root(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        &plan.plan.expected_current_release,
+        plan.target_release(),
+    )?;
+    let expected_owner = plan.plan.expected_owner;
+    let lock = lock_owner_root(&install_root, expected_owner)?;
+    let plan = plan.revalidate()?;
+    let owner_verification = &plan.plan.owner_verification;
+    if !current_matches_release(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        &plan.plan.expected_current_release,
+        expected_owner,
+        owner_verification,
+    ) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
+    }
+    let target = plan
+        .target_release()
+        .strip_prefix(&install_root)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Rollback))?
+        .to_str()
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Rollback))?;
+    let temporary = format!(".current.{}.rollback", uuid::Uuid::new_v4());
+    symlinkat(target, &lock.0, &temporary)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Rollback))?;
+    fsync(&lock.0).map_err(|_| {
+        let _ = cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback);
+        ProvisionError::new(ProvisionErrorCode::Rollback)
+    })?;
+    if !current_matches_release(
+        plan.current_path(),
+        &plan.plan.releases_root,
+        &plan.plan.expected_current_release,
+        expected_owner,
+        owner_verification,
+    ) {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
+        return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
+    }
+    if renameat_with(
+        &lock.0,
+        &temporary,
+        &lock.0,
+        "current",
+        RenameFlags::empty(),
+    )
+    .is_err()
+    {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
+        return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
+    }
+    fsync_owner_directory(&lock.0, ProvisionErrorCode::Rollback)?;
+    Ok(())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -476,6 +944,9 @@ pub enum ProvisionErrorCode {
     SecretMaterial,
     CurrentPointer,
     Signature,
+    OwnerLock,
+    Promotion,
+    Rollback,
 }
 
 impl ProvisionErrorCode {
@@ -495,6 +966,9 @@ impl ProvisionErrorCode {
             Self::SecretMaterial => "secret_material_present",
             Self::CurrentPointer => "invalid_current_pointer",
             Self::Signature => "invalid_release_signature",
+            Self::OwnerLock => "owner_lock_unavailable",
+            Self::Promotion => "atomic_promotion_failed",
+            Self::Rollback => "rollback_failed",
         }
     }
 }
@@ -584,6 +1058,11 @@ fn validate_request(request: &ProvisionRequest) -> Result<(), ProvisionError> {
     if !is_safe_absolute_path(&request.stage_root)
         || !is_safe_absolute_path(&request.current_path)
         || !is_safe_absolute_path(&request.releases_root)
+        || !request
+            .stage_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_safe_release_id)
         || request.stage_root == request.releases_root
         || request.stage_root.starts_with(&request.releases_root)
     {
@@ -1429,6 +1908,56 @@ fn validate_current_pointer(
         owner_verification,
     )?;
     Ok(current)
+}
+
+#[cfg(unix)]
+fn validate_release_target(
+    target: &Path,
+    releases_root: &Path,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+) -> Result<(), ProvisionError> {
+    if !target.starts_with(releases_root)
+        || target == releases_root
+        || !target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_safe_release_id)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+    }
+    let provenance: Provenance = read_json(
+        &target.join(PROVENANCE_FILE),
+        expected_owner,
+        MAX_PROVENANCE_BYTES,
+        ProvisionErrorCode::Provenance,
+    )?;
+    let release_id = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    if provenance.schema != PROVENANCE_SCHEMA
+        || provenance.release_id != release_id
+        || !is_git_revision(&provenance.git_revision)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
+    }
+    let provision_receipt: ProvisionReceipt = read_json(
+        &target.join(PROVISION_RECEIPT_FILE),
+        expected_owner,
+        MAX_PROVISION_RECEIPT_BYTES,
+        ProvisionErrorCode::Receipt,
+    )?;
+    validate_binding_shape(&provision_receipt.bindings)?;
+    validate_release_tree(
+        target,
+        release_id,
+        &provenance.git_revision,
+        &provision_receipt.bindings,
+        expected_owner,
+        target,
+        owner_verification,
+    )
 }
 
 #[cfg(unix)]
@@ -2360,6 +2889,169 @@ mod tests {
         );
         assert!(!fixture.stage.exists());
         assert_eq!(rollback.promotion(), Promotion::TemporarySymlinkRename);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_installer_promotes_without_overwriting_release() {
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let before = fs::canonicalize(&fixture.current).expect("previous current");
+        FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("revalidated plan"))
+            .expect("owner promotion");
+
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            fixture.releases.join(&fixture.release_id)
+        );
+        assert_ne!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(
+            fs::symlink_metadata(&fixture.current)
+                .expect("current metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(fixture.releases.join(&fixture.release_id).exists());
+        assert!(!fixture.stage.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_installer_rejects_lock_conflict_and_existing_release() {
+        use rustix::fs::{FlockOperation, flock};
+
+        let fixture = Fixture::new();
+        let root_lock = File::open(&fixture.root).expect("install root");
+        flock(&root_lock, FlockOperation::NonBlockingLockExclusive).expect("test lock");
+        let plan = fixture.request().validate().expect("valid plan");
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let error = FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("revalidated plan"))
+            .expect_err("lock conflict");
+        assert_eq!(error.code(), ProvisionErrorCode::OwnerLock);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        flock(&root_lock, FlockOperation::NonBlockingUnlock).expect("unlock test lock");
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let proof = plan.revalidate().expect("revalidated plan");
+        fs::create_dir(proof.release_path()).expect("occupy release path");
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let error = FilesystemOwnerAtomicInstaller::new()
+            .promote(proof)
+            .expect_err("existing release");
+        assert_eq!(error.code(), ProvisionErrorCode::CurrentPointer);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_installer_revalidates_stale_current_and_stage_attacks() {
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let proof = plan.revalidate().expect("revalidated plan");
+        fs::remove_file(&fixture.current).expect("remove current");
+        fs::write(&fixture.current, b"not a symlink").expect("regular current");
+        let error = FilesystemOwnerAtomicInstaller::new()
+            .promote(proof)
+            .expect_err("current type attack");
+        assert_eq!(error.code(), ProvisionErrorCode::CurrentPointer);
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let proof = plan.revalidate().expect("revalidated plan");
+        fs::remove_dir_all(&fixture.stage).expect("remove stage");
+        fs::create_dir(fixture.root.join("outside")).expect("outside directory");
+        symlink(fixture.root.join("outside"), &fixture.stage).expect("stage symlink");
+        let error = FilesystemOwnerAtomicInstaller::new()
+            .promote(proof)
+            .expect_err("stage symlink attack");
+        assert!(matches!(
+            error.code(),
+            ProvisionErrorCode::Layout | ProvisionErrorCode::Path
+        ));
+        assert!(
+            fs::symlink_metadata(&fixture.stage)
+                .expect("stage metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_installer_preserves_release_when_current_promotion_fails() {
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555))
+            .expect("make install root non-writable");
+        let result = FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("revalidated plan"));
+        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o755))
+            .expect("restore install root mode");
+
+        assert_eq!(
+            result.expect_err("current promotion must fail").code(),
+            ProvisionErrorCode::Promotion
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.releases.join(&fixture.release_id).exists());
+        assert!(!fixture.stage.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_installer_rolls_back_without_deleting_releases() {
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let rollback = plan.rollback_plan();
+        FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("revalidated plan"))
+            .expect("owner promotion");
+        let candidate = fixture.releases.join(&fixture.release_id);
+        FilesystemOwnerAtomicInstaller::new()
+            .rollback(rollback.revalidate().expect("rollback proof"))
+            .expect("owner rollback");
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            fixture.releases.join("previous")
+        );
+        assert!(candidate.exists());
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let rollback = plan.rollback_plan();
+        FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("revalidated plan"))
+            .expect("owner promotion");
+        fs::remove_file(&fixture.current).expect("remove current");
+        symlink(fixture.releases.join("previous"), &fixture.current).expect("stale current");
+        let error = rollback.revalidate().expect_err("stale rollback current");
+        assert_eq!(error.code(), ProvisionErrorCode::CurrentPointer);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            fixture.releases.join("previous")
+        );
+        assert!(fixture.releases.join(&fixture.release_id).exists());
     }
 
     #[test]

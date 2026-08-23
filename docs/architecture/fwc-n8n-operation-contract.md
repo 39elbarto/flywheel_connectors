@@ -66,10 +66,18 @@ an opaque `RevalidatedInstallPlan`; the typed `OwnerAtomicInstaller::promote`
 consumes that proof and exposes only fixed read-only stage/release/current/
 rollback paths. The owner implementation must revalidate the proof once more
 while its root-side concurrency guard is held immediately before promotion.
-The proof cannot establish atomicity against an unrelated concurrent root
-writer. This repository deliberately does not execute privileged stage rename,
-`current` symlink switch, systemd, or production rollback acceptance; those
-remain separate owner gates.
+The Linux `FilesystemOwnerAtomicInstaller` consumes only that proof, derives
+the fixed install root from proof paths, takes an exclusive root lock, repeats
+proof validation under the lock, uses no-follow directory opens and
+`renameat(..., NOREPLACE)` for stage-to-release promotion, fsyncs the affected
+directories, and atomically replaces `current` through a temporary relative
+symlink. Its rollback seam uses the same lock and revalidation and never
+deletes releases; a failed `current` promotion leaves the immutable release
+and old pointer where possible. Non-Linux fails closed. The default CLI/live
+`/usr/local` install, `current` switch, systemd invocation, and production
+rollback acceptance still do not call this implementation and remain separate
+owner gates. The proof cannot establish atomicity against an unrelated writer
+that ignores the owner lock.
 The rollback target is subjected to the same complete self-relative artifact,
 provenance, provision-receipt, inventory, and policy validation; only its git
 revision may differ from the candidate. The remaining trusted-concurrent-root

@@ -63,8 +63,7 @@ Important runtime truths:
   bounded, externally signed `approval_token` (the token is redacted from
   debug/log output); `approvalRef` alone is never sufficient. The host verifies
   `FCP_HOST_APPROVAL_PUBLIC_KEY` or `_FILE`, exact operation/server/resource
-  binding, expiry, and one-shot claim before provider access (after bounded
-  credential bootstrap), takes a
+  binding, expiry, and one-shot claim before credential/provider access, takes a
   per-resource lock, consumes the validated token_id==approvalRef once via a private replay marker, writes redaction-safe intent/outcome receipts,
   performs one provider attempt, and requires independent GET readback. It
   never retries an unknown result and never implicitly publishes, activates,

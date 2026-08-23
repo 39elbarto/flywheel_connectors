@@ -265,9 +265,9 @@ must carry an externally signed `approval_token`, verified with
 `FCP_HOST_APPROVAL_PUBLIC_KEY` or `_FILE`. Verification requires
 `token_id == approvalRef`, the `fcp.n8n` connector and exact operation, `z:work`,
 the canonical binding digest over `{server_id, resource_uri, operation, input}`,
-expiry, and the exact request constraints. After bounded credential bootstrap
-and before provider access, the host persists a private `token_id` replay marker
-(after signature and binding validation) and then the request claim; a second use of that token
+expiry, and the exact request constraints. Before credential/provider access,
+the host persists a private `token_id` replay marker (after signature and
+binding validation) and then the request claim; a second use of that token
 fails closed even if its idempotency key differs. Missing, invalid, mismatched,
 or already-consumed tokens never reach provider I/O. Official-MCP lifecycle
 calls bind the child `fcp.mcp-bridge` payload digest and policy constraints in

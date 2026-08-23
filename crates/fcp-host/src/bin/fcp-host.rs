@@ -7395,9 +7395,10 @@ fn validate_external_n8n_approval(
             "n8n external approval token does not match approvalRef or expiry".to_string(),
         ));
     }
-    if &token.zone_id != expected_zone {
+    let work_zone = ZoneId::work();
+    if expected_zone != &work_zone || token.zone_id != work_zone {
         return Err(HostError::PreflightFailed(
-            "n8n external approval token zone binding was denied".to_string(),
+            "n8n external approval token must be bound to z:work".to_string(),
         ));
     }
     let ApprovalScope::Execution(scope) = &token.scope else {
@@ -13055,6 +13056,19 @@ async fn async_n8n_read_only_run_once(
         )
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     }
+    #[cfg(unix)]
+    let claim = if is_write && !mcp_access_dry_run {
+        Some(
+            n8n_run_once_claim(&plan)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if is_write {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+    }
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -13130,19 +13144,6 @@ async fn async_n8n_read_only_run_once(
     let capability_token =
         capability_token_from_cbor_b64(&token_b64, "n8n read-only run-once capability")
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
-    #[cfg(unix)]
-    let claim = if is_write && !mcp_access_dry_run {
-        Some(
-            n8n_run_once_claim(&plan)
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
-        )
-    } else {
-        None
-    };
-    #[cfg(not(unix))]
-    if is_write {
-        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
-    }
     let (request, trusted_resource) =
         build_n8n_read_only_invoke_request(plan.clone(), capability_token, approval_token);
     #[cfg(unix)]
@@ -13260,6 +13261,19 @@ async fn async_n8n_official_mcp_run_once(
         })
         .transpose()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    #[cfg(unix)]
+    let claim = if let Some(claim_plan) = claim_plan.as_ref() {
+        Some(
+            n8n_run_once_claim(claim_plan)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if claim_plan.is_some() {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+    }
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -13337,19 +13351,6 @@ async fn async_n8n_official_mcp_run_once(
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
     let (request, trusted_resource) = build_n8n_official_mcp_invoke_request(plan, capability_token);
 
-    #[cfg(unix)]
-    let claim = if let Some(claim_plan) = claim_plan.as_ref() {
-        Some(
-            n8n_run_once_claim(claim_plan)
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
-        )
-    } else {
-        None
-    };
-    #[cfg(not(unix))]
-    if claim_plan.is_some() {
-        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
-    }
     #[cfg(unix)]
     if let (Some(claim), Some(claim_plan)) = (claim.as_ref(), claim_plan.as_ref()) {
         claim
@@ -32981,7 +32982,7 @@ done"#;
             schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
             server_id: N8nReadOnlyServerId::Eec,
             operation: "n8n.workflows.lifecycle".to_string(),
-            zone_id: ZoneId::private().to_string(),
+            zone_id: ZoneId::work().to_string(),
             resource_uri: format!(
                 "fwc-mcp-bridge://eec/tools/{}",
                 if action == "publish" {
@@ -33096,7 +33097,7 @@ done"#;
             "chat-lifecycle-approval",
             "fcp.mcp-bridge",
             plan.operation.as_str(),
-            &ZoneId::private(),
+            &ZoneId::work(),
             mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
             &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
             Some(&signing_key.verifying_key()),

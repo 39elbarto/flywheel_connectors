@@ -599,6 +599,18 @@ impl Workflow {
             .and_then(Value::as_bool)
     }
 
+    /// Return the MCP availability state as represented by the public REST
+    /// workflow schema used by the reconciliation operation.
+    ///
+    /// n8n returns a settings object but omits `availableInMCP` when the
+    /// workflow is not available in MCP. Keep the general projection above
+    /// presence-aware, while normalizing this REST omission only for the
+    /// guarded reconciliation path.
+    #[must_use]
+    pub fn available_in_mcp_for_reconcile(&self) -> Option<bool> {
+        rest_mcp_availability(self.settings.as_ref())
+    }
+
     #[must_use]
     pub fn into_view(self) -> WorkflowView {
         let available_in_mcp = self.available_in_mcp();
@@ -631,6 +643,21 @@ impl WorkflowDetail {
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("availableInMCP"))
             .and_then(Value::as_bool)
+    }
+
+    /// Return the MCP availability state as represented by the public REST
+    /// workflow schema used by the reconciliation operation.
+    #[must_use]
+    pub fn available_in_mcp_for_reconcile(&self) -> Option<bool> {
+        rest_mcp_availability(self.settings.as_ref())
+    }
+}
+
+fn rest_mcp_availability(settings: Option<&Value>) -> Option<bool> {
+    let settings = settings?.as_object()?;
+    match settings.get("availableInMCP") {
+        Some(value) => value.as_bool(),
+        None => Some(false),
     }
 }
 
@@ -803,6 +830,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(w.active, Some(false));
+    }
+
+    #[test]
+    fn rest_mcp_availability_normalizes_only_an_object_without_the_flag() {
+        let omitted: Workflow = serde_json::from_value(json!({
+            "id": "omitted",
+            "settings": {"executionOrder": "v1"}
+        }))
+        .unwrap();
+        assert_eq!(omitted.available_in_mcp(), None);
+        assert_eq!(omitted.available_in_mcp_for_reconcile(), Some(false));
+
+        for (settings, expected) in [
+            (json!({"availableInMCP": false}), Some(false)),
+            (json!({"availableInMCP": true}), Some(true)),
+            (json!({"availableInMCP": null}), None),
+            (json!(null), None),
+        ] {
+            let workflow: Workflow = serde_json::from_value(json!({
+                "id": "state",
+                "settings": settings,
+            }))
+            .unwrap();
+            assert_eq!(workflow.available_in_mcp_for_reconcile(), expected);
+        }
+
+        let missing: Workflow = serde_json::from_value(json!({"id": "missing"})).unwrap();
+        assert_eq!(missing.available_in_mcp_for_reconcile(), None);
     }
 
     #[test]

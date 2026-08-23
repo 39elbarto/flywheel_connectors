@@ -407,6 +407,13 @@ This packet documents and verifies:
 | `n8n.workflows.lifecycle` | baseline REST `GET`, one exact official-MCP `publish_workflow`/`unpublish_workflow` call, then independent REST detail `GET` | `n8n.workflows.lifecycle` | `Risky` | `High` | `BestEffort` | id, `action=publish|unpublish`, optional publish `versionId`, full lifecycle precondition, exact approval reference, UUID idempotency key |
 | `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one full required `PUT /workflows/{id}` with only the logical `settings.availableInMCP` change, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef, exact dryRunDigest, and UUID idempotencyKey |
 
+For `n8n.mcp_access.reconcile`, a present REST `settings` object without an
+`availableInMCP` key is normalized to `false`: n8n's public workflow REST
+serializer omits this default-off flag. A missing, `null`, or non-object
+`settings` value remains unknown and fails closed. The general workflow-list
+projection remains presence-aware and does not apply this normalization to
+ordinary read output.
+
 Read output boundary:
 - Workflow list items keep the compact metadata projection (`id`, nullable `name` and
   description/state metadata, project/folder timestamps, `availableInMCP`, and tag

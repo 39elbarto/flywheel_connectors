@@ -1050,7 +1050,7 @@ impl N8nConnector {
                 ));
                 continue;
             }
-            if baseline.available_in_mcp() != item.available_in_mcp {
+            if baseline.available_in_mcp_for_reconcile() != item.available_in_mcp {
                 exceptions.push(mcp_access_exception(
                     item,
                     reconcile.desired,
@@ -1058,10 +1058,10 @@ impl N8nConnector {
                 ));
                 continue;
             }
-            if baseline.available_in_mcp() == Some(reconcile.desired) {
+            if baseline.available_in_mcp_for_reconcile() == Some(reconcile.desired) {
                 skipped.push(McpAccessPlanItem {
                     id: item.id.clone(),
-                    available_in_mcp: baseline.available_in_mcp(),
+                    available_in_mcp: baseline.available_in_mcp_for_reconcile(),
                     desired: reconcile.desired,
                     reason: "already_desired_on_recheck",
                 });
@@ -1118,7 +1118,7 @@ impl N8nConnector {
                 ));
                 continue;
             };
-            if readback.available_in_mcp() != Some(reconcile.desired) {
+            if readback.available_in_mcp_for_reconcile() != Some(reconcile.desired) {
                 exceptions.push(mcp_access_exception(
                     item,
                     reconcile.desired,
@@ -1133,7 +1133,7 @@ impl N8nConnector {
             } else {
                 changed.push(McpAccessPlanItem {
                     id: item.id.clone(),
-                    available_in_mcp: readback.available_in_mcp(),
+                    available_in_mcp: readback.available_in_mcp_for_reconcile(),
                     desired: reconcile.desired,
                     reason: "updated_and_verified",
                 });
@@ -3450,7 +3450,7 @@ fn plan_mcp_access_reconcile(
         }
         let item = |reason| McpAccessPlanItem {
             id: workflow.id.clone(),
-            available_in_mcp: workflow.available_in_mcp(),
+            available_in_mcp: workflow.available_in_mcp_for_reconcile(),
             desired: input.desired,
             reason,
         };
@@ -3462,7 +3462,7 @@ fn plan_mcp_access_reconcile(
             }
             continue;
         }
-        let Some(current) = workflow.available_in_mcp() else {
+        let Some(current) = workflow.available_in_mcp_for_reconcile() else {
             exceptions.push(item("availability_state_unknown"));
             continue;
         };
@@ -5081,7 +5081,7 @@ mod tests {
             {
                 "id": "unknown-availability",
                 "isArchived": false,
-                "settings": {"timeSavedMode": "fixed"}
+                "settings": null
             }
         ]))
         .unwrap();
@@ -5093,6 +5093,28 @@ mod tests {
         assert_eq!(plan.skipped[1].reason, "archived");
         assert_eq!(plan.exceptions[0].reason, "availability_state_unknown");
         assert!(plan.readback_digest.starts_with("blake3-256:"));
+    }
+
+    #[test]
+    fn mcp_access_dry_run_normalizes_rest_omitted_false() {
+        let input = parse_mcp_access_input(&json!({
+            "scope": "workflow_ids",
+            "workflowIds": ["rest-default-off"],
+            "desired": true,
+            "dryRun": true,
+        }))
+        .expect("valid dry-run input");
+        let workflows: Vec<Workflow> = serde_json::from_value(json!([{
+            "id": "rest-default-off",
+            "isArchived": false,
+            "settings": {"executionOrder": "v1"}
+        }]))
+        .unwrap();
+
+        let plan = plan_mcp_access_reconcile(&input, &workflows, "eec").unwrap();
+        assert_eq!(plan.planned.len(), 1);
+        assert_eq!(plan.planned[0].available_in_mcp, Some(false));
+        assert!(plan.exceptions.is_empty());
     }
 
     #[test]

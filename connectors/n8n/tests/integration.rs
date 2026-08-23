@@ -3166,6 +3166,45 @@ async fn tags_list_timeout_uses_shared_transport_error_mapping() {
 // -- Workflows Get --
 
 #[fcp_async_core::runtime::test]
+async fn mcp_access_dry_run_normalizes_rest_omitted_false() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/wf-rest-default-off"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "wf-rest-default-off",
+            "name": "REST default-off MCP",
+            "active": false,
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "isArchived": false,
+            "nodes": [{"id": "manual"}],
+            "connections": {},
+            "settings": {"executionOrder": "v1"},
+            "activeVersion": null
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.mcp_access.reconcile",
+        json!({
+            "scope": "workflow_ids",
+            "workflowIds": ["wf-rest-default-off"],
+            "desired": true,
+            "dryRun": true
+        }),
+    )
+    .await
+    .expect("REST omitted false should be a planned change");
+
+    assert_eq!(result["planned"][0]["id"], "wf-rest-default-off");
+    assert_eq!(result["planned"][0]["availableInMCP"], false);
+    assert!(result["exceptions"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
 async fn mcp_access_apply_preserves_workflow_payload_and_independent_readback() {
     let server = MockServer::start().await;
     let baseline = json!({

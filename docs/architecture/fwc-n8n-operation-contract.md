@@ -565,6 +565,12 @@ only to workflows present at that time; a newly created workflow is handled on
 the next explicit bounded `all_current` invocation. No daemon, scheduler, or
 implicit future-workflow policy is part of this operation.
 
+For this operation only, a present REST `settings` object with no
+`availableInMCP` key is normalized to `false`, matching n8n's public workflow
+serializer for the default-off state. Missing, `null`, or non-object
+`settings` remains unknown and fails closed. The ordinary workflow read
+projection remains presence-aware and does not infer a value for its output.
+
 The current host implementation keeps the generic owned connector frame and
 RPC timeout at `64 KiB` and `10 seconds`. Only typed
 `n8n.workflows.list` and `n8n.mcp_access.reconcile` receive the bounded

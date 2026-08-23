@@ -766,7 +766,7 @@ impl N8nConnector {
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft"
         ) {
             let plan = Self::prepare_draft_write(operation, &input)?;
-            self.require_draft_approval(operation, &input, &params)?;
+            self.require_draft_approval(operation, &input, canonical_resource, &params)?;
             Some(plan)
         } else {
             None
@@ -775,7 +775,12 @@ impl N8nConnector {
         if operation == "n8n.workflows.lifecycle" {
             let lifecycle =
                 parse_workflow_lifecycle_input(&input).map_err(|error| error.to_fcp_error())?;
-            self.require_workflow_lifecycle_approval(&lifecycle, &input, &params)?;
+            self.require_workflow_lifecycle_approval(
+                &lifecycle,
+                &input,
+                canonical_resource,
+                &params,
+            )?;
         }
 
         if operation == "n8n.workflows.activate" {
@@ -789,7 +794,7 @@ impl N8nConnector {
         if operation == "n8n.mcp_access.reconcile" {
             let reconcile = parse_mcp_access_input(&input).map_err(|error| error.to_fcp_error())?;
             if !reconcile.dry_run {
-                self.require_mcp_access_approval(&reconcile, &input, &params)?;
+                self.require_mcp_access_approval(&reconcile, &input, canonical_resource, &params)?;
             }
         }
 
@@ -1687,8 +1692,10 @@ impl N8nConnector {
         &self,
         operation: &str,
         input: &Value,
+        canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
+        let server_id = self.configured_server_id()?.to_owned();
         let typed: WorkflowDraftMutationInput =
             serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
                 code: 1003,
@@ -1718,6 +1725,8 @@ impl N8nConnector {
                     &typed.guard.approval_ref,
                     self.zone_id.as_ref(),
                     input,
+                    &server_id,
+                    canonical_resource,
                     current_time_ms(),
                 )
             })
@@ -1735,8 +1744,10 @@ impl N8nConnector {
         &self,
         input: &WorkflowLifecycleInput,
         raw_input: &Value,
+        canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
+        let server_id = self.configured_server_id()?.to_owned();
         let approval_values = params
             .get("approval_tokens")
             .and_then(Value::as_array)
@@ -1761,6 +1772,8 @@ impl N8nConnector {
                     &input.guard.approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
+                    &server_id,
+                    canonical_resource,
                     current_time_ms(),
                 )
             })
@@ -1778,8 +1791,10 @@ impl N8nConnector {
         &self,
         input: &McpAccessReconcileInput,
         raw_input: &Value,
+        canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
+        let server_id = self.configured_server_id()?.to_owned();
         let guard = input
             .guard
             .as_ref()
@@ -1811,6 +1826,8 @@ impl N8nConnector {
                     &guard.approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
+                    &server_id,
+                    canonical_resource,
                     current_time_ms(),
                 )
             })
@@ -2419,6 +2436,8 @@ fn is_matching_draft_approval(
     approval_ref: &str,
     zone_id: Option<&ZoneId>,
     request_input: &Value,
+    server_id: &str,
+    resource_uri: &str,
     now_ms: u64,
 ) -> bool {
     if approval.token_id != approval_ref
@@ -2441,13 +2460,28 @@ fn is_matching_draft_approval(
         return false;
     };
     scope.input_constraints.is_empty()
-        && approval_input_hash(request_input).is_some_and(|actual| actual == expected_hash)
+        && approval_binding_hash(server_id, resource_uri, operation, request_input)
+            .is_some_and(|actual| actual == expected_hash)
 }
 
 fn approval_input_hash(input: &Value) -> Option<[u8; 32]> {
     fcp_crypto::canonicalize::to_deterministic_cbor(input)
         .ok()
         .map(|bytes| *blake3::hash(&bytes).as_bytes())
+}
+
+fn approval_binding_hash(
+    server_id: &str,
+    resource_uri: &str,
+    operation: &str,
+    input: &Value,
+) -> Option<[u8; 32]> {
+    approval_input_hash(&serde_json::json!({
+        "server_id": server_id,
+        "resource_uri": resource_uri,
+        "operation": operation,
+        "input": input,
+    }))
 }
 
 fn current_time_ms() -> u64 {
@@ -6549,6 +6583,7 @@ mod tests {
 
     #[test]
     fn draft_approval_requires_exact_binding_and_expiry() {
+        let resource_uri = "fwc-n8n://eec/workflows/1001";
         let request_input = json!({
             "id": "1001",
             "name": "Exact approved draft",
@@ -6575,7 +6610,12 @@ mod tests {
                 connector_id: "fcp.n8n".into(),
                 method_pattern: "n8n.workflows.update_draft".into(),
                 request_object_id: None,
-                input_hash: approval_input_hash(&request_input),
+                input_hash: approval_binding_hash(
+                    "eec",
+                    resource_uri,
+                    "n8n.workflows.update_draft",
+                    &request_input,
+                ),
                 input_constraints: Vec::new(),
             }),
             ZoneId::work(),
@@ -6587,6 +6627,8 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
+            "eec",
+            resource_uri,
             now,
         ));
 
@@ -6598,6 +6640,8 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &mismatched,
+            "eec",
+            resource_uri,
             now,
         ));
         let constrained = ApprovalToken::approved(
@@ -6609,7 +6653,12 @@ mod tests {
                 connector_id: "fcp.n8n".into(),
                 method_pattern: "n8n.workflows.update_draft".into(),
                 request_object_id: None,
-                input_hash: approval_input_hash(&request_input),
+                input_hash: approval_binding_hash(
+                    "eec",
+                    resource_uri,
+                    "n8n.workflows.update_draft",
+                    &request_input,
+                ),
                 input_constraints: vec![fcp_prelude::InputConstraint {
                     pointer: "/name".into(),
                     expected: request_input["name"].clone(),
@@ -6624,6 +6673,8 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
+            "eec",
+            resource_uri,
             now,
         ));
         let expired = ApprovalToken::approved(
@@ -6641,6 +6692,8 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
+            "eec",
+            resource_uri,
             now,
         ));
     }

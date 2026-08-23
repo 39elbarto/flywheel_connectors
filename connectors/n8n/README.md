@@ -59,9 +59,13 @@ Important runtime truths:
   Draft writes are REST-only and accept a full typed graph, current-chat
   `approvalRef`, and UUID idempotency key. Update additionally requires the
   exact version, explicit `activeVersionId`, `active`, `isArchived`, and
-  credential-sensitive state digest. The host mints a fresh short-lived
-  approval bound to the exact normalized mutation, takes a per-resource lock,
-  consumes the approval once, writes redaction-safe intent/outcome receipts,
+  credential-sensitive state digest. The host run-once envelope must carry a
+  bounded, externally signed `approval_token` (the token is redacted from
+  debug/log output); `approvalRef` alone is never sufficient. The host verifies
+  `FCP_HOST_APPROVAL_PUBLIC_KEY` or `_FILE`, exact operation/server/resource
+  binding, expiry, and one-shot claim before provider access (after bounded
+  credential bootstrap), takes a
+  per-resource lock, consumes the validated token_id==approvalRef once via a private replay marker, writes redaction-safe intent/outcome receipts,
   performs one provider attempt, and requires independent GET readback. It
   never retries an unknown result and never implicitly publishes, activates,
   deactivates, archives, or changes credential objects. Runtime files live

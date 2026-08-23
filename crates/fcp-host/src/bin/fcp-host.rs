@@ -447,6 +447,10 @@ struct N8nReadOnlyRunOnceInput {
     zone_id: String,
     resource_uri: String,
     input: Value,
+    /// Optional owner/chat-signed approval transported out-of-band from the
+    /// operation input.  Never include this value in debug output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approval_token: Option<ApprovalToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deadline_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -463,6 +467,10 @@ impl fmt::Debug for N8nReadOnlyRunOnceInput {
             .field("zone_id", &self.zone_id)
             .field("resource_uri", &self.resource_uri)
             .field("input", &"[REDACTED]")
+            .field(
+                "approval_token",
+                &self.approval_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("deadline_ms", &self.deadline_ms)
             .field(
                 "correlation_id",
@@ -480,6 +488,7 @@ struct N8nReadOnlyRunOncePlan {
     zone_id: ZoneId,
     resource_uri: String,
     input: Value,
+    approval_token: Option<ApprovalToken>,
     deadline_ms: u64,
     correlation_id: Option<CorrelationId>,
     credential_binding: RunOnceCredentialBinding,
@@ -7341,6 +7350,84 @@ fn verify_approval_tokens(
     Ok(())
 }
 
+const MAX_N8N_EXTERNAL_APPROVAL_BYTES: usize = 64 * 1024;
+
+fn n8n_run_once_binding_hash(
+    server_id: N8nReadOnlyServerId,
+    resource_uri: &str,
+    operation: &str,
+    input: &Value,
+) -> HostResult<[u8; 32]> {
+    request_input_hash(&json!({
+        "server_id": server_id.as_str(),
+        "resource_uri": resource_uri,
+        "operation": operation,
+        "input": input,
+    }))
+}
+
+fn validate_external_n8n_approval(
+    token: Option<&ApprovalToken>,
+    approval_ref: &str,
+    expected_connector: &str,
+    expected_operation: &str,
+    expected_zone: &ZoneId,
+    expected_input_hash: [u8; 32],
+    expected_constraints: &[InputConstraint],
+    verifying_key: Option<&Ed25519VerifyingKey>,
+) -> HostResult<()> {
+    let token = token.ok_or_else(|| {
+        HostError::PreflightFailed(
+            "n8n write run-once requires an external owner approval token".to_string(),
+        )
+    })?;
+    let encoded = fcp_cbor::to_canonical_cbor(token).map_err(|_| {
+        HostError::PreflightFailed("n8n external approval token is not encodable".to_string())
+    })?;
+    if encoded.len() > MAX_N8N_EXTERNAL_APPROVAL_BYTES {
+        return Err(HostError::PreflightFailed(
+            "n8n external approval token exceeds the bounded size".to_string(),
+        ));
+    }
+    verify_approval_tokens(std::slice::from_ref(token), verifying_key)?;
+    if token.token_id != approval_ref || !token.is_valid(n8n_run_once_now_ms()) {
+        return Err(HostError::PreflightFailed(
+            "n8n external approval token does not match approvalRef or expiry".to_string(),
+        ));
+    }
+    if &token.zone_id != expected_zone {
+        return Err(HostError::PreflightFailed(
+            "n8n external approval token zone binding was denied".to_string(),
+        ));
+    }
+    let ApprovalScope::Execution(scope) = &token.scope else {
+        return Err(HostError::PreflightFailed(
+            "n8n external approval token scope is not execution".to_string(),
+        ));
+    };
+    if scope.connector_id != expected_connector
+        || scope.method_pattern != expected_operation
+        || scope.request_object_id.is_some()
+        || scope.input_hash != Some(expected_input_hash)
+        || scope.input_constraints.len() != expected_constraints.len()
+        || !scope.input_constraints.iter().all(|actual| {
+            expected_constraints.iter().any(|expected| {
+                actual.pointer == expected.pointer && actual.expected == expected.expected
+            })
+        })
+        || !expected_constraints.iter().all(|expected| {
+            scope.input_constraints.iter().any(|actual| {
+                actual.pointer == expected.pointer && actual.expected == expected.expected
+            })
+        })
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n external approval token target binding was denied".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn claims_principal(claims: &fcp_crypto::cose::CwtClaims) -> Option<&str> {
     claims
         .get_subject()
@@ -9047,6 +9134,26 @@ fn n8n_official_mcp_policy_request(
     trusted_resource: Option<&TrustedResourceBinding>,
     resource_uri: Option<&str>,
 ) -> HostResult<(InvokeRequest, [u8; 32])> {
+    if request.connector_id.as_str() == "fcp.n8n"
+        && trusted_resource.is_some()
+        && N8N_WRITE_OPERATIONS.contains(&request.operation.as_str())
+        && !(request.operation.as_str() == "n8n.mcp_access.reconcile"
+            && request.input.get("dryRun").and_then(Value::as_bool) == Some(true))
+    {
+        let binding = trusted_resource.expect("checked above");
+        let resource_uri = resource_uri.ok_or_else(|| {
+            HostError::PreflightFailed("n8n approval requires a verified resource URI".to_string())
+        })?;
+        return Ok((
+            request.clone(),
+            n8n_run_once_binding_hash(
+                binding.server_id,
+                resource_uri,
+                request.operation.as_str(),
+                &request.input,
+            )?,
+        ));
+    }
     if request.connector_id.as_str() != "fcp.mcp-bridge"
         || request.operation.as_str() != N8N_OFFICIAL_MCP_CALL_OPERATION
     {
@@ -10556,6 +10663,14 @@ fn build_n8n_read_only_run_once_plan(
             "n8n read-only run-once operation is not allowed".to_string(),
         ));
     }
+    let approval_token_allowed = N8N_WRITE_OPERATIONS.contains(&input.operation.as_str())
+        && !(input.operation == "n8n.mcp_access.reconcile"
+            && input.input.get("dryRun").and_then(Value::as_bool) == Some(true));
+    if input.approval_token.is_some() && !approval_token_allowed {
+        return Err(HostError::InvalidFilter(
+            "n8n approval token is only valid for a typed write".to_string(),
+        ));
+    }
     if input.operation == "n8n.mcp_access.reconcile" {
         validate_n8n_mcp_access_input(&input.input)?;
     } else if input.operation == "n8n.workflows.lifecycle" {
@@ -10628,6 +10743,7 @@ fn build_n8n_read_only_run_once_plan(
         zone_id,
         resource_uri: input.resource_uri,
         input: input.input,
+        approval_token: input.approval_token,
         deadline_ms,
         correlation_id,
         credential_binding,
@@ -10681,6 +10797,11 @@ fn build_n8n_official_mcp_run_once_plan(
     if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA {
         return Err(HostError::InvalidFilter(
             "n8n official MCP run-once operation is not allowed".to_string(),
+        ));
+    }
+    if input.approval_token.is_some() && input.operation != "n8n.workflows.lifecycle" {
+        return Err(HostError::InvalidFilter(
+            "n8n official MCP approval token is only valid for lifecycle".to_string(),
         ));
     }
     let (operation, resource_uri, provider_input) = if input.operation
@@ -10810,7 +10931,7 @@ fn build_n8n_official_mcp_run_once_plan(
         deadline_ms,
         correlation_id,
         credential_binding,
-        approval_token: None,
+        approval_token: input.approval_token,
     })
 }
 
@@ -10833,17 +10954,9 @@ fn mcp_tools_call_payload_digest(input: &Value) -> HostResult<[u8; 32]> {
     Ok(hasher.finalize().into())
 }
 
-fn mint_n8n_official_mcp_approval(
+fn official_mcp_approval_constraints(
     plan: &N8nOfficialMcpRunOncePlan,
-    high_level_input: &Value,
-    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
-) -> HostResult<ApprovalToken> {
-    let approval_ref = high_level_input
-        .pointer("/guard/approvalRef")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            HostError::InvalidFilter("n8n lifecycle approvalRef is missing".to_string())
-        })?;
+) -> HostResult<Vec<InputConstraint>> {
     let payload_digest = mcp_tools_call_payload_digest(&plan.input)?;
     let normalized = json!({
         "server_id": plan.server_id.as_str(),
@@ -10853,35 +10966,18 @@ fn mint_n8n_official_mcp_approval(
         "payload_sha256": hex::encode(payload_digest),
         "tool_name": plan.input.get("name").cloned().unwrap_or(Value::Null),
     });
-    let input_constraints = normalized
+    normalized
         .as_object()
-        .ok_or_else(|| HostError::Internal("official MCP approval target is invalid".to_string()))?
-        .iter()
-        .map(|(field, expected)| InputConstraint {
-            pointer: format!("/{field}"),
-            expected: expected.clone(),
+        .ok_or_else(|| HostError::Internal("official MCP approval target is invalid".to_string()))
+        .map(|object| {
+            object
+                .iter()
+                .map(|(field, expected)| InputConstraint {
+                    pointer: format!("/{field}"),
+                    expected: expected.clone(),
+                })
+                .collect()
         })
-        .collect();
-    let issued_at_ms = n8n_run_once_now_ms();
-    let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
-    let mut token = ApprovalToken::approved(
-        approval_ref,
-        issued_at_ms,
-        expires_at_ms,
-        "host:fwc-n8n",
-        ApprovalScope::Execution(ExecutionScope {
-            connector_id: "fcp.mcp-bridge".to_string(),
-            method_pattern: plan.operation.to_string(),
-            request_object_id: None,
-            input_hash: Some(payload_digest),
-            input_constraints,
-        }),
-        plan.zone_id.clone(),
-        None,
-    );
-    let bytes = approval_token_signing_bytes(&token)?;
-    token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
-    Ok(token)
 }
 
 fn canonical_json_for_n8n_run_once(value: &Value) -> Value {
@@ -11170,39 +11266,6 @@ fn n8n_run_once_approval_material(
     Ok((material, graph_digest, mutation_digest))
 }
 
-fn mint_n8n_draft_approval(
-    plan: &N8nReadOnlyRunOncePlan,
-    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
-) -> HostResult<ApprovalToken> {
-    n8n_run_once_approval_material(plan)?;
-    let input_hash = request_input_hash(&plan.input)?;
-    let approval_ref = plan
-        .input
-        .pointer("/guard/approvalRef")
-        .and_then(Value::as_str)
-        .ok_or_else(|| HostError::InvalidFilter("n8n draft approvalRef is missing".to_string()))?;
-    let issued_at_ms = n8n_run_once_now_ms();
-    let expires_at_ms = issued_at_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000);
-    let mut token = ApprovalToken::approved(
-        approval_ref,
-        issued_at_ms,
-        expires_at_ms,
-        "host:fwc-n8n",
-        ApprovalScope::Execution(ExecutionScope {
-            connector_id: "fcp.n8n".to_string(),
-            method_pattern: plan.operation.to_string(),
-            request_object_id: None,
-            input_hash: Some(input_hash),
-            input_constraints: Vec::new(),
-        }),
-        plan.zone_id.clone(),
-        None,
-    );
-    let bytes = approval_token_signing_bytes(&token)?;
-    token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
-    Ok(token)
-}
-
 fn n8n_run_once_now_ms() -> u64 {
     u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0)
 }
@@ -11352,41 +11415,47 @@ fn n8n_run_once_claim_at(
             }
         },
     )?;
-    let approval_ref = plan
+    // The external token validator requires token_id == approvalRef before
+    // this claim is reached. Persist a marker keyed by that token id so a
+    // valid token cannot be replayed with a different idempotency/request
+    // binding.
+    let token_id = plan
         .input
         .pointer("/guard/approvalRef")
         .and_then(Value::as_str)
-        .ok_or_else(|| HostError::InvalidFilter("n8n draft approvalRef is missing".to_string()))?;
-    let approval_digest = n8n_run_once_digest(
-        b"fwc-n8n.approval-ref.v1",
-        &Value::String(approval_ref.to_string()),
+        .ok_or_else(|| HostError::InvalidFilter("n8n write approvalRef is missing".to_string()))?;
+    let token_id_digest = n8n_run_once_digest(
+        b"fwc-n8n.approval-token-id.v1",
+        &Value::String(token_id.to_string()),
     );
-    let approval_marker_path = root
+    let token_marker_path = root
         .join("consumed")
-        .join(format!("approval-{approval_digest}.marker"));
-    let mut approval_marker = OpenOptions::new()
+        .join(format!("token-{token_id_digest}.marker"));
+    let mut token_marker = OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(0o600)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-        .open(&approval_marker_path)
+        .open(&token_marker_path)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                HostError::PreflightFailed("n8n run-once approval was already consumed".to_string())
+                HostError::PreflightFailed(
+                    "n8n run-once approval token was already consumed".to_string(),
+                )
             } else {
                 HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
             }
         })?;
-    let approval_marker_payload = json!({
+    let token_marker_payload = json!({
         "schema": "fwc.n8n.run-once-claim.v1",
-        "approvalDigest": approval_digest,
+        "tokenIdDigest": token_id_digest,
         "lockDigest": lock_digest,
         "createdAtMs": n8n_run_once_now_ms(),
         "resultClass": "pending",
     });
-    approval_marker
-        .write_all(approval_marker_payload.to_string().as_bytes())
-        .and_then(|_| approval_marker.sync_all())
+    token_marker
+        .write_all(token_marker_payload.to_string().as_bytes())
+        .and_then(|_| token_marker.sync_all())
         .map_err(|_| {
             HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
         })?;
@@ -12943,16 +13012,49 @@ async fn async_n8n_read_only_run_once(
     if !n8n_run_once_operation_class_allowed(expected_write, plan.operation.as_str(), &plan.input) {
         return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
     }
-    let approval_signing_key =
-        (is_write && !mcp_access_dry_run).then(fcp_crypto::ed25519::Ed25519SigningKey::generate);
-    let approval_token = if let Some(signing_key) = approval_signing_key.as_ref() {
+    let approval_verifying_key = if is_write && !mcp_access_dry_run {
         Some(
-            mint_n8n_draft_approval(&plan, signing_key)
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+            resolve_verifying_key(
+                "FCP_HOST_APPROVAL_PUBLIC_KEY",
+                "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+            )?
+            .ok_or_else(|| {
+                HostError::PreflightFailed(
+                    "n8n write run-once requires FCP_HOST_APPROVAL_PUBLIC_KEY[_FILE]".to_string(),
+                )
+            })?,
         )
     } else {
         None
     };
+    let approval_token = plan.approval_token.clone();
+    if is_write && !mcp_access_dry_run {
+        let approval_ref = plan
+            .input
+            .pointer("/guard/approvalRef")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("n8n write run-once approvalRef is missing".to_string())
+            })?;
+        let binding_hash = n8n_run_once_binding_hash(
+            plan.server_id,
+            &plan.resource_uri,
+            plan.operation.as_str(),
+            &plan.input,
+        )
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        validate_external_n8n_approval(
+            approval_token.as_ref(),
+            approval_ref,
+            "fcp.n8n",
+            plan.operation.as_str(),
+            &plan.zone_id,
+            binding_hash,
+            &[],
+            approval_verifying_key.as_ref(),
+        )
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    }
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -12982,9 +13084,7 @@ async fn async_n8n_read_only_run_once(
         telemetry_config,
         loaded_configs,
         Some(signing_key.verifying_key()),
-        approval_signing_key
-            .as_ref()
-            .map(fcp_crypto::ed25519::Ed25519SigningKey::verifying_key),
+        approval_verifying_key,
         zone_policies,
     )
     .await
@@ -13094,6 +13194,7 @@ async fn async_n8n_official_mcp_run_once(
 ) -> HostResult<InvokeResponse> {
     let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
+    let external_approval = high_level_input.approval_token.clone();
     let lifecycle_input = (high_level_input.operation == "n8n.workflows.lifecycle")
         .then(|| high_level_input.input.clone());
     let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
@@ -13106,17 +13207,59 @@ async fn async_n8n_official_mcp_run_once(
         .first()
         .cloned()
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
-    let mut plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
+    let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
-    let approval_signing_key = lifecycle_input
+    let approval_verifying_key = if let Some(input) = lifecycle_input.as_ref() {
+        let approval_ref = input
+            .pointer("/guard/approvalRef")
+            .and_then(Value::as_str)
+            .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        let verifying_key = resolve_verifying_key(
+            "FCP_HOST_APPROVAL_PUBLIC_KEY",
+            "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
+        )?
+        .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        let payload_digest = mcp_tools_call_payload_digest(&plan.input)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        let constraints = official_mcp_approval_constraints(&plan)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        validate_external_n8n_approval(
+            external_approval.as_ref(),
+            approval_ref,
+            "fcp.mcp-bridge",
+            plan.operation.as_str(),
+            &plan.zone_id,
+            payload_digest,
+            &constraints,
+            Some(&verifying_key),
+        )
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        Some(verifying_key)
+    } else {
+        None
+    };
+    let claim_plan = lifecycle_input
         .as_ref()
-        .map(|_| fcp_crypto::ed25519::Ed25519SigningKey::generate());
-    if let (Some(input), Some(signing_key)) = (&lifecycle_input, approval_signing_key.as_ref()) {
-        plan.approval_token = Some(
-            mint_n8n_official_mcp_approval(&plan, input, signing_key)
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
-        );
-    }
+        .map(|input| {
+            let operation = OperationId::new("n8n.workflows.lifecycle").map_err(|_| {
+                HostError::InvalidFilter("n8n lifecycle operation is invalid".to_string())
+            })?;
+            let resource_uri =
+                expected_n8n_read_only_resource_uri(plan.server_id, operation.as_str(), input)?;
+            Ok(N8nReadOnlyRunOncePlan {
+                server_id: plan.server_id,
+                operation,
+                zone_id: plan.zone_id.clone(),
+                resource_uri,
+                input: input.clone(),
+                approval_token: external_approval.clone(),
+                deadline_ms: plan.deadline_ms,
+                correlation_id: plan.correlation_id.clone(),
+                credential_binding: plan.credential_binding.clone(),
+            })
+        })
+        .transpose()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Credential))?
@@ -13146,9 +13289,7 @@ async fn async_n8n_official_mcp_run_once(
         telemetry_config,
         loaded_configs,
         Some(signing_key.verifying_key()),
-        approval_signing_key
-            .as_ref()
-            .map(fcp_crypto::ed25519::Ed25519SigningKey::verifying_key),
+        approval_verifying_key,
         zone_policies,
     )
     .await
@@ -13196,14 +13337,62 @@ async fn async_n8n_official_mcp_run_once(
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
     let (request, trusted_resource) = build_n8n_official_mcp_invoke_request(plan, capability_token);
 
-    invoke_handler_inner(state, HeaderMap::new(), request, Some(trusted_resource))
-        .await
-        .map(|Json(response)| response)
-        .map_err(|(status, _)| {
-            emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
-            n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
-        })
-        .and_then(accept_n8n_run_once_invoke_response)
+    #[cfg(unix)]
+    let claim = if let Some(claim_plan) = claim_plan.as_ref() {
+        Some(
+            n8n_run_once_claim(claim_plan)
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    if claim_plan.is_some() {
+        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+    }
+    #[cfg(unix)]
+    if let (Some(claim), Some(claim_plan)) = (claim.as_ref(), claim_plan.as_ref()) {
+        claim
+            .write_intent(claim_plan, &request)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    }
+
+    let invoke_result = invoke_handler_inner(
+        state,
+        HeaderMap::new(),
+        request.clone(),
+        Some(trusted_resource),
+    )
+    .await
+    .map(|Json(response)| response)
+    .map_err(|(status, _)| {
+        emit_n8n_run_once_invoke_diagnostic(n8n_run_once_dispatch_diagnostic(status));
+        n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke)
+    });
+    #[cfg(unix)]
+    if let (Some(claim), Some(claim_plan)) = (claim.as_ref(), claim_plan.as_ref()) {
+        let result_class = match invoke_result.as_ref() {
+            Ok(response)
+                if matches!(response.status, InvokeStatus::Ok) && response.error.is_none() =>
+            {
+                "success"
+            }
+            Ok(response)
+                if response
+                    .error
+                    .as_ref()
+                    .is_some_and(n8n_unknown_outcome_error) =>
+            {
+                "unknown"
+            }
+            Err(_) => "unknown",
+            _ => "failed",
+        };
+        claim
+            .write_receipt(claim_plan, &request, result_class)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
+    }
+    invoke_result.and_then(accept_n8n_run_once_invoke_response)
 }
 
 #[cfg(target_os = "linux")]
@@ -20821,6 +21010,35 @@ mod tests {
         SwarmEvidenceSourceKind, SwarmPrewarmColdStartEvidence, SwarmPrewarmLatencyPercentiles,
         validate_swarm_prewarm_cold_start_evidence_bundle,
     };
+
+    fn signed_external_approval(
+        token_id: &str,
+        connector_id: &str,
+        operation: &str,
+        input_hash: [u8; 32],
+        input_constraints: Vec<InputConstraint>,
+        zone_id: ZoneId,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> ApprovalToken {
+        let mut token = ApprovalToken::approved(
+            token_id,
+            n8n_run_once_now_ms(),
+            n8n_run_once_now_ms().saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000),
+            "test:external-owner",
+            ApprovalScope::Execution(ExecutionScope {
+                connector_id: connector_id.to_string(),
+                method_pattern: operation.to_string(),
+                request_object_id: None,
+                input_hash: Some(input_hash),
+                input_constraints,
+            }),
+            zone_id,
+            None,
+        );
+        let bytes = approval_token_signing_bytes(&token).expect("approval canonicalization");
+        token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
+        token
+    }
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -32730,6 +32948,7 @@ done"#;
             zone_id: ZoneId::private().to_string(),
             resource_uri: "fwc-mcp-bridge://eec".to_string(),
             input: json!({}),
+            approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
         }
@@ -32772,6 +32991,7 @@ done"#;
                 }
             ),
             input,
+            approval_token: None,
             deadline_ms: None,
             correlation_id: None,
         }
@@ -32854,20 +33074,34 @@ done"#;
         assert_eq!(plan.input["arguments"]["versionId"], "version-1");
 
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-        let approval = mint_n8n_official_mcp_approval(
-            &plan,
-            &n8n_official_mcp_lifecycle_test_input("publish").input,
+        let approval = signed_external_approval(
+            "chat-lifecycle-approval",
+            "fcp.mcp-bridge",
+            plan.operation.as_str(),
+            mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
+            official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
+            ZoneId::private(),
             &signing_key,
-        )
-        .expect("exact lifecycle approval");
+        );
         let ApprovalScope::Execution(scope) = &approval.scope else {
             panic!("lifecycle approval must carry execution scope");
         };
         assert_eq!(scope.input_constraints.len(), 6);
         assert_eq!(
             scope.input_hash,
-            Some(mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"))
+            Some(mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash")),
         );
+        validate_external_n8n_approval(
+            Some(&approval),
+            "chat-lifecycle-approval",
+            "fcp.mcp-bridge",
+            plan.operation.as_str(),
+            &ZoneId::private(),
+            mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
+            &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("external lifecycle approval verifies");
 
         let mut denied = config;
         denied.config.as_mut().expect("config")["capability_policy"]["approved_tools"] = json!([]);
@@ -32949,6 +33183,7 @@ done"#;
             zone_id: ZoneId::work().to_string(),
             resource_uri: "fwc-n8n://eec".to_string(),
             input,
+            approval_token: None,
             deadline_ms: None,
             correlation_id: None,
         }
@@ -33163,6 +33398,7 @@ done"#;
             zone_id: ZoneId::private().to_string(),
             resource_uri: resource_uri.to_string(),
             input,
+            approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
         }
@@ -33241,6 +33477,7 @@ done"#;
             zone_id: ZoneId::work().to_string(),
             resource_uri: resource_uri.to_string(),
             input,
+            approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
         }
@@ -33380,6 +33617,7 @@ done"#;
                     }
                 }
             }),
+            approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
         };
@@ -33425,23 +33663,142 @@ done"#;
         )
         .expect("typed update plan");
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-        let token = mint_n8n_draft_approval(&plan, &signing_key).expect("host approval");
+        let token = signed_external_approval(
+            "chat-draft-approval",
+            "fcp.n8n",
+            plan.operation.as_str(),
+            n8n_run_once_binding_hash(
+                plan.server_id,
+                &plan.resource_uri,
+                plan.operation.as_str(),
+                &plan.input,
+            )
+            .expect("request binding hash"),
+            Vec::new(),
+            ZoneId::work(),
+            &signing_key,
+        );
         let ApprovalScope::Execution(scope) = &token.scope else {
             panic!("draft approval must use execution scope");
         };
         assert!(scope.input_constraints.is_empty());
         assert_eq!(
             scope.input_hash,
-            Some(request_input_hash(&plan.input).unwrap())
+            Some(
+                n8n_run_once_binding_hash(
+                    plan.server_id,
+                    &plan.resource_uri,
+                    plan.operation.as_str(),
+                    &plan.input,
+                )
+                .unwrap(),
+            )
         );
         let mut changed_input = plan.input.clone();
         changed_input["graph"]["nodes"] = json!([{"id": "changed"}]);
         assert_ne!(
             scope.input_hash,
-            Some(request_input_hash(&changed_input).unwrap())
+            Some(
+                n8n_run_once_binding_hash(
+                    plan.server_id,
+                    &plan.resource_uri,
+                    plan.operation.as_str(),
+                    &changed_input,
+                )
+                .unwrap(),
+            )
         );
-        verify_approval_tokens(&[token], Some(&signing_key.verifying_key()))
-            .expect("fresh host approval verifies");
+        validate_external_n8n_approval(
+            Some(&token),
+            "chat-draft-approval",
+            "fcp.n8n",
+            plan.operation.as_str(),
+            &ZoneId::work(),
+            scope.input_hash.expect("input hash"),
+            &[],
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("external owner approval verifies");
+    }
+
+    #[test]
+    fn n8n_external_approval_rejects_missing_invalid_and_mismatched_before_dispatch() {
+        let config = run_once_n8n_draft_test_config();
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.update_draft",
+                "77777777-8888-4999-8aaa-bbbbbbbbbbbb",
+            ),
+            &config,
+        )
+        .expect("typed update plan");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let binding_hash = n8n_run_once_binding_hash(
+            plan.server_id,
+            &plan.resource_uri,
+            plan.operation.as_str(),
+            &plan.input,
+        )
+        .expect("request binding hash");
+        let token = signed_external_approval(
+            "chat-approval-2",
+            "fcp.n8n",
+            plan.operation.as_str(),
+            binding_hash,
+            Vec::new(),
+            ZoneId::work(),
+            &signing_key,
+        );
+
+        assert!(
+            validate_external_n8n_approval(
+                None,
+                "chat-approval-2",
+                "fcp.n8n",
+                plan.operation.as_str(),
+                &ZoneId::work(),
+                binding_hash,
+                &[],
+                Some(&signing_key.verifying_key()),
+            )
+            .is_err()
+        );
+
+        let wrong_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        assert!(
+            validate_external_n8n_approval(
+                Some(&token),
+                "chat-approval-2",
+                "fcp.n8n",
+                plan.operation.as_str(),
+                &ZoneId::work(),
+                binding_hash,
+                &[],
+                Some(&wrong_key.verifying_key()),
+            )
+            .is_err()
+        );
+
+        let mismatched_hash = n8n_run_once_binding_hash(
+            plan.server_id,
+            "fwc-n8n://eec/workflows/other",
+            plan.operation.as_str(),
+            &plan.input,
+        )
+        .expect("mismatched binding hash");
+        assert!(
+            validate_external_n8n_approval(
+                Some(&token),
+                "chat-approval-2",
+                "fcp.n8n",
+                plan.operation.as_str(),
+                &ZoneId::work(),
+                mismatched_hash,
+                &[],
+                Some(&signing_key.verifying_key()),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -33456,7 +33813,21 @@ done"#;
         )
         .expect("typed create plan");
         let approval_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-        let approval = mint_n8n_draft_approval(&plan, &approval_key).expect("host approval");
+        let approval = signed_external_approval(
+            "chat-draft-approval",
+            "fcp.n8n",
+            plan.operation.as_str(),
+            n8n_run_once_binding_hash(
+                plan.server_id,
+                &plan.resource_uri,
+                plan.operation.as_str(),
+                &plan.input,
+            )
+            .expect("request binding hash"),
+            Vec::new(),
+            ZoneId::work(),
+            &approval_key,
+        );
         let capability_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let (request, _) = build_n8n_read_only_invoke_request(
             plan,
@@ -33468,7 +33839,13 @@ done"#;
             ),
             Some(approval),
         );
-        let exact_hash = request_input_hash(&request.input).expect("exact request input hash");
+        let exact_hash = n8n_run_once_binding_hash(
+            N8nReadOnlyServerId::Eec,
+            "fwc-n8n://eec/projects/project%2D1",
+            request.operation.as_str(),
+            &request.input,
+        )
+        .expect("exact request binding hash");
         let exact = simulate_policy_decision(&PolicySimulationInput {
             zone_policy: host_runtime_policy(ZoneId::work()),
             invoke_request: request.clone(),
@@ -33492,8 +33869,13 @@ done"#;
 
         let mut changed_request = request;
         changed_request.input["name"] = json!("Changed after approval");
-        let changed_hash =
-            request_input_hash(&changed_request.input).expect("changed request input hash");
+        let changed_hash = n8n_run_once_binding_hash(
+            N8nReadOnlyServerId::Eec,
+            "fwc-n8n://eec/projects/project%2D1",
+            changed_request.operation.as_str(),
+            &changed_request.input,
+        )
+        .expect("changed request binding hash");
         let changed = simulate_policy_decision(&PolicySimulationInput {
             zone_policy: host_runtime_policy(ZoneId::work()),
             invoke_request: changed_request,
@@ -33538,8 +33920,21 @@ done"#;
         let plan = build_n8n_read_only_run_once_plan(input.clone(), &config)
             .expect("omitted project binds the personal-project create to the instance");
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-        mint_n8n_draft_approval(&plan, &signing_key)
-            .expect("create without an explicit precondition mints the bounded approval");
+        signed_external_approval(
+            "chat-draft-approval",
+            "fcp.n8n",
+            plan.operation.as_str(),
+            n8n_run_once_binding_hash(
+                plan.server_id,
+                &plan.resource_uri,
+                plan.operation.as_str(),
+                &plan.input,
+            )
+            .expect("request binding hash"),
+            Vec::new(),
+            ZoneId::work(),
+            &signing_key,
+        );
 
         input.resource_uri = "fwc-n8n://eec/projects/project%2D1".to_string();
 
@@ -33583,6 +33978,7 @@ done"#;
                 zone_id: ZoneId::work().to_string(),
                 resource_uri: "fwc-n8n://eec/workflows/workflow%2D1".to_string(),
                 input: reused_input.input,
+                approval_token: None,
                 deadline_ms: None,
                 correlation_id: None,
             },

@@ -22,6 +22,7 @@ use fcp_n8n::router::{
 };
 use fcp_n8n::update::{ComponentSnapshot, detect_update};
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
+use fcp_prelude::ApprovalToken;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -208,6 +209,8 @@ struct HostRunOnceInput {
     server_id: HostRunOnceServerId,
     input: Value,
     #[serde(default)]
+    approval_token: Option<ApprovalToken>,
+    #[serde(default)]
     deadline_ms: Option<u64>,
     #[serde(default)]
     correlation_id: Option<String>,
@@ -240,6 +243,10 @@ impl fmt::Debug for HostRunOnceInput {
             .debug_struct("HostRunOnceInput")
             .field("server_id", &self.server_id)
             .field("input", &"[REDACTED]")
+            .field(
+                "approval_token",
+                &self.approval_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("deadline_ms", &self.deadline_ms)
             .field(
                 "correlation_id",
@@ -258,6 +265,8 @@ struct HostRunOnceEnvelope {
     resource_uri: String,
     input: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
+    approval_token: Option<ApprovalToken>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     deadline_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     correlation_id: Option<String>,
@@ -273,6 +282,10 @@ impl fmt::Debug for HostRunOnceEnvelope {
             .field("zone_id", &self.zone_id)
             .field("resource_uri", &"[REDACTED]")
             .field("input", &"[REDACTED]")
+            .field(
+                "approval_token",
+                &self.approval_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("deadline_ms", &self.deadline_ms)
             .field(
                 "correlation_id",
@@ -1289,6 +1302,7 @@ fn build_host_run_once_envelope(
         zone_id: HOST_RUN_ONCE_ZONE,
         resource_uri,
         input: input.input,
+        approval_token: input.approval_token,
         deadline_ms: Some(
             input
                 .deadline_ms
@@ -3078,6 +3092,7 @@ mod tests {
         HostRunOnceInput {
             server_id,
             input,
+            approval_token: None,
             deadline_ms: None,
             correlation_id: None,
         }

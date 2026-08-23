@@ -10,6 +10,21 @@
 
 This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. Each write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent REST GET readback; direct REST lifecycle/archive routes remain fail-closed and no legacy endpoint is guessed.
 
+### Immutable release provisioner (source-only packet)
+
+`src/bin/fwc_n8n_provision.rs` provides a typed, fixed-root preflight for an
+owner-staged release. It validates the existing twelve-artifact receipt plus
+`provision-receipt.json` (which covers the receipt, provenance, and all staged
+bytes), `provenance.json` (including the exact git revision), BLAKE3 artifact bytes,
+root ownership/restrictive modes, canonical non-symlink paths, strict
+allowlisted inventory/policy metadata with secret-like key/value rejection,
+and exact EEC/Hetzner official-MCP policy bindings for
+`publish_workflow`, `unpublish_workflow`, and `archive_workflow`. The result is
+an `InstallPlan` describing a temporary-symlink atomic promotion and the
+previous verified release for rollback; it has no apply method and performs no
+filesystem mutation. The privileged root installer/current switch remains an
+explicit owner-owned integration seam and is not provided by this repository.
+
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
 ## Current Runtime Snapshot

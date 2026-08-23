@@ -51,6 +51,22 @@ privileged updates locally. Its path-based checks do not defend against a
 concurrent malicious root updater, and it does not claim signature
 verification; a future signed installer/update receipt can strengthen that
 root of trust.
+The source-only `fwc_n8n_provision` packet adds a typed fixed-root preflight
+for owner-staged releases: it checks the existing twelve-artifact receipt,
+the bounded `provision-receipt.json` covering that receipt/provenance and every
+staged byte, explicit git-revision provenance, canonical non-symlink paths,
+owner/mode and size bounds, strict allowlisted inventory/policy metadata with
+secret-like key/value rejection, and exact per-server official-MCP schema
+bindings before returning a non-mutating atomic-promotion plan. It deliberately
+does not implement the privileged stage rename, `current` symlink switch, or
+rollback command; those remain an owner/root installer boundary and are not
+executable through the connector.
+The rollback target is subjected to the same complete self-relative artifact,
+provenance, provision-receipt, inventory, and policy validation; only its git
+revision may differ from the candidate. The remaining trusted-concurrent-root
+writer window is documented and requires immediate owner-side revalidation
+before the atomic rename/symlink operation. Cryptographic signature
+verification and the privileged installer remain separate owner gates.
 `n8n.targets.resolve`, `n8n.runtime.status`,
 `n8n.node_resources.explore`, and `n8n.evaluations.manage` are not all
 representable by that enum yet. `n8n.mcp_access.reconcile` is now represented

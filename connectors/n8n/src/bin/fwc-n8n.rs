@@ -33,6 +33,9 @@ use uuid::Uuid;
 mod fwc_n8n_bridge;
 #[path = "fwc_n8n_bundle.rs"]
 mod fwc_n8n_bundle;
+#[path = "fwc_n8n_provision.rs"]
+#[allow(dead_code)]
+mod fwc_n8n_provision;
 #[path = "fwc_n8n_update_host.rs"]
 #[allow(dead_code)]
 mod fwc_n8n_update_host;

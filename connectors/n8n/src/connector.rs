@@ -960,7 +960,7 @@ impl N8nConnector {
             for id in ids {
                 match client.get_workflow_typed(id, context.clone()).await {
                     Ok(workflow) if workflow.id == *id => {
-                        workflows.push(workflow_summary_from_detail(workflow))
+                        workflows.push(workflow_summary_from_detail(workflow));
                     }
                     Ok(_) => return Err(N8nError::MalformedProviderResponse),
                     Err(N8nError::NotFound { .. }) => {}
@@ -4013,7 +4013,7 @@ fn workflow_lifecycle_output_schema() -> serde_json::Value {
             "provider": {"type": "string", "enum": ["rest", "official_mcp"]},
             "retry": {"type": "string", "enum": ["never_automatic"]},
             "readback": {"type": "string", "enum": ["independent_get"]},
-            "before": state.clone(),
+            "before": state,
             "after": state,
         },
     })

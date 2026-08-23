@@ -78,7 +78,10 @@ Only bounded categories for failures proven before the provider side effect
 (`official_mcp_policy_failed`, `official_mcp_capability_failed`, and related
 preflight classes) may be exposed; invocation, timeout, teardown,
 malformed/ambiguous response, and all other uncertain cases remain
-`unknown_outcome` and are never retried automatically.
+`unknown_outcome` and are never retried automatically. A supervised child may
+also carry one fixed, redaction-safe diagnostic label in the error envelope;
+that label is classification only and never contains provider text, payload,
+headers, credentials, or a retry instruction.
 Uncertain readback is classified unknown and never retried automatically.
 Activation,
 archive/restore, versions, execution, credential mutation, and permanent

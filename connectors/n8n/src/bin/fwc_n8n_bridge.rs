@@ -182,15 +182,28 @@ impl fmt::Debug for BridgeErrorCode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct BridgeError {
     code: BridgeErrorCode,
+    diagnostic: Option<&'static str>,
 }
 
 impl BridgeError {
     const fn new(code: BridgeErrorCode) -> Self {
-        Self { code }
+        Self {
+            code,
+            diagnostic: None,
+        }
+    }
+
+    const fn with_diagnostic(mut self, diagnostic: Option<&'static str>) -> Self {
+        self.diagnostic = diagnostic;
+        self
     }
 
     pub const fn code(self) -> &'static str {
         self.code.as_str()
+    }
+
+    pub const fn diagnostic(self) -> Option<&'static str> {
+        self.diagnostic
     }
 }
 
@@ -199,6 +212,7 @@ impl fmt::Debug for BridgeError {
         formatter
             .debug_struct("BridgeError")
             .field("code", &self.code)
+            .field("diagnostic", &self.diagnostic)
             .finish()
     }
 }
@@ -985,8 +999,9 @@ pub fn run_process(
         request_deadline_at,
     )?;
     if !status.success() {
+        let diagnostic = child_invoke_diagnostic(&stderr);
         emit_child_invoke_diagnostic(&stderr);
-        return Err(BridgeError::new(child_failure_code(&stdout)));
+        return Err(BridgeError::new(child_failure_code(&stdout)).with_diagnostic(diagnostic));
     }
     Ok(ProcessOutput {
         stdout,
@@ -1912,6 +1927,19 @@ mod tests {
         ] {
             assert_eq!(child_invoke_diagnostic(stderr), None);
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bridge_error_preserves_only_the_safe_child_diagnostic_label() {
+        let error = BridgeError::new(BridgeErrorCode::HostN8nInvokeFailed)
+            .with_diagnostic(Some("response_capability"));
+        assert_eq!(error.code(), "host_n8n_invoke_failed");
+        assert_eq!(error.diagnostic(), Some("response_capability"));
+        assert_eq!(
+            BridgeError::new(BridgeErrorCode::HostN8nInvokeFailed).diagnostic(),
+            None
+        );
     }
 
     #[cfg(target_os = "linux")]

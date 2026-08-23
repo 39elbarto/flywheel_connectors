@@ -288,17 +288,27 @@ struct ErrorEnvelope {
     schema: &'static str,
     status: &'static str,
     code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<&'static str>,
     correlation_id: String,
 }
 
 #[derive(Debug)]
 struct AppError {
     code: &'static str,
+    diagnostic: Option<&'static str>,
 }
 
 impl AppError {
     const fn new(code: &'static str) -> Self {
-        Self { code }
+        Self {
+            code,
+            diagnostic: None,
+        }
+    }
+
+    const fn with_diagnostic(code: &'static str, diagnostic: Option<&'static str>) -> Self {
+        Self { code, diagnostic }
     }
 }
 
@@ -313,22 +323,23 @@ fn main() {
                     std::process::exit(1);
                 }
             } else {
-                print_error("output_encoding_failed", &correlation_id);
+                print_error("output_encoding_failed", None, &correlation_id);
                 std::process::exit(1);
             }
         }
         Err(error) => {
-            print_error(error.code, &correlation_id);
+            print_error(error.code, error.diagnostic, &correlation_id);
             std::process::exit(1);
         }
     }
 }
 
-fn print_error(code: &str, correlation_id: &str) {
+fn print_error(code: &str, diagnostic: Option<&'static str>, correlation_id: &str) {
     let envelope = ErrorEnvelope {
         schema: "fwc.n8n.error.v1",
         status: "error",
         code: code.to_string(),
+        diagnostic,
         correlation_id: correlation_id.to_string(),
     };
     let encoded = serde_json::to_string(&envelope).unwrap_or_else(|_| {
@@ -552,13 +563,17 @@ fn run_host_bridge_once(
     envelope.deadline_ms = Some(remaining_deadline_ms(deadline)?);
     fwc_n8n_bridge::run_verified_host_bridge(bundle, &envelope, credential, deadline).map_err(
         |error| {
-            if matches!(purpose, BrokerCredentialPurpose::OfficialMcp)
-                && matches!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle)
-            {
-                AppError::new(official_mcp_lifecycle_bridge_error_code(error.code()))
+            let lifecycle = matches!(purpose, BrokerCredentialPurpose::OfficialMcp)
+                && matches!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle);
+            let code = if lifecycle {
+                official_mcp_lifecycle_bridge_error_code(error.code())
             } else {
-                AppError::new(error.code())
-            }
+                error.code()
+            };
+            let diagnostic = (lifecycle && code == "unknown_outcome")
+                .then(|| error.diagnostic())
+                .flatten();
+            AppError::with_diagnostic(code, diagnostic)
         },
     )
 }
@@ -2786,6 +2801,33 @@ mod tests {
                 "unknown_outcome"
             );
         }
+    }
+
+    #[test]
+    fn unknown_lifecycle_error_envelope_carries_only_optional_safe_diagnostic() {
+        let error = AppError::with_diagnostic("unknown_outcome", Some("response_capability"));
+        let encoded = serde_json::to_value(ErrorEnvelope {
+            schema: "fwc.n8n.error.v1",
+            status: "error",
+            code: error.code.to_string(),
+            diagnostic: error.diagnostic,
+            correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
+        })
+        .expect("safe error envelope");
+        assert_eq!(encoded["code"], "unknown_outcome");
+        assert_eq!(encoded["diagnostic"], "response_capability");
+        assert!(encoded.get("provider").is_none());
+
+        let without_diagnostic = AppError::new("unknown_outcome");
+        let encoded_without_diagnostic = serde_json::to_value(ErrorEnvelope {
+            schema: "fwc.n8n.error.v1",
+            status: "error",
+            code: without_diagnostic.code.to_string(),
+            diagnostic: without_diagnostic.diagnostic,
+            correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
+        })
+        .expect("error envelope without diagnostic");
+        assert!(encoded_without_diagnostic.get("diagnostic").is_none());
     }
 
     #[test]

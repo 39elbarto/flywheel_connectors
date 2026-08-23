@@ -51,7 +51,12 @@ const EXECUTABLES: [&str; 4] = [
     "bin/fcp-n8n",
     "bin/fcp-mcp-bridge",
 ];
-const APPROVED_TOOLS: [&str; 3] = ["archive_workflow", "publish_workflow", "unpublish_workflow"];
+const APPROVED_TOOLS: [&str; 4] = [
+    "archive_workflow",
+    "publish_workflow",
+    "unpublish_workflow",
+    "execute_workflow",
+];
 const PUBLISH_INPUT: &str =
     "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
 const PUBLISH_OUTPUT: &str =
@@ -60,7 +65,15 @@ const UNPUBLISH_INPUT: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const UNPUBLISH_OUTPUT: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
-const EXECUTE_POLICY_STATUS: &str = "unavailable_unproven_schema";
+const EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
+const EEC_EXECUTE_INPUT: &str =
+    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+const EEC_EXECUTE_OUTPUT: &str =
+    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+const HETZNER_EXECUTE_INPUT: &str =
+    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+const HETZNER_EXECUTE_OUTPUT: &str =
+    "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
 const EEC_N8N_VERSION: &str = "2.34.4";
@@ -118,6 +131,8 @@ pub struct OfficialMcpBinding {
     pub server: ServerId,
     pub archive_input_schema_digest: String,
     pub archive_output_schema_digest: String,
+    pub execute_input_schema_digest: String,
+    pub execute_output_schema_digest: String,
 }
 
 impl fmt::Debug for OfficialMcpBinding {
@@ -1087,8 +1102,14 @@ fn validate_binding_shape(bindings: &[OfficialMcpBinding]) -> Result<(), Provisi
         if !seen.insert(binding.server) {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
+        let (expected_execute_input, expected_execute_output) = match binding.server {
+            ServerId::Eec => (EEC_EXECUTE_INPUT, EEC_EXECUTE_OUTPUT),
+            ServerId::Hetzner => (HETZNER_EXECUTE_INPUT, HETZNER_EXECUTE_OUTPUT),
+        };
         if !is_sha256_digest(&binding.archive_input_schema_digest)
             || !is_sha256_digest(&binding.archive_output_schema_digest)
+            || binding.execute_input_schema_digest != expected_execute_input
+            || binding.execute_output_schema_digest != expected_execute_output
         {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
@@ -1276,6 +1297,8 @@ fn release_signing_payload(
             binding.server.as_str().as_bytes(),
             binding.archive_input_schema_digest.as_bytes(),
             binding.archive_output_schema_digest.as_bytes(),
+            binding.execute_input_schema_digest.as_bytes(),
+            binding.execute_output_schema_digest.as_bytes(),
         ] {
             append_signing_field(&mut payload, field);
         }
@@ -1395,6 +1418,8 @@ fn same_bindings(
                     (
                         binding.archive_input_schema_digest.clone(),
                         binding.archive_output_schema_digest.clone(),
+                        binding.execute_input_schema_digest.clone(),
+                        binding.execute_output_schema_digest.clone(),
                     ),
                 )
             })
@@ -1740,6 +1765,10 @@ fn validate_inventory(
                 binding.archive_input_schema_digest.as_str(),
                 binding.archive_output_schema_digest.as_str(),
             ),
+            "execute_workflow" => (
+                binding.execute_input_schema_digest.as_str(),
+                binding.execute_output_schema_digest.as_str(),
+            ),
             _ => return Err(ProvisionError::new(ProvisionErrorCode::Policy)),
         };
         if (input, output) != expected || seen.insert(name, (input, output)).is_some() {
@@ -1774,8 +1803,14 @@ fn validate_inventory(
         .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
     if execute_schema.len() != 3
         || execute_schema.get("status").and_then(Value::as_str) != Some(EXECUTE_POLICY_STATUS)
-        || execute_schema.get("input_schema_digest") != Some(&Value::Null)
-        || execute_schema.get("output_schema_digest") != Some(&Value::Null)
+        || execute_schema
+            .get("input_schema_digest")
+            .and_then(Value::as_str)
+            != Some(binding.execute_input_schema_digest.as_str())
+        || execute_schema
+            .get("output_schema_digest")
+            .and_then(Value::as_str)
+            != Some(binding.execute_output_schema_digest.as_str())
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
@@ -2364,10 +2399,11 @@ mod tests {
                         "approved_tools": [
                             {"name":"archive_workflow","class":"write","input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
                             {"name":"publish_workflow","class":"write","input_schema_digest":PUBLISH_INPUT,"output_schema_digest":PUBLISH_OUTPUT},
-                            {"name":"unpublish_workflow","class":"write","input_schema_digest":UNPUBLISH_INPUT,"output_schema_digest":UNPUBLISH_OUTPUT}
+                            {"name":"unpublish_workflow","class":"write","input_schema_digest":UNPUBLISH_INPUT,"output_schema_digest":UNPUBLISH_OUTPUT},
+                            {"name":"execute_workflow","class":"write","input_schema_digest": if server=="eec" {EEC_EXECUTE_INPUT} else {HETZNER_EXECUTE_INPUT},"output_schema_digest": if server=="eec" {EEC_EXECUTE_OUTPUT} else {HETZNER_EXECUTE_OUTPUT}}
                         ],
                         "archive_workflow_schema": {"input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
-                        "execute_workflow_schema": {"status": EXECUTE_POLICY_STATUS, "input_schema_digest": null, "output_schema_digest": null}
+                        "execute_workflow_schema": {"status": EXECUTE_POLICY_STATUS, "input_schema_digest": if server=="eec" {EEC_EXECUTE_INPUT} else {HETZNER_EXECUTE_INPUT}, "output_schema_digest": if server=="eec" {EEC_EXECUTE_OUTPUT} else {HETZNER_EXECUTE_OUTPUT}}
                     }},
                     "allowed_zones": ["z:work"],
                     "allowed_operations": ["mcp.tools.list", "mcp.tools.call"],
@@ -2545,6 +2581,8 @@ mod tests {
                     archive_output_schema_digest:
                         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                             .to_owned(),
+                    execute_input_schema_digest: EEC_EXECUTE_INPUT.to_owned(),
+                    execute_output_schema_digest: EEC_EXECUTE_OUTPUT.to_owned(),
                 },
                 OfficialMcpBinding {
                     server: ServerId::Hetzner,
@@ -2554,6 +2592,8 @@ mod tests {
                     archive_output_schema_digest:
                         "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                             .to_owned(),
+                    execute_input_schema_digest: HETZNER_EXECUTE_INPUT.to_owned(),
+                    execute_output_schema_digest: HETZNER_EXECUTE_OUTPUT.to_owned(),
                 },
             ];
             let artifacts = artifacts
@@ -2682,8 +2722,8 @@ mod tests {
 
         fn request(&self) -> ProvisionRequest {
             ProvisionRequest::for_test(self.stage.clone(), self.release_id.clone(), "0123456789abcdef0123456789abcdef01234567".to_owned(), vec![
-                OfficialMcpBinding { server:ServerId::Eec, archive_input_schema_digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(), archive_output_schema_digest:"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned() },
-                OfficialMcpBinding { server:ServerId::Hetzner, archive_input_schema_digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(), archive_output_schema_digest:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned() },
+                OfficialMcpBinding { server:ServerId::Eec, archive_input_schema_digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(), archive_output_schema_digest:"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(), execute_input_schema_digest:EEC_EXECUTE_INPUT.to_owned(), execute_output_schema_digest:EEC_EXECUTE_OUTPUT.to_owned() },
+                OfficialMcpBinding { server:ServerId::Hetzner, archive_input_schema_digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(), archive_output_schema_digest:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(), execute_input_schema_digest:HETZNER_EXECUTE_INPUT.to_owned(), execute_output_schema_digest:HETZNER_EXECUTE_OUTPUT.to_owned() },
             ], test_owner_verification(), self.owner, self.current.clone(), self.releases.clone())
         }
     }
@@ -2747,6 +2787,46 @@ mod tests {
             request.validate().expect_err("wrong schema").code(),
             ProvisionErrorCode::Policy | ProvisionErrorCode::Signature
         ));
+    }
+
+    #[test]
+    fn execute_schema_binding_is_signed_and_mismatch_fails_closed() {
+        let fixture = Fixture::new();
+        let mut request = fixture.request();
+        request.bindings[0].execute_output_schema_digest = HETZNER_EXECUTE_OUTPUT.to_owned();
+        assert_eq!(
+            request
+                .validate()
+                .expect_err("cross-server execute binding")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+
+        let fixture = Fixture::new();
+        let provision_path = fixture.stage.join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&provision_path).expect("provision receipt"))
+                .expect("provision receipt json");
+        receipt["signature"]["signature"] = Value::String("00".repeat(SIGNATURE_SIZE));
+        fs::write(
+            &provision_path,
+            serde_json::to_vec(&receipt).expect("tampered provision signature"),
+        )
+        .expect("write tampered provision signature");
+        let provision_receipt: ProvisionReceipt =
+            serde_json::from_slice(&fs::read(&provision_path).expect("provision receipt"))
+                .expect("provision receipt json");
+        let receipt_digest = hash_file(&fixture.stage.join(RECEIPT_FILE)).expect("receipt digest");
+        assert_eq!(
+            verify_release_signature(
+                &provision_receipt,
+                &receipt_digest,
+                &test_owner_verification(),
+            )
+            .expect_err("tampered release signature")
+            .code(),
+            ProvisionErrorCode::Signature
+        );
     }
 
     #[test]

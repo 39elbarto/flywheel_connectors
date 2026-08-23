@@ -49,10 +49,18 @@ const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
-// No per-server execute_workflow schema digest has been owner-provisioned in
-// this source tree. The explicit sentinel keeps execution unavailable rather
-// than admitting a caller/inventory-supplied name or self-derived digest.
-const OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "unavailable_unproven_schema";
+const OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
+const OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
+    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+const OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC: &str =
+    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+const OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+const OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
+// Legacy/sentinel policy shape remains structurally accepted for already
+// provisioned bundles, but the host never admits it for execution.
+const OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
 // Archive schemas are intentionally bound to the per-server tools/list digest
 // in the owner-provisioned policy; unlike publish/unpublish, no live digest is
 // guessed in source. These values are only deterministic offline fixtures.
@@ -626,14 +634,43 @@ fn verify_inventory_binding(
             binding.get("input_schema_digest") == tool.get("input_schema_digest")
                 && binding.get("output_schema_digest") == tool.get("output_schema_digest")
         };
-        let execute_schema_unavailable = |policy: &serde_json::Map<String, Value>| {
+        let execute_schema_owner = |policy: &serde_json::Map<String, Value>| {
+            let Some(schema) = policy
+                .get("execute_workflow_schema")
+                .and_then(Value::as_object)
+            else {
+                return false;
+            };
+            if schema.len() != 3 {
+                return false;
+            }
+            let (expected_input, expected_output) = if expected_server_id == "eec" {
+                (
+                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+                )
+            } else {
+                (
+                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+                )
+            };
+            let owner_shape = schema.get("status").and_then(Value::as_str)
+                == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+                && schema.get("input_schema_digest").and_then(Value::as_str)
+                    == Some(expected_input)
+                && schema.get("output_schema_digest").and_then(Value::as_str)
+                    == Some(expected_output);
+            owner_shape
+        };
+        let execute_schema_sentinel = |policy: &serde_json::Map<String, Value>| {
             policy
                 .get("execute_workflow_schema")
                 .and_then(Value::as_object)
                 .is_some_and(|schema| {
                     schema.len() == 3
                         && schema.get("status").and_then(Value::as_str)
-                            == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+                            == Some(OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS)
                         && schema.get("input_schema_digest") == Some(&Value::Null)
                         && schema.get("output_schema_digest") == Some(&Value::Null)
                 })
@@ -642,6 +679,39 @@ fn verify_inventory_binding(
             .pointer("/config/capability_policy")
             .and_then(Value::as_object)
             .is_some_and(|policy| {
+                let owner_tools = policy
+                    .get("approved_tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| {
+                        tools.len() == 4
+                            && tools.iter().all(|tool| {
+                                matches!(
+                                    tool.get("name").and_then(Value::as_str),
+                                    Some("archive_workflow")
+                                        | Some("publish_workflow")
+                                        | Some("unpublish_workflow")
+                                        | Some("execute_workflow")
+                                )
+                            })
+                            && exact_approved_tool(
+                                policy,
+                                "execute_workflow",
+                                if expected_server_id == "eec" {
+                                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC
+                                } else {
+                                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER
+                                },
+                                if expected_server_id == "eec" {
+                                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
+                                } else {
+                                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER
+                                },
+                            )
+                    });
+                let sentinel_tools = policy
+                    .get("approved_tools")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tools| tools.len() == 3);
                 policy.len() == 6
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
@@ -650,10 +720,6 @@ fn verify_inventory_binding(
                         .get("api_scope_digest")
                         .and_then(Value::as_str)
                         .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
-                    && policy
-                        .get("approved_tools")
-                        .and_then(Value::as_array)
-                        .is_some_and(|tools| tools.len() == 3)
                     && exact_approved_tool(
                         policy,
                         "publish_workflow",
@@ -668,7 +734,8 @@ fn verify_inventory_binding(
                     )
                     && archive_approved_tool(policy)
                     && archive_schema_binding_matches(policy)
-                    && execute_schema_unavailable(policy)
+                    && ((owner_tools && execute_schema_owner(policy))
+                        || (sentinel_tools && execute_schema_sentinel(policy)))
             });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
@@ -1064,6 +1131,12 @@ mod tests {
                                 "class": "write",
                                 "input_schema_digest": OFFICIAL_MCP_ARCHIVE_INPUT_SCHEMA_DIGEST,
                                 "output_schema_digest": OFFICIAL_MCP_ARCHIVE_OUTPUT_SCHEMA_DIGEST
+                            },
+                            {
+                                "name": "execute_workflow",
+                                "class": "write",
+                                "input_schema_digest": if server_id == "eec" { OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC } else { OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER },
+                                "output_schema_digest": if server_id == "eec" { OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC } else { OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER }
                             }
                         ],
                         "archive_workflow_schema": {
@@ -1072,8 +1145,8 @@ mod tests {
                         },
                         "execute_workflow_schema": {
                             "status": OFFICIAL_MCP_EXECUTE_POLICY_STATUS,
-                            "input_schema_digest": null,
-                            "output_schema_digest": null
+                            "input_schema_digest": if server_id == "eec" { OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC } else { OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER },
+                            "output_schema_digest": if server_id == "eec" { OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC } else { OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER }
                         }
                     }
                 },
@@ -1369,6 +1442,107 @@ mod tests {
             .code(),
             BundleErrorCode::InventoryBinding
         );
+
+        let wrong_execute_digest = ReleaseFixture::new();
+        let inventory_path = wrong_execute_digest.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["capability_policy"]["approved_tools"][3]["input_schema_digest"] =
+            Value::String("sha256:wrong".to_owned());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode wrong execute policy"),
+        )
+        .expect("write wrong execute policy");
+        wrong_execute_digest.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &wrong_execute_digest.executable,
+                wrong_execute_digest.owner,
+            )
+            .expect_err("wrong execute schema digest")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let extra_execute_tool = ReleaseFixture::new();
+        let inventory_path = extra_execute_tool.artifact("inventory/hetzner-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .expect("approved tools")
+            .push(serde_json::json!({
+                "name": "unexpected_write_tool",
+                "class": "write",
+                "input_schema_digest": OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+                "output_schema_digest": OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER
+            }));
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode extra execute policy"),
+        )
+        .expect("write extra execute policy");
+        extra_execute_tool.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &extra_execute_tool.executable,
+                extra_execute_tool.owner,
+            )
+            .expect_err("extra approved tool")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let wrong_execute_server = ReleaseFixture::new();
+        let inventory_path = wrong_execute_server.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["server_id"] = Value::String("hetzner".to_owned());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode wrong execute server"),
+        )
+        .expect("write wrong execute server");
+        wrong_execute_server.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &wrong_execute_server.executable,
+                wrong_execute_server.owner,
+            )
+            .expect_err("wrong execute server binding")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let sentinel = ReleaseFixture::new();
+        let inventory_path = sentinel.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        assert!(
+            inventory[0]["config"]["capability_policy"]["approved_tools"]
+                .as_array_mut()
+                .expect("approved tools")
+                .pop()
+                .is_some()
+        );
+        inventory[0]["config"]["capability_policy"]["execute_workflow_schema"] = serde_json::json!({
+            "status": OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS,
+            "input_schema_digest": null,
+            "output_schema_digest": null
+        });
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode sentinel policy"),
+        )
+        .expect("write sentinel policy");
+        sentinel.write_receipt(None);
+        verify_release_bundle_for_owner(&sentinel.executable, sentinel.owner)
+            .expect("legacy sentinel policy remains structurally accepted");
     }
 
     #[cfg(unix)]

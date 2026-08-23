@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; it remains unavailable until exact per-server `execute_workflow` schema digests and execution readback policy are provisioned, so no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
+> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -8,7 +8,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. The `n8n.workflows.execute` seam validates its bounded manual/production contract but remains unavailable until exact per-server `execute_workflow` schema digests and independent execution readback policy are owner-provisioned; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed.
 
 ### Immutable release provisioner (source-only packet)
 
@@ -19,7 +19,8 @@ bytes), `provenance.json` (including the exact git revision), BLAKE3 artifact by
 root ownership/restrictive modes, canonical non-symlink paths, strict
 allowlisted inventory/policy metadata with secret-like key/value rejection,
 and exact EEC/Hetzner official-MCP policy bindings for
-`publish_workflow`, `unpublish_workflow`, and `archive_workflow`. The
+`publish_workflow`, `unpublish_workflow`, `archive_workflow`, and the
+owner-provisioned `execute_workflow` schema bindings. The
 `provision-receipt.json` must carry an owner Ed25519 signature over
 domain-separated release/git/receipt/provision digests and the canonical full
 server binding map; verification accepts only an explicit owner public key and
@@ -58,7 +59,7 @@ The current crate exposes these operations:
 - `n8n.workflows.update_draft`
 - `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; one guarded provider attempt plus independent readback)
 - `n8n.workflows.archive` (typed official-MCP `archive_workflow`; inactive/unarchived baseline only, one guarded provider attempt plus independent readback)
-- `n8n.workflows.execute` (typed official-MCP `execute_workflow` seam; wrapper/host/connector validate identical bounded manual or production inputs, and the typed result is limited to workflow/execution IDs, initial status, mode/version, and an independent execution GET classification. Execution remains unavailable until owner-provisioned per-server schema digests and readback policy are accepted; no live acceptance)
+- `n8n.workflows.execute` (typed official-MCP `execute_workflow` seam; wrapper/host/connector validate identical bounded manual or production inputs, and the typed result is limited to workflow/execution IDs, initial status, mode/version, and an independent execution GET classification. Host admission requires the immutable owner-provisioned EEC/Hetzner schema binding; no live acceptance)
 - `n8n.mcp_access.reconcile`
 
 Important runtime truths:

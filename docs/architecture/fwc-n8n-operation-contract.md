@@ -404,7 +404,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
-| `n8n.workflows.execute` | `n8n.executions.start` | Risky / High | Interactive | BestEffort | owner-gated official MCP `execute_workflow` (unavailable until exact per-server schema digests are provisioned) | bounded workflow/execution IDs and initial status plus independent typed execution GET readback; post-provider readback failures are terminal unknown/no-retry; live acceptance deferred | 256 KiB |
+| `n8n.workflows.execute` | `n8n.executions.start` | Risky / High | Interactive | BestEffort | owner-gated official MCP `execute_workflow` with exact immutable EEC/Hetzner input/output schema bindings | bounded workflow/execution IDs and initial status plus independent typed execution GET readback; post-provider readback failures are terminal unknown/no-retry; live acceptance deferred | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
 | `n8n.executions.get` | `n8n.executions.read` | Safe / High | None | None | REST | execution status; data opt-in | 1 MiB full |
 | `n8n.credentials.list` | `n8n.credentials.metadata.read` | Safe / Medium | None | None | official MCP | credential metadata URI | 128 KiB |
@@ -454,7 +454,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
 | `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact official-MCP call and independent REST GET readback |
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
-| `workflows.execute` | exact workflow target, `mode`, `versionId`, `guard` | `inputs` (bounded), `wait=false` | `{status,operation,provider,workflowId,mode,versionId,executionId,initialStatus,retry,readback}`; only bounded identifiers/status are returned. The owner-gated official-MCP path remains unavailable until exact per-server schema digests are provisioned; after any provider attempt, readback transport/decode/mismatch is terminal `unknown_outcome` with no automatic retry. |
+| `workflows.execute` | exact workflow target, `mode`, `versionId`, `guard` | `inputs` (bounded), `wait=false` | `{status,operation,provider,workflowId,mode,versionId,executionId,initialStatus,retry,readback}`; only bounded identifiers/status are returned. Host admission requires the exact immutable owner-provisioned EEC/Hetzner schema binding; after any provider attempt, readback transport/decode/mismatch is terminal `unknown_outcome` with no automatic retry. |
 | `executions.search` | `target.server` | `workflowId`, `status[]`, `startedAfter`, `startedBefore`, `page` | `{executions:[{resourceUri,id,workflowId,status,mode,startedAt?,stoppedAt?}]}` |
 | `executions.get` | exact execution target | `includeData=false`, `nodeNames[1..20]`, `maxItemsPerNode` | `{execution:{id,workflowId,status,mode,startedAt?,stoppedAt?,retryOf?,waitTill?},data?}` |
 | `credentials.list` | `target.server` | `query`, `type`, `projectId`, `onlySharedWithMe`, `page` | `{credentials:[{resourceUri,id,name,type,scopes,isManaged,isGlobal,homeProject?}]}` |
@@ -519,13 +519,13 @@ and route.
 `workflows.execute.mode` is exactly `manual` or `production` in the bounded
 input contract. Both modes are Risky/High/BestEffort and require a current-chat
 guard with exact workflow/version preconditions, UUID idempotency, bounded
-input class, and side-effect summary. The provider call is only the owner-policy
-bound official MCP `execute_workflow` tool with `wait=false`; the source tree
-currently carries an explicit unavailable policy sentinel because exact
-per-server input/output schema digests are not owner-provisioned. When that
-owner gate is supplied, the path must return only a bounded handle and verify
-the execution through an independent typed `n8n.executions.get`; `test` and
-`prepare_test` remain future-only. `inputs.headers`
+input class, and side-effect summary. The provider call is only the immutable
+owner-policy-bound official MCP `execute_workflow` tool with `wait=false`; the
+EEC and Hetzner input/output schema digests are fixed in the owner-signed
+per-server binding. A legacy unavailable sentinel may remain in an older bundle
+but never admits execution. The path must return only a bounded handle and
+verify the execution through an independent typed `n8n.executions.get`; `test`
+and `prepare_test` remain future-only. `inputs.headers`
 rejects authorization, cookie, proxy authorization, API-key, and other
 credential-bearing headers; secrets must come from the workflow's existing
 credential references, not model input.
@@ -656,7 +656,7 @@ caller-configurable frame expansion.
 | Draft/published comparison | Official MCP | REST plus local validation | Official server semantics expose both graphs |
 | Workflow SDK create/update | Official MCP | Typed REST only after parity | Server-side SDK and node schema validation |
 | Publish/unpublish/archive/restore | Typed REST after parity | Official MCP | Typed preconditions and compact readback |
-| Manual/production execution | Owner-gated official MCP `execute_workflow` | No REST fallback | Input parity is implemented; execution remains unavailable until exact per-server schema policy and independent execution GET readback are owner-provisioned; test/prepare-test deferred |
+| Manual/production execution | Owner-gated official MCP `execute_workflow` | No REST fallback | Input parity and exact EEC/Hetzner schema binding are implemented; live execution acceptance and test/prepare-test remain deferred |
 | Credential metadata | Official MCP | Typed REST | Official MCP strips secret data |
 | Data tables | Official MCP | Typed REST after parity | Current official typed surface is broader |
 | Audit/evaluations/version history | Typed REST or local MCP by capability | No silent fallback | Feature/version dependent |

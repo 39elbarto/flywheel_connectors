@@ -376,6 +376,16 @@ const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+const N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
+const N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
+const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
+    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+const N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC: &str =
+    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+const N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
 #[cfg(target_os = "linux")]
@@ -11088,20 +11098,118 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         return false;
     };
     if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
+        let server_id = config.get("server_id").and_then(Value::as_str);
+        let (expected_input, expected_output) = match server_id {
+            Some("eec") => (
+                N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+            ),
+            Some("hetzner") => (
+                N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+                N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+            ),
+            _ => return false,
+        };
         let Some(schema) = policy
             .get("execute_workflow_schema")
             .and_then(Value::as_object)
         else {
             return false;
         };
-        // No owner-provisioned per-server execute schema digest exists yet.
-        // The explicit sentinel is accepted as policy shape but never admits
-        // execution; arbitrary inventory/caller digests remain fail-closed.
-        let shape_valid = schema.len() == 3
-            && schema.get("status").and_then(Value::as_str) == Some("unavailable_unproven_schema")
+        let owner_schema = schema.len() == 3
+            && schema.get("status").and_then(Value::as_str)
+                == Some(N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+            && schema.get("input_schema_digest").and_then(Value::as_str) == Some(expected_input)
+            && schema.get("output_schema_digest").and_then(Value::as_str) == Some(expected_output);
+        let sentinel_schema = schema.len() == 3
+            && schema.get("status").and_then(Value::as_str)
+                == Some(N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS)
             && schema.get("input_schema_digest") == Some(&Value::Null)
             && schema.get("output_schema_digest") == Some(&Value::Null);
-        if !shape_valid {
+        let Some(tools) = policy.get("approved_tools").and_then(Value::as_array) else {
+            return false;
+        };
+        let tool_matches = |tool: &Value, name: &str, input: &str, output: &str| {
+            tool.as_object().is_some_and(|tool| {
+                tool.len() == 4
+                    && tool.get("name").and_then(Value::as_str) == Some(name)
+                    && tool.get("class").and_then(Value::as_str) == Some("write")
+                    && tool.get("input_schema_digest").and_then(Value::as_str) == Some(input)
+                    && tool.get("output_schema_digest").and_then(Value::as_str) == Some(output)
+            })
+        };
+        let archive_matches = policy
+            .get("archive_workflow_schema")
+            .and_then(Value::as_object)
+            .filter(|schema| schema.len() == 2)
+            .and_then(|schema| {
+                tools
+                    .iter()
+                    .find(|tool| {
+                        tool.as_object().is_some_and(|tool| {
+                            tool.len() == 4
+                                && tool.get("name").and_then(Value::as_str)
+                                    == Some("archive_workflow")
+                                && tool.get("class").and_then(Value::as_str) == Some("write")
+                                && tool
+                                    .get("input_schema_digest")
+                                    .and_then(Value::as_str)
+                                    .is_some()
+                                && tool
+                                    .get("output_schema_digest")
+                                    .and_then(Value::as_str)
+                                    .is_some()
+                        })
+                    })
+                    .and_then(|tool| {
+                        (schema.get("input_schema_digest") == tool.get("input_schema_digest")
+                            && schema.get("output_schema_digest")
+                                == tool.get("output_schema_digest"))
+                        .then_some(tool)
+                    })
+            })
+            .is_some();
+        let owner_tools = tools.len() == 4
+            && tools.iter().all(|tool| {
+                matches!(
+                    tool.get("name").and_then(Value::as_str),
+                    Some(N8N_OFFICIAL_MCP_ARCHIVE_TOOL)
+                        | Some(N8N_OFFICIAL_MCP_PUBLISH_TOOL)
+                        | Some(N8N_OFFICIAL_MCP_UNPUBLISH_TOOL)
+                        | Some(N8N_OFFICIAL_MCP_EXECUTE_TOOL)
+                )
+            })
+            && tools.iter().any(|tool| {
+                tool_matches(
+                    tool,
+                    N8N_OFFICIAL_MCP_PUBLISH_TOOL,
+                    N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                    N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+                )
+            })
+            && tools.iter().any(|tool| {
+                tool_matches(
+                    tool,
+                    N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
+                    N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                    N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+                )
+            })
+            && tools.iter().any(|tool| {
+                tool_matches(
+                    tool,
+                    N8N_OFFICIAL_MCP_EXECUTE_TOOL,
+                    expected_input,
+                    expected_output,
+                )
+            })
+            && archive_matches;
+        if owner_schema && owner_tools {
+            return true;
+        }
+        // The legacy sentinel remains a valid shape for old bundles, but it
+        // never admits execution and cannot be combined with owner digests.
+        if sentinel_schema {
             return false;
         }
         return false;
@@ -33518,11 +33626,22 @@ done"#;
                     "class": "write",
                     "input_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "output_schema_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                {
+                    "name": N8N_OFFICIAL_MCP_EXECUTE_TOOL,
+                    "class": "write",
+                    "input_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                    "output_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
                 }
             ],
             "archive_workflow_schema": {
                 "input_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "output_schema_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "execute_workflow_schema": {
+                "status": N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS,
+                "input_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                "output_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
             }
         });
         config
@@ -33679,7 +33798,7 @@ done"#;
     fn n8n_official_mcp_execute_sentinel_policy_denies_before_provider() {
         let mut config = run_once_n8n_official_mcp_lifecycle_test_config();
         config.config.as_mut().expect("config")["capability_policy"]["execute_workflow_schema"] = json!({
-            "status": "unavailable_unproven_schema",
+            "status": N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS,
             "input_schema_digest": null,
             "output_schema_digest": null
         });
@@ -33712,6 +33831,65 @@ done"#;
             correlation_id: None,
         };
         assert!(build_n8n_official_mcp_run_once_plan(input, &config).is_err());
+    }
+
+    #[test]
+    fn n8n_official_mcp_execute_owner_binding_is_exact_per_server() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.execute".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_string(),
+            input: json!({
+                "id": "workflow-1",
+                "mode": "manual",
+                "versionId": "version-1",
+                "guard": {
+                    "approvalRef": "chat-execute-approval",
+                    "idempotencyKey": "33333333-4444-4555-8666-777777777777",
+                    "inputClass": "none",
+                    "sideEffectSummary": "manual approved run",
+                    "precondition": {
+                        "versionId": "version-1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }
+            }),
+            approval_token: None,
+            deadline_ms: None,
+            correlation_id: None,
+        };
+        let plan = build_n8n_official_mcp_run_once_plan(input.clone(), &config)
+            .expect("owner-provisioned execute binding");
+        assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_EXECUTE_TOOL);
+        assert_eq!(plan.input["arguments"]["workflowId"], "workflow-1");
+        assert_eq!(plan.input["arguments"]["executionMode"], "manual");
+
+        let mut wrong_digest = config.clone();
+        wrong_digest.config.as_mut().expect("config")["capability_policy"]["approved_tools"][3]["output_schema_digest"] =
+            json!("sha256:wrong");
+        assert!(build_n8n_official_mcp_run_once_plan(input.clone(), &wrong_digest).is_err());
+
+        let mut wrong_server = config.clone();
+        wrong_server.config.as_mut().expect("config")["server_id"] = json!("hetzner");
+        assert!(build_n8n_official_mcp_run_once_plan(input.clone(), &wrong_server).is_err());
+
+        let mut extra_tool = config;
+        extra_tool.config.as_mut().expect("config")["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .expect("approved tools")
+            .push(json!({
+                "name": "unexpected_write_tool",
+                "class": "write",
+                "input_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                "output_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
+            }));
+        assert!(build_n8n_official_mcp_run_once_plan(input, &extra_tool).is_err());
     }
 
     #[test]

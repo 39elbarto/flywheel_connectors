@@ -72,6 +72,8 @@ const WORKFLOWS_LIFECYCLE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-
 #[cfg(target_os = "linux")]
 const WORKFLOWS_ARCHIVE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.mcp-bridge","operation":"mcp.tools.call"}"#;
 #[cfg(target_os = "linux")]
+const WORKFLOWS_EXECUTE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.mcp-bridge","operation":"mcp.tools.call"}"#;
+#[cfg(target_os = "linux")]
 const MCP_ACCESS_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.mcp_access.reconcile"}"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +285,7 @@ fn process_spec(
         super::HostRunOnceOperation::CapabilitiesInspect
             | super::HostRunOnceOperation::WorkflowsLifecycle
             | super::HostRunOnceOperation::WorkflowsArchive
+            | super::HostRunOnceOperation::WorkflowsExecute
     );
     let mcp_access_dry_run = matches!(
         envelope.operation,
@@ -296,6 +299,7 @@ fn process_spec(
             Some(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION)
         }
         super::HostRunOnceOperation::WorkflowsArchive => Some(WORKFLOWS_ARCHIVE_OWNER_ADMISSION),
+        super::HostRunOnceOperation::WorkflowsExecute => Some(WORKFLOWS_EXECUTE_OWNER_ADMISSION),
         super::HostRunOnceOperation::McpAccessReconcile => Some(MCP_ACCESS_OWNER_ADMISSION),
         _ => None,
     };
@@ -352,6 +356,7 @@ const fn max_output_bytes(operation: super::HostRunOnceOperation) -> usize {
         super::HostRunOnceOperation::CapabilitiesInspect
             | super::HostRunOnceOperation::WorkflowsLifecycle
             | super::HostRunOnceOperation::WorkflowsArchive
+            | super::HostRunOnceOperation::WorkflowsExecute
     ) {
         MAX_OFFICIAL_MCP_OUTPUT_BYTES
     } else if matches!(

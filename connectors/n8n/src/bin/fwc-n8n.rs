@@ -144,6 +144,8 @@ enum HostRunOnceOperation {
     WorkflowsLifecycle,
     #[serde(rename = "n8n.workflows.archive")]
     WorkflowsArchive,
+    #[serde(rename = "n8n.workflows.execute")]
+    WorkflowsExecute,
     #[serde(rename = "n8n.mcp_access.reconcile")]
     McpAccessReconcile,
 }
@@ -165,6 +167,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
             Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
             Self::WorkflowsArchive => "n8n.workflows.archive",
+            Self::WorkflowsExecute => "n8n.workflows.execute",
             Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
         }
     }
@@ -185,6 +188,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
             "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
             "n8n.workflows.archive" => Ok(Self::WorkflowsArchive),
+            "n8n.workflows.execute" => Ok(Self::WorkflowsExecute),
             "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
             _ => Err(AppError::new("operation_not_allowed")),
         }
@@ -205,7 +209,7 @@ impl HostRunOnceOperation {
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
             | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
-            Self::WorkflowsLifecycle | Self::WorkflowsArchive => {
+            Self::WorkflowsLifecycle | Self::WorkflowsArchive | Self::WorkflowsExecute => {
                 BrokerCredentialPurpose::OfficialMcp
             }
         }
@@ -590,6 +594,7 @@ fn run_host_bridge_once(
                     envelope.operation,
                     HostRunOnceOperation::WorkflowsLifecycle
                         | HostRunOnceOperation::WorkflowsArchive
+                        | HostRunOnceOperation::WorkflowsExecute
                 );
             let code = if lifecycle {
                 official_mcp_workflow_bridge_error_code(error.code())
@@ -1024,6 +1029,208 @@ fn execute_workflow_archive_official_mcp(
     }))
 }
 
+fn decode_official_mcp_execute_result(
+    response: Value,
+    workflow_id: &str,
+) -> Result<Value, AppError> {
+    let mut result = response_result(response, "unknown_outcome")?;
+    if let Some(structured) = result.get("structuredContent").cloned() {
+        result = structured;
+    } else if let Some(content) = result.get("content").and_then(Value::as_array) {
+        let text = content
+            .iter()
+            .find_map(|item| {
+                (item.get("type").and_then(Value::as_str) == Some("text"))
+                    .then(|| item.get("text").and_then(Value::as_str))
+                    .flatten()
+            })
+            .ok_or_else(|| AppError::new("unknown_outcome"))?;
+        result = serde_json::from_str(text).map_err(|_| AppError::new("unknown_outcome"))?;
+    }
+    let object = result
+        .as_object()
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if object.get("success").and_then(Value::as_bool) != Some(true)
+        || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
+        || object
+            .get("executionId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || object.get("error").is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let execution_id = object
+        .get("executionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if execution_id.len() > 256 || execution_id.chars().any(char::is_control) {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let initial_status = object
+        .get("initialStatus")
+        .or_else(|| object.get("status"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if initial_status.len() > 64
+        || initial_status.chars().any(char::is_control)
+        || !matches!(
+            initial_status,
+            "accepted"
+                | "new"
+                | "running"
+                | "success"
+                | "error"
+                | "waiting"
+                | "canceled"
+                | "crashed"
+        )
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    Ok(json!({
+        "success": true,
+        "workflowId": workflow_id,
+        "executionId": execution_id,
+        "initialStatus": initial_status,
+    }))
+}
+
+fn executions_get_envelope(
+    envelope: &HostRunOnceEnvelope,
+    workflow_id: &str,
+    execution_id: &str,
+) -> Result<HostRunOnceEnvelope, AppError> {
+    let mut get = envelope.clone();
+    get.operation = HostRunOnceOperation::ExecutionsGet;
+    get.approval_token = None;
+    get.input = json!({"workflow_id": workflow_id, "id": execution_id});
+    get.resource_uri = expected_host_run_once_resource_uri(
+        envelope.server_id,
+        HostRunOnceOperation::ExecutionsGet,
+        &get.input,
+    )?;
+    Ok(get)
+}
+
+fn verify_execution_readback(
+    input: &Value,
+    execution_id: &str,
+    readback: &Value,
+) -> Result<(), AppError> {
+    let workflow_id = input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let mode = input
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let version_id = input
+        .get("versionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if readback.get("id").and_then(Value::as_str) != Some(execution_id)
+        || readback.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
+        || readback.get("mode").and_then(Value::as_str) != Some(mode)
+        || readback.get("workflowVersionId").and_then(Value::as_str) != Some(version_id)
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    let status = readback
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|status| {
+            !status.is_empty()
+                && status.len() <= 64
+                && matches!(
+                    *status,
+                    "new" | "running" | "success" | "error" | "waiting" | "canceled" | "crashed"
+                )
+        })
+        .ok_or_else(|| AppError::new("readback_mismatch"))?;
+    if status.chars().any(char::is_control) {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    Ok(())
+}
+
+fn terminal_execute_readback<T>(result: Result<T, AppError>) -> Result<T, AppError> {
+    result.map_err(|_| AppError::new("unknown_outcome"))
+}
+
+fn execute_workflow_execute_official_mcp(
+    bundle: &fwc_n8n_bundle::VerifiedBundle,
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+) -> Result<Value, AppError> {
+    let get = lifecycle_get_envelope(&envelope)?;
+    let baseline_response = run_host_bridge_once(
+        bundle,
+        &get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    )?;
+    let baseline = response_result(baseline_response, "unknown_outcome")?;
+    verify_lifecycle_baseline(&envelope.input, &baseline)?;
+    let provider_response = run_host_bridge_once(
+        bundle,
+        &envelope,
+        BrokerCredentialPurpose::OfficialMcp,
+        request_deadline_at,
+    )?;
+    let workflow_id = envelope
+        .input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let provider = decode_official_mcp_execute_result(provider_response, workflow_id)?;
+    let execution_id = provider
+        .get("executionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    let execution_get = terminal_execute_readback(executions_get_envelope(
+        &envelope,
+        workflow_id,
+        execution_id,
+    ))?;
+    let readback_response = terminal_execute_readback(run_host_bridge_once(
+        bundle,
+        &execution_get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    ))?;
+    let readback =
+        terminal_execute_readback(response_result(readback_response, "unknown_outcome"))?;
+    terminal_execute_readback(verify_execution_readback(
+        &envelope.input,
+        execution_id,
+        &readback,
+    ))?;
+    let mode = envelope
+        .input
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let version_id = envelope
+        .input
+        .get("versionId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "status": "submitted",
+        "operation": "n8n.workflows.execute",
+        "provider": "official_mcp",
+        "workflowId": provider.get("workflowId").cloned().unwrap_or(Value::Null),
+        "mode": mode,
+        "versionId": version_id,
+        "executionId": provider.get("executionId").cloned().unwrap_or(Value::Null),
+        "initialStatus": provider.get("initialStatus").cloned().unwrap_or(Value::Null),
+        "retry": "never_automatic",
+        "readback": "independent_execution_get",
+    }))
+}
+
 fn execute_host_run_once(
     mut envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
@@ -1039,6 +1246,9 @@ fn execute_host_run_once(
     }
     if operation == HostRunOnceOperation::WorkflowsArchive {
         return execute_workflow_archive_official_mcp(&bundle, envelope, request_deadline_at);
+    }
+    if operation == HostRunOnceOperation::WorkflowsExecute {
+        return execute_workflow_execute_official_mcp(&bundle, envelope, request_deadline_at);
     }
     let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
         Some(
@@ -1460,6 +1670,10 @@ fn validate_host_run_once_input(
             &["id", "action", "guard"],
         ),
         HostRunOnceOperation::WorkflowsArchive => (&["id", "guard"], &["id", "guard"]),
+        HostRunOnceOperation::WorkflowsExecute => (
+            &["id", "mode", "versionId", "inputs", "guard"],
+            &["id", "mode", "versionId", "guard"],
+        ),
         HostRunOnceOperation::McpAccessReconcile => (
             &[
                 "scope",
@@ -1513,6 +1727,7 @@ fn validate_host_run_once_input(
         }
         HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
         HostRunOnceOperation::WorkflowsArchive => validate_workflow_archive_input(object),
+        HostRunOnceOperation::WorkflowsExecute => validate_workflow_execute_input(object),
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
 }
@@ -1681,6 +1896,177 @@ fn validate_workflow_archive_input(
         return Err(AppError::new("invalid_operation_input"));
     }
     Ok(())
+}
+
+fn validate_workflow_execute_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let encoded =
+        serde_json::to_vec(object).map_err(|_| AppError::new("invalid_operation_input"))?;
+    if encoded.len() > 64 * 1024 {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "id" | "mode" | "versionId" | "inputs" | "guard"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    host_run_once_input_id(&json!({"id": id}), "id")?;
+    let mode = object
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "manual" | "production"))
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let version_id = object
+        .get("versionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition" | "inputClass" | "sideEffectSummary"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let input_class = guard
+        .get("inputClass")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "none" | "bounded_json"))
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let side_effect_summary = guard
+        .get("sideEffectSummary")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let inputs = object.get("inputs");
+    if (inputs.is_some() && input_class != "bounded_json")
+        || (inputs.is_none() && input_class != "none")
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if let Some(inputs) = inputs {
+        let bytes =
+            serde_json::to_vec(inputs).map_err(|_| AppError::new("invalid_operation_input"))?;
+        if !inputs.is_object() || bytes.len() > 64 * 1024 || !bounded_execute_json(inputs, 0) {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition.get("versionId") != Some(&Value::String(version_id.to_owned()))
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            !value.is_null()
+                && value.as_str().is_none_or(|value| {
+                    value.is_empty() || value.len() > 256 || value.trim() != value
+                })
+        })
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if mode == "production"
+        && (precondition.get("active") != Some(&Value::Bool(true))
+            || precondition.get("isArchived") != Some(&Value::Bool(false))
+            || precondition.get("activeVersionId") != Some(&Value::String(version_id.to_owned())))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let _ = side_effect_summary;
+    Ok(())
+}
+
+fn bounded_execute_json(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => {
+            object.len() <= 64
+                && object.iter().all(|(key, value)| {
+                    let lowered = key.to_ascii_lowercase();
+                    key.len() <= 128
+                        && ![
+                            "secret",
+                            "token",
+                            "credential",
+                            "header",
+                            "authorization",
+                            "cookie",
+                            "api_key",
+                            "apikey",
+                            "password",
+                            "url",
+                            "command",
+                            "path",
+                            "data",
+                        ]
+                        .iter()
+                        .any(|marker| lowered.contains(marker))
+                        && bounded_execute_json(value, depth + 1)
+                })
+        }
+        Value::Array(array) => {
+            array.len() <= 128
+                && array
+                    .iter()
+                    .all(|value| bounded_execute_json(value, depth + 1))
+        }
+        Value::String(value) => value.len() <= 4096 && !value.chars().any(char::is_control),
+        _ => true,
+    }
 }
 
 fn validate_mcp_access_input(
@@ -1935,6 +2321,10 @@ fn expected_host_run_once_resource_uri(
             "fwc-mcp-bridge://{}/tools/archive%5Fworkflow",
             server_id.as_str()
         )),
+        HostRunOnceOperation::WorkflowsExecute => Ok(format!(
+            "fwc-mcp-bridge://{}/tools/execute%5Fworkflow",
+            server_id.as_str()
+        )),
         HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
             Ok(format!(
                 "{root}/workflows/{}",
@@ -2089,6 +2479,113 @@ const fn route_error_code(code: fcp_n8n::router::RouteErrorCode) -> &'static str
 mod tests {
     use super::*;
     use fcp_n8n::router::{Provider, ProviderCapability, ServerId};
+
+    fn execute_input_fixture() -> Value {
+        json!({
+            "id": "workflow-1",
+            "mode": "manual",
+            "versionId": "version-1",
+            "inputs": {"items": [1, true, "bounded"]},
+            "guard": {
+                "approvalRef": "chat-approval",
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                "inputClass": "bounded_json",
+                "sideEffectSummary": "run one approved workflow",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn execute_handle_and_post_readback_failures_are_bounded_unknown() {
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "success": true,
+                    "workflowId": "workflow-1",
+                    "executionId": "execution-1",
+                    "initialStatus": "accepted"
+                }
+            }
+        });
+        let handle =
+            decode_official_mcp_execute_result(response, "workflow-1").expect("typed handle");
+        assert_eq!(handle["workflowId"], "workflow-1");
+        assert_eq!(handle["initialStatus"], "accepted");
+
+        let input = execute_input_fixture();
+        let readback = json!({
+            "id": "execution-1",
+            "workflowId": "workflow-1",
+            "workflowVersionId": "version-1",
+            "mode": "manual",
+            "status": "running"
+        });
+        verify_execution_readback(&input, "execution-1", &readback).expect("readback");
+        let mismatch = verify_execution_readback(
+            &input,
+            "execution-1",
+            &json!({"id": "execution-1", "workflowId": "other", "mode": "manual", "workflowVersionId": "version-1", "status": "running"}),
+        );
+        assert_eq!(
+            terminal_execute_readback(mismatch)
+                .expect_err("mismatch")
+                .code,
+            "unknown_outcome"
+        );
+        let transport: Result<Value, AppError> = Err(AppError::new("timeout"));
+        assert_eq!(
+            terminal_execute_readback(transport)
+                .expect_err("transport")
+                .code,
+            "unknown_outcome"
+        );
+    }
+
+    #[test]
+    fn execute_handle_missing_status_fails_closed() {
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "success": true,
+                    "workflowId": "workflow-1",
+                    "executionId": "execution-1"
+                }
+            }
+        });
+        assert_eq!(
+            decode_official_mcp_execute_result(response, "workflow-1")
+                .expect_err("missing status must be denied")
+                .code,
+            "unknown_outcome"
+        );
+    }
+
+    #[test]
+    fn execute_input_parity_rejects_recursive_secret_shapes_and_oversize() {
+        let input = execute_input_fixture();
+        validate_workflow_execute_input(input.as_object().expect("object")).expect("valid input");
+
+        let mut marker = input.clone();
+        marker["inputs"] = json!({"nested": {"apiKey": "redacted"}});
+        assert!(validate_workflow_execute_input(marker.as_object().expect("object")).is_err());
+
+        let mut array = input.clone();
+        array["inputs"] = json!(["top-level arrays are denied"]);
+        assert!(validate_workflow_execute_input(array.as_object().expect("object")).is_err());
+
+        let mut oversized = input;
+        oversized["inputs"] = json!({"value": "x".repeat(65_000)});
+        assert!(validate_workflow_execute_input(oversized.as_object().expect("object")).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     use fcp_crypto::ZeroizingSecret;

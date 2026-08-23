@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
+> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; it remains unavailable until exact per-server `execute_workflow` schema digests and execution readback policy are provisioned, so no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and an installed owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -8,7 +8,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. Each write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent REST GET readback; direct REST lifecycle/archive routes remain fail-closed and no legacy endpoint is guessed.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. The `n8n.workflows.execute` seam validates its bounded manual/production contract but remains unavailable until exact per-server `execute_workflow` schema digests and independent execution readback policy are owner-provisioned; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed.
 
 ### Immutable release provisioner (source-only packet)
 
@@ -58,6 +58,7 @@ The current crate exposes these operations:
 - `n8n.workflows.update_draft`
 - `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; one guarded provider attempt plus independent readback)
 - `n8n.workflows.archive` (typed official-MCP `archive_workflow`; inactive/unarchived baseline only, one guarded provider attempt plus independent readback)
+- `n8n.workflows.execute` (typed official-MCP `execute_workflow` seam; wrapper/host/connector validate identical bounded manual or production inputs, and the typed result is limited to workflow/execution IDs, initial status, mode/version, and an independent execution GET classification. Execution remains unavailable until owner-provisioned per-server schema digests and readback policy are accepted; no live acceptance)
 - `n8n.mcp_access.reconcile`
 
 Important runtime truths:
@@ -519,7 +520,7 @@ The current implementation does not include:
 - workflow create, update, delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations
 - provider-specific filtering and sorting for workflow or execution list calls
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
-- restore/unarchive, versions, execution, credential mutation, and permanent deletion; archive is implemented only through the exact official-MCP `archive_workflow` route and rejects active/already-archived baselines
+- restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent deletion; execution data/result retrieval and execution management remain out of scope
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
 - API-key provisioning, secret injection, or host egress enforcement
 - OAuth installation, API-key rotation, credential validation beyond local configuration shape, or live self-check probe

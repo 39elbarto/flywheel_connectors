@@ -300,6 +300,57 @@ pub struct WorkflowLifecycleInput {
     pub guard: WorkflowLifecycleGuard,
 }
 
+/// Execution modes supported by the mediated official MCP path.  Test and
+/// prepare-test execution are intentionally not represented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowExecuteMode {
+    Manual,
+    Production,
+}
+
+impl WorkflowExecuteMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Production => "production",
+        }
+    }
+}
+
+/// Approval binding for a workflow execution.  `inputClass` and
+/// `sideEffectSummary` are explicit so production approval cannot be reused
+/// for a materially different invocation; manual execution is not assumed to
+/// be side-effect free either.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowExecuteGuard {
+    #[serde(rename = "approvalRef")]
+    pub approval_ref: String,
+    #[serde(rename = "idempotencyKey")]
+    pub idempotency_key: String,
+    pub precondition: WorkflowLifecyclePrecondition,
+    #[serde(rename = "inputClass")]
+    pub input_class: String,
+    #[serde(rename = "sideEffectSummary")]
+    pub side_effect_summary: String,
+}
+
+/// Typed input for `n8n.workflows.execute`.  Provider payloads are accepted
+/// only as bounded JSON input and are never returned in the execution result.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowExecuteInput {
+    pub id: String,
+    pub mode: WorkflowExecuteMode,
+    #[serde(rename = "versionId")]
+    pub version_id: String,
+    #[serde(default)]
+    pub inputs: Option<Value>,
+    pub guard: WorkflowExecuteGuard,
+}
+
 /// Deserialize-only provider workflow tag DTO.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tag {
@@ -322,6 +373,8 @@ pub struct Execution {
     pub stopped_at: Option<String>,
     #[serde(default, rename = "workflowId")]
     pub workflow_id: Option<String>,
+    #[serde(default, rename = "workflowVersionId")]
+    pub workflow_version_id: Option<String>,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default, rename = "retryOf")]
@@ -507,6 +560,8 @@ pub struct ExecutionView {
     pub stopped_at: Option<String>,
     #[serde(rename = "workflowId")]
     pub workflow_id: Option<String>,
+    #[serde(rename = "workflowVersionId", skip_serializing_if = "Option::is_none")]
+    pub workflow_version_id: Option<String>,
     pub status: Option<String>,
     #[serde(rename = "retryOf")]
     pub retry_of: Option<String>,
@@ -681,6 +736,7 @@ impl Execution {
             started_at: self.started_at,
             stopped_at: self.stopped_at,
             workflow_id: self.workflow_id,
+            workflow_version_id: self.workflow_version_id,
             status: self.status,
             retry_of: self.retry_of,
             retry_success_id: self.retry_success_id,
@@ -1150,6 +1206,7 @@ mod tests {
             started_at: Some("2025-01-01T00:00:00Z".into()),
             stopped_at: Some("2025-01-01T00:00:01Z".into()),
             workflow_id: Some("w1".into()),
+            workflow_version_id: None,
             status: Some("success".into()),
             retry_of: None,
             retry_success_id: None,
@@ -1357,6 +1414,7 @@ mod tests {
             started_at: None,
             stopped_at: None,
             workflow_id: Some("w1".into()),
+            workflow_version_id: None,
             status: Some("success".into()),
             retry_of: None,
             retry_success_id: None,
@@ -1376,6 +1434,7 @@ mod tests {
             started_at: None,
             stopped_at: None,
             workflow_id: None,
+            workflow_version_id: None,
             status: None,
             retry_of: None,
             retry_success_id: None,

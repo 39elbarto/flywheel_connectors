@@ -367,6 +367,7 @@ const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
 const N8N_OFFICIAL_MCP_PUBLISH_TOOL: &str = "publish_workflow";
 const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
 const N8N_OFFICIAL_MCP_ARCHIVE_TOOL: &str = "archive_workflow";
+const N8N_OFFICIAL_MCP_EXECUTE_TOOL: &str = "execute_workflow";
 const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
     "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
 const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
@@ -402,14 +403,15 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 5] = [
+const N8N_WRITE_OPERATIONS: [&str; 6] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
+    "n8n.workflows.execute",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 14] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
     "n8n.executions.get",
     "n8n.executions.list",
@@ -424,6 +426,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 14] = [
     "n8n.workflows.update_draft",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
+    "n8n.workflows.execute",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,6 +580,7 @@ impl TrustedResourceBinding {
                     N8N_OFFICIAL_MCP_PUBLISH_TOOL
                         | N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
                         | N8N_OFFICIAL_MCP_ARCHIVE_TOOL
+                        | N8N_OFFICIAL_MCP_EXECUTE_TOOL
                 ) || !object.get("arguments").is_some_and(Value::is_object)
                 {
                     return Err(HostError::PreflightFailed(
@@ -10443,6 +10447,217 @@ fn validate_n8n_workflow_lifecycle_input(input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
+    let encoded = serde_json::to_vec(input).map_err(|_| {
+        HostError::InvalidFilter("n8n workflow execute input is not valid JSON".to_string())
+    })?;
+    if encoded.len() > 64 * 1024 {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute input exceeds bounds".to_string(),
+        ));
+    }
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n workflow execute input must be an object".to_string())
+    })?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "id" | "mode" | "versionId" | "inputs" | "guard"
+        )
+    }) || !["id", "mode", "versionId", "guard"]
+        .iter()
+        .all(|field| object.contains_key(*field))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute input contains unsupported or missing fields".to_string(),
+        ));
+    }
+    let workflow_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow execute id is invalid".to_string())
+        })?;
+    n8n_read_only_input_id(&json!({"id": workflow_id}), "id")?;
+    let mode = object.get("mode").and_then(Value::as_str).ok_or_else(|| {
+        HostError::InvalidFilter("n8n workflow execute mode is invalid".to_string())
+    })?;
+    if !matches!(mode, "manual" | "production") {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute mode is invalid".to_string(),
+        ));
+    }
+    let version_id = object
+        .get("versionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow execute versionId is invalid".to_string())
+        })?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow execute guard is invalid".to_string())
+        })?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition" | "inputClass" | "sideEffectSummary"
+        )
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute guard is invalid".to_string(),
+        ));
+    }
+    if guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .is_none_or(|value| {
+            value.is_empty()
+                || value.len() > 256
+                || value.trim() != value
+                || value.chars().any(char::is_control)
+        })
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| Uuid::parse_str(value).is_err())
+        || guard
+            .get("sideEffectSummary")
+            .and_then(Value::as_str)
+            .is_none_or(|value| {
+                value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            })
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute approval binding is invalid".to_string(),
+        ));
+    }
+    let input_class = guard
+        .get("inputClass")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow execute inputClass is invalid".to_string())
+        })?;
+    if !matches!(input_class, "none" | "bounded_json") {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute inputClass is invalid".to_string(),
+        ));
+    }
+    if let Some(inputs) = object.get("inputs") {
+        let bytes = serde_json::to_vec(inputs).map_err(|_| {
+            HostError::InvalidFilter("n8n workflow execute inputs are invalid".to_string())
+        })?;
+        if !inputs.is_object()
+            || bytes.len() > 64 * 1024
+            || !host_bounded_execute_json(inputs, 0)
+            || input_class != "bounded_json"
+        {
+            return Err(HostError::InvalidFilter(
+                "n8n workflow execute inputs exceed bounds".to_string(),
+            ));
+        }
+    } else if input_class != "none" {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute inputClass does not match inputs".to_string(),
+        ));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow execute precondition is invalid".to_string())
+        })?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition.get("versionId") != Some(&Value::String(version_id.to_owned()))
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            !value.is_null()
+                && value.as_str().is_none_or(|value| {
+                    value.is_empty() || value.len() > 256 || value.trim() != value
+                })
+        })
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute precondition is invalid".to_string(),
+        ));
+    }
+    if mode == "production"
+        && (precondition.get("active") != Some(&Value::Bool(true))
+            || precondition.get("isArchived") != Some(&Value::Bool(false))
+            || precondition.get("activeVersionId") != Some(&Value::String(version_id.to_owned())))
+    {
+        return Err(HostError::InvalidFilter(
+            "production execution requires the published version".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn host_bounded_execute_json(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => {
+            object.len() <= 64
+                && object.iter().all(|(key, value)| {
+                    let lowered = key.to_ascii_lowercase();
+                    key.len() <= 128
+                        && ![
+                            "secret",
+                            "token",
+                            "credential",
+                            "header",
+                            "authorization",
+                            "cookie",
+                            "api_key",
+                            "apikey",
+                            "password",
+                            "url",
+                            "command",
+                            "path",
+                            "data",
+                        ]
+                        .iter()
+                        .any(|marker| lowered.contains(marker))
+                        && host_bounded_execute_json(value, depth + 1)
+                })
+        }
+        Value::Array(array) => {
+            array.len() <= 128
+                && array
+                    .iter()
+                    .all(|value| host_bounded_execute_json(value, depth + 1))
+        }
+        Value::String(value) => value.len() <= 4096 && !value.chars().any(char::is_control),
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+    }
+}
+
 fn validate_n8n_workflow_archive_input(input: &Value) -> HostResult<()> {
     let object = input.as_object().ok_or_else(|| {
         HostError::InvalidFilter("n8n workflow archive input must be an object".to_string())
@@ -10738,6 +10953,10 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.execute" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.mcp_access.reconcile" => Ok(root),
         "n8n.executions.get" => Ok(format!(
             "{root}/workflows/{}/executions/{}",
@@ -10784,6 +11003,8 @@ fn build_n8n_read_only_run_once_plan(
         validate_n8n_workflow_lifecycle_input(&input.input)?;
     } else if input.operation == "n8n.workflows.archive" {
         validate_n8n_workflow_archive_input(&input.input)?;
+    } else if input.operation == "n8n.workflows.execute" {
+        validate_n8n_workflow_execute_input(&input.input)?;
     } else if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
         validate_n8n_draft_input(&input.operation, &input.input)?;
     }
@@ -10866,6 +11087,25 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
     let Some(Value::Object(policy)) = config.get("capability_policy") else {
         return false;
     };
+    if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
+        let Some(schema) = policy
+            .get("execute_workflow_schema")
+            .and_then(Value::as_object)
+        else {
+            return false;
+        };
+        // No owner-provisioned per-server execute schema digest exists yet.
+        // The explicit sentinel is accepted as policy shape but never admits
+        // execution; arbitrary inventory/caller digests remain fail-closed.
+        let shape_valid = schema.len() == 3
+            && schema.get("status").and_then(Value::as_str) == Some("unavailable_unproven_schema")
+            && schema.get("input_schema_digest") == Some(&Value::Null)
+            && schema.get("output_schema_digest") == Some(&Value::Null);
+        if !shape_valid {
+            return false;
+        }
+        return false;
+    }
     let (expected_input_digest, expected_output_digest) = match tool_name {
         N8N_OFFICIAL_MCP_PUBLISH_TOOL => (
             N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
@@ -10921,7 +11161,7 @@ fn build_n8n_official_mcp_run_once_plan(
     }
     let parent_binding_hash = if matches!(
         input.operation.as_str(),
-        "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+        "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
     ) {
         let resource_uri = expected_n8n_read_only_resource_uri(
             input.server_id,
@@ -10940,7 +11180,7 @@ fn build_n8n_official_mcp_run_once_plan(
     if input.approval_token.is_some()
         && !matches!(
             input.operation.as_str(),
-            "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+            "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
         )
     {
         return Err(HostError::InvalidFilter(
@@ -10970,18 +11210,22 @@ fn build_n8n_official_mcp_run_once_plan(
         )
     } else if matches!(
         input.operation.as_str(),
-        "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+        "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
     ) {
         if input.operation == "n8n.workflows.lifecycle" {
             validate_n8n_workflow_lifecycle_input(&input.input)?;
-        } else {
+        } else if input.operation == "n8n.workflows.archive" {
             validate_n8n_workflow_archive_input(&input.input)?;
+        } else {
+            validate_n8n_workflow_execute_input(&input.input)?;
         }
         let object = input.input.as_object().ok_or_else(|| {
             HostError::InvalidFilter("n8n workflow operation input is invalid".to_string())
         })?;
         let tool_name = if input.operation == "n8n.workflows.archive" {
             N8N_OFFICIAL_MCP_ARCHIVE_TOOL
+        } else if input.operation == "n8n.workflows.execute" {
+            N8N_OFFICIAL_MCP_EXECUTE_TOOL
         } else {
             match object.get("action").and_then(Value::as_str) {
                 Some("publish") => N8N_OFFICIAL_MCP_PUBLISH_TOOL,
@@ -11008,6 +11252,19 @@ fn build_n8n_official_mcp_run_once_plan(
         if input.operation == "n8n.workflows.lifecycle" {
             if let Some(version_id) = object.get("versionId") {
                 arguments.insert("versionId".to_string(), version_id.clone());
+            }
+        } else if input.operation == "n8n.workflows.execute" {
+            arguments.insert(
+                "executionMode".to_string(),
+                object.get("mode").cloned().unwrap_or(Value::Null),
+            );
+            arguments.insert(
+                "versionId".to_string(),
+                object.get("versionId").cloned().unwrap_or(Value::Null),
+            );
+            arguments.insert("wait".to_string(), Value::Bool(false));
+            if let Some(inputs) = object.get("inputs") {
+                arguments.insert("inputs".to_string(), inputs.clone());
             }
         }
         (
@@ -11124,6 +11381,22 @@ fn official_mcp_approval_constraints(
             "parent_binding_sha256".to_string(),
             Value::String(hex::encode(parent_binding_hash)),
         );
+    }
+    if plan.operation.as_str() == "n8n.workflows.execute" {
+        if let Some(input) = plan.input.get("arguments").and_then(Value::as_object) {
+            object.insert(
+                "execution_mode".to_string(),
+                input.get("executionMode").cloned().unwrap_or(Value::Null),
+            );
+            object.insert(
+                "workflow_version".to_string(),
+                input.get("versionId").cloned().unwrap_or(Value::Null),
+            );
+            object.insert(
+                "wait".to_string(),
+                input.get("wait").cloned().unwrap_or(Value::Null),
+            );
+        }
     }
     Ok(object
         .iter()
@@ -11322,7 +11595,7 @@ fn n8n_run_once_approval_material(
     }
     if matches!(
         plan.operation.as_str(),
-        "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+        "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
     ) {
         let object = plan.input.as_object().ok_or_else(|| {
             HostError::InvalidFilter("n8n workflow lifecycle input is invalid".to_string())
@@ -11360,6 +11633,8 @@ fn n8n_run_once_approval_material(
         let mutation_digest = n8n_run_once_digest(
             if plan.operation.as_str() == "n8n.workflows.archive" {
                 &b"fwc-n8n.archive-mutation.v1"[..]
+            } else if plan.operation.as_str() == "n8n.workflows.execute" {
+                &b"fwc-n8n.execute-mutation.v1"[..]
             } else {
                 &b"fwc-n8n.lifecycle-mutation.v1"[..]
             },
@@ -11368,6 +11643,10 @@ fn n8n_run_once_approval_material(
                 "resource_digest": resource_digest.clone(),
                 "workflow_id_digest": workflow_id_digest.clone(),
                 "action": object.get("action").cloned().unwrap_or(Value::Null),
+                "mode": object.get("mode").cloned().unwrap_or(Value::Null),
+                "input_class": guard.get("inputClass").cloned().unwrap_or(Value::Null),
+                "side_effect_summary": guard.get("sideEffectSummary").cloned().unwrap_or(Value::Null),
+                "inputs_digest": object.get("inputs").map(|value| n8n_run_once_digest(b"fwc-n8n.execute-inputs.v1", value)),
                 "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
                 "precondition": precondition,
             }),
@@ -11385,6 +11664,10 @@ fn n8n_run_once_approval_material(
                 }
             }),
             "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+            "mode": object.get("mode").cloned().unwrap_or(Value::Null),
+            "input_class": guard.get("inputClass").cloned().unwrap_or(Value::Null),
+            "side_effect_summary": guard.get("sideEffectSummary").cloned().unwrap_or(Value::Null),
+            "inputs_digest": object.get("inputs").map(|value| n8n_run_once_digest(b"fwc-n8n.execute-inputs.v1", value)),
             "precondition_version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
             "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
             "active_version_id_present": precondition.contains_key("activeVersionId"),
@@ -11397,6 +11680,8 @@ fn n8n_run_once_approval_material(
             "provider": "official_mcp",
             "side_effect": if plan.operation.as_str() == "n8n.workflows.archive" {
                 "workflow_archive"
+            } else if plan.operation.as_str() == "n8n.workflows.execute" {
+                "workflow_execute"
             } else {
                 "workflow_lifecycle"
             },
@@ -13368,7 +13653,7 @@ async fn async_n8n_official_mcp_run_once(
     let external_approval = high_level_input.approval_token.clone();
     let lifecycle_input = matches!(
         high_level_input.operation.as_str(),
-        "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+        "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
     )
     .then(|| high_level_input.input.clone());
     let claim_operation_is_archive = high_level_input.operation == "n8n.workflows.archive";
@@ -13382,6 +13667,7 @@ async fn async_n8n_official_mcp_run_once(
         .first()
         .cloned()
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
+    let claim_operation_name = high_level_input.operation.clone();
     let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     let approval_verifying_key = if let Some(input) = lifecycle_input.as_ref() {
@@ -13418,6 +13704,8 @@ async fn async_n8n_official_mcp_run_once(
         .map(|input| -> HostResult<N8nReadOnlyRunOncePlan> {
             let operation_name = if claim_operation_is_archive {
                 "n8n.workflows.archive"
+            } else if claim_operation_name == "n8n.workflows.execute" {
+                "n8n.workflows.execute"
             } else {
                 "n8n.workflows.lifecycle"
             };
@@ -33388,6 +33676,45 @@ done"#;
     }
 
     #[test]
+    fn n8n_official_mcp_execute_sentinel_policy_denies_before_provider() {
+        let mut config = run_once_n8n_official_mcp_lifecycle_test_config();
+        config.config.as_mut().expect("config")["capability_policy"]["execute_workflow_schema"] = json!({
+            "status": "unavailable_unproven_schema",
+            "input_schema_digest": null,
+            "output_schema_digest": null
+        });
+        let input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.execute".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_string(),
+            input: json!({
+                "id": "workflow-1",
+                "mode": "manual",
+                "versionId": "version-1",
+                "guard": {
+                    "approvalRef": "chat-execute-approval",
+                    "idempotencyKey": "33333333-4444-4555-8666-777777777777",
+                    "inputClass": "none",
+                    "sideEffectSummary": "manual approved run",
+                    "precondition": {
+                        "versionId": "version-1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }
+            }),
+            approval_token: None,
+            deadline_ms: None,
+            correlation_id: None,
+        };
+        assert!(build_n8n_official_mcp_run_once_plan(input, &config).is_err());
+    }
+
+    #[test]
     fn n8n_official_mcp_archive_plan_requires_exact_schema_binding() {
         let config = run_once_n8n_official_mcp_lifecycle_test_config();
         let plan =
@@ -33409,7 +33736,7 @@ done"#;
             .is_err()
         );
 
-        let mut mismatched_binding = config;
+        let mut mismatched_binding = config.clone();
         mismatched_binding.config.as_mut().expect("config")["capability_policy"]["archive_workflow_schema"]
             ["output_schema_digest"] =
             json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");

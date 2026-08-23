@@ -60,6 +60,7 @@ const UNPUBLISH_INPUT: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const UNPUBLISH_OUTPUT: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+const EXECUTE_POLICY_STATUS: &str = "unavailable_unproven_schema";
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
 const EEC_N8N_VERSION: &str = "2.34.4";
@@ -1675,6 +1676,7 @@ fn validate_inventory(
         "api_scope_digest",
         "approved_tools",
         "archive_workflow_schema",
+        "execute_workflow_schema",
     ]);
     if policy.len() != expected_policy.len()
         || !policy
@@ -1763,6 +1765,17 @@ fn validate_inventory(
             .get("output_schema_digest")
             .and_then(Value::as_str)
             != Some(binding.archive_output_schema_digest.as_str())
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
+    let execute_schema = policy
+        .get("execute_workflow_schema")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
+    if execute_schema.len() != 3
+        || execute_schema.get("status").and_then(Value::as_str) != Some(EXECUTE_POLICY_STATUS)
+        || execute_schema.get("input_schema_digest") != Some(&Value::Null)
+        || execute_schema.get("output_schema_digest") != Some(&Value::Null)
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
@@ -2353,7 +2366,8 @@ mod tests {
                             {"name":"publish_workflow","class":"write","input_schema_digest":PUBLISH_INPUT,"output_schema_digest":PUBLISH_OUTPUT},
                             {"name":"unpublish_workflow","class":"write","input_schema_digest":UNPUBLISH_INPUT,"output_schema_digest":UNPUBLISH_OUTPUT}
                         ],
-                        "archive_workflow_schema": {"input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}
+                        "archive_workflow_schema": {"input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
+                        "execute_workflow_schema": {"status": EXECUTE_POLICY_STATUS, "input_schema_digest": null, "output_schema_digest": null}
                     }},
                     "allowed_zones": ["z:work"],
                     "allowed_operations": ["mcp.tools.list", "mcp.tools.call"],

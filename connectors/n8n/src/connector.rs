@@ -31,8 +31,9 @@ use crate::{
     error::{N8nError, N8nResult},
     types::{
         ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
-        ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowGraphSummary,
-        WorkflowLifecycleAction, WorkflowLifecycleInput, WorkflowStateView, WorkflowVersion,
+        ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowExecuteInput,
+        WorkflowExecuteMode, WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleInput,
+        WorkflowStateView, WorkflowVersion,
     },
 };
 
@@ -787,6 +788,15 @@ impl N8nConnector {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.archive".into(),
                 reason: "archive requires the mediated official MCP host path".into(),
+            });
+        }
+
+        if operation == "n8n.workflows.execute" {
+            let _execute =
+                parse_workflow_execute_input(&input).map_err(|error| error.to_fcp_error())?;
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.execute".into(),
+                reason: "execution requires the mediated official MCP host path".into(),
             });
         }
 
@@ -2852,6 +2862,7 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
             Ok(())
         }
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
+        "n8n.workflows.execute" => parse_workflow_execute_input(input).map(|_| ()),
         "n8n.workflows.archive" => parse_workflow_archive_input(input),
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             validate_draft_input_presence(operation, input)?;
@@ -3017,6 +3028,124 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
         ));
     }
     Ok(typed)
+}
+
+fn parse_workflow_execute_input(input: &Value) -> N8nResult<WorkflowExecuteInput> {
+    let encoded = serde_json::to_vec(input)
+        .map_err(|_| N8nError::InvalidInput("workflow execute input is not valid JSON".into()))?;
+    if encoded.len() > 64 * 1024 {
+        return Err(N8nError::InvalidInput(
+            "workflow execute input exceeds bounds".into(),
+        ));
+    }
+    let typed: WorkflowExecuteInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "workflow execute input requires id, mode, versionId, inputs, and exact guard".into(),
+        )
+    })?;
+    if typed.id.is_empty() || typed.id.len() > 256 {
+        return Err(N8nError::InvalidInput("workflow id is invalid".into()));
+    }
+    sanitize_path_segment(&typed.id, "workflow id")?;
+    if typed.version_id.is_empty()
+        || typed.version_id.len() > 256
+        || typed.version_id.trim() != typed.version_id
+        || typed.guard.approval_ref.is_empty()
+        || typed.guard.approval_ref.len() > 256
+        || typed.guard.approval_ref.trim() != typed.guard.approval_ref
+        || typed.guard.approval_ref.chars().any(char::is_control)
+        || uuid::Uuid::parse_str(&typed.guard.idempotency_key).is_err()
+        || !matches!(
+            typed.mode,
+            WorkflowExecuteMode::Manual | WorkflowExecuteMode::Production
+        )
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow execute guard is invalid".into(),
+        ));
+    }
+    let class = match typed.inputs.as_ref() {
+        None => "none",
+        Some(value @ Value::Object(_)) if bounded_execute_json(value, 0) => "bounded_json",
+        Some(_) => {
+            return Err(N8nError::InvalidInput(
+                "workflow execute inputs exceed bounds".into(),
+            ));
+        }
+    };
+    if typed.guard.input_class != class
+        || typed.guard.side_effect_summary.is_empty()
+        || typed.guard.side_effect_summary.len() > 256
+        || typed
+            .guard
+            .side_effect_summary
+            .chars()
+            .any(char::is_control)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow execute approval binding is invalid".into(),
+        ));
+    }
+    let precondition = &typed.guard.precondition;
+    if precondition.version_id != typed.version_id
+        || precondition.state_digest.len() > 256
+        || !is_blake3_digest(&precondition.state_digest)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow execute precondition is invalid".into(),
+        ));
+    }
+    if typed.mode == WorkflowExecuteMode::Production
+        && (!precondition.active
+            || precondition.is_archived
+            || !matches!(&precondition.active_version_id, crate::types::RequiredNullable::Value(value) if value == &typed.version_id))
+    {
+        return Err(N8nError::InvalidInput(
+            "production execution requires the published version".into(),
+        ));
+    }
+    Ok(typed)
+}
+
+fn bounded_execute_json(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => {
+            object.len() <= 64
+                && object.iter().all(|(key, value)| {
+                    let lowered = key.to_ascii_lowercase();
+                    key.len() <= 128
+                        && ![
+                            "secret",
+                            "token",
+                            "credential",
+                            "header",
+                            "authorization",
+                            "cookie",
+                            "api_key",
+                            "apikey",
+                            "password",
+                            "url",
+                            "command",
+                            "path",
+                            "data",
+                        ]
+                        .iter()
+                        .any(|marker| lowered.contains(marker))
+                        && bounded_execute_json(value, depth + 1)
+                })
+        }
+        Value::Array(array) => {
+            array.len() <= 128
+                && array
+                    .iter()
+                    .all(|value| bounded_execute_json(value, depth + 1))
+        }
+        Value::String(value) => value.len() <= 4096 && !value.chars().any(char::is_control),
+        _ => true,
+    }
 }
 
 fn parse_workflow_archive_input(input: &Value) -> N8nResult<()> {
@@ -3682,9 +3811,10 @@ fn op_info(
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 ApprovalMode::Interactive
             }
-            "n8n.mcp_access.reconcile" | "n8n.workflows.lifecycle" | "n8n.workflows.archive" => {
-                ApprovalMode::Interactive
-            }
+            "n8n.mcp_access.reconcile"
+            | "n8n.workflows.lifecycle"
+            | "n8n.workflows.archive"
+            | "n8n.workflows.execute" => ApprovalMode::Interactive,
             _ => ApprovalMode::None,
         }),
         safety_tier,
@@ -3810,6 +3940,7 @@ fn execution_view_schema() -> serde_json::Value {
             "startedAt": {"type": ["string", "null"]},
             "stoppedAt": {"type": ["string", "null"]},
             "workflowId": {"type": ["string", "null"]},
+            "workflowVersionId": {"type": ["string", "null"]},
             "status": {"type": ["string", "null"]},
             "retryOf": {"type": ["string", "null"]},
             "retrySuccessId": {"type": ["string", "null"]},
@@ -4175,6 +4306,60 @@ fn workflow_lifecycle_output_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_execute_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "mode", "versionId", "guard"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "mode": {"type": "string", "enum": ["manual", "production"]},
+            "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "inputs": {"type": "object", "maxProperties": 64},
+            "guard": {
+                "type": "object", "additionalProperties": false,
+                "required": ["approvalRef", "idempotencyKey", "precondition", "inputClass", "sideEffectSummary"],
+                "properties": {
+                    "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "idempotencyKey": {"type": "string", "format": "uuid"},
+                    "inputClass": {"type": "string", "enum": ["none", "bounded_json"]},
+                    "sideEffectSummary": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "precondition": {
+                        "type": "object", "additionalProperties": false,
+                        "required": ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"],
+                        "properties": {
+                            "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
+                            "active": {"type": "boolean"},
+                            "isArchived": {"type": "boolean"},
+                            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$"}
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn workflow_execute_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object", "additionalProperties": false,
+        "required": ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "retry", "readback"],
+        "properties": {
+            "status": {"type": "string", "enum": ["submitted", "unknown"]},
+            "operation": {"const": "n8n.workflows.execute"},
+            "provider": {"const": "official_mcp"},
+            "workflowId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "mode": {"type": "string", "enum": ["manual", "production"]},
+            "versionId": {"type": "string", "maxLength": 256},
+            "executionId": {"type": ["string", "null"], "maxLength": 256},
+            "initialStatus": {"type": "string", "enum": ["accepted", "new", "running", "success", "error", "waiting", "canceled", "crashed"], "maxLength": 64},
+            "retry": {"const": "never_automatic"},
+            "readback": {"const": "independent_execution_get"}
+        }
+    })
+}
+
 fn workflow_archive_output_schema() -> serde_json::Value {
     let state = workflow_lifecycle_output_schema()["properties"]["before"].clone();
     json!({
@@ -4533,6 +4718,29 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.lifecycle"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.execute",
+            "Execute one exact workflow version through the owner-approved official n8n MCP tool",
+            workflow_execute_input_schema(),
+            workflow_execute_output_schema(),
+            "n8n.workflows.execute",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use only with an exact server/workflow/version, bounded input class, current-chat approval, and owner policy binding execute_workflow.".into(),
+                common_mistakes: vec![
+                    "Manual execution is not presumed side-effect free; production approval binds the published version and side-effect summary.".into(),
+                    "The public operation never exposes generic MCP tools/call, caller URLs, headers, credentials, or execution data.".into(),
+                    "A timeout, disconnect, malformed result, or readback mismatch is unknown and is never retried automatically.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","mode":"manual","versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000005","inputClass":"none","sideEffectSummary":"manual approved run","precondition":{"versionId":"published-v1","activeVersionId":"published-v1","active":true,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.executions.get"),
                 ],
             },
         ),
@@ -5245,9 +5453,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_15_operations() {
+    fn operations_info_has_16_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 15);
+        assert_eq!(ops.len(), 16);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -5259,6 +5467,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
         assert!(operation_ids.contains(&"n8n.workflows.archive"));
+        assert!(operation_ids.contains(&"n8n.workflows.execute"));
         assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
     }
 
@@ -5749,6 +5958,21 @@ mod tests {
                 .as_array()
                 .is_some_and(|required| !required.iter().any(|field| field == "project_id"))
         );
+    }
+
+    #[test]
+    fn execute_schema_exposes_only_bounded_handle_and_readback_fields() {
+        let schema = workflow_execute_output_schema();
+        let required = schema["required"].as_array().expect("required");
+        for field in ["workflowId", "executionId", "initialStatus", "readback"] {
+            assert!(required.iter().any(|value| value.as_str() == Some(field)));
+        }
+        assert_eq!(
+            schema["properties"]["readback"]["const"],
+            "independent_execution_get"
+        );
+        assert!(schema["properties"].get("payload").is_none());
+        assert!(schema["properties"].get("data").is_none());
     }
 
     #[test]

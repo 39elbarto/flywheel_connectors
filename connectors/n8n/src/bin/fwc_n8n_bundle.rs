@@ -49,6 +49,10 @@ const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+// No per-server execute_workflow schema digest has been owner-provisioned in
+// this source tree. The explicit sentinel keeps execution unavailable rather
+// than admitting a caller/inventory-supplied name or self-derived digest.
+const OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "unavailable_unproven_schema";
 // Archive schemas are intentionally bound to the per-server tools/list digest
 // in the owner-provisioned policy; unlike publish/unpublish, no live digest is
 // guessed in source. These values are only deterministic offline fixtures.
@@ -622,11 +626,23 @@ fn verify_inventory_binding(
             binding.get("input_schema_digest") == tool.get("input_schema_digest")
                 && binding.get("output_schema_digest") == tool.get("output_schema_digest")
         };
+        let execute_schema_unavailable = |policy: &serde_json::Map<String, Value>| {
+            policy
+                .get("execute_workflow_schema")
+                .and_then(Value::as_object)
+                .is_some_and(|schema| {
+                    schema.len() == 3
+                        && schema.get("status").and_then(Value::as_str)
+                            == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+                        && schema.get("input_schema_digest") == Some(&Value::Null)
+                        && schema.get("output_schema_digest") == Some(&Value::Null)
+                })
+        };
         let exact_policy = entry
             .pointer("/config/capability_policy")
             .and_then(Value::as_object)
             .is_some_and(|policy| {
-                policy.len() == 5
+                policy.len() == 6
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
                     && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
@@ -652,6 +668,7 @@ fn verify_inventory_binding(
                     )
                     && archive_approved_tool(policy)
                     && archive_schema_binding_matches(policy)
+                    && execute_schema_unavailable(policy)
             });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
@@ -1052,6 +1069,11 @@ mod tests {
                         "archive_workflow_schema": {
                             "input_schema_digest": OFFICIAL_MCP_ARCHIVE_INPUT_SCHEMA_DIGEST,
                             "output_schema_digest": OFFICIAL_MCP_ARCHIVE_OUTPUT_SCHEMA_DIGEST
+                        },
+                        "execute_workflow_schema": {
+                            "status": OFFICIAL_MCP_EXECUTE_POLICY_STATUS,
+                            "input_schema_digest": null,
+                            "output_schema_digest": null
                         }
                     }
                 },

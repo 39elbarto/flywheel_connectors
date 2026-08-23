@@ -49,6 +49,7 @@ optional = [
     "n8n.projects.read",
     "n8n.tags.read",
     "n8n.workflows.lifecycle",
+    "n8n.workflows.execute",
     "n8n.workflows.write",
     "n8n.workflows.read",
 ]
@@ -1425,6 +1426,157 @@ related = [
     "n8n.workflows.get",
     "n8n.workflows.activate",
 ]
+
+[provides.operations."n8n.workflows.execute"]
+description = "Owner-gated execute_workflow seam; unavailable until exact per-server schema policy and execution readback are provisioned"
+capability = "n8n.workflows.execute"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.execute".input_schema]
+additionalProperties = false
+required = ["id", "mode", "versionId", "guard"]
+type = "object"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.id]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.mode]
+type = "string"
+enum = ["manual", "production"]
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.inputs]
+type = "object"
+maxProperties = 64
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard]
+additionalProperties = false
+required = ["approvalRef", "idempotencyKey", "precondition", "inputClass", "sideEffectSummary"]
+type = "object"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.approvalRef]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.idempotencyKey]
+type = "string"
+format = "uuid"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.inputClass]
+type = "string"
+enum = ["none", "bounded_json"]
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.sideEffectSummary]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"]
+type = "object"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = ["string", "null"]
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+
+[provides.operations."n8n.workflows.execute".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.execute".output_schema]
+additionalProperties = false
+required = ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "retry", "readback"]
+type = "object"
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.status]
+type = "string"
+enum = ["submitted", "unknown"]
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.operation]
+const = "n8n.workflows.execute"
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.provider]
+const = "official_mcp"
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.workflowId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.mode]
+type = "string"
+enum = ["manual", "production"]
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.versionId]
+type = "string"
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.executionId]
+type = ["string", "null"]
+maxLength = 256
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.initialStatus]
+type = "string"
+enum = ["accepted", "new", "running", "success", "error", "waiting", "canceled", "crashed"]
+maxLength = 64
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.retry]
+const = "never_automatic"
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.readback]
+const = "independent_execution_get"
+
+[provides.operations."n8n.workflows.execute".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."n8n.workflows.execute".ai_hints]
+when_to_use = "Execute one manually or in production only after exact workflow/version precondition and current-chat approval; manual is not side-effect free."
+common_mistakes = [
+    "Only an owner-provisioned execute_workflow policy with exact per-server schema digests may be admitted; generic tools/call and REST execution routes are not exposed, and missing policy fails closed.",
+    "Inputs are bounded and classified; credentials, headers, URLs, commands, paths, and arbitrary execution data are rejected or redacted.",
+    "Timeout, disconnect, malformed response, teardown uncertainty, or readback mismatch is unknown and never retried automatically.",
+]
+examples = ['{"id":"1001","mode":"manual","versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000005","inputClass":"none","sideEffectSummary":"manual approved run","precondition":{"versionId":"published-v1","activeVersionId":"published-v1","active":true,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}']
+related = ["n8n.workflows.get", "n8n.executions.get"]
 
 [provides.operations."n8n.workflows.archive"]
 description = "Archive an exact n8n workflow through the owner-approved official MCP archive_workflow tool with independent REST GET readback"

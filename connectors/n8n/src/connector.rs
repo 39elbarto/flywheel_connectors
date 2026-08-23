@@ -4364,6 +4364,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.".into(),
                     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.".into(),
                     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
+                    "For host run-once writes, approvalRef is only the external token_id reference: the redacted envelope must carry an owner-signed approval_token verified by FCP_HOST_APPROVAL_PUBLIC_KEY[_FILE]; missing, invalid, mismatched, or replayed tokens fail before provider access.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","action":"publish","versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000003","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![

@@ -70,6 +70,13 @@ struct CapabilityPolicy {
     auth_mode: AuthMode,
     api_scope_digest: String,
     approved_tools: Vec<ApprovedTool>,
+    archive_workflow_schema: Option<ArchiveWorkflowSchemaBinding>,
+}
+
+#[derive(Debug, Clone)]
+struct ArchiveWorkflowSchemaBinding {
+    input_schema_digest: String,
+    output_schema_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -326,7 +333,11 @@ impl CapabilityPolicy {
         if policy.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "n8n_version" | "auth_mode" | "api_scope_digest" | "approved_tools"
+                "n8n_version"
+                    | "auth_mode"
+                    | "api_scope_digest"
+                    | "approved_tools"
+                    | "archive_workflow_schema"
             )
         }) {
             return Err(invalid_policy(
@@ -418,12 +429,63 @@ impl CapabilityPolicy {
             });
         }
 
+        let archive_tool = approved_tools
+            .iter()
+            .find(|tool| tool.name == "archive_workflow");
+        let archive_workflow_schema = match policy.get("archive_workflow_schema") {
+            Some(value) => {
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| invalid_policy("archive_workflow_schema must be an object"))?;
+                if object.len() != 2
+                    || object.keys().any(|key| {
+                        !matches!(key.as_str(), "input_schema_digest" | "output_schema_digest")
+                    })
+                {
+                    return Err(invalid_policy(
+                        "archive_workflow_schema contains an unsupported field",
+                    ));
+                }
+                let input_schema_digest = required_policy_string(
+                    object.get("input_schema_digest"),
+                    "archive_workflow_schema.input_schema_digest",
+                )?;
+                let output_schema_digest = required_policy_string(
+                    object.get("output_schema_digest"),
+                    "archive_workflow_schema.output_schema_digest",
+                )?;
+                let Some(archive_tool) = archive_tool else {
+                    return Err(invalid_policy(
+                        "archive_workflow_schema requires an approved archive_workflow tool",
+                    ));
+                };
+                if archive_tool.input_schema_digest != input_schema_digest
+                    || archive_tool.output_schema_digest != output_schema_digest
+                {
+                    return Err(invalid_policy(
+                        "archive_workflow_schema does not match approved archive_workflow",
+                    ));
+                }
+                Some(ArchiveWorkflowSchemaBinding {
+                    input_schema_digest,
+                    output_schema_digest,
+                })
+            }
+            None if archive_tool.is_some() => {
+                return Err(invalid_policy(
+                    "archive_workflow requires an exact schema binding",
+                ));
+            }
+            None => None,
+        };
+
         Ok(Some(Self {
             server_id,
             n8n_version,
             auth_mode,
             api_scope_digest,
             approved_tools,
+            archive_workflow_schema,
         }))
     }
 }
@@ -1513,6 +1575,24 @@ fn reviewed_policy_snapshot(
     era: ProtocolEra,
     version: ProtocolVersion,
 ) -> McpBridgeResult<CapabilitySnapshot> {
+    if let Some(archive_tool) = policy
+        .approved_tools
+        .iter()
+        .find(|tool| tool.name == "archive_workflow")
+    {
+        let Some(binding) = policy.archive_workflow_schema.as_ref() else {
+            return Err(McpBridgeError::InvalidInput(
+                "archive_workflow policy binding is missing".into(),
+            ));
+        };
+        if binding.input_schema_digest != archive_tool.input_schema_digest
+            || binding.output_schema_digest != archive_tool.output_schema_digest
+        {
+            return Err(McpBridgeError::InvalidInput(
+                "archive_workflow policy binding is mismatched".into(),
+            ));
+        }
+    }
     let observations = policy
         .approved_tools
         .iter()
@@ -3092,6 +3172,43 @@ mod tests {
     }
 
     #[test]
+    fn archive_policy_requires_exact_owner_schema_binding() {
+        let input_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let output_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let archive = policy_tool("archive_workflow", "write", input_digest, output_digest);
+        let mut valid = policy_params("eec", json!([archive.clone()]));
+        valid["capability_policy"]["archive_workflow_schema"] = json!({
+            "input_schema_digest": input_digest,
+            "output_schema_digest": output_digest,
+        });
+        let config = McpBridgeConfig::from_params(&valid).expect("exact archive binding");
+        let binding = config
+            .capability_policy
+            .as_ref()
+            .and_then(|policy| policy.archive_workflow_schema.as_ref())
+            .expect("archive schema binding");
+        assert_eq!(binding.input_schema_digest, input_digest);
+        assert_eq!(binding.output_schema_digest, output_digest);
+
+        let mut missing = policy_params("eec", json!([archive.clone()]));
+        assert!(McpBridgeConfig::from_params(&missing).is_err());
+
+        let mut mismatched = valid;
+        mismatched["capability_policy"]["archive_workflow_schema"]["output_schema_digest"] =
+            json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert!(McpBridgeConfig::from_params(&mismatched).is_err());
+        mismatched["capability_policy"]["archive_workflow_schema"] = json!({
+            "input_schema_digest": input_digest,
+            "output_schema_digest": output_digest,
+        });
+        mismatched["capability_policy"]["approved_tools"][0]["input_schema_digest"] =
+            json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert!(McpBridgeConfig::from_params(&mismatched).is_err());
+    }
+
+    #[test]
     fn capability_snapshot_exact_approval_and_unknown_classification() {
         let input_schema = json!({"type": "object"});
         let output_schema = serde_json::Value::Null;
@@ -3173,6 +3290,50 @@ mod tests {
             Some(crate::protocol::ToolStatus::Changed)
         );
         assert!(snapshot.tool_call_is_blocked("approved"));
+    }
+
+    #[test]
+    fn archive_fresh_tools_list_requires_exact_owner_bound_digests() {
+        let input_schema = json!({"type": "object", "required": ["workflowId"]});
+        let output_schema = json!({"type": "object", "required": ["archived"]});
+        let (input_digest, output_digest) = schema_digests(&input_schema, &output_schema);
+        let archive = policy_tool("archive_workflow", "write", &input_digest, &output_digest);
+        let mut params = policy_params("eec", json!([archive]));
+        params["capability_policy"]["archive_workflow_schema"] = json!({
+            "input_schema_digest": input_digest,
+            "output_schema_digest": output_digest,
+        });
+        let config = McpBridgeConfig::from_params(&params).expect("exact archive policy");
+        let policy = config.capability_policy.as_ref().expect("archive policy");
+        let matching = build_capability_snapshot(
+            &json!({
+                "tools": [{
+                    "name": "archive_workflow",
+                    "inputSchema": input_schema,
+                    "outputSchema": output_schema
+                }]
+            }),
+            policy,
+            ProtocolEra::Modern,
+            ProtocolVersion::V20260728,
+        )
+        .expect("fresh matching tools/list");
+        assert!(!matching.tool_call_is_blocked("archive_workflow"));
+
+        let drifted = build_capability_snapshot(
+            &json!({
+                "tools": [{
+                    "name": "archive_workflow",
+                    "inputSchema": {"type": "array"},
+                    "outputSchema": output_schema
+                }]
+            }),
+            policy,
+            ProtocolEra::Modern,
+            ProtocolVersion::V20260728,
+        )
+        .expect("fresh drifted tools/list remains classifiable");
+        assert!(drifted.tool_call_is_blocked("archive_workflow"));
     }
 
     #[test]

@@ -783,6 +783,13 @@ impl N8nConnector {
             )?;
         }
 
+        if operation == "n8n.workflows.archive" {
+            return Err(FcpError::CapabilityDenied {
+                capability: "n8n.workflows.archive".into(),
+                reason: "archive requires the mediated official MCP host path".into(),
+            });
+        }
+
         if operation == "n8n.workflows.activate" {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.write".into(),
@@ -1893,7 +1900,8 @@ impl N8nConnector {
             "n8n.workflows.get"
             | "n8n.workflows.activate"
             | "n8n.workflows.update_draft"
-            | "n8n.workflows.lifecycle" => {
+            | "n8n.workflows.lifecycle"
+            | "n8n.workflows.archive" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
                     .map_err(|error| error.to_fcp_error())?
@@ -2844,6 +2852,7 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
             Ok(())
         }
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
+        "n8n.workflows.archive" => parse_workflow_archive_input(input),
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             validate_draft_input_presence(operation, input)?;
             let typed: WorkflowDraftMutationInput =
@@ -3008,6 +3017,76 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
         ));
     }
     Ok(typed)
+}
+
+fn parse_workflow_archive_input(input: &Value) -> N8nResult<()> {
+    require_exact_object(input, &["id", "guard"], "workflow archive input")?;
+    let workflow_id = require_str(input, "id")?;
+    sanitize_path_segment(workflow_id, "workflow id")?;
+    let guard = input
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| N8nError::InvalidInput("workflow archive guard is invalid".into()))?;
+    require_exact_object(
+        &Value::Object(guard.clone()),
+        &["approvalRef", "idempotencyKey", "precondition"],
+        "workflow archive guard",
+    )?;
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .ok_or_else(|| N8nError::InvalidInput("workflow archive approvalRef is invalid".into()))?;
+    if approval_ref.is_empty()
+        || approval_ref.len() > 256
+        || approval_ref.trim() != approval_ref
+        || approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow archive approvalRef and idempotencyKey are invalid".into(),
+        ));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| N8nError::InvalidInput("workflow archive precondition is invalid".into()))?;
+    require_exact_object(
+        &Value::Object(precondition.clone()),
+        &[
+            "versionId",
+            "activeVersionId",
+            "active",
+            "isArchived",
+            "stateDigest",
+        ],
+        "workflow archive precondition",
+    )?;
+    let version_id = precondition
+        .get("versionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| N8nError::InvalidInput("workflow archive versionId is invalid".into()))?;
+    let state_digest = precondition
+        .get("stateDigest")
+        .and_then(Value::as_str)
+        .ok_or_else(|| N8nError::InvalidInput("workflow archive stateDigest is invalid".into()))?;
+    if version_id.is_empty()
+        || version_id.len() > 256
+        || version_id.trim() != version_id
+        || !is_blake3_digest(state_digest)
+        || precondition.get("active") != Some(&Value::Bool(false))
+        || precondition.get("isArchived") != Some(&Value::Bool(false))
+        || !precondition
+            .get("activeVersionId")
+            .is_some_and(Value::is_null)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow archive requires an inactive, unarchived baseline".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn classify_lifecycle_attempt_error(error: N8nError) -> N8nError {
@@ -3603,7 +3682,9 @@ fn op_info(
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 ApprovalMode::Interactive
             }
-            "n8n.mcp_access.reconcile" | "n8n.workflows.lifecycle" => ApprovalMode::Interactive,
+            "n8n.mcp_access.reconcile" | "n8n.workflows.lifecycle" | "n8n.workflows.archive" => {
+                ApprovalMode::Interactive
+            }
             _ => ApprovalMode::None,
         }),
         safety_tier,
@@ -4023,6 +4104,38 @@ fn workflow_lifecycle_input_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_archive_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "guard"],
+        "properties": {
+            "id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "guard": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["approvalRef", "idempotencyKey", "precondition"],
+                "properties": {
+                    "approvalRef": {"type": "string", "minLength": 1, "maxLength": 256},
+                    "idempotencyKey": {"type": "string", "format": "uuid"},
+                    "precondition": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"],
+                        "properties": {
+                            "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
+                            "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
+                            "active": {"const": false},
+                            "isArchived": {"const": false},
+                            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
+                        },
+                    },
+                },
+            },
+        },
+    })
+}
+
 fn workflow_lifecycle_output_schema() -> serde_json::Value {
     let draft = workflow_lifecycle_graph_summary_schema(false);
     let published = workflow_lifecycle_graph_summary_schema(true);
@@ -4058,6 +4171,33 @@ fn workflow_lifecycle_output_schema() -> serde_json::Value {
             "readback": {"type": "string", "enum": ["independent_get"]},
             "before": state,
             "after": state,
+        },
+    })
+}
+
+fn workflow_archive_output_schema() -> serde_json::Value {
+    let state = workflow_lifecycle_output_schema()["properties"]["before"].clone();
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "operation", "provider", "retry", "readback", "before", "after", "providerResult"],
+        "properties": {
+            "status": {"type": "string", "enum": ["verified", "unknown"]},
+            "operation": {"const": "n8n.workflows.archive"},
+            "provider": {"const": "official_mcp"},
+            "retry": {"const": "never_automatic"},
+            "readback": {"const": "independent_get"},
+            "before": state,
+            "after": state,
+            "providerResult": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["archived", "workflowId"],
+                "properties": {
+                    "archived": {"const": true},
+                    "workflowId": {"type": "string", "maxLength": 256},
+                },
+            },
         },
     })
 }
@@ -4360,7 +4500,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests.".into(),
                 common_mistakes: vec![
-                    "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.".into(),
+                    "Restore, activate, deactivate, version, execution, and credential operations are not part of this packet; archive is a separate mediated official-MCP operation.".into(),
                     "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.".into(),
                     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.".into(),
                     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
@@ -4370,6 +4510,29 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.activate"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.archive",
+            "Archive an inactive workflow through the mediated official n8n MCP path with independent REST GET readback",
+            workflow_archive_input_schema(),
+            workflow_archive_output_schema(),
+            "n8n.workflows.archive",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use only through the host-mediated official MCP archive_workflow path with exact per-server schema binding, fresh tools/list approval, inactive/unarchived precondition, and external signed approval.".into(),
+                common_mistakes: vec![
+                    "Active or already archived workflows are rejected; archive never performs incidental deactivation or restore.".into(),
+                    "The direct connector path is fail-closed; host run-once performs one archive_workflow call followed by an independent REST GET readback.".into(),
+                    "Restore/unarchive, delete, credential mutation, and all other lifecycle actions are unsupported; ambiguous outcomes are never retried automatically.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000004","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.lifecycle"),
                 ],
             },
         ),
@@ -5082,9 +5245,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_14_operations() {
+    fn operations_info_has_15_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 15);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -5095,6 +5258,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.workflows.create_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
+        assert!(operation_ids.contains(&"n8n.workflows.archive"));
         assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
     }
 

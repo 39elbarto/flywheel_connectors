@@ -61,7 +61,7 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
     assert_eq!(response["result"]["connector_id"], "fcp.n8n");
     assert_eq!(
         response["result"]["operations"].as_array().map(Vec::len),
-        Some(14)
+        Some(15)
     );
 
     drop(host_endpoint);

@@ -49,6 +49,15 @@ const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+// Archive schemas are intentionally bound to the per-server tools/list digest
+// in the owner-provisioned policy; unlike publish/unpublish, no live digest is
+// guessed in source. These values are only deterministic offline fixtures.
+#[cfg(test)]
+const OFFICIAL_MCP_ARCHIVE_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+#[cfg(test)]
+const OFFICIAL_MCP_ARCHIVE_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BundleErrorCode {
@@ -564,11 +573,60 @@ fn verify_inventory_binding(
                     })
                 })
         };
+        let archive_approved_tool = |policy: &serde_json::Map<String, Value>| {
+            let valid_digest = |value: Option<&Value>| {
+                value.and_then(Value::as_str).is_some_and(|digest| {
+                    digest.len() == 71
+                        && digest.starts_with("sha256:")
+                        && digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            };
+            policy
+                .get("approved_tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| {
+                    tools.iter().any(|tool| {
+                        let Some(tool) = tool.as_object() else {
+                            return false;
+                        };
+                        tool.len() == 4
+                            && tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
+                            && tool.get("class").and_then(Value::as_str) == Some("write")
+                            && valid_digest(tool.get("input_schema_digest"))
+                            && valid_digest(tool.get("output_schema_digest"))
+                    })
+                })
+        };
+        let archive_schema_binding_matches = |policy: &serde_json::Map<String, Value>| {
+            let Some(binding) = policy
+                .get("archive_workflow_schema")
+                .and_then(Value::as_object)
+            else {
+                return false;
+            };
+            if binding.len() != 2 {
+                return false;
+            }
+            let Some(tool) = policy
+                .get("approved_tools")
+                .and_then(Value::as_array)
+                .and_then(|tools| {
+                    tools.iter().find(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
+                    })
+                })
+                .and_then(Value::as_object)
+            else {
+                return false;
+            };
+            binding.get("input_schema_digest") == tool.get("input_schema_digest")
+                && binding.get("output_schema_digest") == tool.get("output_schema_digest")
+        };
         let exact_policy = entry
             .pointer("/config/capability_policy")
             .and_then(Value::as_object)
             .is_some_and(|policy| {
-                policy.len() == 4
+                policy.len() == 5
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
                     && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
@@ -579,7 +637,7 @@ fn verify_inventory_binding(
                     && policy
                         .get("approved_tools")
                         .and_then(Value::as_array)
-                        .is_some_and(|tools| tools.len() == 2)
+                        .is_some_and(|tools| tools.len() == 3)
                     && exact_approved_tool(
                         policy,
                         "publish_workflow",
@@ -592,6 +650,8 @@ fn verify_inventory_binding(
                         OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
                         OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
                     )
+                    && archive_approved_tool(policy)
+                    && archive_schema_binding_matches(policy)
             });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
@@ -981,8 +1041,18 @@ mod tests {
                                 "class": "write",
                                 "input_schema_digest": OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
                                 "output_schema_digest": OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST
+                            },
+                            {
+                                "name": "archive_workflow",
+                                "class": "write",
+                                "input_schema_digest": OFFICIAL_MCP_ARCHIVE_INPUT_SCHEMA_DIGEST,
+                                "output_schema_digest": OFFICIAL_MCP_ARCHIVE_OUTPUT_SCHEMA_DIGEST
                             }
-                        ]
+                        ],
+                        "archive_workflow_schema": {
+                            "input_schema_digest": OFFICIAL_MCP_ARCHIVE_INPUT_SCHEMA_DIGEST,
+                            "output_schema_digest": OFFICIAL_MCP_ARCHIVE_OUTPUT_SCHEMA_DIGEST
+                        }
                     }
                 },
                 "allowed_zones": ["z:work"],
@@ -1225,6 +1295,55 @@ mod tests {
                 wrong_policy_digest.owner,
             )
             .expect_err("wrong official MCP schema digest")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let wrong_archive_input = ReleaseFixture::new();
+        let inventory_path = wrong_archive_input.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["capability_policy"]["approved_tools"][2]["input_schema_digest"] =
+            Value::String("sha256:wrong".to_string());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode wrong archive input policy"),
+        )
+        .expect("write wrong archive input policy");
+        wrong_archive_input.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &wrong_archive_input.executable,
+                wrong_archive_input.owner,
+            )
+            .expect_err("wrong archive input schema digest")
+            .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        let stale_archive_binding = ReleaseFixture::new();
+        let inventory_path = stale_archive_binding.artifact("inventory/hetzner-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        inventory[0]["config"]["capability_policy"]["archive_workflow_schema"]["output_schema_digest"] =
+            Value::String(
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                    .to_string(),
+            );
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode stale archive binding"),
+        )
+        .expect("write stale archive binding");
+        stale_archive_binding.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle_for_owner(
+                &stale_archive_binding.executable,
+                stale_archive_binding.owner,
+            )
+            .expect_err("stale archive schema binding")
             .code(),
             BundleErrorCode::InventoryBinding
         );

@@ -139,6 +139,8 @@ enum HostRunOnceOperation {
     WorkflowsUpdateDraft,
     #[serde(rename = "n8n.workflows.lifecycle")]
     WorkflowsLifecycle,
+    #[serde(rename = "n8n.workflows.archive")]
+    WorkflowsArchive,
     #[serde(rename = "n8n.mcp_access.reconcile")]
     McpAccessReconcile,
 }
@@ -159,6 +161,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
             Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
+            Self::WorkflowsArchive => "n8n.workflows.archive",
             Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
         }
     }
@@ -178,6 +181,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
             "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
+            "n8n.workflows.archive" => Ok(Self::WorkflowsArchive),
             "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
             _ => Err(AppError::new("operation_not_allowed")),
         }
@@ -198,7 +202,9 @@ impl HostRunOnceOperation {
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
             | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
-            Self::WorkflowsLifecycle => BrokerCredentialPurpose::OfficialMcp,
+            Self::WorkflowsLifecycle | Self::WorkflowsArchive => {
+                BrokerCredentialPurpose::OfficialMcp
+            }
         }
     }
 }
@@ -577,9 +583,13 @@ fn run_host_bridge_once(
     fwc_n8n_bridge::run_verified_host_bridge(bundle, &envelope, credential, deadline).map_err(
         |error| {
             let lifecycle = matches!(purpose, BrokerCredentialPurpose::OfficialMcp)
-                && matches!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle);
+                && matches!(
+                    envelope.operation,
+                    HostRunOnceOperation::WorkflowsLifecycle
+                        | HostRunOnceOperation::WorkflowsArchive
+                );
             let code = if lifecycle {
-                official_mcp_lifecycle_bridge_error_code(error.code())
+                official_mcp_workflow_bridge_error_code(error.code())
             } else {
                 error.code()
             };
@@ -591,7 +601,7 @@ fn run_host_bridge_once(
     )
 }
 
-fn official_mcp_lifecycle_bridge_error_code(code: &str) -> &'static str {
+fn official_mcp_workflow_bridge_error_code(code: &str) -> &'static str {
     match code {
         "host_connector_not_found" => "official_mcp_connector_not_found",
         "host_preflight_denied" => "official_mcp_preflight_denied",
@@ -620,6 +630,7 @@ fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceE
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
     let mut get = envelope.clone();
     get.operation = HostRunOnceOperation::WorkflowsGet;
+    get.approval_token = None;
     get.resource_uri = expected_host_run_once_resource_uri(
         envelope.server_id,
         HostRunOnceOperation::WorkflowsGet,
@@ -720,6 +731,37 @@ fn decode_official_mcp_lifecycle_result(
         safe.insert("activeVersionId".to_string(), active_version_id.clone());
     }
     Ok(Value::Object(safe))
+}
+
+fn decode_official_mcp_archive_result(
+    response: Value,
+    workflow_id: &str,
+) -> Result<Value, AppError> {
+    let mut result = response_result(response, "unknown_outcome")?;
+    if let Some(structured) = result.get("structuredContent").cloned() {
+        result = structured;
+    } else if let Some(content) = result.get("content").and_then(Value::as_array) {
+        let text = content.iter().find_map(|item| {
+            (item.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| item.get("text").and_then(Value::as_str))
+                .flatten()
+        });
+        let text = text.ok_or_else(|| AppError::new("unknown_outcome"))?;
+        result = serde_json::from_str(text).map_err(|_| AppError::new("unknown_outcome"))?;
+    }
+    let object = result
+        .as_object()
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    if object.get("archived").and_then(Value::as_bool) != Some(true)
+        || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
+        || object
+            .get("name")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    Ok(json!({"archived": true, "workflowId": workflow_id}))
 }
 
 fn is_lifecycle_blake3_digest(value: &str) -> bool {
@@ -922,6 +964,63 @@ fn execute_workflow_lifecycle_official_mcp(
     }))
 }
 
+fn execute_workflow_archive_official_mcp(
+    bundle: &fwc_n8n_bundle::VerifiedBundle,
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+) -> Result<Value, AppError> {
+    let get = lifecycle_get_envelope(&envelope)?;
+    let baseline_response = run_host_bridge_once(
+        bundle,
+        &get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    )?;
+    let baseline = response_result(baseline_response, "unknown_outcome")?;
+    verify_lifecycle_baseline(&envelope.input, &baseline)?;
+
+    let provider_response = run_host_bridge_once(
+        bundle,
+        &envelope,
+        BrokerCredentialPurpose::OfficialMcp,
+        request_deadline_at,
+    )?;
+    let workflow_id = envelope
+        .input
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let provider = decode_official_mcp_archive_result(provider_response, workflow_id)?;
+    let readback_response = run_host_bridge_once(
+        bundle,
+        &get,
+        BrokerCredentialPurpose::RestApi,
+        request_deadline_at,
+    )?;
+    let readback = response_result(readback_response, "unknown_outcome")?;
+    validate_lifecycle_state_summary(&readback)?;
+    if baseline.get("id") != readback.get("id")
+        || baseline.get("versionId") != readback.get("versionId")
+        || baseline.get("draft") != readback.get("draft")
+        || baseline.get("published") != readback.get("published")
+        || readback.get("active") != Some(&Value::Bool(false))
+        || !readback.get("activeVersionId").is_some_and(Value::is_null)
+        || readback.get("isArchived") != Some(&Value::Bool(true))
+    {
+        return Err(AppError::new("readback_mismatch"));
+    }
+    Ok(json!({
+        "status": "verified",
+        "operation": "n8n.workflows.archive",
+        "provider": "official_mcp",
+        "retry": "never_automatic",
+        "readback": "independent_get",
+        "before": baseline,
+        "after": readback,
+        "providerResult": provider,
+    }))
+}
+
 fn execute_host_run_once(
     mut envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
@@ -934,6 +1033,9 @@ fn execute_host_run_once(
     let server_id = envelope.server_id;
     if operation == HostRunOnceOperation::WorkflowsLifecycle {
         return execute_workflow_lifecycle_official_mcp(&bundle, envelope, request_deadline_at);
+    }
+    if operation == HostRunOnceOperation::WorkflowsArchive {
+        return execute_workflow_archive_official_mcp(&bundle, envelope, request_deadline_at);
     }
     let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
         Some(
@@ -1354,6 +1456,7 @@ fn validate_host_run_once_input(
             &["id", "action", "versionId", "guard"],
             &["id", "action", "guard"],
         ),
+        HostRunOnceOperation::WorkflowsArchive => (&["id", "guard"], &["id", "guard"]),
         HostRunOnceOperation::McpAccessReconcile => (
             &[
                 "scope",
@@ -1406,6 +1509,7 @@ fn validate_host_run_once_input(
             validate_workflow_draft_input(operation, input, object)
         }
         HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
+        HostRunOnceOperation::WorkflowsArchive => validate_workflow_archive_input(object),
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
 }
@@ -1496,6 +1600,80 @@ fn validate_workflow_lifecycle_input(
                 .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
                 || !(value.is_null() || value.is_string())
         })
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    Ok(())
+}
+
+fn validate_workflow_archive_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "guard"))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    host_run_once_input_id(&json!({"id": id}), "id")?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition.get("active") != Some(&Value::Bool(false))
+        || precondition.get("isArchived") != Some(&Value::Bool(false))
+        || !precondition
+            .get("activeVersionId")
+            .is_some_and(Value::is_null)
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
     {
         return Err(AppError::new("invalid_operation_input"));
     }
@@ -1750,6 +1928,10 @@ fn expected_host_run_once_resource_uri(
                 encode_host_resource_segment(tool)
             ))
         }
+        HostRunOnceOperation::WorkflowsArchive => Ok(format!(
+            "fwc-mcp-bridge://{}/tools/archive%5Fworkflow",
+            server_id.as_str()
+        )),
         HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
             Ok(format!(
                 "{root}/workflows/{}",
@@ -2558,6 +2740,81 @@ mod tests {
     }
 
     #[test]
+    fn official_mcp_archive_result_is_typed_and_redacted() {
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "archived": true,
+                "workflowId": "1001",
+                "name": "private workflow name",
+                "secret": "drop-me"
+            }
+        });
+        assert_eq!(
+            decode_official_mcp_archive_result(response, "1001").expect("archive result"),
+            json!({"archived": true, "workflowId": "1001"})
+        );
+        assert!(decode_official_mcp_archive_result(
+            json!({"status": "ok", "result": {"archived": false, "workflowId": "1001", "name": "x"}}),
+            "1001"
+        )
+        .is_err());
+        assert!(decode_official_mcp_archive_result(
+            json!({"status": "ok", "result": {"archived": true, "workflowId": "other", "name": "x"}}),
+            "1001"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn archive_input_requires_inactive_unarchived_baseline() {
+        let mut input = json!({
+            "id": "1001",
+            "guard": {
+                "approvalRef": "chat-approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000004",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        run_once_from_bytes_at(
+            "n8n.workflows.archive",
+            &serde_json::to_vec(
+                &json!({"server_id": "eec", "input": input.clone(), "deadline_ms": 1000}),
+            )
+            .expect("archive input"),
+            Instant::now(),
+            |envelope, _| {
+                assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsArchive);
+                assert_eq!(
+                    envelope.resource_uri,
+                    "fwc-mcp-bridge://eec/tools/archive%5Fworkflow"
+                );
+                Ok(json!({"status": "ok"}))
+            },
+        )
+        .expect("archive preflight should reach the owned seam");
+        input["guard"]["precondition"]["active"] = json!(true);
+        assert!(
+            run_once_from_bytes_at(
+                "n8n.workflows.archive",
+                &serde_json::to_vec(
+                    &json!({"server_id": "eec", "input": input, "deadline_ms": 1000})
+                )
+                .expect("archive input"),
+                Instant::now(),
+                |_envelope, _| Ok(json!({"status": "ok"}))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn official_mcp_lifecycle_decoder_rejects_action_and_result_shape_mismatch() {
         let wrong_action = json!({
             "status": "ok",
@@ -2802,7 +3059,7 @@ mod tests {
         ];
         for (bridge_code, public_code) in safe_categories {
             assert_eq!(
-                official_mcp_lifecycle_bridge_error_code(bridge_code),
+                official_mcp_workflow_bridge_error_code(bridge_code),
                 public_code
             );
         }
@@ -2814,7 +3071,7 @@ mod tests {
             "process_spawn_failed",
         ] {
             assert_eq!(
-                official_mcp_lifecycle_bridge_error_code(ambiguous_code),
+                official_mcp_workflow_bridge_error_code(ambiguous_code),
                 "unknown_outcome"
             );
         }

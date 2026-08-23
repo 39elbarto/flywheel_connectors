@@ -84,8 +84,13 @@ that label is classification only and never contains provider text, payload,
 headers, credentials, or a retry instruction.
 Uncertain readback is classified unknown and never retried automatically.
 Activation,
-archive/restore, versions, execution, credential mutation, and permanent
-deletion remain outside this packet; no legacy route is guessed.
+restore/unarchive, versions, execution, credential mutation, and permanent
+deletion remain outside this packet; no legacy route is guessed. The bounded
+`n8n.workflows.archive` operation separately maps only to the documented
+official MCP `archive_workflow` tool, requires an inactive/unarchived baseline,
+and verifies archived/inactive state plus unchanged draft/published summaries
+through an independent REST GET. Its owner policy must carry both per-server
+schema digests and the child tools/list response must match them exactly.
 Local, typed REST, local MCP, and any official-MCP operation beyond capability
 inspection must remain behind the host-owned boundary; this wrapper does not
 accept model-supplied commands, paths, environments, URLs, or upstream tool
@@ -363,6 +368,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
+| `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | action-dependent | action-dependent | action-dependent | official MCP | workflow version and execution URI | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
@@ -380,8 +386,9 @@ Hetzner, with disposable workflows removed after exact DELETE/404 readback.
 The typed official-MCP lifecycle path is not yet live-accepted: one exact EEC
 webhook publish attempt returned `unknown_outcome`, the independent REST
 readback remained inactive, and the contract correctly performed no retry.
-This does not authorize REST lifecycle fallback or activation/archive/execution
-operations.
+This does not authorize REST lifecycle/archive fallback, restore/unarchive, or
+activation/execution operations. Archive remains policy- and tools/list-gated;
+no live archive acceptance is claimed here.
 
 The provider result is fail-closed unless it contains typed `active`,
 `isArchived`, `activeVersionId`, draft/published graph summaries, and
@@ -469,10 +476,11 @@ Its action-specific outputs are exactly:
 The default is `runtime`; provider-specific extra profiles cannot become public
 without a contract revision.
 
-`workflows.lifecycle.action` is exactly `publish` or `unpublish` in the current
-packet. Archive/restore, activation/deactivation, version operations, and
-execution are separate future capabilities and cannot be represented as
-aliases here; the provider action is fixed by the typed enum and route.
+`workflows.lifecycle.action` is exactly `publish` or `unpublish`; archive is a
+separate typed `n8n.workflows.archive` operation. Restore/unarchive,
+activation/deactivation, version operations, and execution cannot be
+represented as aliases here; each provider action is fixed by its typed enum
+and route.
 
 `workflows.execute.mode` is exactly `prepare_test`, `test`, `manual`, or
 `production`. `prepare_test` is Safe/Low/None and requires no guard. The other

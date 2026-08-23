@@ -1414,7 +1414,7 @@ max_response_bytes = 1048576
 [provides.operations."n8n.workflows.lifecycle".ai_hints]
 when_to_use = "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests."
 common_mistakes = [
-    "Archive, restore, activate, deactivate, version, execution, and credential operations are not part of this packet.",
+    "Restore, activate, deactivate, version, execution, and credential operations are not part of this packet; archive is a separate mediated official-MCP operation.",
     "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.",
     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.",
     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.",
@@ -1425,6 +1425,140 @@ related = [
     "n8n.workflows.get",
     "n8n.workflows.activate",
 ]
+
+[provides.operations."n8n.workflows.archive"]
+description = "Archive an exact n8n workflow through the owner-approved official MCP archive_workflow tool with independent REST GET readback"
+capability = "n8n.workflows.lifecycle"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.archive".input_schema]
+additionalProperties = false
+required = ["id", "guard"]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.id]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard]
+additionalProperties = false
+required = ["approvalRef", "idempotencyKey", "precondition"]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.approvalRef]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.idempotencyKey]
+type = "string"
+format = "uuid"
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = ["string", "null"]
+maxLength = 256
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+const = false
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+const = false
+
+[provides.operations."n8n.workflows.archive".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.archive".output_schema]
+additionalProperties = false
+required = ["status", "operation", "provider", "retry", "readback", "before", "after", "providerResult"]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.status]
+type = "string"
+enum = ["verified"]
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.operation]
+type = "string"
+const = "n8n.workflows.archive"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.provider]
+type = "string"
+const = "official_mcp"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.retry]
+type = "string"
+const = "never_automatic"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.readback]
+type = "string"
+const = "independent_get"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.before]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.after]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.providerResult]
+additionalProperties = false
+required = ["archived", "workflowId"]
+type = "object"
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.providerResult.properties.archived]
+type = "boolean"
+const = true
+
+[provides.operations."n8n.workflows.archive".output_schema.properties.providerResult.properties.workflowId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.archive".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."n8n.workflows.archive".ai_hints]
+when_to_use = "Use only with an exact workflow target, UUID idempotency key, explicit inactive/unarchived lifecycle precondition, external signed approval, and an owner-provisioned archive_workflow policy entry whose digest is matched by fresh tools/list."
+common_mistakes = [
+    "The archive path rejects active or already archived baselines to avoid incidental deactivation; it performs no REST archive fallback.",
+    "The owner policy must carry an exact archive_workflow_schema input/output digest pair equal to the approved_tools entry; missing or mismatched binding fails before the side-effect call.",
+    "One archive_workflow MCP call is followed by an independent REST GET; timeout, disconnect, conflict, malformed response, or readback mismatch is unknown and never retried automatically.",
+    "Restore/unarchive has no proven approved route and remains fail-closed/out of scope.",
+]
+examples = ["{\"id\":\"1001\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000004\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
+related = ["n8n.workflows.get", "n8n.workflows.lifecycle"]
 
 [provides.operations."n8n.workflows.create_draft"]
 description = "Create an inactive n8n workflow draft and verify it by independent readback"

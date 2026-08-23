@@ -15,7 +15,10 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
-`run-once`, and `status`. `run-once` supports nine Phase-1 REST reads, guarded
+`run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
+`status`. `provision` defaults to read-only `preflight`; mutation requires the
+explicit owner-gated `provision --mode apply`. `run-once` supports nine Phase-1
+REST reads, guarded
 REST draft create/update, two local knowledge/validation operations, and one
 official-MCP discovery operation, `n8n.capabilities.inspect`. The draft-write
 packet is source-only: the installed immutable release remains the accepted
@@ -35,7 +38,10 @@ sorted tool names, SHA-256 input/output schema digests, and explicit
 Implementation status snapshot (2026-08-19): the host-side local
 `n8n-mcp` update executor and its security primitives are implemented behind
 the connector boundary. The public CLI still has no registry fetch, `npm`
-invocation, release switch, or live update command. The implementation status
+invocation, or apply mode for `update-review`. Its separate explicit
+`provision --mode apply` path is limited to fixed-root, proof-carrying,
+owner-gated immutable release promotion; it is not a generic live update
+command. The implementation status
 and evidence are maintained in `connectors/n8n/README.md`; this document
 continues to define the accepted public contract and owner gates.
 
@@ -71,13 +77,34 @@ the fixed install root from proof paths, takes an exclusive root lock, repeats
 proof validation under the lock, uses no-follow directory opens and
 `renameat(..., NOREPLACE)` for stage-to-release promotion, fsyncs the affected
 directories, and atomically replaces `current` through a temporary relative
-symlink. Its rollback seam uses the same lock and revalidation and never
-deletes releases; a failed `current` promotion leaves the immutable release
-and old pointer where possible. Non-Linux fails closed. The default CLI/live
-`/usr/local` install, `current` switch, systemd invocation, and production
-rollback acceptance still do not call this implementation and remain separate
-owner gates. The proof cannot establish atomicity against an unrelated writer
-that ignores the owner lock.
+symlink. Before reading any receipt or artifact, release-tree validation opens
+only the fixed direct children `bin/`, `manifests/`, `inventory/`, and `policy/`
+relative to the already validated release root with `NOFOLLOW`; each must keep
+its exact relative name and parent, directory type and inode identity, expected
+owner (UID 0 in production), non-writable metadata, and canonical no-symlink
+traversal. These are constants, never caller-supplied subpaths. Because the
+shared validation is
+repeated by plan revalidation under the owner lock and after the stage rename,
+it covers stage, current/rollback immutable releases, and the promoted target
+before `current` changes. Its rollback seam uses the same lock and revalidation
+and never deletes releases; a failed `current` promotion leaves the immutable release
+and old pointer where possible. Non-Linux fails closed. The `fwc-n8n provision`
+CLI provides the narrow owner wiring: it accepts only a bounded
+`fwc.n8n.provision-request.v1` envelope with release metadata and the fixed
+server binding map. The public trust root comes only from immutable
+release-build configuration: stdin cannot select its key ID or public key,
+missing production configuration fails closed, and no private key is read or
+generated. Its default mode is read-only preflight; `--mode apply` requires
+effective UID 0, while the installer seam and both Linux mutation functions
+enforce that requirement again independently of the CLI. Promotion accepts
+only the exact direct child `/var/lib/fwc-n8n/staging/<release_id>` with a
+matching basename; mismatches, nesting/traversal, and symlink aliases fail
+before mutation. The existing proof-carrying installer otherwise uses only the
+fixed staging/install roots.
+Output is redacted and does not expose signatures, keys, or paths. No sudo,
+shell, systemd, release deletion, or live n8n operation is performed; rollback
+remains a separate owner-gated boundary. The proof cannot establish atomicity
+against an unrelated writer that ignores the owner lock.
 The rollback target is subjected to the same complete self-relative artifact,
 provenance, provision-receipt, inventory, and policy validation; only its git
 revision may differ from the candidate. The remaining trusted-concurrent-root
@@ -942,7 +969,7 @@ The trusted local-provider update path is review-first and host-owned:
   authority.
 
 The executor's apply path is tested offline, but wiring registry discovery and
-the owner-facing public update command remains a separate gated task. A failed
+live acceptance remain separate gates. A failed
 exact precondition returns before the component lock is acquired; callers must
 not infer lock ownership from that error.
 

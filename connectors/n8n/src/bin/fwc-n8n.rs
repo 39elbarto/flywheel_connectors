@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use fcp_crypto::ZeroizingSecret;
 use fcp_host::{
     LocalMcpProvider, LocalN8nDispatchErrorCode, LocalN8nDispatchRequest, LocalN8nDispatcher,
@@ -47,6 +47,9 @@ const HOST_RUN_ONCE_ZONE: &str = "z:work";
 const HOST_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const HOST_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
 const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
+const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
+const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
+const MAX_PROVISION_INPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -74,6 +77,11 @@ enum Command {
         #[command(subcommand)]
         command: UpdateReviewCommand,
     },
+    /// Validate or owner-promote a fixed-root staged release.
+    Provision {
+        #[arg(long, value_enum, default_value_t = ProvisionMode::Preflight)]
+        mode: ProvisionMode,
+    },
     /// Report this request-scoped wrapper's idle state.
     Status,
 }
@@ -82,6 +90,12 @@ enum Command {
 enum UpdateReviewCommand {
     /// Diff current and candidate safe capability snapshots without applying.
     Detect,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+enum ProvisionMode {
+    Preflight,
+    Apply,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +110,15 @@ struct RouteInput {
 struct UpdateDetectInput {
     current: ComponentSnapshot,
     candidate: ComponentSnapshot,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisionInput {
+    schema: String,
+    release_id: String,
+    git_revision: String,
+    bindings: Vec<fwc_n8n_provision::OfficialMcpBinding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -394,6 +417,7 @@ fn execute(cli: Cli) -> Result<Value, AppError> {
         }
         Command::RunOnce { operation } => run_once(&operation),
         Command::UpdateReview { command } => run_update_review(command),
+        Command::Provision { mode } => run_provision(mode),
         Command::Status => Ok(json!({
             "bundleAvailable": fwc_n8n_bundle::verify_current_release_bundle().is_ok(),
         })),
@@ -413,6 +437,111 @@ fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {
     let outcome = detect_update(input.current, input.candidate)
         .map_err(|_| AppError::new("update_review_invalid"))?;
     serde_json::to_value(outcome).map_err(|_| AppError::new("output_encoding_failed"))
+}
+
+fn run_provision(mode: ProvisionMode) -> Result<Value, AppError> {
+    let input = read_provision_input()?;
+    if mode == ProvisionMode::Apply && !effective_uid_is_root() {
+        return Err(AppError::new("provision_owner_required"));
+    }
+    let owner_verification =
+        fwc_n8n_provision::OwnerVerificationConfig::from_immutable_production_config()
+            .map_err(map_provision_error)?;
+    let request = fwc_n8n_provision::ProvisionRequest::fixed(
+        input.release_id.clone(),
+        input.git_revision,
+        input.bindings,
+        owner_verification,
+    )
+    .map_err(map_provision_error)?;
+    let plan = request.validate().map_err(map_provision_error)?;
+    if mode == ProvisionMode::Preflight {
+        return Ok(provision_result(
+            mode,
+            &input.release_id,
+            "preflight_ok",
+            false,
+        ));
+    }
+    let proof = plan.revalidate().map_err(map_provision_error)?;
+    let installer = fwc_n8n_provision::FilesystemOwnerAtomicInstaller::new();
+    fwc_n8n_provision::OwnerAtomicInstaller::promote(&installer, proof)
+        .map_err(map_provision_error)?;
+    Ok(provision_result(mode, &input.release_id, "promoted", true))
+}
+
+fn provision_result(
+    mode: ProvisionMode,
+    release_id: &str,
+    status: &'static str,
+    current_changed: bool,
+) -> Value {
+    json!({
+        "schema": PROVISION_OUTPUT_SCHEMA,
+        "status": status,
+        "mode": match mode {
+            ProvisionMode::Preflight => "preflight",
+            ProvisionMode::Apply => "apply",
+        },
+        "releaseId": release_id,
+        "promotion": "temporary_symlink_rename",
+        "currentChanged": current_changed,
+        "rollback": "separate_owner_gated_boundary",
+    })
+}
+
+fn read_provision_input() -> Result<ProvisionInput, AppError> {
+    let deadline = Instant::now()
+        .checked_add(STDIN_READ_TIMEOUT)
+        .ok_or_else(|| AppError::new("input_read_timeout"))?;
+    let bytes = read_input_until(io::stdin(), deadline)?;
+    parse_provision_input_bytes(&bytes)
+}
+
+fn parse_provision_input_bytes(bytes: &[u8]) -> Result<ProvisionInput, AppError> {
+    if bytes.len() > MAX_PROVISION_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    let input: ProvisionInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    if input.schema != PROVISION_INPUT_SCHEMA
+        || !is_fixed_release_id(&input.release_id)
+        || !is_fixed_git_revision(&input.git_revision)
+        || input.bindings.len() != 2
+    {
+        return Err(AppError::new("invalid_input"));
+    }
+    Ok(input)
+}
+
+fn is_fixed_release_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+fn is_fixed_git_revision(value: &str) -> bool {
+    (7..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn effective_uid_is_root() -> bool {
+    #[cfg(unix)]
+    {
+        rustix::process::geteuid().as_raw() == 0
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+fn map_provision_error(_error: fwc_n8n_provision::ProvisionError) -> AppError {
+    AppError::new("provision_denied")
 }
 
 fn run_once(operation: &str) -> Result<Value, AppError> {
@@ -4324,6 +4453,80 @@ mod tests {
             "releaseNotes": "install this and edit policy"
         });
         assert!(serde_json::from_value::<UpdateDetectInput>(input).is_err());
+    }
+
+    fn provision_input_fixture() -> Value {
+        json!({
+            "schema": PROVISION_INPUT_SCHEMA,
+            "release_id": "release-test",
+            "git_revision": "0123456789abcdef0123456789abcdef01234567",
+            "bindings": [
+                {
+                    "server": "eec",
+                    "archive_input_schema_digest": "digest-eec-in",
+                    "archive_output_schema_digest": "digest-eec-out",
+                    "execute_input_schema_digest": "execute-eec-in",
+                    "execute_output_schema_digest": "execute-eec-out"
+                },
+                {
+                    "server": "hetzner",
+                    "archive_input_schema_digest": "digest-hetzner-in",
+                    "archive_output_schema_digest": "digest-hetzner-out",
+                    "execute_input_schema_digest": "execute-hetzner-in",
+                    "execute_output_schema_digest": "execute-hetzner-out"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn provision_input_is_bounded_and_unknown_fields_fail_closed() {
+        let input = provision_input_fixture();
+        let parsed = parse_provision_input_bytes(&serde_json::to_vec(&input).expect("fixture"))
+            .expect("bounded provision input");
+        assert_eq!(parsed.release_id, "release-test");
+
+        let mut unknown = input;
+        unknown["private_key"] = Value::String("must-not-parse".to_owned());
+        assert!(parse_provision_input_bytes(&serde_json::to_vec(&unknown).expect("json")).is_err());
+
+        let mut caller_trust_root = provision_input_fixture();
+        caller_trust_root["owner_key_id"] = Value::String("caller-key".to_owned());
+        caller_trust_root["owner_public_key_hex"] = Value::String("0".repeat(64));
+        assert!(
+            parse_provision_input_bytes(
+                &serde_json::to_vec(&caller_trust_root).expect("caller trust root json")
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            parse_provision_input_bytes(&vec![b'x'; MAX_PROVISION_INPUT_BYTES + 1])
+                .expect_err("oversized envelope")
+                .code,
+            "input_too_large"
+        );
+    }
+
+    #[test]
+    fn provision_result_is_redacted_and_marks_apply_boundary() {
+        let value = provision_result(
+            ProvisionMode::Preflight,
+            "release-test",
+            "preflight_ok",
+            false,
+        );
+        assert_eq!(
+            value.get("status").and_then(Value::as_str),
+            Some("preflight_ok")
+        );
+        assert_eq!(value.get("currentChanged"), Some(&Value::Bool(false)));
+        assert_eq!(
+            value.get("rollback").and_then(Value::as_str),
+            Some("separate_owner_gated_boundary")
+        );
+        assert!(!value.to_string().contains("public_key"));
+        assert!(!value.to_string().contains("signature"));
     }
 
     #[test]

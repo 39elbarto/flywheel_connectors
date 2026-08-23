@@ -1,9 +1,12 @@
-//! Typed, unprivileged validation for an owner-provisioned immutable n8n release.
+//! Typed validation/planning plus the concrete owner/root promotion and
+//! rollback seam for an owner-provisioned immutable n8n release.
 //!
-//! This module deliberately stops at an install plan.  It never invokes a
-//! shell, `sudo`, `systemd`, or filesystem mutation.  A separate owner/root
-//! installer must consume the returned plan and perform the final
-//! stage-rename and temporary-symlink promotion.
+//! The default request path is unprivileged and does not mutate: it validates
+//! fixed roots and returns a proof-carrying plan without invoking a shell,
+//! `sudo`, or `systemd`. The concrete filesystem installer is the mutation
+//! boundary; it promotes or rolls back only after requiring effective UID 0,
+//! consuming a revalidated proof, taking the owner lock, and repeating final
+//! validation under that lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -45,6 +48,7 @@ const ARTIFACTS: [&str; 12] = [
     "policy/zone-policies.json",
     "policy/local-mcp.json",
 ];
+const RELEASE_DIRECTORIES: [&str; 4] = ["bin", "manifests", "inventory", "policy"];
 const EXECUTABLES: [&str; 4] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
@@ -185,17 +189,39 @@ impl fmt::Debug for OwnerVerificationConfig {
 }
 
 impl OwnerVerificationConfig {
-    pub fn new(key_id: String, public_key_hex: String) -> Self {
-        Self {
-            key_id,
+    /// Load the public trust root embedded by the owner-side release build.
+    /// Missing or malformed production configuration fails closed. There is
+    /// deliberately no runtime path or stdin override and no private-key path.
+    pub fn from_immutable_production_config() -> Result<Self, ProvisionError> {
+        Self::from_immutable_public_key(option_env!("FWC_N8N_OWNER_PUBLIC_KEY_HEX"))
+    }
+
+    fn from_immutable_public_key(value: Option<&str>) -> Result<Self, ProvisionError> {
+        let public_key_hex =
+            value.ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Signature))?;
+        Self::from_public_key_hex(public_key_hex.to_owned())
+    }
+
+    fn from_public_key_hex(public_key_hex: String) -> Result<Self, ProvisionError> {
+        let public_key_bytes = decode_hex::<PUBLIC_KEY_SIZE>(&public_key_hex)?;
+        let verifying_key = Ed25519VerifyingKey::from_bytes(&public_key_bytes)
+            .map_err(|_| ProvisionError::new(ProvisionErrorCode::Signature))?;
+        Ok(Self {
+            key_id: verifying_key.key_id().to_string(),
             public_key_hex,
-        }
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(public_key_hex: String) -> Self {
+        Self::from_public_key_hex(public_key_hex).expect("valid test public key")
     }
 }
 
 /// Owner input for preflight validation.  The public constructor only accepts
 /// the fixed staging/install roots; tests use the crate-private test builder.
 pub struct ProvisionRequest {
+    staging_root: PathBuf,
     stage_root: PathBuf,
     release_id: String,
     git_revision: String,
@@ -219,6 +245,28 @@ impl fmt::Debug for ProvisionRequest {
 }
 
 impl ProvisionRequest {
+    /// Construct a request using only the fixed production staging/install
+    /// roots.  The caller supplies a release identifier, never a filesystem
+    /// path; all path and provenance checks remain in [`Self::validate`].
+    pub fn fixed(
+        release_id: String,
+        git_revision: String,
+        bindings: Vec<OfficialMcpBinding>,
+        owner_verification: OwnerVerificationConfig,
+    ) -> Result<Self, ProvisionError> {
+        if !is_safe_release_id(&release_id) {
+            return Err(ProvisionError::new(ProvisionErrorCode::InvalidRequest));
+        }
+        let stage_root = Path::new(DEFAULT_STAGING_ROOT).join(&release_id);
+        Self::new(
+            stage_root,
+            release_id,
+            git_revision,
+            bindings,
+            owner_verification,
+        )
+    }
+
     pub fn new(
         stage_root: PathBuf,
         release_id: String,
@@ -228,10 +276,15 @@ impl ProvisionRequest {
     ) -> Result<Self, ProvisionError> {
         let staging_root = Path::new(DEFAULT_STAGING_ROOT);
         let install_root = Path::new(DEFAULT_INSTALL_ROOT);
-        if !is_absolute_child(&stage_root, staging_root) {
+        if !is_absolute_child(&stage_root, staging_root)
+            || stage_root.parent() != Some(staging_root)
+            || stage_root.file_name().and_then(|name| name.to_str()) != Some(&release_id)
+            || stage_root != staging_root.join(&release_id)
+        {
             return Err(ProvisionError::new(ProvisionErrorCode::Path));
         }
         Ok(Self {
+            staging_root: staging_root.to_path_buf(),
             stage_root,
             release_id,
             git_revision,
@@ -254,7 +307,12 @@ impl ProvisionRequest {
         current_path: PathBuf,
         releases_root: PathBuf,
     ) -> Self {
+        let staging_root = stage_root
+            .parent()
+            .expect("test staging root")
+            .to_path_buf();
         Self {
+            staging_root,
             stage_root,
             release_id,
             git_revision,
@@ -278,6 +336,7 @@ impl ProvisionRequest {
         reject_existing_path(&release_path)?;
         validate_stage_tree(&self, &self.owner_verification)?;
         Ok(InstallPlan {
+            staging_root: self.staging_root.clone(),
             release_id: self.release_id.clone(),
             stage_root: self.stage_root.clone(),
             release_path,
@@ -301,6 +360,7 @@ pub enum Promotion {
 /// A validated, but not yet owner-promoted, plan.  There is intentionally no
 /// `apply` method in this packet: root-owned installation is a separate seam.
 pub struct InstallPlan {
+    staging_root: PathBuf,
     release_id: String,
     stage_root: PathBuf,
     release_path: PathBuf,
@@ -364,6 +424,9 @@ impl InstallPlan {
         }
         #[cfg(unix)]
         {
+            validate_stage_root_binding(&self.staging_root, &self.stage_root, &self.release_id)?;
+            reject_symlink_ancestors(&self.staging_root, true)?;
+            reject_symlink_ancestors(&self.stage_root, true)?;
             let current = validate_current_pointer(
                 &self.current_path,
                 &self.releases_root,
@@ -578,6 +641,7 @@ impl OwnerAtomicInstaller for FilesystemOwnerAtomicInstaller {
     fn promote(&self, plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
         #[cfg(target_os = "linux")]
         {
+            require_effective_root()?;
             promote_linux(plan)
         }
         #[cfg(not(target_os = "linux"))]
@@ -592,6 +656,7 @@ impl OwnerAtomicRollback for FilesystemOwnerAtomicInstaller {
     fn rollback(&self, plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         #[cfg(target_os = "linux")]
         {
+            require_effective_root()?;
             rollback_linux(plan)
         }
         #[cfg(not(target_os = "linux"))]
@@ -600,6 +665,40 @@ impl OwnerAtomicRollback for FilesystemOwnerAtomicInstaller {
             Err(ProvisionError::new(ProvisionErrorCode::UnsupportedPlatform))
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn require_effective_root() -> Result<(), ProvisionError> {
+    if owner_boundary_effective_uid() == 0 {
+        Ok(())
+    } else {
+        Err(ProvisionError::new(ProvisionErrorCode::OwnerRequired))
+    }
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+fn owner_boundary_effective_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+#[cfg(all(target_os = "linux", test))]
+std::thread_local! {
+    static TEST_OWNER_BOUNDARY_EFFECTIVE_UID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn owner_boundary_effective_uid() -> u32 {
+    TEST_OWNER_BOUNDARY_EFFECTIVE_UID.with(std::cell::Cell::get)
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn with_test_owner_boundary_effective_uid<T>(uid: u32, operation: impl FnOnce() -> T) -> T {
+    TEST_OWNER_BOUNDARY_EFFECTIVE_UID.with(|effective_uid| {
+        let previous = effective_uid.replace(uid);
+        let result = operation();
+        effective_uid.set(previous);
+        result
+    })
 }
 
 fn owner_install_root(
@@ -731,6 +830,12 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
     use rustix::fs::{RenameFlags, fsync, openat2, renameat_with, symlinkat};
     use std::os::unix::fs::MetadataExt;
 
+    require_effective_root()?;
+    validate_stage_root_binding(
+        &plan.plan.staging_root,
+        plan.stage_root(),
+        &plan.plan.release_id,
+    )?;
     let install_root = owner_install_root(
         plan.current_path(),
         &plan.plan.releases_root,
@@ -886,6 +991,7 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
 fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
     use rustix::fs::{RenameFlags, fsync, renameat_with, symlinkat};
 
+    require_effective_root()?;
     let install_root = owner_install_root(
         plan.current_path(),
         &plan.plan.releases_root,
@@ -960,6 +1066,7 @@ pub enum ProvisionErrorCode {
     SecretMaterial,
     CurrentPointer,
     Signature,
+    OwnerRequired,
     OwnerLock,
     Promotion,
     Rollback,
@@ -982,6 +1089,7 @@ impl ProvisionErrorCode {
             Self::SecretMaterial => "secret_material_present",
             Self::CurrentPointer => "invalid_current_pointer",
             Self::Signature => "invalid_release_signature",
+            Self::OwnerRequired => "owner_required",
             Self::OwnerLock => "owner_lock_unavailable",
             Self::Promotion => "atomic_promotion_failed",
             Self::Rollback => "rollback_failed",
@@ -1071,24 +1179,42 @@ fn validate_request(request: &ProvisionRequest) -> Result<(), ProvisionError> {
         return Err(ProvisionError::new(ProvisionErrorCode::InvalidRequest));
     }
     validate_binding_shape(&request.bindings)?;
-    if !is_safe_absolute_path(&request.stage_root)
+    if !is_safe_absolute_path(&request.staging_root)
+        || !is_safe_absolute_path(&request.stage_root)
         || !is_safe_absolute_path(&request.current_path)
         || !is_safe_absolute_path(&request.releases_root)
-        || !request
-            .stage_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(is_safe_release_id)
         || request.stage_root == request.releases_root
         || request.stage_root.starts_with(&request.releases_root)
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Path));
     }
+    validate_stage_root_binding(
+        &request.staging_root,
+        &request.stage_root,
+        &request.release_id,
+    )?;
     #[cfg(unix)]
     {
+        reject_symlink_ancestors(&request.staging_root, true)?;
         reject_symlink_ancestors(&request.stage_root, true)?;
         reject_symlink_ancestors(&request.releases_root, true)?;
         reject_symlink_ancestors(&request.current_path, false)?;
+    }
+    Ok(())
+}
+
+fn validate_stage_root_binding(
+    staging_root: &Path,
+    stage_root: &Path,
+    release_id: &str,
+) -> Result<(), ProvisionError> {
+    if !is_safe_absolute_path(staging_root)
+        || !is_safe_absolute_path(stage_root)
+        || stage_root != staging_root.join(release_id)
+        || stage_root.parent() != Some(staging_root)
+        || stage_root.file_name().and_then(|name| name.to_str()) != Some(release_id)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
     }
     Ok(())
 }
@@ -1153,7 +1279,7 @@ fn validate_release_tree(
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
-    validate_directory(root, expected_owner)?;
+    validate_release_directories(root, expected_owner)?;
     let provision_receipt: ProvisionReceipt = read_json(
         &root.join(PROVISION_RECEIPT_FILE),
         expected_owner,
@@ -1241,6 +1367,74 @@ fn validate_release_tree(
         } else if relative_path.starts_with("policy/") {
             let value = read_value(&path, MAX_POLICY_BYTES)?;
             reject_secret_keys(&value)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_release_directories(root: &Path, expected_owner: u32) -> Result<(), ProvisionError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use std::os::unix::fs::MetadataExt;
+
+    let root_path_metadata = validate_directory(root, expected_owner)?;
+    reject_symlink_ancestors(root, true)?;
+    if fs::canonicalize(root).map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))? != root
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Path));
+    }
+    let root_directory =
+        File::open(root).map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
+    let root_fd_metadata = root_directory
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
+    if !root_fd_metadata.file_type().is_dir()
+        || root_fd_metadata.dev() != root_path_metadata.dev()
+        || root_fd_metadata.ino() != root_path_metadata.ino()
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Layout));
+    }
+    verify_metadata(&root_fd_metadata, expected_owner, false)?;
+
+    for relative_name in RELEASE_DIRECTORIES {
+        let relative_path = Path::new(relative_name);
+        if !is_exact_relative_path(relative_name)
+            || relative_path.components().count() != 1
+            || relative_path.file_name().and_then(|name| name.to_str()) != Some(relative_name)
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::Path));
+        }
+        let path = root.join(relative_path);
+        if path.parent() != Some(root) {
+            return Err(ProvisionError::new(ProvisionErrorCode::Path));
+        }
+        let directory = File::from(
+            openat(
+                &root_directory,
+                relative_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::empty(),
+            )
+            .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?,
+        );
+        let fd_metadata = directory
+            .metadata()
+            .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
+        let path_metadata = fs::symlink_metadata(&path)
+            .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
+        if !fd_metadata.file_type().is_dir()
+            || !path_metadata.file_type().is_dir()
+            || fd_metadata.dev() != path_metadata.dev()
+            || fd_metadata.ino() != path_metadata.ino()
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::Layout));
+        }
+        verify_metadata(&fd_metadata, expected_owner, false)?;
+        verify_metadata(&path_metadata, expected_owner, false)?;
+        if fs::canonicalize(&path).map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?
+            != path
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::Path));
         }
     }
     Ok(())
@@ -1927,6 +2121,7 @@ fn validate_current_pointer(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    validate_release_directories(&current, expected_owner)?;
     let provenance: Provenance = read_json(
         &current.join(PROVENANCE_FILE),
         expected_owner,
@@ -1974,16 +2169,17 @@ fn validate_release_target(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
     }
+    let release_id = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    validate_release_directories(target, expected_owner)?;
     let provenance: Provenance = read_json(
         &target.join(PROVENANCE_FILE),
         expected_owner,
         MAX_PROVENANCE_BYTES,
         ProvisionErrorCode::Provenance,
     )?;
-    let release_id = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
     if provenance.schema != PROVENANCE_SCHEMA
         || provenance.release_id != release_id
         || !is_git_revision(&provenance.git_revision)
@@ -2285,10 +2481,23 @@ mod tests {
 
     fn test_owner_verification() -> OwnerVerificationConfig {
         let key = test_signing_key();
-        OwnerVerificationConfig::new(
-            key.key_id().to_string(),
-            hex::encode(key.verifying_key().to_bytes()),
-        )
+        OwnerVerificationConfig::for_test(hex::encode(key.verifying_key().to_bytes()))
+    }
+
+    #[test]
+    fn immutable_owner_trust_root_missing_or_malformed_fails_closed() {
+        assert_eq!(
+            OwnerVerificationConfig::from_immutable_public_key(None)
+                .expect_err("missing immutable owner key")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
+        assert_eq!(
+            OwnerVerificationConfig::from_immutable_public_key(Some("caller-controlled"))
+                .expect_err("malformed immutable owner key")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
     }
 
     struct Fixture {
@@ -2855,10 +3064,8 @@ mod tests {
 
         let fixture = Fixture::new();
         let mut request = fixture.request();
-        request.owner_verification = OwnerVerificationConfig::new(
-            "0000000000000000".to_owned(),
-            hex::encode([9_u8; PUBLIC_KEY_SIZE]),
-        );
+        request.owner_verification =
+            OwnerVerificationConfig::for_test(hex::encode([9_u8; PUBLIC_KEY_SIZE]));
         let before = fs::canonicalize(&fixture.current).expect("current target");
         assert_eq!(
             request.validate().expect_err("wrong key").code(),
@@ -2906,6 +3113,76 @@ mod tests {
                 .map_err(|_| ProvisionError::new(ProvisionErrorCode::Layout))?;
             Ok(())
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn filesystem_owner_boundaries_reject_non_root_before_mutation() {
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let outer_error = with_test_owner_boundary_effective_uid(1000, || {
+            FilesystemOwnerAtomicInstaller::new()
+                .promote(plan.revalidate().expect("promotion proof"))
+                .expect_err("outer non-root promotion")
+        });
+        assert_eq!(outer_error.code(), ProvisionErrorCode::OwnerRequired);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let inner_error = with_test_owner_boundary_effective_uid(1000, || {
+            promote_linux(plan.revalidate().expect("promotion proof"))
+                .expect_err("inner non-root promotion")
+        });
+        assert_eq!(inner_error.code(), ProvisionErrorCode::OwnerRequired);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let rollback = plan.rollback_plan();
+        TestAtomicInstaller
+            .promote(plan.revalidate().expect("promotion proof"))
+            .expect("test promotion");
+        let candidate = fixture.releases.join(&fixture.release_id);
+        let outer_error = with_test_owner_boundary_effective_uid(1000, || {
+            FilesystemOwnerAtomicInstaller::new()
+                .rollback(rollback.revalidate().expect("rollback proof"))
+                .expect_err("outer non-root rollback")
+        });
+        assert_eq!(outer_error.code(), ProvisionErrorCode::OwnerRequired);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            candidate
+        );
+
+        let fixture = Fixture::new();
+        let plan = fixture.request().validate().expect("valid plan");
+        let rollback = plan.rollback_plan();
+        TestAtomicInstaller
+            .promote(plan.revalidate().expect("promotion proof"))
+            .expect("test promotion");
+        let candidate = fixture.releases.join(&fixture.release_id);
+        let inner_error = with_test_owner_boundary_effective_uid(1000, || {
+            rollback_linux(rollback.revalidate().expect("rollback proof"))
+                .expect_err("inner non-root rollback")
+        });
+        assert_eq!(inner_error.code(), ProvisionErrorCode::OwnerRequired);
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            candidate
+        );
     }
 
     #[test]
@@ -3175,6 +3452,98 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn writable_intermediate_directories_fail_before_mutation_at_every_boundary() {
+        let fixture = Fixture::new();
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        fs::set_permissions(
+            fixture.releases.join("previous/inventory"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .expect("tamper immutable inventory directory mode");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("writable immutable intermediate directory")
+                .code(),
+            ProvisionErrorCode::Permissions
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        fs::set_permissions(
+            fixture.stage.join("inventory"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .expect("tamper stage inventory directory mode");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("writable stage intermediate directory")
+                .code(),
+            ProvisionErrorCode::Permissions
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let plan = fixture.request().validate().expect("valid plan");
+        fs::set_permissions(
+            fixture.stage.join("policy"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .expect("tamper stage policy directory mode");
+        assert_eq!(
+            plan.revalidate()
+                .expect_err("writable intermediate directory at revalidate")
+                .code(),
+            ProvisionErrorCode::Permissions
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+
+        let fixture = Fixture::new();
+        let before = fs::canonicalize(&fixture.current).expect("current target");
+        let plan = fixture.request().validate().expect("valid plan");
+        let proof = plan.revalidate().expect("revalidated proof");
+        fs::set_permissions(
+            fixture.stage.join("manifests"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .expect("tamper stage manifests directory mode");
+        assert_eq!(
+            FilesystemOwnerAtomicInstaller::new()
+                .promote(proof)
+                .expect_err("writable intermediate directory at owner boundary")
+                .code(),
+            ProvisionErrorCode::Permissions
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("current target"),
+            before
+        );
+        assert!(fixture.stage.exists());
+        assert!(!fixture.releases.join(&fixture.release_id).exists());
+    }
+
     #[test]
     fn current_pointer_and_rollback_target_fail_closed() {
         let fixture = Fixture::new();
@@ -3436,6 +3805,7 @@ mod tests {
         let alias = fixture.root.join("staging-alias");
         symlink(fixture.root.join("staging"), &alias).expect("staging alias");
         let mut request = fixture.request();
+        request.staging_root = alias.clone();
         request.stage_root = alias.join("release-test");
         assert_eq!(
             request.validate().expect_err("symlink ancestry").code(),
@@ -3468,6 +3838,32 @@ mod tests {
         );
         assert_eq!(
             request.expect_err("parent traversal").code(),
+            ProvisionErrorCode::Path
+        );
+
+        let fixture = Fixture::new();
+        let request = ProvisionRequest::new(
+            PathBuf::from("/var/lib/fwc-n8n/staging/not-the-release-id"),
+            fixture.release_id.clone(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            fixture.request().bindings,
+            test_owner_verification(),
+        );
+        assert_eq!(
+            request.expect_err("basename mismatch").code(),
+            ProvisionErrorCode::Path
+        );
+
+        let fixture = Fixture::new();
+        let request = ProvisionRequest::new(
+            PathBuf::from("/var/lib/fwc-n8n/staging/nested/release-test"),
+            fixture.release_id.clone(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            fixture.request().bindings,
+            test_owner_verification(),
+        );
+        assert_eq!(
+            request.expect_err("nested staging child").code(),
             ProvisionErrorCode::Path
         );
     }

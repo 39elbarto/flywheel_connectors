@@ -32,12 +32,33 @@ accepts and consumes that proof. On Linux, the concrete
 takes an exclusive root lock, revalidates under that lock, uses no-follow
 directory opens and `renameat(..., NOREPLACE)` for stage-to-release promotion,
 then fsyncs and atomically replaces `current` through a temporary relative
-symlink. Its rollback seam uses the same lock/revalidation and never deletes
+symlink. Before any receipt or artifact read, every release-tree validation
+opens exactly the fixed direct children `bin/`, `manifests/`, `inventory/`, and
+`policy/` relative to the validated release root with `NOFOLLOW`, and checks
+directory type, inode identity, owner, non-writable metadata, canonical parent,
+and exact relative name (production owner is fixed to UID 0). The same check
+therefore covers stage preflight/final revalidation, the current and rollback
+immutable releases, and the post-rename
+release before `current` changes; callers cannot supply intermediate paths. Its
+rollback seam uses the same lock/revalidation and never deletes
 releases; partial promotion preserves the immutable release and old `current`
-where possible. Non-Linux fails closed. The default CLI and live `/usr/local`
-install/current/systemd paths still do not invoke this source-only
-implementation; privileged owner wiring and live acceptance remain separate
-gates.
+where possible. Non-Linux fails closed. The `fwc-n8n provision` command is the
+bounded owner wiring:
+it reads a strict `fwc.n8n.provision-request.v1` JSON envelope containing only
+release metadata and the fixed server binding map. The owner public trust root
+is embedded by immutable release-build configuration; stdin cannot select a
+key ID or public key, missing configuration fails closed, and the provisioner
+never reads or generates a private key. With no mode (or `--mode preflight`) it
+performs read-only validation and returns a redacted plan summary. `--mode
+apply` requires effective UID 0, and both the installer seam and its Linux
+mutation boundary repeat that check independently of the CLI. The existing
+proof-carrying `FilesystemOwnerAtomicInstaller` accepts only the exact direct
+child `/var/lib/fwc-n8n/staging/<release_id>` and the fixed
+`/usr/local/lib/fwc-n8n` install root; basename mismatch, nested/traversal paths,
+and symlink aliases fail before mutation. It never accepts caller paths, private
+keys, sudo, shell, systemd, or release deletion.
+Rollback remains a separate owner-gated boundary, and live installation/current
+acceptance is still not performed by repository tests.
 
 The connector is intentionally a bounded self-hosted n8n administration bridge. It is not a workflow authoring client or credential secret/value manager, and it does not provide project-management writes, variable management, audit access, webhook trigger runtime, event subscriptions, n8n CLI replacement, or general HTTP proxy behavior.
 
@@ -66,8 +87,11 @@ Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
 - The crate also builds the operator wrapper `fwc-n8n`. Its current commands are
-  `resolve`, `route <public-operation>`, `run-once <host-operation>`, and
-  `status`. `run-once` accepts the nine Phase-1 host reads, guarded
+  `resolve`, `route <public-operation>`, `run-once <host-operation>`,
+  `update-review detect`, `provision [--mode preflight|apply]`, and `status`.
+  `provision` defaults to read-only `preflight`; mutation requires the explicit
+  owner-gated `provision --mode apply`. `run-once` accepts the nine Phase-1 host
+  reads, guarded
   `n8n.workflows.create_draft` and `n8n.workflows.update_draft`, the typed
   publish/unpublish lifecycle path (unknown outcomes fail closed), plus the closed
   `n8n.capabilities.inspect` operation, a strict
@@ -544,10 +568,10 @@ The current update subsystem is a review-first contract, not a live updater:
 
 - `fwc-n8n update-review detect` is read-only. It compares normalized snapshots
   and emits a stable review digest and deduplication key.
-- Authorization and apply are deliberately absent from the public CLI. A future
-  owner-decision adapter must authenticate the owner and issue an opaque,
-  single-use decision with a UUID, a short bounded lifetime, and a persistent
-  replay ledger.
+- Authorization and apply are deliberately absent from the `update-review`
+  command. A future owner-decision adapter must authenticate the owner and
+  issue an opaque, single-use decision with a UUID, a short bounded lifetime,
+  and a persistent replay ledger.
 - The host-side trusted executor is now implemented as a narrow library path;
   it is not a generic command runner and is not exposed as a model-controlled
   `npm` or shell operation. It accepts only the opaque verified candidate,
@@ -580,8 +604,11 @@ The current update subsystem is a review-first contract, not a live updater:
   rejected; malformed or colliding committed records fail closed. A crash
   before commit may leave an ignored pending file but cannot consume the
   decision. The ledger trust root is not created by the runtime.
-- The public CLI still does not fetch from the registry, invoke `npm`, switch a
-  release, or expose a live apply command. The implemented executor is the
+- The public CLI still does not fetch from the registry or invoke `npm`, and
+  `update-review` exposes no apply mode. The separate `provision --mode apply`
+  command performs only the fixed-root, proof-carrying owner-gated immutable
+  release promotion described above; it is not this component update executor.
+  The implemented executor is the
   host-side security boundary for a future adapter: it re-verifies the exact
   stage before `apply_authorized`, and on every pre-activation materialize,
   extraction, re-verification, or candidate-mismatch failure it performs a

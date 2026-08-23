@@ -33081,7 +33081,7 @@ done"#;
             plan.operation.as_str(),
             mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
             official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
-            ZoneId::private(),
+            ZoneId::work(),
             &signing_key,
         );
         let ApprovalScope::Execution(scope) = &approval.scope else {

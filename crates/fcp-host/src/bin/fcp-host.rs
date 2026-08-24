@@ -20077,10 +20077,31 @@ async fn perform_host_tcp_egress(
 ///     principal_id claim.
 ///   - Absent the header, behavior is unchanged: the token's claim
 ///     set drives the principal (br-flywheel_connectors-t623k).
-const fn normalized_host_error_class(error: &HostError) -> &'static str {
+fn normalized_invalid_filter_class(message: &str) -> &'static str {
+    if message.starts_with("invalid manifest") {
+        "local.validation.manifest"
+    } else if message.starts_with("runtime network enforcement claim") {
+        "local.validation.network_claim"
+    } else if message.starts_with("invalid prewarm policy")
+        || message.starts_with("connector '") && message.contains("per_invocation lifecycle")
+    {
+        "local.validation.lifecycle"
+    } else if message.starts_with("invalid connector id")
+        || message.starts_with("duplicate connector id")
+        || message.starts_with("invalid version for connector")
+    {
+        "local.validation.inventory"
+    } else if message.contains("HRW") || message.contains("hrw") {
+        "local.validation.hrw"
+    } else {
+        "local.validation"
+    }
+}
+
+fn normalized_host_error_class(error: &HostError) -> &'static str {
     match error {
         HostError::ConnectorNotFound(_) => "local.capability_denied",
-        HostError::InvalidFilter(_) => "local.validation",
+        HostError::InvalidFilter(message) => normalized_invalid_filter_class(message),
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "local.policy_denied",
         HostError::Unavailable(_) => "transport.host_connector",
         HostError::ConnectorFrameLimit { .. } => "transport.frame_limit",

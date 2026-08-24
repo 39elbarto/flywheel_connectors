@@ -2308,18 +2308,6 @@ where
         .and_then(|name| name.to_str())
         .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
     validate_release_directories(&current, expected_owner)?;
-    let provenance: Provenance = read_json(
-        &current.join(PROVENANCE_FILE),
-        expected_owner,
-        MAX_PROVENANCE_BYTES,
-        ProvisionErrorCode::Provenance,
-    )?;
-    if provenance.schema != PROVENANCE_SCHEMA
-        || provenance.release_id != release_id
-        || !is_git_revision(&provenance.git_revision)
-    {
-        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
-    }
     let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
     let mode = match fs::symlink_metadata(&provision_receipt_path) {
         Ok(_) => CurrentValidationMode::SignedProvisionReceipt,
@@ -2332,8 +2320,31 @@ where
         return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
     }
 
+    let provenance_path = current.join(PROVENANCE_FILE);
+    let provenance = match fs::symlink_metadata(&provenance_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(read_json::<Provenance>(
+            &provenance_path,
+            expected_owner,
+            MAX_PROVENANCE_BYTES,
+            ProvisionErrorCode::Provenance,
+        )?),
+        Ok(_) => return Err(ProvisionError::new(ProvisionErrorCode::Provenance)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Provenance)),
+    };
+    if let Some(provenance) = &provenance
+        && (provenance.schema != PROVENANCE_SCHEMA
+            || provenance.release_id != release_id
+            || !is_git_revision(&provenance.git_revision))
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
+    }
+
     match mode {
         CurrentValidationMode::SignedProvisionReceipt => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
             let provision_receipt: ProvisionReceipt = read_json(
                 &provision_receipt_path,
                 expected_owner,
@@ -3315,6 +3326,22 @@ mod tests {
         assert_eq!(
             plan.current_validation,
             CurrentValidationMode::SignedProvisionReceipt
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_current_without_provenance_remains_bootstrap_eligible() {
+        let fixture = Fixture::new_legacy();
+        fs::remove_file(fixture.releases.join("previous").join(PROVENANCE_FILE))
+            .expect("remove optional legacy provenance");
+        let plan = fixture
+            .request()
+            .validate_with_legacy_verifier(|_, _| Ok(()))
+            .expect("legacy current without provenance");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::LegacyBootstrap
         );
     }
 

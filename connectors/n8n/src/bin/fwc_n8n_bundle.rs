@@ -344,7 +344,7 @@ pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
     if current.parent() != Some(releases_root.as_path()) {
         return Err(BundleError::new(BundleErrorCode::Layout));
     }
-    verify_release_bundle(&current.join("bin/fwc-n8n"), 0).map(|_| ())
+    verify_release_bundle(&current.join("bin/fwc-n8n"), 0, true).map(|_| ())
 }
 
 #[cfg(not(unix))]
@@ -363,7 +363,7 @@ pub fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, Bund
     {
         let executable =
             std::env::current_exe().map_err(|_| BundleError::new(BundleErrorCode::Metadata))?;
-        verify_release_bundle(&executable, 0)
+        verify_release_bundle(&executable, 0, false)
     }
 }
 
@@ -371,6 +371,7 @@ pub fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, Bund
 fn verify_release_bundle(
     executable: &Path,
     expected_owner: u32,
+    allow_legacy_policy: bool,
 ) -> Result<VerifiedBundle, BundleError> {
     let executable = verify_file(executable, expected_owner, true)?;
     if executable.file_name().and_then(|name| name.to_str()) != Some("fwc-n8n") {
@@ -433,6 +434,7 @@ fn verify_release_bundle(
         &fcp_n8n_path,
         &fcp_n8n_digest,
         &manifest_path,
+        allow_legacy_policy,
     )?;
     verify_inventory_binding(
         &inventory_hetzner_path,
@@ -441,6 +443,7 @@ fn verify_release_bundle(
         &fcp_n8n_path,
         &fcp_n8n_digest,
         &manifest_path,
+        allow_legacy_policy,
     )?;
     verify_inventory_binding(
         &inventory_eec_official_mcp_path,
@@ -449,6 +452,7 @@ fn verify_release_bundle(
         &fcp_mcp_bridge_path,
         &fcp_mcp_bridge_digest,
         &mcp_manifest_path,
+        allow_legacy_policy,
     )?;
     verify_inventory_binding(
         &inventory_hetzner_official_mcp_path,
@@ -457,6 +461,7 @@ fn verify_release_bundle(
         &fcp_mcp_bridge_path,
         &fcp_mcp_bridge_digest,
         &mcp_manifest_path,
+        allow_legacy_policy,
     )?;
     Ok(VerifiedBundle {
         fcp_host_path,
@@ -524,6 +529,7 @@ fn verify_inventory_binding(
     executable: &Path,
     executable_digest: &str,
     manifest: &Path,
+    allow_legacy_policy: bool,
 ) -> Result<(), BundleError> {
     let value = read_bounded_json(path, MAX_INVENTORY_BYTES)
         .map_err(|_| BundleError::new(BundleErrorCode::InventoryBinding))?;
@@ -738,6 +744,27 @@ fn verify_inventory_binding(
                     .get("approved_tools")
                     .and_then(Value::as_array)
                     .is_some_and(|tools| tools.len() == 3);
+                let legacy_policy = allow_legacy_policy
+                    && policy
+                        .get("approved_tools")
+                        .and_then(Value::as_array)
+                        .is_some_and(|tools| {
+                            tools.len() == 2
+                                && exact_approved_tool(
+                                    policy,
+                                    "publish_workflow",
+                                    OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                                    OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+                                )
+                                && exact_approved_tool(
+                                    policy,
+                                    "unpublish_workflow",
+                                    OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                                    OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+                                )
+                        })
+                    && policy.get("archive_workflow_schema") == Some(&Value::Null)
+                    && policy.get("execute_workflow_schema") == Some(&Value::Null);
                 policy.len() == 6
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
@@ -758,10 +785,11 @@ fn verify_inventory_binding(
                         OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
                         OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
                     )
-                    && archive_approved_tool(policy)
-                    && archive_schema_binding_matches(policy)
-                    && ((owner_tools && execute_schema_owner(policy))
-                        || (sentinel_tools && execute_schema_sentinel(policy)))
+                    && (legacy_policy
+                        || (archive_approved_tool(policy)
+                            && archive_schema_binding_matches(policy)
+                            && ((owner_tools && execute_schema_owner(policy))
+                                || (sentinel_tools && execute_schema_sentinel(policy)))))
             });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
@@ -816,7 +844,7 @@ pub(crate) fn verify_release_bundle_for_owner(
     executable: &Path,
     expected_owner: u32,
 ) -> Result<VerifiedBundle, BundleError> {
-    verify_release_bundle(executable, expected_owner)
+    verify_release_bundle(executable, expected_owner, false)
 }
 
 #[cfg(unix)]

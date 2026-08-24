@@ -765,9 +765,7 @@ fn verify_inventory_binding(
                                     OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
                                     OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
                                 )
-                        })
-                    && policy.get("archive_workflow_schema") == Some(&Value::Null)
-                    && policy.get("execute_workflow_schema") == Some(&Value::Null);
+                        });
                 (policy.len() == 6 || legacy_policy)
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
@@ -1600,6 +1598,49 @@ mod tests {
         sentinel.write_receipt(None);
         verify_release_bundle_for_owner(&sentinel.executable, sentinel.owner)
             .expect("legacy sentinel policy remains structurally accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_official_policy_is_accepted_only_in_bootstrap_mode() {
+        let fixture = ReleaseFixture::new();
+        for server_id in ["eec", "hetzner"] {
+            let inventory_path =
+                fixture.artifact(&format!("inventory/{server_id}-official-mcp.json"));
+            let mut inventory: Value =
+                serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                    .expect("decode inventory fixture");
+            let policy = inventory[0]["config"]["capability_policy"]
+                .as_object_mut()
+                .expect("capability policy object");
+            policy
+                .get_mut("approved_tools")
+                .and_then(Value::as_array_mut)
+                .expect("approved tools")
+                .retain(|tool| {
+                    matches!(
+                        tool.get("name").and_then(Value::as_str),
+                        Some("publish_workflow") | Some("unpublish_workflow")
+                    )
+                });
+            policy.remove("archive_workflow_schema");
+            policy.remove("execute_workflow_schema");
+            fs::write(
+                &inventory_path,
+                serde_json::to_vec(&inventory).expect("encode legacy inventory"),
+            )
+            .expect("write legacy inventory");
+        }
+        fixture.write_receipt(None);
+
+        verify_release_bundle(&fixture.executable, fixture.owner, true)
+            .expect("legacy official policy bootstrap verifier");
+        assert_eq!(
+            verify_release_bundle(&fixture.executable, fixture.owner, false)
+                .expect_err("legacy official policy outside bootstrap mode")
+                .code(),
+            BundleErrorCode::InventoryBinding
+        );
     }
 
     #[cfg(unix)]

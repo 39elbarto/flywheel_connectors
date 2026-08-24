@@ -13665,7 +13665,10 @@ async fn async_n8n_read_only_run_once(
         zone_policies,
     )
     .await
-    .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState))?;
+    .map_err(|error| {
+        emit_n8n_run_once_host_error_diagnostic(&error);
+        n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState)
+    })?;
     let introspection = state
         .registry
         .get_introspection(&connector_id)
@@ -13882,7 +13885,10 @@ async fn async_n8n_official_mcp_run_once(
         zone_policies,
     )
     .await
-    .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState))?;
+    .map_err(|error| {
+        emit_n8n_run_once_host_error_diagnostic(&error);
+        n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState)
+    })?;
     let introspection = state
         .registry
         .get_introspection(&connector_id)

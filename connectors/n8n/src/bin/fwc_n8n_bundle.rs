@@ -18,6 +18,8 @@ use serde_json::Value;
 
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const RECEIPT_FILE: &str = "receipt.json";
+const FIXED_INSTALL_ROOT: &str = "/usr/local/lib/fwc-n8n";
+const FIXED_CURRENT_PATH: &str = "/usr/local/lib/fwc-n8n/current";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_LOCAL_MCP_POLICY_BYTES: usize = 256 * 1024;
@@ -324,6 +326,30 @@ fn test_local_mcp_policy() -> LocalMcpPolicy {
 /// Verify the fixed release bundle selected by the canonical current binary.
 pub fn verify_current_release_bundle() -> Result<(), BundleError> {
     verify_current_release_bundle_for_bridge().map(|_| ())
+}
+
+/// Verify the fixed owner-managed current release for provision bootstrap.
+///
+/// This seam intentionally accepts no path. It starts at the fixed production
+/// `current` symlink, requires a direct child of the fixed `releases/` root,
+/// canonicalizes that release, and only then reuses the legacy bundle
+/// verifier. The ordinary runtime/status verifier below continues to derive
+/// its executable from `current_exe()`.
+#[cfg(unix)]
+pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
+    let current = fs::canonicalize(Path::new(FIXED_CURRENT_PATH))
+        .map_err(|_| BundleError::new(BundleErrorCode::Metadata))?;
+    let releases_root = fs::canonicalize(Path::new(FIXED_INSTALL_ROOT).join("releases"))
+        .map_err(|_| BundleError::new(BundleErrorCode::Metadata))?;
+    if current.parent() != Some(releases_root.as_path()) {
+        return Err(BundleError::new(BundleErrorCode::Layout));
+    }
+    verify_release_bundle(&current.join("bin/fwc-n8n"), 0).map(|_| ())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
+    Err(BundleError::new(BundleErrorCode::UnsupportedPlatform))
 }
 
 /// Verify and return the fixed facts needed by the internal host runner.
@@ -786,7 +812,7 @@ fn verify_release_bundle(
 
 #[cfg(test)]
 #[allow(dead_code)]
-fn verify_release_bundle_for_owner(
+pub(crate) fn verify_release_bundle_for_owner(
     executable: &Path,
     expected_owner: u32,
 ) -> Result<VerifiedBundle, BundleError> {

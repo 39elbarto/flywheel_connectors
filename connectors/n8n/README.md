@@ -1,7 +1,7 @@
 # n8n Connector Security Contract
 
 > **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
-> **Current host evidence (2026-08-24, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260823-5ec43ecbc`, and that installed binary reports `{"bundleAvailable":true}`. This proves the ordinary immutable-bundle verifier only; it does **not** prove that commit `902f38ec5` has passed the new owner provisioner. No host-visible `provision-receipt.json` was found, no release switch was performed, and no current-release owner-provisioning claim is made. A separate point-in-time process audit found 22 pre-existing `node /usr/local/bin/n8n-mcp` processes (approximately 1.42 GiB RSS, 1.27 GiB PSS, 1.17 GiB private memory); they were not stopped. The zero-idle-provider-memory target therefore remains unverified for those existing opt-in sessions.
+> **Current host evidence (2026-08-24, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260823-5ec43ecbc`, and that installed binary reports `{"bundleAvailable":true}`. This proves the ordinary immutable-bundle verifier only; it does **not** prove that commit `56a5fab345e54cec0e8efdc303455f23d42ef6a7` has passed the new owner provisioner. No host-visible `provision-receipt.json` was found, no release switch was performed, and no current-release owner-provisioning claim is made. A separate point-in-time process audit found 22 pre-existing `node /usr/local/bin/n8n-mcp` processes (approximately 1.42 GiB RSS, 1.27 GiB PSS, 1.17 GiB private memory); they were not stopped. The zero-idle-provider-memory target therefore remains unverified for those existing opt-in sessions.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -58,6 +58,17 @@ child `/var/lib/fwc-n8n/staging/<release_id>` and the fixed
 `/usr/local/lib/fwc-n8n` install root; basename mismatch, nested/traversal paths,
 and symlink aliases fail before mutation. It never accepts caller paths, private
 keys, sudo, shell, systemd, or release deletion.
+
+The first owner-gated promotion has one explicit compatibility rule for the
+existing installation: if fixed `current` has no `provision-receipt.json`, the
+provisioner may classify it as `legacy-bootstrap` only after the fixed current
+pointer, ownership, provenance, and complete old bundle verifier all pass. This
+is not a generic bypass and accepts no caller path. If the file exists but is
+malformed or its signature is invalid, validation fails closed; the staged
+candidate always requires its complete owner-signed `provision-receipt.json`.
+After the first successful promotion, revalidation requires the new
+signed-current contract, so later promotions do not use the legacy fallback.
+
 Rollback remains a separate owner-gated boundary, and live installation/current
 acceptance is still not performed by repository tests.
 

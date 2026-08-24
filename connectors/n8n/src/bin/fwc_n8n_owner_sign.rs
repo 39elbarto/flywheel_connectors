@@ -9,6 +9,9 @@ use std::{fs, io, io::Read, io::Write, path::Path, process::ExitCode};
 use clap::Parser;
 use serde::Deserialize;
 
+#[path = "fwc_n8n_bundle.rs"]
+#[allow(dead_code)]
+mod fwc_n8n_bundle;
 #[path = "fwc_n8n_owner_signing.rs"]
 mod fwc_n8n_owner_signing;
 #[path = "fwc_n8n_provision.rs"]

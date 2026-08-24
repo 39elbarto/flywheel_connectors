@@ -19,7 +19,7 @@ profile change is authorized by this contract.
 `release-20260823-5ec43ecbc`, whose installed `fwc-n8n status` reports
 `{"bundleAvailable":true}`. That result proves only the ordinary immutable
 bundle verifier; it does not prove owner provisioning of source commit
-`902f38ec5`. No host-visible `provision-receipt.json` was found, no release
+`56a5fab345e54cec0e8efdc303455f23d42ef6a7`. No host-visible `provision-receipt.json` was found, no release
 switch was performed, and no current-release owner-provisioning claim is made.
 The new `provision --mode preflight|apply` implementation is therefore a
 source-level gate awaiting an owner-signed staged receipt, trusted build-time
@@ -114,6 +114,16 @@ only the exact direct child `/var/lib/fwc-n8n/staging/<release_id>` with a
 matching basename; mismatches, nesting/traversal, and symlink aliases fail
 before mutation. The existing proof-carrying installer otherwise uses only the
 fixed staging/install roots.
+
+The first promotion also has a narrow legacy-bootstrap compatibility path. A
+fixed current release without `provision-receipt.json` is accepted only when
+the current symlink, direct-child release layout, ownership, provenance, and
+the complete old immutable-bundle verifier all pass. This fallback has no
+caller-controlled path and is not used when a provision receipt exists but is
+invalid. The staged candidate still requires a complete owner-signed provision
+receipt. Once the first candidate is promoted, the current pointer must pass
+the new signed provision-receipt contract for every later promotion.
+
 Output is redacted and does not expose signatures, keys, or paths. No sudo,
 shell, systemd, release deletion, or live n8n operation is performed; rollback
 remains a separate owner-gated boundary. The proof cannot establish atomicity

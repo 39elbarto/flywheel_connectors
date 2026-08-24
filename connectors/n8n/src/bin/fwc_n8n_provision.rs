@@ -19,6 +19,8 @@ use fcp_manifest::LocalMcpPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::fwc_n8n_bundle;
+
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const PROVENANCE_SCHEMA: &str = "fwc.n8n.provenance.v1";
 pub(crate) const PROVISION_RECEIPT_SCHEMA: &str = "fwc.n8n.provision.v1";
@@ -358,12 +360,27 @@ impl ProvisionRequest {
     }
 
     pub fn validate(self) -> Result<InstallPlan, ProvisionError> {
+        self.validate_with_legacy_verifier(|_, _| {
+            fwc_n8n_bundle::verify_fixed_current_release_bundle()
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+        })
+    }
+
+    fn validate_with_legacy_verifier<F>(
+        self,
+        legacy_verifier: F,
+    ) -> Result<InstallPlan, ProvisionError>
+    where
+        F: FnOnce(&Path, u32) -> Result<(), ProvisionError>,
+    {
         validate_request(&self)?;
-        let previous_release = validate_current_pointer(
+        let (previous_release, current_validation) = validate_current_pointer_with_verifier(
             &self.current_path,
             &self.releases_root,
             self.expected_owner,
             &self.owner_verification,
+            None,
+            legacy_verifier,
         )?;
         let release_path = self.releases_root.join(&self.release_id);
         reject_existing_path(&release_path)?;
@@ -380,6 +397,7 @@ impl ProvisionRequest {
             bindings: self.bindings.clone(),
             owner_verification: self.owner_verification.clone(),
             expected_owner: self.expected_owner,
+            current_validation,
             promotion: Promotion::TemporarySymlinkRename,
         })
     }
@@ -408,6 +426,12 @@ pub enum Promotion {
     TemporarySymlinkRename,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CurrentValidationMode {
+    SignedProvisionReceipt,
+    LegacyBootstrap,
+}
+
 /// A validated, but not yet owner-promoted, plan.  There is intentionally no
 /// `apply` method in this packet: root-owned installation is a separate seam.
 pub struct InstallPlan {
@@ -422,6 +446,7 @@ pub struct InstallPlan {
     bindings: Vec<OfficialMcpBinding>,
     owner_verification: OwnerVerificationConfig,
     expected_owner: u32,
+    current_validation: CurrentValidationMode,
     promotion: Promotion,
 }
 
@@ -478,13 +503,14 @@ impl InstallPlan {
             validate_stage_root_binding(&self.staging_root, &self.stage_root, &self.release_id)?;
             reject_symlink_ancestors(&self.staging_root, true)?;
             reject_symlink_ancestors(&self.stage_root, true)?;
-            let current = validate_current_pointer(
+            let (current, current_validation) = validate_current_pointer(
                 &self.current_path,
                 &self.releases_root,
                 self.expected_owner,
                 &self.owner_verification,
+                Some(self.current_validation),
             )?;
-            if current != self.previous_release {
+            if current != self.previous_release || current_validation != self.current_validation {
                 return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
             }
             reject_existing_path(&self.release_path)?;
@@ -612,11 +638,12 @@ impl RollbackPlan {
         }
         #[cfg(unix)]
         {
-            let current = validate_current_pointer(
+            let (current, _) = validate_current_pointer(
                 &self.current_path,
                 &self.releases_root,
                 self.expected_owner,
                 &self.owner_verification,
+                Some(CurrentValidationMode::SignedProvisionReceipt),
             )?;
             if current != self.expected_current_release {
                 return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
@@ -871,8 +898,9 @@ fn current_matches_release(
         releases_root,
         expected_owner,
         owner_verification,
+        Some(CurrentValidationMode::SignedProvisionReceipt),
     )
-    .is_ok_and(|current| current == expected_release)
+    .is_ok_and(|(current, _)| current == expected_release)
 }
 
 #[cfg(target_os = "linux")]
@@ -2224,7 +2252,33 @@ fn validate_current_pointer(
     releases_root: &Path,
     expected_owner: u32,
     owner_verification: &OwnerVerificationConfig,
-) -> Result<PathBuf, ProvisionError> {
+    expected_mode: Option<CurrentValidationMode>,
+) -> Result<(PathBuf, CurrentValidationMode), ProvisionError> {
+    validate_current_pointer_with_verifier(
+        current_path,
+        releases_root,
+        expected_owner,
+        owner_verification,
+        expected_mode,
+        |_, _| {
+            fwc_n8n_bundle::verify_fixed_current_release_bundle()
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+        },
+    )
+}
+
+#[cfg(unix)]
+fn validate_current_pointer_with_verifier<F>(
+    current_path: &Path,
+    releases_root: &Path,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+    expected_mode: Option<CurrentValidationMode>,
+    legacy_verifier: F,
+) -> Result<(PathBuf, CurrentValidationMode), ProvisionError>
+where
+    F: FnOnce(&Path, u32) -> Result<(), ProvisionError>,
+{
     use std::os::unix::fs::MetadataExt;
 
     let metadata = fs::symlink_metadata(current_path)
@@ -2239,7 +2293,7 @@ fn validate_current_pointer(
         .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
     let releases_root = fs::canonicalize(releases_root)
         .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
-    if !current.starts_with(&releases_root) || current == releases_root {
+    if current.parent() != Some(releases_root.as_path()) {
         return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
     }
     if !current
@@ -2266,23 +2320,42 @@ fn validate_current_pointer(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
     }
-    let provision_receipt: ProvisionReceipt = read_json(
-        &current.join(PROVISION_RECEIPT_FILE),
-        expected_owner,
-        MAX_PROVISION_RECEIPT_BYTES,
-        ProvisionErrorCode::Receipt,
-    )?;
-    validate_binding_shape(&provision_receipt.bindings)?;
-    validate_release_tree(
-        &current,
-        release_id,
-        &provenance.git_revision,
-        &provision_receipt.bindings,
-        expected_owner,
-        &current,
-        owner_verification,
-    )?;
-    Ok(current)
+    let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
+    let mode = match fs::symlink_metadata(&provision_receipt_path) {
+        Ok(_) => CurrentValidationMode::SignedProvisionReceipt,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            CurrentValidationMode::LegacyBootstrap
+        }
+        Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Receipt)),
+    };
+    if expected_mode.is_some_and(|expected| expected != mode) {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+    }
+
+    match mode {
+        CurrentValidationMode::SignedProvisionReceipt => {
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+            )?;
+        }
+        CurrentValidationMode::LegacyBootstrap => {
+            legacy_verifier(&current, expected_owner)?;
+        }
+    }
+    Ok((current, mode))
 }
 
 #[cfg(unix)]
@@ -2687,6 +2760,14 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::new_with_previous_receipt(true)
+        }
+
+        fn new_legacy() -> Self {
+            Self::new_with_previous_receipt(false)
+        }
+
+        fn new_with_previous_receipt(include_provision_receipt: bool) -> Self {
             let base = fs::canonicalize(std::env::temp_dir()).expect("temp root");
             let id = format!(
                 "fwc-provision-{}-{}",
@@ -2727,7 +2808,7 @@ mod tests {
                 release_id,
             };
             fixture.populate();
-            fixture.populate_previous();
+            fixture.populate_previous_with_receipt(include_provision_receipt);
             fixture
         }
 
@@ -3042,7 +3123,7 @@ mod tests {
             .expect("provision receipt json")
         }
 
-        fn populate_previous(&self) {
+        fn populate_previous_with_receipt(&self, include_provision_receipt: bool) {
             let previous = self.releases.join("previous");
             for directory in ["manifests", "inventory", "policy"] {
                 fs::create_dir(previous.join(directory)).expect("previous directory");
@@ -3099,12 +3180,18 @@ mod tests {
                 self.receipt_for(&previous, "previous"),
             )
             .expect("previous receipt");
-            fs::write(
-                previous.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(&previous, "previous"),
-            )
-            .expect("previous provision receipt");
-            for name in [RECEIPT_FILE, PROVENANCE_FILE, PROVISION_RECEIPT_FILE] {
+            if include_provision_receipt {
+                fs::write(
+                    previous.join(PROVISION_RECEIPT_FILE),
+                    self.provision_receipt_for(&previous, "previous"),
+                )
+                .expect("previous provision receipt");
+            }
+            let mut metadata_files = vec![RECEIPT_FILE, PROVENANCE_FILE];
+            if include_provision_receipt {
+                metadata_files.push(PROVISION_RECEIPT_FILE);
+            }
+            for name in metadata_files {
                 fs::set_permissions(previous.join(name), fs::Permissions::from_mode(0o644))
                     .expect("previous metadata mode");
             }
@@ -3157,6 +3244,206 @@ mod tests {
             Promotion::TemporarySymlinkRename
         );
         assert!(!fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[cfg(unix)]
+    fn legacy_bundle_verifier(current: &Path, owner: u32) -> Result<(), ProvisionError> {
+        let release_id = current
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+        let provenance: Provenance = read_json(
+            &current.join(PROVENANCE_FILE),
+            owner,
+            MAX_PROVENANCE_BYTES,
+            ProvisionErrorCode::Provenance,
+        )?;
+        let bindings = vec![
+            OfficialMcpBinding {
+                server: ServerId::Eec,
+                archive_input_schema_digest:
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                archive_output_schema_digest:
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_owned(),
+                execute_input_schema_digest: EEC_EXECUTE_INPUT.to_owned(),
+                execute_output_schema_digest: EEC_EXECUTE_OUTPUT.to_owned(),
+            },
+            OfficialMcpBinding {
+                server: ServerId::Hetzner,
+                archive_input_schema_digest:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                archive_output_schema_digest:
+                    "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                        .to_owned(),
+                execute_input_schema_digest: HETZNER_EXECUTE_INPUT.to_owned(),
+                execute_output_schema_digest: HETZNER_EXECUTE_OUTPUT.to_owned(),
+            },
+        ];
+        validate_unsigned_release_tree(
+            current,
+            release_id,
+            &provenance.git_revision,
+            &bindings,
+            owner,
+            current,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_legacy_current_is_accepted_only_in_bootstrap_mode() {
+        let fixture = Fixture::new_legacy();
+        let plan = fixture
+            .request()
+            .validate_with_legacy_verifier(legacy_bundle_verifier)
+            .expect("valid legacy current bootstrap");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::LegacyBootstrap
+        );
+
+        let fixture = Fixture::new();
+        let plan = fixture
+            .request()
+            .validate_with_legacy_verifier(|_, _| {
+                Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+            })
+            .expect("signed current");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceipt
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_legacy_current_is_rejected() {
+        let fixture = Fixture::new_legacy();
+        fs::write(
+            fixture.releases.join("previous/bin/fcp-host"),
+            b"tampered legacy artifact",
+        )
+        .expect("tamper legacy artifact");
+        assert_eq!(
+            fixture
+                .request()
+                .validate_with_legacy_verifier(legacy_bundle_verifier)
+                .expect_err("invalid legacy current")
+                .code(),
+            ProvisionErrorCode::Digest
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_current_with_mismatched_provenance_is_rejected_before_fallback() {
+        let fixture = Fixture::new_legacy();
+        fs::write(
+            fixture.releases.join("previous").join(PROVENANCE_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": PROVENANCE_SCHEMA,
+                "release_id": "another-release",
+                "git_revision": "0123456789abcdef0123456789abcdef01234567"
+            }))
+            .expect("mismatched provenance"),
+        )
+        .expect("write mismatched legacy provenance");
+        assert_eq!(
+            fixture
+                .request()
+                .validate_with_legacy_verifier(|_, _| {
+                    Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+                })
+                .expect_err("mismatched legacy provenance")
+                .code(),
+            ProvisionErrorCode::Provenance
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_current_never_falls_back_to_legacy_verifier() {
+        let fixture = Fixture::new();
+        let path = fixture
+            .releases
+            .join("previous")
+            .join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&path).expect("signed current receipt"))
+                .expect("signed current receipt json");
+        receipt["signature"]["signature"] = Value::String("00".repeat(SIGNATURE_SIZE));
+        fs::write(
+            &path,
+            serde_json::to_vec(&receipt).expect("tampered receipt"),
+        )
+        .expect("write tampered current receipt");
+        assert_eq!(
+            fixture
+                .request()
+                .validate_with_legacy_verifier(|_, _| {
+                    Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+                })
+                .expect_err("invalid signed current")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_release_requires_complete_signed_provision_receipt() {
+        let fixture = Fixture::new();
+        fs::write(
+            fixture.stage.join(PROVISION_RECEIPT_FILE),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": PROVISION_RECEIPT_SCHEMA,
+                "release_id": fixture.release_id.clone(),
+                "git_revision": "0123456789abcdef0123456789abcdef01234567",
+                "bindings": [],
+                "artifacts": [],
+                "signature": {}
+            }))
+            .expect("incomplete provision receipt"),
+        )
+        .expect("write incomplete staged receipt");
+        assert_eq!(
+            fixture
+                .request()
+                .validate_with_legacy_verifier(|_, _| {
+                    Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer))
+                })
+                .expect_err("staged receipt must be complete and signed")
+                .code(),
+            ProvisionErrorCode::Receipt
+        );
+    }
+
+    #[test]
+    fn caller_controlled_paths_cannot_bypass_fixed_provision_roots() {
+        let fixture = Fixture::new();
+        let request = ProvisionRequest::new(
+            fixture.root.join("attacker/release-test"),
+            fixture.release_id.clone(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            fixture.request().bindings,
+            test_owner_verification(),
+        );
+        assert_eq!(
+            request.expect_err("caller-controlled staging path").code(),
+            ProvisionErrorCode::Path
+        );
+        assert!(
+            ProvisionRequest::fixed(
+                "/var/lib/fwc-n8n/releases/attacker".to_owned(),
+                "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                fixture.request().bindings,
+                test_owner_verification(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

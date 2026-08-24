@@ -892,13 +892,14 @@ fn current_matches_release(
     expected_release: &Path,
     expected_owner: u32,
     owner_verification: &OwnerVerificationConfig,
+    expected_mode: CurrentValidationMode,
 ) -> bool {
     validate_current_pointer(
         current_path,
         releases_root,
         expected_owner,
         owner_verification,
-        Some(CurrentValidationMode::SignedProvisionReceipt),
+        Some(expected_mode),
     )
     .is_ok_and(|(current, _)| current == expected_release)
 }
@@ -1024,6 +1025,7 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
         plan.rollback_target(),
         expected_owner,
         owner_verification,
+        plan.plan.current_validation,
     ) {
         return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
     }
@@ -1046,6 +1048,7 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
         plan.rollback_target(),
         expected_owner,
         owner_verification,
+        plan.plan.current_validation,
     ) {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
@@ -1087,6 +1090,7 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         &plan.plan.expected_current_release,
         expected_owner,
         owner_verification,
+        CurrentValidationMode::SignedProvisionReceipt,
     ) {
         return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
     }
@@ -1109,6 +1113,7 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         &plan.plan.expected_current_release,
         expected_owner,
         owner_verification,
+        CurrentValidationMode::SignedProvisionReceipt,
     ) {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
@@ -3326,6 +3331,47 @@ mod tests {
         assert_eq!(
             plan.current_validation,
             CurrentValidationMode::SignedProvisionReceipt
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn legacy_bootstrap_mode_survives_owner_revalidation() {
+        let fixture = Fixture::new_legacy();
+        let expected_release = fixture.releases.join("previous");
+        let (_, mode) = validate_current_pointer_with_verifier(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+            None,
+            legacy_bundle_verifier,
+        )
+        .expect("legacy current validation");
+        assert_eq!(mode, CurrentValidationMode::LegacyBootstrap);
+
+        let (current, revalidated_mode) = validate_current_pointer_with_verifier(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+            Some(mode),
+            legacy_bundle_verifier,
+        )
+        .expect("legacy current revalidation");
+        assert_eq!(current, expected_release);
+        assert_eq!(revalidated_mode, CurrentValidationMode::LegacyBootstrap);
+
+        assert!(
+            validate_current_pointer_with_verifier(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification(),
+                Some(CurrentValidationMode::SignedProvisionReceipt),
+                legacy_bundle_verifier,
+            )
+            .is_err()
         );
     }
 

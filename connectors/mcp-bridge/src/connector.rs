@@ -71,12 +71,20 @@ struct CapabilityPolicy {
     api_scope_digest: String,
     approved_tools: Vec<ApprovedTool>,
     archive_workflow_schema: Option<ArchiveWorkflowSchemaBinding>,
+    execute_workflow_schema: Option<ExecuteWorkflowSchemaBinding>,
 }
 
 #[derive(Debug, Clone)]
 struct ArchiveWorkflowSchemaBinding {
     input_schema_digest: String,
     output_schema_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExecuteWorkflowSchemaBinding {
+    status: String,
+    input_schema_digest: Option<String>,
+    output_schema_digest: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +346,7 @@ impl CapabilityPolicy {
                     | "api_scope_digest"
                     | "approved_tools"
                     | "archive_workflow_schema"
+                    | "execute_workflow_schema"
             )
         }) {
             return Err(invalid_policy(
@@ -479,6 +488,87 @@ impl CapabilityPolicy {
             None => None,
         };
 
+        let execute_tool = approved_tools
+            .iter()
+            .find(|tool| tool.name == "execute_workflow");
+        let execute_workflow_schema = match policy.get("execute_workflow_schema") {
+            Some(value) => {
+                let object = value
+                    .as_object()
+                    .ok_or_else(|| invalid_policy("execute_workflow_schema must be an object"))?;
+                if object.len() != 3
+                    || object.keys().any(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "status" | "input_schema_digest" | "output_schema_digest"
+                        )
+                    })
+                {
+                    return Err(invalid_policy(
+                        "execute_workflow_schema contains an unsupported field",
+                    ));
+                }
+                let status =
+                    required_policy_string(object.get("status"), "execute_workflow_schema.status")?;
+                match status.as_str() {
+                    "owner_provisioned" => {
+                        let input_schema_digest = required_policy_string(
+                            object.get("input_schema_digest"),
+                            "execute_workflow_schema.input_schema_digest",
+                        )?;
+                        let output_schema_digest = required_policy_string(
+                            object.get("output_schema_digest"),
+                            "execute_workflow_schema.output_schema_digest",
+                        )?;
+                        let Some(execute_tool) = execute_tool else {
+                            return Err(invalid_policy(
+                                "execute_workflow_schema requires an approved execute_workflow tool",
+                            ));
+                        };
+                        if execute_tool.class != ToolClass::Write
+                            || execute_tool.input_schema_digest != input_schema_digest
+                            || execute_tool.output_schema_digest != output_schema_digest
+                        {
+                            return Err(invalid_policy(
+                                "execute_workflow_schema does not match approved execute_workflow",
+                            ));
+                        }
+                        Some(ExecuteWorkflowSchemaBinding {
+                            status,
+                            input_schema_digest: Some(input_schema_digest),
+                            output_schema_digest: Some(output_schema_digest),
+                        })
+                    }
+                    "unavailable_unproven_schema" => {
+                        if object.get("input_schema_digest") != Some(&serde_json::Value::Null)
+                            || object.get("output_schema_digest") != Some(&serde_json::Value::Null)
+                            || execute_tool.is_some()
+                        {
+                            return Err(invalid_policy(
+                                "execute_workflow_schema sentinel is incompatible with an approved execute_workflow tool",
+                            ));
+                        }
+                        Some(ExecuteWorkflowSchemaBinding {
+                            status,
+                            input_schema_digest: None,
+                            output_schema_digest: None,
+                        })
+                    }
+                    _ => {
+                        return Err(invalid_policy(
+                            "execute_workflow_schema.status is unsupported",
+                        ));
+                    }
+                }
+            }
+            None if execute_tool.is_some() => {
+                return Err(invalid_policy(
+                    "execute_workflow requires an exact schema binding",
+                ));
+            }
+            None => None,
+        };
+
         Ok(Some(Self {
             server_id,
             n8n_version,
@@ -486,6 +576,7 @@ impl CapabilityPolicy {
             api_scope_digest,
             approved_tools,
             archive_workflow_schema,
+            execute_workflow_schema,
         }))
     }
 }
@@ -3192,7 +3283,7 @@ mod tests {
         assert_eq!(binding.input_schema_digest, input_digest);
         assert_eq!(binding.output_schema_digest, output_digest);
 
-        let mut missing = policy_params("eec", json!([archive.clone()]));
+        let missing = policy_params("eec", json!([archive.clone()]));
         assert!(McpBridgeConfig::from_params(&missing).is_err());
 
         let mut mismatched = valid;
@@ -3206,6 +3297,72 @@ mod tests {
         mismatched["capability_policy"]["approved_tools"][0]["input_schema_digest"] =
             json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         assert!(McpBridgeConfig::from_params(&mismatched).is_err());
+    }
+
+    #[test]
+    fn execute_policy_requires_exact_owner_schema_binding() {
+        let input_digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let output_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let execute = policy_tool("execute_workflow", "write", input_digest, output_digest);
+        let mut valid = policy_params("eec", json!([execute.clone()]));
+        valid["capability_policy"]["execute_workflow_schema"] = json!({
+            "status": "owner_provisioned",
+            "input_schema_digest": input_digest,
+            "output_schema_digest": output_digest,
+        });
+        let config = McpBridgeConfig::from_params(&valid).expect("exact execute binding");
+        let binding = config
+            .capability_policy
+            .as_ref()
+            .and_then(|policy| policy.execute_workflow_schema.as_ref())
+            .expect("execute schema binding");
+        assert_eq!(binding.status, "owner_provisioned");
+        assert_eq!(binding.input_schema_digest.as_deref(), Some(input_digest));
+        assert_eq!(binding.output_schema_digest.as_deref(), Some(output_digest));
+
+        let missing = policy_params("eec", json!([execute.clone()]));
+        assert!(McpBridgeConfig::from_params(&missing).is_err());
+
+        let mut mismatched = valid;
+        mismatched["capability_policy"]["execute_workflow_schema"]["output_schema_digest"] =
+            json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+        assert!(McpBridgeConfig::from_params(&mismatched).is_err());
+
+        let mut sentinel = policy_params("eec", json!([]));
+        sentinel["capability_policy"]["execute_workflow_schema"] = json!({
+            "status": "unavailable_unproven_schema",
+            "input_schema_digest": null,
+            "output_schema_digest": null,
+        });
+        let sentinel_config =
+            McpBridgeConfig::from_params(&sentinel).expect("sentinel execute binding");
+        let sentinel_binding = sentinel_config
+            .capability_policy
+            .as_ref()
+            .and_then(|policy| policy.execute_workflow_schema.as_ref())
+            .expect("sentinel binding");
+        assert_eq!(sentinel_binding.status, "unavailable_unproven_schema");
+        assert!(sentinel_binding.input_schema_digest.is_none());
+        assert!(sentinel_binding.output_schema_digest.is_none());
+    }
+
+    #[test]
+    fn execute_policy_rejects_sentinel_with_approved_tool() {
+        let execute = policy_tool(
+            "execute_workflow",
+            "write",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let mut params = policy_params("eec", json!([execute]));
+        params["capability_policy"]["execute_workflow_schema"] = json!({
+            "status": "unavailable_unproven_schema",
+            "input_schema_digest": null,
+            "output_schema_digest": null,
+        });
+        assert!(McpBridgeConfig::from_params(&params).is_err());
     }
 
     #[test]

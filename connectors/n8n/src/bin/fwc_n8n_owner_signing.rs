@@ -36,6 +36,7 @@ pub(crate) fn sign_staged_provision_receipt(
             ));
         }
         let stage_root = provision::fixed_staging_path(release_id)?;
+        let release_root = provision::fixed_release_path(release_id)?;
         let expected_owner = rustix::process::geteuid().as_raw();
         provision::validate_binding_shape(&bindings)?;
         provision::validate_unsigned_release_tree(
@@ -44,7 +45,7 @@ pub(crate) fn sign_staged_provision_receipt(
             git_revision,
             &bindings,
             expected_owner,
-            &stage_root,
+            &release_root,
         )?;
 
         let owner_verification =

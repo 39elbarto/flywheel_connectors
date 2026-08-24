@@ -28,7 +28,7 @@ pub(crate) const PROVISION_RECEIPT_FILE: &str = "provision-receipt.json";
 pub(crate) const MAX_RECEIPT_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_PROVISION_RECEIPT_BYTES: usize = 256 * 1024;
-pub(crate) const MAX_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_POLICY_BYTES: usize = 256 * 1024;
 pub(crate) const DEFAULT_STAGING_ROOT: &str = "/var/lib/fwc-n8n/staging";
@@ -80,11 +80,28 @@ const HETZNER_EXECUTE_OUTPUT: &str =
     "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
+const EEC_API_URL: &str = "https://n8n.europeaneyecenter.com/api/v1";
 const EEC_N8N_VERSION: &str = "2.34.4";
 const HETZNER_MCP_URL: &str = "https://n8nhet.levilaser.com:8443/mcp-server/http";
 const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
+const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
 const HETZNER_N8N_VERSION: &str = "2.34.6";
 pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
+const COMMON_ALLOWED_OPERATIONS: [&str; 13] = [
+    "n8n.credentials.list",
+    "n8n.executions.get",
+    "n8n.executions.list",
+    "n8n.folders.get",
+    "n8n.folders.list",
+    "n8n.mcp_access.reconcile",
+    "n8n.projects.list",
+    "n8n.tags.list",
+    "n8n.workflows.create_draft",
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+    "n8n.workflows.lifecycle",
+    "n8n.workflows.update_draft",
+];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -93,6 +110,11 @@ struct CommonInventoryEntry {
     binary: String,
     manifest_path: String,
     config: CommonInventoryConfig,
+    allowed_zones: Vec<String>,
+    allowed_operations: Vec<String>,
+    operation_network_constraints: BTreeMap<String, Value>,
+    enforce_empty_allow_lists: bool,
+    enforce_operation_network_constraints: bool,
     runtime_network_enforcement: String,
     lifecycle_mode: String,
     launch_binding: LaunchBinding,
@@ -101,6 +123,8 @@ struct CommonInventoryEntry {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommonInventoryConfig {
+    base_url: String,
+    credential_id: String,
     server_id: String,
 }
 
@@ -1693,10 +1717,35 @@ fn validate_common_inventory(
     let expected_binary = release_root.join("bin/fcp-n8n");
     let expected_manifest = release_root.join("manifests/fcp-n8n.toml");
     let expected_digest = hash_file(&artifact_root.join("bin/fcp-n8n"))?;
+    let expected_base_url = match server {
+        ServerId::Eec => EEC_API_URL,
+        ServerId::Hetzner => HETZNER_API_URL,
+    };
+    let (expected_host, expected_port) = match server {
+        ServerId::Eec => (EEC_MCP_HOST, 443_u64),
+        ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
+    };
+    let expected_operations = COMMON_ALLOWED_OPERATIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let actual_operations = entry
+        .allowed_operations
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     if entry.id != "fcp.n8n"
         || entry.binary != expected_binary.to_string_lossy()
         || entry.manifest_path != expected_manifest.to_string_lossy()
+        || entry.config.base_url != expected_base_url
+        || !is_uuid_ref(&entry.config.credential_id)
         || entry.config.server_id != server.as_str()
+        || entry.allowed_zones != ["z:work"]
+        || entry.allowed_operations.len() != COMMON_ALLOWED_OPERATIONS.len()
+        || actual_operations != expected_operations
+        || entry.operation_network_constraints.len() != COMMON_ALLOWED_OPERATIONS.len()
+        || !entry.enforce_empty_allow_lists
+        || !entry.enforce_operation_network_constraints
         || entry.runtime_network_enforcement != "host_egress_proxy"
         || entry.lifecycle_mode != "per_invocation"
         || entry.launch_binding.launcher_path != expected_binary.to_string_lossy()
@@ -1706,7 +1755,34 @@ fn validate_common_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
+    if COMMON_ALLOWED_OPERATIONS.iter().any(|operation| {
+        entry.operation_network_constraints.get(*operation) != Some(&expected_network)
+    }) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
     Ok(())
+}
+
+fn expected_n8n_network_constraint(host: &str, port: u64) -> Value {
+    serde_json::json!({
+        "cidr_deny": [],
+        "connect_timeout_ms": 5000,
+        "deny_ip_literals": true,
+        "deny_localhost": true,
+        "deny_private_ranges": true,
+        "deny_tailnet_ranges": true,
+        "dns_max_ips": 4,
+        "host_allow": [host],
+        "ip_allow": [],
+        "max_redirects": 0,
+        "max_response_bytes": 10485760,
+        "port_allow": [port],
+        "require_host_canonicalization": true,
+        "require_sni": true,
+        "spki_pins": [],
+        "total_timeout_ms": 15000,
+    })
 }
 
 #[cfg(unix)]
@@ -1873,6 +1949,8 @@ fn validate_inventory(
         "allowed_zones",
         "allowed_operations",
         "operation_network_constraints",
+        "enforce_empty_allow_lists",
+        "enforce_operation_network_constraints",
         "runtime_network_enforcement",
         "lifecycle_mode",
         "launch_binding",
@@ -2069,6 +2147,17 @@ fn validate_inventory(
     if zones != &[Value::String("z:work".to_owned())] {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    if entry
+        .get("enforce_empty_allow_lists")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || entry
+            .get("enforce_operation_network_constraints")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
     let operations = entry
         .get("allowed_operations")
         .and_then(Value::as_array)
@@ -2093,20 +2182,9 @@ fn validate_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
     for operation in ["mcp.tools.list", "mcp.tools.call"] {
-        let constraint = network
-            .get(operation)
-            .and_then(Value::as_object)
-            .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
-        if constraint.len() != 2
-            || !constraint
-                .keys()
-                .all(|key| matches!(key.as_str(), "host_allow" | "port_allow"))
-            || constraint.get("host_allow")
-                != Some(&Value::Array(vec![Value::String(expected_host.to_owned())]))
-            || constraint.get("port_allow")
-                != Some(&Value::Array(vec![Value::Number(expected_port.into())]))
-        {
+        if network.get(operation) != Some(&expected_network) {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
     }
@@ -2715,9 +2793,11 @@ mod tests {
                     "allowed_zones": ["z:work"],
                     "allowed_operations": ["mcp.tools.list", "mcp.tools.call"],
                     "operation_network_constraints": {
-                        "mcp.tools.list": {"host_allow": [mcp_host], "port_allow": [mcp_port]},
-                        "mcp.tools.call": {"host_allow": [mcp_host], "port_allow": [mcp_port]}
+                        "mcp.tools.list": expected_n8n_network_constraint(mcp_host, mcp_port),
+                        "mcp.tools.call": expected_n8n_network_constraint(mcp_host, mcp_port)
                     },
+                    "enforce_empty_allow_lists": true,
+                    "enforce_operation_network_constraints": true,
                     "runtime_network_enforcement": "host_egress_proxy",
                     "lifecycle_mode": "per_invocation",
                     "launch_binding": {
@@ -2754,11 +2834,34 @@ mod tests {
                 .join(&self.release_id)
                 .join("manifests/fcp-n8n.toml");
             let digest = hash_file(&self.stage.join("bin/fcp-n8n")).expect("n8n digest");
+            let (base_url, host, port) = if server == "eec" {
+                (EEC_API_URL, EEC_MCP_HOST, 443_u64)
+            } else {
+                (HETZNER_API_URL, HETZNER_MCP_HOST, 443_u64)
+            };
+            let operation_network_constraints = COMMON_ALLOWED_OPERATIONS
+                .into_iter()
+                .map(|operation| {
+                    (
+                        operation.to_owned(),
+                        expected_n8n_network_constraint(host, port),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             serde_json::to_vec(&serde_json::json!([{
                 "id": "fcp.n8n",
                 "binary": executable,
                 "manifest_path": manifest,
-                "config": {"server_id": server},
+                "config": {
+                    "base_url": base_url,
+                    "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "server_id": server
+                },
+                "allowed_zones": ["z:work"],
+                "allowed_operations": COMMON_ALLOWED_OPERATIONS,
+                "operation_network_constraints": operation_network_constraints,
+                "enforce_empty_allow_lists": true,
+                "enforce_operation_network_constraints": true,
                 "runtime_network_enforcement": "host_egress_proxy",
                 "lifecycle_mode": "per_invocation",
                 "launch_binding": {

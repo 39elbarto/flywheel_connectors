@@ -745,6 +745,9 @@ fn verify_inventory_binding(
                     .and_then(Value::as_array)
                     .is_some_and(|tools| tools.len() == 3);
                 let legacy_policy = allow_legacy_policy
+                    && policy.len() == 4
+                    && !policy.contains_key("archive_workflow_schema")
+                    && !policy.contains_key("execute_workflow_schema")
                     && policy
                         .get("approved_tools")
                         .and_then(Value::as_array)
@@ -765,7 +768,7 @@ fn verify_inventory_binding(
                         })
                     && policy.get("archive_workflow_schema") == Some(&Value::Null)
                     && policy.get("execute_workflow_schema") == Some(&Value::Null);
-                policy.len() == 6
+                (policy.len() == 6 || legacy_policy)
                     && policy.get("n8n_version").and_then(Value::as_str)
                         == Some(expected_n8n_version)
                     && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")

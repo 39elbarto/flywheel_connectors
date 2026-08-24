@@ -55,28 +55,30 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(()) => {
-            eprintln!("fwc-n8n-owner-sign: owner_sign_failed");
+        Err(code) => {
+            eprintln!("fwc-n8n-owner-sign: {code}");
             ExitCode::from(1)
         }
     }
 }
 
-fn run() -> Result<Vec<u8>, ()> {
+fn run() -> Result<Vec<u8>, &'static str> {
     let cli = Cli::parse();
-    let request_bytes = read_bounded_regular_file(&cli.request_file, MAX_REQUEST_BYTES)?;
-    let request: SigningRequest = serde_json::from_slice(&request_bytes).map_err(|_| ())?;
+    let request_bytes = read_bounded_regular_file(&cli.request_file, MAX_REQUEST_BYTES)
+        .map_err(|_| "invalid_request")?;
+    let request: SigningRequest =
+        serde_json::from_slice(&request_bytes).map_err(|_| "invalid_request")?;
     if request.schema != PROVISION_INPUT_SCHEMA || request.release_id != cli.release_id {
-        return Err(());
+        return Err("invalid_request");
     }
-    let seed = fwc_n8n_owner_signing::read_seed_from_stdin()?;
+    let seed = fwc_n8n_owner_signing::read_seed_from_stdin().map_err(|_| "invalid_seed")?;
     fwc_n8n_owner_signing::sign_staged_provision_receipt(
         &cli.release_id,
         &request.git_revision,
         request.bindings,
         &seed,
     )
-    .map_err(|_| ())
+    .map_err(|error| error.redacted_code())
 }
 
 fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ()> {

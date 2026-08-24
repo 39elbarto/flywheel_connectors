@@ -1197,6 +1197,11 @@ impl ProvisionError {
         Self { code }
     }
 
+    /// Return only the fixed, redacted machine-readable error class.
+    pub(crate) const fn redacted_code(self) -> &'static str {
+        self.code.as_str()
+    }
+
     #[cfg(test)]
     const fn code(self) -> ProvisionErrorCode {
         self.code

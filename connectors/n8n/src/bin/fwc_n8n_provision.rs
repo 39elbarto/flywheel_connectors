@@ -2979,7 +2979,7 @@ mod tests {
         fn local_mcp_policy(&self) -> Vec<u8> {
             serde_json::to_vec(&serde_json::json!({
                 "package_id": "n8n-mcp",
-                "package_version": "2.69.0",
+                "package_version": "2.69.2",
                 "launcher_path": "/usr/bin/node",
                 "launcher_digest": "0".repeat(64),
                 "runtime_executable": "/usr/bin/node",

@@ -286,7 +286,7 @@ impl VerifiedBundle {
 fn test_local_mcp_policy() -> LocalMcpPolicy {
     serde_json::from_value(serde_json::json!({
         "package_id": "n8n-mcp",
-        "package_version": "2.69.0",
+        "package_version": "2.69.2",
         "launcher_path": "/usr/bin/node",
         "launcher_digest": "0".repeat(64),
         "runtime_executable": "/usr/bin/node",

@@ -88,7 +88,7 @@ const PLACEHOLDER: &str =
 fn test_policy() -> LocalMcpPolicy {
     LocalMcpPolicy {
         package_id: "czlonkowski/n8n-mcp".into(),
-        package_version: semver::Version::new(2, 67, 2),
+        package_version: semver::Version::new(2, 69, 2),
         launcher_path: "/usr/bin/node".into(),
         launcher_digest: "0".repeat(64),
         runtime_executable: "/usr/bin/node".into(),

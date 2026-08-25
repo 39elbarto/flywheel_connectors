@@ -109,3 +109,33 @@ Remaining `.14` work is to add a controlled tokenizer/token-estimation step,
 repeat the measurements under a documented resource envelope, and decide
 whether the current-profile baseline can be retired after the on-demand path
 passes its owner/live acceptance. This report does not close the bead.
+
+## Live read-only verification — 2026-08-25
+
+An owner-approved, sequential read-only run covered EEC and Hetzner with three
+samples per operation. It used the fixed current release
+`release-20260824-90819213-static` and binary reference
+`ab9cfea00bc29dbb`; only redacted JSONL metadata was retained. Known workflow
+IDs were resolved in shell variables and are not present in this document.
+
+| Operation class | EEC p50/p95 | Hetzner p50/p95 | Mean response bytes | Result |
+| --- | ---: | ---: | ---: | --- |
+| `workflows.list` / `typed_rest_fcp` | 655 / 658 ms | 830 / 1084 ms | 482 / 510 | 3/3 each |
+| known-ID `workflows.get` / `typed_rest_fcp` | 651 / 698 ms | 853 / 1198 ms | 611 / 757 | 3/3 each |
+| `capabilities.inspect` / `official_mcp` (`tools/list`) | 1334 / 1346 ms | 1233 / 1439 ms | 9067 / 9071 | 3/3 each |
+
+The benchmark measured invocation wall-clock time, not provider latency. The
+official-MCP row proves only the fixed capability-discovery path; it does not
+authorize or measure generic `tools/call` or workflow side effects.
+
+During the run, the existing persistent MCP baseline remained at 18
+`node /usr/local/bin/n8n-mcp` processes. Across the recorded before/after
+snapshots, RSS was approximately 1,049,000–1,132,000 KiB, PSS
+925,000–1,008,000 KiB, and private memory 882,000–965,000 KiB. After the
+benchmark, no `fwc-n8n`, `fcp-n8n`, `fcp-mcp-bridge`, or `fcp-host` process
+remained. This supports request teardown for the FWC path but does not prove
+zero idle memory for the persistent MCP baseline.
+
+The live packet remains incomplete for final `.14` acceptance: token estimates,
+provider-vs-total latency, per-invocation peak memory, current-profile parity
+for every operation class, and a routing-policy change were not performed.

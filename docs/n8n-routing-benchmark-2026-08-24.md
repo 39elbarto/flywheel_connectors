@@ -1,31 +1,42 @@
-# n8n routing benchmark — preliminary evidence
+# n8n routing benchmark — bounded harness contract
 
 Date: 2026-08-24
 
-This is a bounded, read-only measurement packet for
-`flywheel_connectors-nqm81.14`. It is preliminary evidence, not final
-acceptance: each latency class has five samples, tokenization was not run, and
-official MCP was measured only through capability discovery (`tools/list`), not
-through a side-effecting `tools/call`.
+This is a bounded, read-only harness-contract packet for
+`flywheel_connectors-nqm81.14`. It defines what the offline harness can prove;
+it is not live n8n/API acceptance. Official MCP remains limited to capability
+discovery (`tools/list`), not a side-effecting `tools/call`.
 
 ## Offline harness contract
 
-`scripts/n8n_routing_benchmark.sh` emits redaction-safe JSONL metadata bound to
-the fixed `/usr/local/lib/fwc-n8n/current` symlink. A normal run records the
-immutable release ID and a truncated SHA-256 reference for the fixed
-`fwc-n8n` binary; it does not accept a caller-selected binary path or print
-catalogs, provider payloads, credentials, or workflow IDs. The `--self-test`
-mode exercises only the local operation and server allowlists and does not
-read the runtime or invoke a provider.
+`scripts/n8n_routing_benchmark.sh` emits schema
+`fwc.n8n.routing-benchmark.v3` JSONL metadata bound to the fixed
+`/usr/local/lib/fwc-n8n/current` symlink. A normal run records the immutable
+release ID, the fixed-current reference, and truncated SHA-256 references for
+the fixed `fwc-n8n` binary and `policy/local-mcp.json`. It does not accept a
+caller-selected binary/path or print catalogs, provider payloads, credentials,
+or workflow IDs. `--self-test` is fully offline: it exercises only the
+allowlists, schema fixture, bounded byte estimate, and redaction-safe metadata
+shape; it does not read the runtime or invoke a provider.
 
-Every preflight, memory, sample, and summary record has `route`,
+Every preflight, sample, summary, and teardown record has `route`,
 `operation_class`, `phase`, and `not_collected`. `capabilities.inspect` is
 classified as `official_mcp`; workflow list/get remain `typed_rest_fcp`.
-`latency_ms` is process-invocation wall-clock metadata. The harness does not
-collect provider-vs-total latency, token estimates, per-request peak memory,
-or provider live-acceptance evidence; those fields remain explicitly listed
-in `not_collected`. Persistent MCP observations are a warm baseline and do not
-prove zero-idle memory.
+`total_latency_ms` is measured from wrapper invocation through wrapper exit.
+`startup_latency_ms`, `provider_latency_ms`, and `provider_vs_total` remain
+explicitly `null` and listed in `not_collected`: this host `run-once` stdout
+does not expose internal phase telemetry, and the harness does not change
+runtime instrumentation.
+
+`token_estimate` is a bounded estimate only: `ceil(response_bytes / 4)` with a
+10 MiB response-byte bound, labelled
+`byte_count_estimate_not_tokenization`. No tokenizer runs and no claim of real
+token count is made. The wrapper's own exit is observed as
+`wrapper_exit_zero`/`wrapper_exit_nonzero`; `wrapper_invocation_count` is
+therefore factual. Provider call count, nested-child teardown, and peak
+RSS/PSS/private memory are `null`/`not_collected` because the request-scoped
+child is not safely sampled by this shell-only contract. The old global scan of
+persistent `n8n-mcp` processes is intentionally not part of this schema.
 
 ## Scope and redaction
 
@@ -34,8 +45,9 @@ prove zero-idle memory.
 - The known-ID read used one existing workflow ID per server. IDs, names,
   graphs, executions, credentials, and provider bodies were not written to the
   report.
-- The FCP harness records only latency, return code, response byte count, and a
-  short response digest. It discards the response body.
+- The harness records only bounded request/response byte counts, total wrapper
+  time, return code, a short response digest, the byte-count estimate, and the
+  observed wrapper exit state. It discards the response body.
 - No workflow write, activation, execution, deletion, credential operation, or
   automatic retry was performed.
 
@@ -50,13 +62,17 @@ FWC_N8N_SAMPLES=1 scripts/n8n_routing_benchmark.sh eec capabilities
 FWC_N8N_SAMPLES=1 scripts/n8n_routing_benchmark.sh hetzner capabilities
 ```
 
-The `get` ID is validated but never printed. The script also emits before/after
-counts and RSS/PSS/private totals for existing local `n8n-mcp` processes.
+The `get` ID is validated but never printed. A normal run emits `preflight`, one
+`sample` per invocation, `summary`, and `teardown` phases. It emits no global
+process baseline and does not claim that wrapper exit proves nested child
+absence.
 
 ## Measured latency
 
-Values are p50/p95 in milliseconds; `response bytes` is the mean compact
-response size observed by the caller.
+The existing rows below are historical redacted observations. Values are p50/p95
+in milliseconds; `response bytes` is the mean compact response size observed by
+the caller. They predate schema v3 and do not retroactively prove the fields
+listed above.
 
 | Operation and route | EEC | Hetzner |
 | --- | ---: | ---: |
@@ -102,13 +118,15 @@ Therefore:
 - Official MCP is currently evidenced only for discovery. Its tool-call path
   remains owner-policy/provisioning/live-acceptance gated and must not be
   treated as a measured write-capable route.
-- The final routing choice must also include token counts. This packet records
-  byte sizes only; it intentionally does not claim token savings.
+- The final routing choice must also include token counts. This packet now
+  records only a clearly labelled byte-count estimate; it intentionally does
+  not claim tokenization or token savings.
 
-Remaining `.14` work is to add a controlled tokenizer/token-estimation step,
-repeat the measurements under a documented resource envelope, and decide
-whether the current-profile baseline can be retired after the on-demand path
-passes its owner/live acceptance. This report does not close the bead.
+The offline harness-contract slice is complete. Live provider-vs-total timing,
+true tokenization, request-scoped child peak memory, provider call count, and
+nested teardown proof remain `not_collected` and require runtime/provider
+instrumentation or an owner-approved live measurement packet. This document
+does not claim those results or close any routing-policy decision.
 
 ## Live read-only verification — 2026-08-25
 
@@ -136,6 +154,21 @@ benchmark, no `fwc-n8n`, `fcp-n8n`, `fcp-mcp-bridge`, or `fcp-host` process
 remained. This supports request teardown for the FWC path but does not prove
 zero idle memory for the persistent MCP baseline.
 
-The live packet remains incomplete for final `.14` acceptance: token estimates,
-provider-vs-total latency, per-invocation peak memory, current-profile parity
-for every operation class, and a routing-policy change were not performed.
+The live packet remains incomplete for final `.14` acceptance: provider-vs-total
+latency, true tokenization, per-invocation peak memory, provider call count,
+nested teardown proof, current-profile parity for every operation class, and a
+routing-policy change were not performed. The harness contract records these
+gaps honestly instead of inferring them from persistent-process snapshots.
+
+## Offline verification performed
+
+Only the following checks are in scope for this packet:
+
+```bash
+bash -n scripts/n8n_routing_benchmark.sh
+scripts/n8n_routing_benchmark.sh --self-test
+git diff --check
+```
+
+No live n8n/API call, Cargo command, Beads write, workflow write, lifecycle
+action, credential read, or commit/push is part of this verification.

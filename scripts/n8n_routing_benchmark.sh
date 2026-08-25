@@ -1,16 +1,144 @@
 #!/usr/bin/env bash
-# Redaction-safe, read-only latency harness for the installed fwc-n8n path.
+# Redaction-safe, read-only latency harness for the fixed installed fwc-n8n path.
 # It prints JSONL metadata only; provider responses are hashed and discarded.
+# The measured latency is process-invocation wall-clock time, not provider
+# latency or live-acceptance evidence.
 set -u
 
-BIN=${FWC_N8N_BIN:-/usr/local/lib/fwc-n8n/current/bin/fwc-n8n}
+INSTALL_ROOT=/usr/local/lib/fwc-n8n
+CURRENT_ROOT=$INSTALL_ROOT/current
+BIN=$CURRENT_ROOT/bin/fwc-n8n
 SAMPLES=${FWC_N8N_SAMPLES:-5}
+NOT_COLLECTED='["provider_latency_ms","startup_latency_ms","shutdown_latency_ms","call_count","token_estimate","peak_rss_kib","peak_pss_kib","peak_private_kib","post_run_process_state","live_acceptance"]'
+
+release_id=
+binary_sha256_16=
+operation_route=
+operation_class=
+host_operation=
+input=
 
 usage() {
     printf '%s\n' \
-        "usage: $0 <eec|hetzner> <list|capabilities|\"get\" workflow_id>" \
-        "       FWC_N8N_SAMPLES=5 FWC_N8N_BIN=/path/to/fwc-n8n $0 eec list"
+        "usage: $0 [--self-test] <eec|hetzner> <list|capabilities|\"get\" workflow_id>" \
+        "       FWC_N8N_SAMPLES=5 $0 eec list"
 }
+
+validate_server() {
+    case "$1" in
+        eec|hetzner) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+configure_operation() {
+    case "$1" in
+        list)
+            input='{"limit":1}'
+            host_operation='n8n.workflows.list'
+            operation_route='typed_rest_fcp'
+            operation_class='workflow_list_read'
+            ;;
+        capabilities)
+            input='{}'
+            host_operation='n8n.capabilities.inspect'
+            operation_route='official_mcp'
+            operation_class='capability_discovery'
+            ;;
+        get)
+            if [[ -z "${workflow_id:-}" || ! "$workflow_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                printf '%s\n' 'get requires an alphanumeric workflow_id (the value is never printed)' >&2
+                return 64
+            fi
+            input=$(printf '{"id":"%s"}' "$workflow_id")
+            host_operation='n8n.workflows.get'
+            operation_route='typed_rest_fcp'
+            operation_class='known_id_read'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+assert_equal() {
+    if [[ "$1" != "$2" ]]; then
+        printf 'offline self-test failed: expected %s, got %s\n' "$2" "$1" >&2
+        return 1
+    fi
+}
+
+run_self_test() {
+    workflow_id=self_test_only
+
+    if ! validate_server eec || ! validate_server hetzner || validate_server other; then
+        printf '%s\n' 'offline self-test failed: server allowlist' >&2
+        return 1
+    fi
+
+    configure_operation list || return 1
+    assert_equal "$operation_route" typed_rest_fcp || return 1
+    assert_equal "$operation_class" workflow_list_read || return 1
+
+    configure_operation get || return 1
+    assert_equal "$operation_route" typed_rest_fcp || return 1
+    assert_equal "$operation_class" known_id_read || return 1
+
+    configure_operation capabilities || return 1
+    assert_equal "$operation_route" official_mcp || return 1
+    assert_equal "$operation_class" capability_discovery || return 1
+
+    if configure_operation unknown; then
+        printf '%s\n' 'offline self-test failed: unknown operation was accepted' >&2
+        return 1
+    fi
+
+    printf '%s\n' 'offline self-test: PASS (route labels, operation allowlist, unknown-operation rejection)'
+}
+
+prepare_release_metadata() {
+    local resolved_current resolved_bin
+
+    if [[ ! -L "$CURRENT_ROOT" ]]; then
+        printf '%s\n' 'fixed current path is not a symlink' >&2
+        return 66
+    fi
+    resolved_current=$(readlink -f -- "$CURRENT_ROOT") || {
+        printf '%s\n' 'fixed current path cannot be resolved' >&2
+        return 66
+    }
+    if [[ "$(dirname "$resolved_current")" != "$INSTALL_ROOT/releases" ]]; then
+        printf '%s\n' 'fixed current path is not a direct immutable release child' >&2
+        return 66
+    fi
+    release_id=${resolved_current##*/}
+    if [[ -z "$release_id" || ! "$release_id" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        printf '%s\n' 'fixed current release id is invalid' >&2
+        return 66
+    fi
+
+    resolved_bin=$(readlink -f -- "$BIN") || {
+        printf '%s\n' 'fixed current binary cannot be resolved' >&2
+        return 66
+    }
+    if [[ "$resolved_bin" != "$resolved_current/bin/fwc-n8n" || ! -x "$resolved_bin" ]]; then
+        printf '%s\n' 'fixed current binary is not the immutable release binary' >&2
+        return 66
+    fi
+    binary_sha256_16=$(sha256sum -- "$resolved_bin" | cut -c1-16)
+    if [[ ! "$binary_sha256_16" =~ ^[0-9a-f]{16}$ ]]; then
+        printf '%s\n' 'fixed current binary digest is invalid' >&2
+        return 66
+    fi
+}
+
+emit_preflight() {
+    printf '{"schema":"fwc.n8n.routing-benchmark.v2","route":"%s","operation_class":"%s","phase":"preflight","server":"%s","operation":"%s","release_id":"%s","release_ref":"fixed_current","binary_sha256_16":"%s","not_collected":%s}\n' \
+        "$operation_route" "$operation_class" "$server" "$host_operation" "$release_id" "$binary_sha256_16" "$NOT_COLLECTED"
+}
+
+if [[ "${1:-}" == '--self-test' ]]; then
+    run_self_test
+    exit $?
+fi
 
 if [[ $# -lt 2 || $# -gt 3 ]]; then
     usage >&2
@@ -21,30 +149,18 @@ server=$1
 operation=$2
 workflow_id=${3:-}
 
-case "$server" in
-    eec|hetzner) ;;
-    *) usage >&2; exit 64 ;;
-esac
-
-case "$operation" in
-    list)
-        input='{"limit":1}'
-        host_operation='n8n.workflows.list'
-        ;;
-    capabilities)
-        input='{}'
-        host_operation='n8n.capabilities.inspect'
-        ;;
-    get)
-        if [[ -z "$workflow_id" || ! "$workflow_id" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            printf '%s\n' 'get requires an alphanumeric workflow_id (the value is never printed)' >&2
-            exit 64
-        fi
-        input=$(printf '{"id":"%s"}' "$workflow_id")
-        host_operation='n8n.workflows.get'
-        ;;
-    *) usage >&2; exit 64 ;;
-esac
+if ! validate_server "$server"; then
+    usage >&2
+    exit 64
+fi
+if ! configure_operation "$operation"; then
+    usage >&2
+    exit 64
+fi
+if [[ "$operation" != get && $# -ne 2 ]]; then
+    usage >&2
+    exit 64
+fi
 
 if [[ ! "$SAMPLES" =~ ^[1-9][0-9]*$ || "$SAMPLES" -gt 25 ]]; then
     printf '%s\n' 'FWC_N8N_SAMPLES must be an integer from 1 to 25' >&2
@@ -79,10 +195,12 @@ memory_snapshot() {
         fi
     done
 
-    printf '{"telemetry":"n8n_mcp_memory","phase":"%s","processes":%s,"rss_kib":%s,"pss_kib":%s,"private_kib":%s}\n' \
-        "$phase" "$count" "$rss" "$pss" "$private"
+    printf '{"schema":"fwc.n8n.routing-benchmark.v2","route":"%s","operation_class":"%s","phase":"%s","server":"%s","operation":"%s","release_id":"%s","release_ref":"fixed_current","binary_sha256_16":"%s","telemetry":"n8n_mcp_memory","processes":%s,"rss_kib":%s,"pss_kib":%s,"private_kib":%s,"not_collected":%s}\n' \
+        "$operation_route" "$operation_class" "$phase" "$server" "$host_operation" "$release_id" "$binary_sha256_16" "$count" "$rss" "$pss" "$private" "$NOT_COLLECTED"
 }
 
+prepare_release_metadata
+emit_preflight
 memory_snapshot before
 
 latencies=()
@@ -101,15 +219,15 @@ for ((sample = 1; sample <= SAMPLES; sample++)); do
     response_digest=$(LC_ALL=C printf '%s' "$output" | sha256sum | cut -c1-16)
     latencies+=("$latency_ms")
     bytes_total=$((bytes_total + response_bytes))
-    printf '{"route":"typed_rest_fcp","operation":"%s","server":"%s","sample":%s,"rc":%s,"latency_ms":%s,"response_bytes":%s,"response_sha256_16":"%s"}\n' \
-        "$host_operation" "$server" "$sample" "$rc" "$latency_ms" "$response_bytes" "$response_digest"
+    printf '{"schema":"fwc.n8n.routing-benchmark.v2","route":"%s","operation_class":"%s","phase":"sample","operation":"%s","server":"%s","sample":%s,"release_id":"%s","release_ref":"fixed_current","binary_sha256_16":"%s","rc":%s,"latency_ms":%s,"response_bytes":%s,"response_sha256_16":"%s","not_collected":%s}\n' \
+        "$operation_route" "$operation_class" "$host_operation" "$server" "$sample" "$release_id" "$binary_sha256_16" "$rc" "$latency_ms" "$response_bytes" "$response_digest" "$NOT_COLLECTED"
 done
 
 sorted=($(printf '%s\n' "${latencies[@]}" | sort -n))
 middle=$(( (SAMPLES - 1) / 2 ))
 p50=${sorted[$middle]}
 p95=${sorted[$((SAMPLES - 1))]}
-printf '{"summary":{"route":"typed_rest_fcp","operation":"%s","server":"%s","samples":%s,"p50_ms":%s,"p95_ms":%s,"mean_response_bytes":%s}}\n' \
-    "$host_operation" "$server" "$SAMPLES" "$p50" "$p95" "$((bytes_total / SAMPLES))"
+printf '{"schema":"fwc.n8n.routing-benchmark.v2","route":"%s","operation_class":"%s","phase":"summary","operation":"%s","server":"%s","samples":%s,"release_id":"%s","release_ref":"fixed_current","binary_sha256_16":"%s","p50_ms":%s,"p95_ms":%s,"mean_response_bytes":%s,"not_collected":%s}\n' \
+    "$operation_route" "$operation_class" "$host_operation" "$server" "$SAMPLES" "$release_id" "$binary_sha256_16" "$p50" "$p95" "$((bytes_total / SAMPLES))" "$NOT_COLLECTED"
 
 memory_snapshot after

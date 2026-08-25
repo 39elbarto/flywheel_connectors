@@ -8,6 +8,25 @@ acceptance: each latency class has five samples, tokenization was not run, and
 official MCP was measured only through capability discovery (`tools/list`), not
 through a side-effecting `tools/call`.
 
+## Offline harness contract
+
+`scripts/n8n_routing_benchmark.sh` emits redaction-safe JSONL metadata bound to
+the fixed `/usr/local/lib/fwc-n8n/current` symlink. A normal run records the
+immutable release ID and a truncated SHA-256 reference for the fixed
+`fwc-n8n` binary; it does not accept a caller-selected binary path or print
+catalogs, provider payloads, credentials, or workflow IDs. The `--self-test`
+mode exercises only the local operation and server allowlists and does not
+read the runtime or invoke a provider.
+
+Every preflight, memory, sample, and summary record has `route`,
+`operation_class`, `phase`, and `not_collected`. `capabilities.inspect` is
+classified as `official_mcp`; workflow list/get remain `typed_rest_fcp`.
+`latency_ms` is process-invocation wall-clock metadata. The harness does not
+collect provider-vs-total latency, token estimates, per-request peak memory,
+or provider live-acceptance evidence; those fields remain explicitly listed
+in `not_collected`. Persistent MCP observations are a warm baseline and do not
+prove zero-idle memory.
+
 ## Scope and redaction
 
 - EEC and Hetzner were measured separately; no server was inferred from a

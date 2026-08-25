@@ -104,6 +104,46 @@ The connector is intentionally a bounded self-hosted n8n administration bridge. 
 
 ## Current Runtime Snapshot
 
+### Release-bound capability snapshot and evidence (owner decision, 2026-08-25)
+
+The canonical capability snapshot/evidence is release-bound. It is read only
+from immutable `/usr/local/lib/fwc-n8n/current` or from a specifically
+identified immutable release under the same `/usr/local/lib/fwc-n8n` install
+root. There is no separate checked-in volatile catalog. EEC and Hetzner
+evidence is selected and verified independently; the two server inventories
+and capability results must never be merged.
+
+The release-bound files are:
+
+- `inventory/eec.json` (EEC only);
+- `inventory/hetzner.json` (Hetzner only);
+- `inventory/eec-official-mcp.json` (EEC only);
+- `inventory/hetzner-official-mcp.json` (Hetzner only);
+- `policy/local-mcp.json`;
+- `provenance.json`;
+- `provision-receipt.json`.
+
+These files are the evidence inputs for the selected immutable release. The
+documents retain only the schema, redacted references or digests, and
+acceptance status. They do not retain provider catalogs, workflow or other
+payloads, or secrets.
+
+Operator boundaries are deliberately narrow:
+
+- `fwc-n8n status` and the existing `provision` read-only preflight contract
+  report status and validation; they do not install a release or switch
+  `current`.
+- Verification must establish provenance, receipt validity, artifact digests,
+  ownership/modes, and the fixed release layout before an owner-gated action.
+  Receipt presence or matching metadata is not proof of cryptographic
+  verification or live/current-release acceptance.
+- Rollback is owner-gated only and may target a preserved immutable release
+  after the same fixed-root validation; immutable releases are not deleted.
+- Logs and operator receipts are redacted. This contract does not invent or
+  prescribe an additional log path; the fixed runtime roots remain
+  `/usr/local/lib/fwc-n8n`, `/var/lib/fwc-n8n/staging`, and
+  `/var/lib/fwc-n8n/mcp-access-ledger`.
+
 The current crate exposes these operations:
 
 - `n8n.workflows.list`

@@ -965,6 +965,44 @@ legacy. The current wrapper emits this redacted compact result:
 No workflow payload, Code source, execution data, tool response, credential
 value, or auth header is stored in this snapshot.
 
+### 11.1 Release-bound capability evidence (owner decision, 2026-08-25)
+
+The canonical capability snapshot/evidence is release-bound. It is read only
+from immutable `/usr/local/lib/fwc-n8n/current` or from a specifically
+identified immutable release under the same `/usr/local/lib/fwc-n8n` install
+root. A separate checked-in volatile catalog is not canonical. EEC and
+Hetzner evidence remains separate and must not be mixed.
+
+The release-bound files are:
+
+- `inventory/eec.json` (EEC only);
+- `inventory/hetzner.json` (Hetzner only);
+- `inventory/eec-official-mcp.json` (EEC only);
+- `inventory/hetzner-official-mcp.json` (Hetzner only);
+- `policy/local-mcp.json`;
+- `provenance.json`;
+- `provision-receipt.json`.
+
+These files are evidence inputs for the selected immutable release. The
+documents retain only schema, redacted references or digests, and acceptance
+status. They do not retain provider catalogs, workflow or other payloads, or
+secrets.
+
+The operator boundary is:
+
+- the existing `status` and read-only `provision` preflight contract are for
+  status and validation only; they do not install a release or switch
+  `current`;
+- verification must establish provenance, receipt validity, artifact digests,
+  ownership/modes, and the fixed release layout before an owner-gated action;
+  receipt presence or matching metadata is not proof of cryptographic
+  verification, live provider acceptance, or current-release acceptance;
+- rollback is owner-gated only and may target a preserved immutable release
+  after the same fixed-root validation; immutable releases are not deleted;
+- logs and operator receipts are redacted. No additional log path is defined
+  here; the fixed runtime roots are `/usr/local/lib/fwc-n8n`,
+  `/var/lib/fwc-n8n/staging`, and `/var/lib/fwc-n8n/mcp-access-ledger`.
+
 `n8nVersion`, `mcpEra`, `protocolVersions`, `apiScopeDigest`, `capturedAt`,
 `expiresAt`, `snapshotId`, and `publicRoute` are not fields emitted by the
 current wrapper; they are future metadata only. The current path selects a
@@ -1083,6 +1121,18 @@ They are normative for v1 unless changed by a later explicit owner decision:
    item bounds;
 6. the current official MCP and local MCP catalogs are fully reachable only
    through the typed mappings above, never through generic `tools/call`.
+
+The owner additionally decided on 2026-08-25 that the canonical capability
+snapshot/evidence is release-bound and must be read only from immutable
+`/usr/local/lib/fwc-n8n/current` or a specifically identified immutable release
+under that install root. The release-bound EEC and Hetzner inventory files,
+`policy/local-mcp.json`, `provenance.json`, and `provision-receipt.json` must
+remain server-separated. Documentation stores only schema, redacted
+references/digests, and acceptance status; it does not store catalogs,
+payloads, or secrets. Status/read-only preflight, provenance/receipt/digest/
+ownership verification, owner-gated rollback to a preserved immutable release,
+and redacted logs remain the operator boundaries. Receipt presence is not
+cryptographic or live acceptance.
 
 Acceptance of these decisions completes the policy gate for
 `flywheel_connectors-nqm81.1`. Runtime work remains governed by the individual

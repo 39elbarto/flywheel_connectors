@@ -1,7 +1,7 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. All disposable acceptance workflows are now removed: EEC deletion was independently verified with HTTP 404, and the earlier Hetzner disposable gate was also deleted and verified. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain the fallback, and prior immutable releases remain available for rollback.
-> **Current host evidence (2026-08-24, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260823-5ec43ecbc`, and that installed binary reports `{"bundleAvailable":true}`. This proves the ordinary immutable-bundle verifier only; it does **not** prove that commit `56a5fab345e54cec0e8efdc303455f23d42ef6a7` has passed the new owner provisioner. No host-visible `provision-receipt.json` was found, no release switch was performed, and no current-release owner-provisioning claim is made. A separate point-in-time process audit found 22 pre-existing `node /usr/local/bin/n8n-mcp` processes (approximately 1.42 GiB RSS, 1.27 GiB PSS, 1.17 GiB private memory); they were not stopped. The zero-idle-provider-memory target therefore remains unverified for those existing opt-in sessions.
+> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. The disposable workflow cleanup and acceptance statements are historical evidence, not current-release live acceptance. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain a separate opt-in path, and prior immutable releases remain available for rollback.
+> **Current host evidence (2026-08-25, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260824-90819213-static`, and that installed binary reports `{"bundleAvailable":true}`. The resolved tree contains `provenance.json` and `provision-receipt.json`, with matching release/revision metadata. Their presence does **not** by itself prove cryptographic receipt verification, live provider acceptance, or current-release live acceptance; no live/API invocation is claimed here. The fixed runtime policy records local `n8n-mcp` package version `2.69.2`, and the source update fixtures pin the same version. No release switch or runtime mutation was performed by this documentation update.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -123,6 +123,28 @@ The current crate exposes these operations:
 - `n8n.workflows.execute` (typed official-MCP `execute_workflow` seam; wrapper/host/connector validate identical bounded manual or production inputs, and the typed result is limited to workflow/execution IDs, initial status, mode/version, and an independent execution GET classification. Host admission requires the immutable owner-provisioned EEC/Hetzner schema binding; no live acceptance)
 - `n8n.mcp_access.reconcile`
 
+The list above is the manifest/runtime declaration surface, not a promise that
+every provider path is enabled. The documentation separates the layers:
+
+- **Manifest operations:** the 16 operations listed above are declared by
+  `connectors/n8n/manifest.toml`; activation remains fail-closed because its
+  provider lifecycle path is deferred.
+- **Wrapper/host-only operations:** `n8n.capabilities.inspect` is not in the
+  connector manifest. Its wrapper input is empty `{}`; the bounded host
+  envelope supplies the fixed EEC/Hetzner server and the host maps it only to
+  `mcp.tools.list`.
+- **Router intents:** the typed router can recognize selection intents such as
+  `n8n.knowledge.query`, `n8n.validation.run`, `n8n.workflows.search`,
+  `n8n.executions.search`, `n8n.structure.search`, `n8n.workflows.compare`,
+  `n8n.data_tables.search`, `n8n.data_tables.mutate`, `n8n.audit.inspect`,
+  and `n8n.workflows.versions`. A routing intent selects a strategy; it does
+  not provide a provider execution path.
+- **Future/unimplemented:** `n8n.runtime.status`,
+  `n8n.node_resources.explore`, `n8n.evaluations.manage`, and router intents
+  without a corresponding host/connector dispatch remain future or
+  unimplemented execution paths. Restore/unarchive, versions, credential
+  mutation, permanent deletion, and provider activation remain fail-closed.
+
 Important runtime truths:
 
 - Package and binary name are `fcp-n8n`.
@@ -179,7 +201,30 @@ Important runtime truths:
   catalog with a deterministic compact response containing only tool names,
   SHA-256 input/output schema digests, and `unknown`/`unreviewed` policy
   markers. Provider descriptions and raw schemas are never returned to the
-  caller.
+  caller. Its result shape is:
+
+  ```json
+  {
+    "capabilities": {
+      "schema": "fwc.n8n.capabilities.v1",
+      "serverId": "eec | hetzner",
+      "provider": "official_mcp",
+      "toolCount": 0,
+      "tools": [{
+        "name": "tool_name",
+        "inputSchemaDigest": "sha256:...",
+        "outputSchemaDigest": "sha256:...",
+        "class": "unknown",
+        "status": "unreviewed"
+      }]
+    }
+  }
+  ```
+
+  `snapshotId`, `n8nVersion`, `protocolVersions`, `capturedAt`, `expiresAt`,
+  and REST fallback fields are not emitted by this wrapper; they remain future
+  metadata only. No caller-controlled method, URL, header, token, or tool name
+  is accepted.
   `n8n.targets.resolve`, `n8n.runtime.status`,
   `n8n.node_resources.explore`, and `n8n.evaluations.manage` still need
   dedicated routing intents or host-local dispatch before they can use this
@@ -205,9 +250,10 @@ Important runtime truths:
   provisioning is part of the host installer trust root; an unavailable,
   malformed, stale, or over-bound
   ledger fails closed. A stale digest, unknown provider outcome, or readback
-  mismatch fails closed for that workflow and is never retried. The installed
-  bundle has passed the owner-gated disposable EEC and Hetzner
-  enable/disable/readback acceptance. `all_current` is an explicit, bounded
+  mismatch fails closed for that workflow and is never retried. A historical
+  owner-gated bundle passed disposable EEC and Hetzner
+  enable/disable/readback acceptance; its release ID and evidence receipt are
+  not recorded here, so this is not current-release acceptance. `all_current` is an explicit, bounded
   one-shot reconciliation of the workflows visible when that invocation starts;
   a newly created workflow is considered only on the next explicit
   `all_current` request. There is no daemon, scheduler, or persistent policy
@@ -225,11 +271,13 @@ Important runtime truths:
   connector/owned defaults remain `64 KiB` and `10 seconds`. The provider
   response itself remains bounded to `10 MiB`, is typed and compacted before
   crossing the connector boundary, and is never logged as raw payload.
-- On 2026-08-19 the installed release passed read-only live smoke on both
-  servers: EEC listed 100 items and its `all_current` dry-run planned 137
+- A historical 2026-08-19 live-smoke record reports both servers: EEC listed
+  100 items and its `all_current` dry-run planned 137
   workflows (48 already disabled, 0 changes, 0 exceptions); Hetzner listed
   100 items and planned 300 (56 already disabled, 0 changes, 3 bounded
   exceptions). No workflow write, activation, deletion, or retry occurred.
+  The release ID and evidence scope are not recorded here, so this is not
+  current-release acceptance.
 - The library now includes a compact, provider-neutral target resolver and
   provider router. It accepts explicit server, confirmed project mapping,
   workflow/execution provenance, canonical resource URI, or bounded ambiguity;
@@ -258,8 +306,10 @@ Important runtime truths:
   ownership, restrictive modes, and serialized atomic privileged updates are
   the current local trust root; path-based verification does not defend against
   a concurrent malicious root updater. This verifier also does not claim
-  signature verification. The
-  future signed-installer/update receipt is a separate hardening step.
+  signature verification. Signed `provision-receipt.json` validation belongs
+  to the separate owner-gated `provision` path; the receipt's presence in the
+  current runtime snapshot is not proof that cryptographic verification or
+  live acceptance occurred.
 - Runtime `BaseConnector` ID is `n8n`.
 - Manifest and reported connector ID are `fcp.n8n`.
 - The manifest interface hash is generated from the current operation surface; `fwc manifest fix connectors/n8n/manifest.toml --check --json` must report `changed=false` before release.
@@ -275,7 +325,16 @@ Important runtime truths:
   `unpublish_workflow` policy entries with input/output schema digests; a
   missing or drifted policy fails closed before MCP provider I/O.
 - The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed credential broker. Missing release, broker, credential, or delegated-cgroup prerequisites fail closed.
-- Live official-MCP acceptance on 2026-08-17 used only `n8n.capabilities.inspect` and did not call any discovered tool. EEC completed in 1,448 ms with sampled aggregate peaks of 35,048 KiB RSS, 32,516 KiB PSS, and 32,504 KiB private memory. Hetzner completed in 3,396 ms with peaks of 35,100 KiB RSS, 32,576 KiB PSS, and 32,564 KiB private memory. The 20 ms sampler observed at most two concurrent bundle processes; separate idle checks found zero bundle, broker, or running-scope processes immediately, after 5 seconds, and after 30 seconds. These are host snapshots, not long-term performance guarantees; comparative routing benchmarks remain a separate task.
+- A historical 2026-08-17 official-MCP acceptance record used only
+  `n8n.capabilities.inspect` and did not call any discovered tool. EEC
+  completed in 1,448 ms with sampled aggregate peaks of 35,048 KiB RSS,
+  32,516 KiB PSS, and 32,504 KiB private memory. Hetzner completed in 3,396 ms
+  with peaks of 35,100 KiB RSS, 32,576 KiB PSS, and 32,564 KiB private memory.
+  The 20 ms sampler observed at most two concurrent bundle processes; separate
+  idle checks found zero bundle, broker, or running-scope processes immediately,
+  after 5 seconds, and after 30 seconds. These are host snapshots, not
+  long-term performance guarantees. The release ID and evidence scope are not
+  recorded here, so this is not current-release acceptance.
 - The host compares the connector's selected-operation introspection with trusted manifest metadata before activating egress, binds every egress frame to connector, operation, zone, request, correlation, and capability-token context, and proves child reap plus process-group absence before returning.
 - Each n8n run-once invocation generates a fresh host-owned connector instance ID in memory, passes that exact ID through the owned handshake, and issues the capability token with the matching instance claim. A stale or inventory-pinned instance value is replaced for the one-shot launch, and a different connector instance cannot reuse the token.
 - `credential_id` must be a valid UUID.
@@ -587,7 +646,9 @@ The current implementation does not include:
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
 - restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent deletion; execution data/result retrieval and execution management remain out of scope
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
-- API-key provisioning, secret injection, or host egress enforcement
+- API-key provisioning or secret injection inside the connector process;
+  production credential injection and egress enforcement belong to the
+  host/sandbox boundary, not to the connector process
 - OAuth installation, API-key rotation, credential validation beyond local configuration shape, or live self-check probe
 - n8n CLI behavior, server CLI behavior, embedded n8n runtime, webhook receiver, scheduler, or trigger execution
 - provider credential claims: the connector does not infer or assert that a folder
@@ -682,7 +743,7 @@ The deterministic integration evidence is anchored on connector-local tests cove
 - credential metadata list success, bounded pagination and cursor handling, owner/admin/scope caveat documentation, malformed required-field rejection, provider status/timeout/bad-JSON mapping, canonical resource binding, host-proxy envelope, no-fallback behavior, and hostile secret-field discard
 - direct provider response bounds for declared and chunked oversized success/error bodies, a boundary-safe response, and a short configured timeout
 - table-driven connector-to-proxy envelope/response handling for every advertised read, including exact operation/resource pairs and logical resources distinct from HTTPS transport URLs
-- focused host authorization source coverage with a non-wildcard token: matching logical resource accepted, mismatched logical resource rejected, and valid logical resource plus disallowed transport rejected by network policy; current-host read-only REST acceptance has also passed against both configured servers
+- focused host authorization source coverage with a non-wildcard token: matching logical resource accepted, mismatched logical resource rejected, and valid logical resource plus disallowed transport rejected by network policy; a historical current-host read-only REST acceptance record also reports both configured servers, but its release ID and evidence scope are not recorded here and it is not current-release acceptance
 - tag list typed projection, timestamp/unknown-field redaction, bounded pagination, input/cursor validation, provider error mapping, timeout, malformed JSON, and capability/simulation parity
 - folder list/get projection and redaction, exact encoded paths and JSON query values, root/nested parent handling, defaults/bounds, invalid-input no-HTTP behavior, capability-resource binding, required-field rejection, safe 400/401/403/404/429/500/503 mapping, malformed JSON, configured timeout, and simulation parity
 - invoke rejection for unknown operation and missing required inputs
@@ -704,7 +765,8 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-The nqm81.11 security closeout (2026-08-19) passed the focused connector proof
+The nqm81.11 security closeout (2026-08-19) is a historical verification record,
+not current-release acceptance; no re-run is implied here. It passed the focused connector proof
 lane: 301 library tests, the connector binary test suite (52 passed, one
 approved cgroup-v2 integration ignored), 125 integration tests, three local
 non-mock tests, `cargo check --locked -p fcp-n8n --all-targets`,

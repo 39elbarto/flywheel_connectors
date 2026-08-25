@@ -14,16 +14,18 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current host evidence (2026-08-24, read-only):**
+**Current host evidence (2026-08-25, read-only):**
 `/usr/local/lib/fwc-n8n/current` points to
-`release-20260823-5ec43ecbc`, whose installed `fwc-n8n status` reports
-`{"bundleAvailable":true}`. That result proves only the ordinary immutable
-bundle verifier; it does not prove owner provisioning of source commit
-`56a5fab345e54cec0e8efdc303455f23d42ef6a7`. No host-visible `provision-receipt.json` was found, no release
-switch was performed, and no current-release owner-provisioning claim is made.
-The new `provision --mode preflight|apply` implementation is therefore a
-source-level gate awaiting an owner-signed staged receipt, trusted build-time
-public-key configuration, and separate privileged acceptance.
+`release-20260824-90819213-static`, whose installed `fwc-n8n status` reports
+`{"bundleAvailable":true}`. The resolved tree contains both `provenance.json`
+and `provision-receipt.json`, and their release/revision metadata agrees with
+this release. Receipt presence and matching metadata alone do not establish
+cryptographic verification, live provider acceptance, or current-release live
+acceptance; no such live/API invocation is claimed here. No release switch was
+performed by this documentation update.
+The fixed runtime policy records local `n8n-mcp` package version `2.69.2`;
+the source update fixtures pin the same version. This is version evidence only,
+not a live provider check.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
 `run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
@@ -66,10 +68,11 @@ capability remains `unknown`/`unreviewed` and `tools/call` remains unavailable
 through the public surface. Bundle verification currently
 trusts root ownership, restrictive filesystem modes, and serialized atomic
 privileged updates locally. Its path-based checks do not defend against a
-concurrent malicious root updater. The source packet now verifies an
-owner-signed `provision-receipt.json` when a release is evaluated, but the
-installed release above has no such receipt and therefore makes no
-owner-provisioning claim.
+concurrent malicious root updater. The source packet verifies an owner-signed
+`provision-receipt.json` when a release is evaluated. The installed release
+above contains such a receipt with matching release metadata, but filesystem
+presence does not by itself prove that signature verification was performed or
+that the release was live accepted.
 The source-only `fwc_n8n_provision` packet adds a typed fixed-root preflight
 for owner-staged releases: it checks the existing twelve-artifact receipt,
 the bounded `provision-receipt.json` covering that receipt/provenance and every
@@ -161,8 +164,10 @@ payload, while the logical mutation is allow-listed to
 `settings.availableInMCP`. Lifecycle fields and graph semantics are excluded
 from the mutation and verified by an independent detail readback. Host run-once
 adds a server-wide transient lock, UUID idempotency binding, and redacted
-intent/outcome receipts. The historical installed bundle passed owner-gated disposable
-enable/disable/readback acceptance on EEC and Hetzner. The private web bulk
+intent/outcome receipts. The historical owner-gated bundle passed disposable
+enable/disable/readback acceptance on EEC and Hetzner; the release ID and
+evidence receipt are not recorded in this contract, so that record is not
+current-release acceptance. The private web bulk
 endpoint remains an unaccepted provider surface; future workflows require a
 later bounded reconciliation run rather than a daemon or implicit policy.
 The Phase-3 lifecycle packet represents `n8n.workflows.lifecycle` as typed
@@ -259,9 +264,9 @@ The table names the REST API credential. Official MCP uses a separate personal
 access-token purpose and the fixed KeePass services `n8n-eec-mcp` and
 `n8n-hetzner-mcp`. The broker protocol binds server and purpose; it must reject
 REST/MCP substitution and never fall back from one credential class to the
-other. The service names alone are not provisioning evidence; current
-provisioning is established by the 2026-08-17 broker-backed live discovery
-readback, without exposing either value.
+other. The service names alone are not provisioning evidence; the 2026-08-17
+broker-backed live discovery readback was historical evidence, without
+exposing either value, and is not evidence for the current release.
 
 ### 3.2 Canonical URI shapes
 
@@ -456,7 +461,7 @@ guarantees, not permission to replay.
 | Operation | Capability | Safety / risk | Approval | Idempotency | Primary provider | URI / readback | Model result cap |
 |---|---|---|---|---|---|---|---|
 | `n8n.targets.resolve` | `n8n.targets.read` | Safe / Low | None | None | REST | instance/project/workflow URI | 32 KiB |
-| `n8n.capabilities.inspect` | `n8n.capabilities.read` | Safe / Low | None | None | official MCP + REST | instance URI; snapshot ID/digest | 64 KiB |
+| `n8n.capabilities.inspect` | `n8n.capabilities.read` | Safe / Low | None | None | official MCP | fixed EEC/Hetzner server; compact capability catalog | 64 KiB |
 | `n8n.runtime.status` | `n8n.runtime.read` | Safe / Low | None | None | host | local/provider status only | 32 KiB |
 | `n8n.knowledge.query` | `n8n.knowledge.read` | Safe / Low | None | None | local MCP | local node/template URI | 256 KiB |
 | `n8n.node_resources.explore` | `n8n.credentials.use_read` | Risky / Medium | Interactive | None | official MCP | node/credential metadata; no secret | 256 KiB |
@@ -480,7 +485,35 @@ guarantees, not permission to replay.
 | `n8n.audit.inspect` | `n8n.audit.read` | Safe / High | None | None | REST/local MCP | instance URI; redacted findings | 512 KiB |
 | `n8n.mcp_access.reconcile` | `n8n.mcp_access.write` | Risky / High | Interactive | BestEffort | typed REST settings adapter | exact server; availability and lifecycle/graph readback | 512 KiB operation-scoped; 60 s all-current budget |
 
-Historical live acceptance boundary (2026-08-21): the then-installed owner-gated bundle
+The inventory above is contract-level. The executable surfaces are deliberately
+separate:
+
+- **Manifest operations:** the current `fcp.n8n` manifest declares
+  `workflows.list`, `workflows.get`, `workflows.activate`, `executions.list`,
+  `executions.get`, `projects.list`, `credentials.list`, `tags.list`,
+  `folders.list`, `folders.get`, `workflows.create_draft`,
+  `workflows.update_draft`, `workflows.lifecycle`, `workflows.archive`,
+  `workflows.execute`, and `mcp_access.reconcile`. A manifest declaration does
+  not override an operation's fail-closed provider gate.
+- **Wrapper/host-only operations:** `n8n.capabilities.inspect` is absent from
+  the connector manifest. The wrapper/host path accepts an empty operation
+  input, derives a fixed EEC/Hetzner server from its bounded envelope, and
+  maps only to `mcp.tools.list`.
+- **Router intents:** the typed router recognizes selection intents such as
+  `n8n.knowledge.query`, `n8n.validation.run`, `n8n.workflows.search`,
+  `n8n.executions.search`, `n8n.structure.search`, `n8n.workflows.compare`,
+  `n8n.data_tables.search`, `n8n.data_tables.mutate`, `n8n.audit.inspect`,
+  and `n8n.workflows.versions`. A routing decision is not a provider
+  execution path and does not imply that the selected operation is available.
+- **Future/unimplemented execution paths:** `n8n.runtime.status`,
+  `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
+  without a corresponding host/connector dispatch remain future or
+  unimplemented execution paths. `restore/unarchive`, `versions`, credential
+  mutation, permanent deletion, and the provider activation path remain
+  fail-closed/non-goals.
+
+Historical live acceptance boundary (2026-08-21; release ID and evidence receipt
+not recorded here): the then-installed owner-gated bundle
 passed read-only and MCP-availability reconciliation checks on EEC and
 Hetzner, with disposable workflows removed after exact DELETE/404 readback.
 The typed official-MCP lifecycle path is not yet live-accepted: one exact EEC
@@ -507,7 +540,7 @@ The table specifies the exact operation-specific `data` shape.
 | Operation | Required input | Optional input | `data` output |
 |---|---|---|---|
 | `targets.resolve` | one of `resourceUri`, `server`, `projectId`, `workflowId`, `executionId` | `candidateServers[1..3]`, `legacyOptIn` | `{resolution: resolved|ambiguous|not_found, target?: TargetRef, candidates?: [{resourceUri,id,name,server}]}` |
-| `capabilities.inspect` | `target.server` | `refresh=false`, `detail` | `{snapshotId,n8nVersion,protocolVersions,apiScopeDigest,tools:[{name,schemaDigest,class,status}],capturedAt,expiresAt}` |
+| `capabilities.inspect` | empty `{}` operation input; fixed server comes from the host envelope | none | `{capabilities:{schema:"fwc.n8n.capabilities.v1",serverId,provider:"official_mcp",toolCount,tools:[{name,inputSchemaDigest,outputSchemaDigest,class:"unknown",status:"unreviewed"}]}}` |
 | `runtime.status` | none | `correlationId` | `{idle,activeRuns,providers:[{provider,pid?,pgid?,rssBytes?,pssBytes?,privateBytes?,stopped?}]}` |
 | `knowledge.query` | `action`, action fields | `detail`, `limit` | discriminated result matching the action |
 | `node_resources.explore` | `target`, `nodeType`, `version`, `methodName`, `methodType`, `credentialId` | `filter`, `paginationToken`, `currentNodeParameters`, `legacyOptIn` | `{results:[{name,value,url?,description?}],paginationToken?,builderHint?}` |
@@ -756,10 +789,11 @@ Official instance-level MCP:
 | `create_data_table`, `add_data_table_column`, `rename_data_table_column`, `rename_data_table`, `add_data_table_rows` | `data_tables.mutate` |
 | `delete_data_table_column` | future-only data-table destructive gate |
 
-Installed local `n8n-mcp` (`2.67.2` observed, not pinned by this contract)
-currently lists 24 tool names: seven core tools and 17 management tools. Its
-README heading says 16 management tools, so catalog names and schema digests,
-not that human-maintained count, are authoritative:
+The current fixed runtime policy records local `n8n-mcp` package version
+`2.69.2`, and the source update fixtures pin the same version. The earlier
+observed catalog count is historical evidence, not a current tool-count claim;
+catalog names and schema digests, not a human-maintained count, are
+authoritative:
 
 | Upstream tool family | Public route |
 |---|---|
@@ -906,39 +940,37 @@ and is not used as an instruction.
 ## 11. Capability discovery and MCP compatibility
 
 Capability discovery is per server and never copied from EEC to Hetzner or
-legacy. A safe snapshot contains:
+legacy. The current wrapper emits this redacted compact result:
 
 ```json
 {
-  "server": "eec",
-  "n8nVersion": "string",
-  "mcpEra": "modern | legacy",
-  "protocolVersions": ["2026-07-28"],
-  "authMode": "oauth | access_token",
-  "apiScopeDigest": "blake3-256:...",
-  "tools": [
-    {
-      "name": "search_workflows",
-      "inputSchemaDigest": "blake3-256:...",
-      "outputSchemaDigest": "blake3-256:...",
-      "class": "read | write | execution | credential | destructive",
-      "publicRoute": "n8n.workflows.search",
-      "status": "approved | blocked | changed"
-    }
-  ],
-  "capturedAt": "RFC3339",
-  "expiresAt": "RFC3339"
+  "capabilities": {
+    "schema": "fwc.n8n.capabilities.v1",
+    "serverId": "eec | hetzner",
+    "provider": "official_mcp",
+    "toolCount": 0,
+    "tools": [
+      {
+        "name": "tool_name",
+        "inputSchemaDigest": "sha256:...",
+        "outputSchemaDigest": "sha256:...",
+        "class": "unknown",
+        "status": "unreviewed"
+      }
+    ]
+  }
 }
 ```
 
 No workflow payload, Code source, execution data, tool response, credential
 value, or auth header is stored in this snapshot.
 
-For MCP revision `2026-07-28` and later, the adapter uses per-request protocol
-metadata and `server/discover`; it does not invent a session or initialization
-handshake. For older servers, the adapter may use the legacy initialize flow
-for the lifetime of one bounded operation. Era detection is cached by server
-origin and re-probed when it fails.
+`n8nVersion`, `mcpEra`, `protocolVersions`, `apiScopeDigest`, `capturedAt`,
+`expiresAt`, `snapshotId`, and `publicRoute` are not fields emitted by the
+current wrapper; they are future metadata only. The current path selects a
+fixed official-MCP inventory and invokes only host-owned `mcp.tools.list`.
+It has no REST fallback and accepts no caller-controlled method, URL, header,
+token, or tool name.
 
 The stateless protocol reduces connection/session state but does not itself
 guarantee zero memory: a host may still keep a client process, HTTP pool, cached

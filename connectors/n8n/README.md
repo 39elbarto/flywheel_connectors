@@ -817,6 +817,27 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
+### HDD-only release assembly
+
+The repository contains the bounded owner-side assembler
+[`scripts/n8n_release_assembler.sh`](../../scripts/n8n_release_assembler.sh).
+It is the reproducible boundary between a committed source `HEAD` and a
+staged release. It requires root only to create the fixed root-owned staging
+tree, keeps `CARGO_TARGET_DIR` and `TMPDIR` below
+`/srv/hdd500gb-internal/fwc-build-cache`, builds the two static provider
+executables with `+crt-static` only on their final crate invocations, and
+copies only release-bound inventory/policy templates from the fixed current
+bundle. It generates `provenance.json`, the twelve-artifact `receipt.json`,
+and a non-secret provision request; it never reads n8n API keys, signs a
+receipt, changes `current`, or invokes n8n.
+
+The assembler refuses tracked worktree changes, an existing staging target,
+an HDD target outside the fixed build-cache root, insufficient HDD space, or
+an absent build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX`. Signing remains a separate
+step using `fwc-n8n-owner-sign` and the KeePass-only seed; promotion remains a
+separate owner/root step. The current release and its rollback target are
+preserved throughout assembly.
+
 The nqm81.11 security closeout (2026-08-19) is a historical verification record,
 not current-release acceptance; no re-run is implied here. It passed the focused connector proof
 lane: 301 library tests, the connector binary test suite (52 passed, one

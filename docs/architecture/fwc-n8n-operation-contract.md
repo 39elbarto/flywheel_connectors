@@ -373,20 +373,28 @@ For host run-once writes, `approvalRef` is only a reference to the owner/chat-
 issued token: it never mints trust. The typed, redaction-safe run-once envelope
 must carry an externally signed `approval_token`, verified with
 `FCP_HOST_APPROVAL_PUBLIC_KEY` or `_FILE`. Verification requires
-`token_id == approvalRef`, the `fcp.n8n` connector and exact operation, `z:work`,
-the canonical binding digest over `{server_id, resource_uri, operation, input}`,
-expiry, and the exact request constraints. Before credential/provider access,
+`token_id == approvalRef`, the typed `fcp.mcp-bridge` wrapper operation
+`n8n.mcp.call`, `z:work`, the canonical official-MCP payload digest, expiry, and
+the exact request constraints. The constraints also carry the typed plan digest,
+which binds EEC/Hetzner, the canonical workflow resource URI and workflow ID,
+the official tool name/payload, lifecycle precondition, UUID idempotency key,
+and expiry as one exact owner-confirmation plan. Before credential/provider access,
 the host persists a private `token_id` replay marker (after signature and
 binding validation) and then the request claim; a second use of that token
 fails closed even if its idempotency key differs. Missing, invalid, mismatched,
 or already-consumed tokens never reach provider I/O. Official-MCP lifecycle
 calls bind the child `fcp.mcp-bridge` payload digest and policy constraints in
-the same way.
+the same way. The provider-start marker is fsynced immediately before the single
+`invoke_handler_inner` boundary; a restart with a pending claim, provider-start
+marker, or missing terminal receipt is `unknown` and never auto-retried. Receipt
+and marker fields are digests only and are checked against the reconstructed
+typed plan before replay is refused.
 
 The bounded owner-confirmation seam is typed to publish, unpublish, and archive
 only. It computes a redaction-safe plan digest over the exact EEC/Hetzner
-target, operation, canonical input and precondition digests, UUID idempotency
-key, and expiry; confirmation must echo that digest. `fcp-host` reuses the
+target, operation, canonical input and precondition digests, official-MCP tool
+and payload digest, UUID idempotency key, and expiry; confirmation must echo
+that digest. `fcp-host` reuses the
 existing `ApprovalToken` canonicalization contract through a fail-closed issuer
 seam and does not load or accept private key material. This module is not a
 second ledger and is not wired as an independent provider gate: the existing

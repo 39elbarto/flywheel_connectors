@@ -61,6 +61,7 @@ use fcp_evidence::{
 };
 #[cfg(test)]
 use fcp_host::ConnectorLaunchBinding;
+use fcp_host::n8n_typed_approval_plan_digest;
 use fcp_host::{
     AdaptiveWarmPoolConfig, AdaptiveWarmPoolController, BatchExecutor, BatchInvokeRequest,
     BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
@@ -364,6 +365,7 @@ const N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN: &str = "n8n-official-mcp-run-o
 const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
 const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
+const N8N_APPROVAL_WRAPPER_OPERATION: &str = "n8n.mcp.call";
 const N8N_OFFICIAL_MCP_PUBLISH_TOOL: &str = "publish_workflow";
 const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
 const N8N_OFFICIAL_MCP_ARCHIVE_TOOL: &str = "archive_workflow";
@@ -509,6 +511,18 @@ struct N8nReadOnlyRunOncePlan {
     deadline_ms: u64,
     correlation_id: Option<CorrelationId>,
     credential_binding: RunOnceCredentialBinding,
+    typed_approval: Option<N8nTypedApprovalReceiptBinding>,
+}
+
+#[derive(Clone)]
+struct N8nTypedApprovalReceiptBinding {
+    plan_digest: String,
+    workflow_id_digest: String,
+    precondition_digest: String,
+    idempotency_key_hash: String,
+    official_mcp_tool_digest: String,
+    provider_payload_digest: String,
+    expires_at_ms: u64,
 }
 
 #[derive(Clone)]
@@ -11085,6 +11099,7 @@ fn build_n8n_read_only_run_once_plan(
         deadline_ms,
         correlation_id,
         credential_binding,
+        typed_approval: None,
     })
 }
 
@@ -11474,7 +11489,7 @@ fn official_mcp_approval_constraints(
     let normalized = json!({
         "server_id": plan.server_id.as_str(),
         "resource_uri": plan.resource_uri,
-        "operation": plan.operation.as_str(),
+        "operation": N8N_APPROVAL_WRAPPER_OPERATION,
         "provider": "mcp",
         "payload_sha256": hex::encode(payload_digest),
         "tool_name": plan.input.get("name").cloned().unwrap_or(Value::Null),
@@ -11511,6 +11526,114 @@ fn official_mcp_approval_constraints(
             expected: expected.clone(),
         })
         .collect())
+}
+
+fn official_mcp_approval_constraints_with_typed_plan(
+    plan: &N8nOfficialMcpRunOncePlan,
+    typed_approval: Option<&N8nTypedApprovalReceiptBinding>,
+) -> HostResult<Vec<InputConstraint>> {
+    let mut constraints = official_mcp_approval_constraints(plan)?;
+    if let Some(typed_approval) = typed_approval {
+        constraints.push(InputConstraint {
+            pointer: "/typed_plan_sha256".to_string(),
+            expected: Value::String(typed_approval.plan_digest.clone()),
+        });
+    }
+    Ok(constraints)
+}
+
+fn build_n8n_typed_approval_binding(
+    high_level_operation: &str,
+    high_level_input: &Value,
+    provider_plan: &N8nOfficialMcpRunOncePlan,
+    approval_token: Option<&ApprovalToken>,
+) -> HostResult<N8nTypedApprovalReceiptBinding> {
+    let token = approval_token.ok_or_else(|| {
+        HostError::PreflightFailed(
+            "typed n8n lifecycle approval token is required before claim".to_string(),
+        )
+    })?;
+    let object = high_level_input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("typed n8n lifecycle input is invalid".to_string())
+    })?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("typed n8n lifecycle guard is invalid".to_string())
+        })?;
+    let workflow_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::InvalidFilter("typed n8n workflow id is invalid".to_string()))?;
+    let precondition = guard.get("precondition").ok_or_else(|| {
+        HostError::InvalidFilter("typed n8n lifecycle precondition is missing".to_string())
+    })?;
+    let idempotency_key = guard
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("typed n8n lifecycle idempotency key is missing".to_string())
+        })?;
+    let lifecycle_operation = match high_level_operation {
+        "n8n.workflows.lifecycle" => match object.get("action").and_then(Value::as_str) {
+            Some("publish") => "publish",
+            Some("unpublish") => "unpublish",
+            _ => {
+                return Err(HostError::PreflightFailed(
+                    "typed n8n lifecycle action is not approved".to_string(),
+                ));
+            }
+        },
+        "n8n.workflows.archive" => "archive",
+        _ => {
+            return Err(HostError::PreflightFailed(
+                "typed n8n approval is only valid for lifecycle/archive".to_string(),
+            ));
+        }
+    };
+    let official_mcp_tool = provider_plan
+        .input
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| HostError::PreflightFailed("official MCP tool is missing".to_string()))?;
+    let provider_payload_digest = mcp_tools_call_payload_digest(&provider_plan.input)?;
+    let provider_payload_digest = format!("sha256:{}", hex::encode(provider_payload_digest));
+    let plan_digest = n8n_typed_approval_plan_digest(
+        provider_plan.server_id.as_str(),
+        workflow_id,
+        lifecycle_operation,
+        official_mcp_tool,
+        &provider_payload_digest,
+        high_level_input,
+        precondition,
+        idempotency_key,
+        token.expires_at_ms,
+        n8n_run_once_now_ms(),
+    )
+    .ok_or_else(|| {
+        HostError::PreflightFailed(
+            "typed n8n approval plan binding was denied or expired".to_string(),
+        )
+    })?;
+    Ok(N8nTypedApprovalReceiptBinding {
+        plan_digest,
+        workflow_id_digest: n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            &Value::String(workflow_id.to_owned()),
+        ),
+        precondition_digest: n8n_run_once_digest(b"fwc-n8n.approval-precondition.v1", precondition),
+        idempotency_key_hash: n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            &Value::String(idempotency_key.to_owned()),
+        ),
+        official_mcp_tool_digest: n8n_run_once_digest(
+            b"fwc-n8n.official-mcp-tool.v1",
+            &Value::String(official_mcp_tool.to_owned()),
+        ),
+        provider_payload_digest,
+        expires_at_ms: token.expires_at_ms,
+    })
 }
 
 fn canonical_json_for_n8n_run_once(value: &Value) -> Value {
@@ -11899,6 +12022,98 @@ fn n8n_run_once_runtime_dir() -> HostResult<PathBuf> {
     Ok(root)
 }
 
+#[cfg(unix)]
+fn sync_n8n_parent_dir(path: &FsPath) -> HostResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        HostError::Unavailable("n8n run-once receipt parent is unavailable".to_string())
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| HostError::Unavailable("n8n run-once receipt is not durable".to_string()))
+}
+
+#[cfg(unix)]
+fn read_n8n_private_json(path: &FsPath) -> HostResult<Value> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|_| {
+            HostError::PreflightFailed("n8n run-once recovery record is unavailable".to_string())
+        })?;
+    let metadata = file.metadata().map_err(|_| {
+        HostError::PreflightFailed("n8n run-once recovery record is unavailable".to_string())
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err(HostError::PreflightFailed(
+            "n8n run-once recovery record ownership or mode is invalid".to_string(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(16 * 1024).read_to_end(&mut bytes).map_err(|_| {
+        HostError::PreflightFailed("n8n run-once recovery record is unreadable".to_string())
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        HostError::PreflightFailed("n8n run-once recovery record is malformed".to_string())
+    })
+}
+
+#[cfg(unix)]
+fn n8n_run_once_expected_receipt_binding(plan: &N8nReadOnlyRunOncePlan) -> Value {
+    let idempotency_key = plan
+        .input
+        .pointer("/guard/idempotencyKey")
+        .unwrap_or(&Value::Null);
+    let typed = plan.typed_approval.as_ref();
+    json!({
+        "operation": plan.operation.as_str(),
+        "server": plan.server_id.as_str(),
+        "resourceDigest": n8n_run_once_digest(
+            b"fwc-n8n.resource.v1",
+            &Value::String(plan.resource_uri.clone()),
+        ),
+        "idempotencyKeyHash": typed.map_or_else(
+            || n8n_run_once_digest(b"fwc-n8n.idempotency-key.v1", idempotency_key),
+            |binding| binding.idempotency_key_hash.clone(),
+        ),
+        "typedPlanDigest": typed.map(|binding| binding.plan_digest.clone()),
+        "workflowIdDigest": typed.map(|binding| binding.workflow_id_digest.clone()),
+        "preconditionDigest": typed.map(|binding| binding.precondition_digest.clone()),
+        "wrapperOperation": typed.map(|_| N8N_APPROVAL_WRAPPER_OPERATION),
+        "officialMcpToolDigest": typed.map(|binding| binding.official_mcp_tool_digest.clone()),
+        "providerPayloadDigest": typed.map(|binding| binding.provider_payload_digest.clone()),
+        "expiryMs": typed.map(|binding| binding.expires_at_ms),
+    })
+}
+
+#[cfg(unix)]
+fn validate_n8n_recovery_binding(expected: &Value, actual: &Value, phase: &str) -> HostResult<()> {
+    let expected_object = expected.as_object().ok_or_else(|| {
+        HostError::Internal("n8n run-once expected recovery binding is invalid".to_string())
+    })?;
+    let actual_object = actual.as_object().ok_or_else(|| {
+        HostError::PreflightFailed(format!("n8n run-once {phase} recovery record is malformed"))
+    })?;
+    for (field, expected_value) in expected_object {
+        if actual_object.get(field) != Some(expected_value) {
+            return Err(HostError::PreflightFailed(format!(
+                "n8n run-once {phase} recovery binding mismatch"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn n8n_run_once_validate_existing_record(
+    plan: &N8nReadOnlyRunOncePlan,
+    path: &FsPath,
+    phase: &str,
+) -> HostResult<()> {
+    let record = read_n8n_private_json(path)?;
+    validate_n8n_recovery_binding(&n8n_run_once_expected_receipt_binding(plan), &record, phase)
+}
+
 #[cfg(not(unix))]
 fn n8n_run_once_runtime_dir() -> HostResult<PathBuf> {
     Err(HostError::Unavailable(
@@ -11993,6 +12208,47 @@ fn n8n_run_once_claim_at(
     let token_marker_path = root
         .join("consumed")
         .join(format!("token-{token_id_digest}.marker"));
+    let marker_path = root.join("consumed").join(format!("{claim_digest}.marker"));
+    let receipt_path = root
+        .join("receipts")
+        .join(format!("{claim_digest}.receipt.json"));
+    let marker_exists = fs::symlink_metadata(&marker_path).is_ok();
+    let receipt_exists = fs::symlink_metadata(&receipt_path).is_ok();
+    if marker_exists {
+        if receipt_exists {
+            n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome")?;
+            return Err(HostError::PreflightFailed(
+                "n8n run-once approval was already consumed".to_string(),
+            ));
+        }
+        let marker = read_n8n_private_json(&marker_path)?;
+        let expected_marker = json!({
+            "schema": "fwc.n8n.run-once-claim.v1",
+            "claimDigest": claim_digest,
+            "lockDigest": lock_digest,
+            "resultClass": "pending",
+            "typedPlanDigest": plan
+                .typed_approval
+                .as_ref()
+                .map(|binding| binding.plan_digest.clone()),
+        });
+        validate_n8n_recovery_binding(&expected_marker, &marker, "claim")?;
+        return Err(HostError::PreflightFailed(
+            "n8n run-once outcome is unknown; reconcile by readback; automatic retry forbidden"
+                .to_string(),
+        ));
+    }
+    if receipt_exists {
+        n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome")?;
+        return Err(HostError::PreflightFailed(
+            "n8n run-once approval was already consumed".to_string(),
+        ));
+    }
+    if fs::symlink_metadata(&token_marker_path).is_ok() {
+        return Err(HostError::PreflightFailed(
+            "n8n run-once approval token was already consumed".to_string(),
+        ));
+    }
     let mut token_marker = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -12014,6 +12270,10 @@ fn n8n_run_once_claim_at(
         "lockDigest": lock_digest,
         "createdAtMs": n8n_run_once_now_ms(),
         "resultClass": "pending",
+        "typedPlanDigest": plan
+            .typed_approval
+            .as_ref()
+            .map(|binding| binding.plan_digest.clone()),
     });
     token_marker
         .write_all(token_marker_payload.to_string().as_bytes())
@@ -12021,7 +12281,7 @@ fn n8n_run_once_claim_at(
         .map_err(|_| {
             HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
         })?;
-    let marker_path = root.join("consumed").join(format!("{claim_digest}.marker"));
+    sync_n8n_parent_dir(&token_marker_path)?;
     let mut marker = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -12041,6 +12301,10 @@ fn n8n_run_once_claim_at(
         "lockDigest": lock_digest,
         "createdAtMs": n8n_run_once_now_ms(),
         "resultClass": "pending",
+        "typedPlanDigest": plan
+            .typed_approval
+            .as_ref()
+            .map(|binding| binding.plan_digest.clone()),
     });
     marker
         .write_all(marker_payload.to_string().as_bytes())
@@ -12048,6 +12312,7 @@ fn n8n_run_once_claim_at(
         .map_err(|_| {
             HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
         })?;
+    sync_n8n_parent_dir(&marker_path)?;
     Ok(N8nRunOnceClaim {
         _lock: lock,
         claim_digest,
@@ -12057,40 +12322,44 @@ fn n8n_run_once_claim_at(
 
 #[cfg(unix)]
 impl N8nRunOnceClaim {
-    fn write_intent(
-        &self,
+    fn receipt_binding(
         plan: &N8nReadOnlyRunOncePlan,
         request: &InvokeRequest,
-    ) -> HostResult<()> {
+    ) -> HostResult<serde_json::Map<String, Value>> {
         let (material, _graph_digest, mutation_digest) = n8n_run_once_approval_material(plan)?;
-        let state_digest = material
-            .get("state_digest")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let input_digest = hex::encode(request_input_hash(&request.input)?);
-        let idempotency_digest = n8n_run_once_digest(
-            b"fwc-n8n.idempotency-key.v1",
-            plan.input
-                .pointer("/guard/idempotencyKey")
-                .unwrap_or(&Value::Null),
+        let mut binding = n8n_run_once_expected_receipt_binding(plan)
+            .as_object()
+            .cloned()
+            .ok_or_else(|| HostError::Internal("n8n receipt binding is invalid".to_string()))?;
+        binding.insert(
+            "schema".to_string(),
+            Value::String("fwc.n8n.run-once-receipt.v1".to_string()),
         );
-        let payload = json!({
-            "schema": "fwc.n8n.run-once-receipt.v1",
-            "phase": "intent",
-            "operation": plan.operation.as_str(),
-            "server": plan.server_id.as_str(),
-            "resourceDigest": n8n_run_once_digest(b"fwc-n8n.resource.v1", &Value::String(plan.resource_uri.clone())),
-            "mutationDigest": mutation_digest,
-            "stateDigest": state_digest,
-            "inputDigest": input_digest,
-            "idempotencyKeyHash": idempotency_digest,
-            "correlationId": request.correlation_id.as_ref().map(ToString::to_string),
-            "timestampMs": n8n_run_once_now_ms(),
-            "resultClass": "pending",
-        });
-        let path = self
-            .receipts_dir
-            .join(format!("{}.intent.json", self.claim_digest));
+        binding.insert("mutationDigest".to_string(), Value::String(mutation_digest));
+        binding.insert(
+            "stateDigest".to_string(),
+            material.get("state_digest").cloned().unwrap_or(Value::Null),
+        );
+        binding.insert(
+            "inputDigest".to_string(),
+            Value::String(hex::encode(request_input_hash(&request.input)?)),
+        );
+        binding.insert(
+            "correlationId".to_string(),
+            request
+                .correlation_id
+                .as_ref()
+                .map(ToString::to_string)
+                .map_or(Value::Null, Value::String),
+        );
+        Ok(binding)
+    }
+
+    fn write_record(
+        &self,
+        path: &FsPath,
+        mut payload: serde_json::Map<String, Value>,
+    ) -> HostResult<()> {
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -12098,13 +12367,52 @@ impl N8nRunOnceClaim {
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(path)
             .map_err(|_| {
-                HostError::Unavailable("n8n run-once intent receipt is unavailable".to_string())
+                HostError::Unavailable("n8n run-once receipt is unavailable".to_string())
             })?;
-        file.write_all(payload.to_string().as_bytes())
+        payload.insert("timestampMs".to_string(), json!(n8n_run_once_now_ms()));
+        file.write_all(Value::Object(payload).to_string().as_bytes())
             .and_then(|_| file.sync_all())
             .map_err(|_| {
-                HostError::Unavailable("n8n run-once intent receipt is unavailable".to_string())
-            })
+                HostError::Unavailable("n8n run-once receipt is not durable".to_string())
+            })?;
+        sync_n8n_parent_dir(path)
+    }
+
+    fn write_intent(
+        &self,
+        plan: &N8nReadOnlyRunOncePlan,
+        request: &InvokeRequest,
+    ) -> HostResult<()> {
+        let mut payload = Self::receipt_binding(plan, request)?;
+        payload.insert("phase".to_string(), Value::String("intent".to_string()));
+        payload.insert(
+            "resultClass".to_string(),
+            Value::String("pending".to_string()),
+        );
+        let path = self
+            .receipts_dir
+            .join(format!("{}.intent.json", self.claim_digest));
+        self.write_record(&path, payload)
+    }
+
+    fn mark_provider_started(
+        &self,
+        plan: &N8nReadOnlyRunOncePlan,
+        request: &InvokeRequest,
+    ) -> HostResult<()> {
+        let mut payload = Self::receipt_binding(plan, request)?;
+        payload.insert(
+            "phase".to_string(),
+            Value::String("provider-start".to_string()),
+        );
+        payload.insert(
+            "resultClass".to_string(),
+            Value::String("unknown".to_string()),
+        );
+        let path = self
+            .receipts_dir
+            .join(format!("{}.provider-start.json", self.claim_digest));
+        self.write_record(&path, payload)
     }
 
     fn write_receipt(
@@ -12113,41 +12421,16 @@ impl N8nRunOnceClaim {
         request: &InvokeRequest,
         result_class: &str,
     ) -> HostResult<()> {
-        let (material, _graph_digest, mutation_digest) = n8n_run_once_approval_material(plan)?;
-        let payload = json!({
-            "schema": "fwc.n8n.run-once-receipt.v1",
-            "phase": "outcome",
-            "operation": plan.operation.as_str(),
-            "server": plan.server_id.as_str(),
-            "resourceDigest": n8n_run_once_digest(b"fwc-n8n.resource.v1", &Value::String(plan.resource_uri.clone())),
-            "mutationDigest": mutation_digest,
-            "stateDigest": material.get("state_digest").cloned().unwrap_or(Value::Null),
-            "inputDigest": hex::encode(request_input_hash(&request.input)?),
-            "idempotencyKeyHash": n8n_run_once_digest(
-                b"fwc-n8n.idempotency-key.v1",
-                plan.input.pointer("/guard/idempotencyKey").unwrap_or(&Value::Null),
-            ),
-            "correlationId": request.correlation_id.as_ref().map(ToString::to_string),
-            "timestampMs": n8n_run_once_now_ms(),
-            "resultClass": result_class,
-        });
+        let mut payload = Self::receipt_binding(plan, request)?;
+        payload.insert("phase".to_string(), Value::String("outcome".to_string()));
+        payload.insert(
+            "resultClass".to_string(),
+            Value::String(result_class.to_string()),
+        );
         let path = self
             .receipts_dir
             .join(format!("{}.receipt.json", self.claim_digest));
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|_| {
-                HostError::Unavailable("n8n run-once outcome receipt is unavailable".to_string())
-            })?;
-        file.write_all(payload.to_string().as_bytes())
-            .and_then(|_| file.sync_all())
-            .map_err(|_| {
-                HostError::Unavailable("n8n run-once outcome receipt is unavailable".to_string())
-            })
+        self.write_record(&path, payload)
     }
 }
 
@@ -13715,6 +13998,9 @@ async fn async_n8n_read_only_run_once(
         claim
             .write_intent(&plan, &request)
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        claim
+            .mark_provider_started(&plan, &request)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
     }
     let invoke_result = invoke_handler_inner(
         state,
@@ -13779,6 +14065,24 @@ async fn async_n8n_official_mcp_run_once(
     let claim_operation_name = high_level_input.operation.clone();
     let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+    let typed_approval = lifecycle_input
+        .as_ref()
+        .filter(|_| {
+            matches!(
+                claim_operation_name.as_str(),
+                "n8n.workflows.lifecycle" | "n8n.workflows.archive"
+            )
+        })
+        .map(|input| {
+            build_n8n_typed_approval_binding(
+                &claim_operation_name,
+                input,
+                &plan,
+                external_approval.as_ref(),
+            )
+        })
+        .transpose()
+        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
     let approval_verifying_key = if let Some(input) = lifecycle_input.as_ref() {
         let approval_ref = input
             .pointer("/guard/approvalRef")
@@ -13791,13 +14095,14 @@ async fn async_n8n_official_mcp_run_once(
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
         let payload_digest = mcp_tools_call_payload_digest(&plan.input)
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
-        let constraints = official_mcp_approval_constraints(&plan)
-            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        let constraints =
+            official_mcp_approval_constraints_with_typed_plan(&plan, typed_approval.as_ref())
+                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
         validate_external_n8n_approval(
             external_approval.as_ref(),
             approval_ref,
             "fcp.mcp-bridge",
-            plan.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION,
             &plan.zone_id,
             payload_digest,
             &constraints,
@@ -13833,6 +14138,7 @@ async fn async_n8n_official_mcp_run_once(
                 deadline_ms: plan.deadline_ms,
                 correlation_id: plan.correlation_id.clone(),
                 credential_binding: plan.credential_binding.clone(),
+                typed_approval: typed_approval.clone(),
             })
         })
         .transpose()
@@ -13935,6 +14241,9 @@ async fn async_n8n_official_mcp_run_once(
         claim
             .write_intent(claim_plan, &request)
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        claim
+            .mark_provider_started(claim_plan, &request)
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
     }
 
     let invoke_result = invoke_handler_inner(
@@ -33672,6 +33981,63 @@ done"#;
         config
     }
 
+    fn typed_official_mcp_test_fixture() -> (N8nReadOnlyRunOncePlan, InvokeRequest) {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let mut high_level = n8n_official_mcp_lifecycle_test_input("publish");
+        let approval = ApprovalToken::approved(
+            "chat-lifecycle-approval",
+            n8n_run_once_now_ms(),
+            n8n_run_once_now_ms().saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000),
+            "test:external-owner",
+            ApprovalScope::Execution(ExecutionScope {
+                connector_id: "fcp.mcp-bridge".to_string(),
+                method_pattern: N8N_APPROVAL_WRAPPER_OPERATION.to_string(),
+                request_object_id: None,
+                input_hash: None,
+                input_constraints: Vec::new(),
+            }),
+            ZoneId::work(),
+            Some(vec![7; 64]),
+        );
+        high_level.approval_token = Some(approval.clone());
+        let high_level_input = high_level.input.clone();
+        let provider_plan = build_n8n_official_mcp_run_once_plan(high_level, &config)
+            .expect("official MCP provider plan");
+        let typed_approval = build_n8n_typed_approval_binding(
+            "n8n.workflows.lifecycle",
+            &high_level_input,
+            &provider_plan,
+            Some(&approval),
+        )
+        .expect("typed approval binding");
+        let claim_plan = N8nReadOnlyRunOncePlan {
+            server_id: provider_plan.server_id,
+            operation: OperationId::from_static("n8n.workflows.lifecycle"),
+            zone_id: provider_plan.zone_id.clone(),
+            resource_uri: expected_n8n_read_only_resource_uri(
+                provider_plan.server_id,
+                "n8n.workflows.lifecycle",
+                &high_level_input,
+            )
+            .expect("canonical workflow resource"),
+            input: high_level_input,
+            approval_token: Some(approval),
+            deadline_ms: provider_plan.deadline_ms,
+            correlation_id: provider_plan.correlation_id.clone(),
+            credential_binding: provider_plan.credential_binding.clone(),
+            typed_approval: Some(typed_approval),
+        };
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let capability_token = test_capability_token(
+            &signing_key,
+            "mcp.tools.write",
+            N8N_OFFICIAL_MCP_CALL_OPERATION,
+            ZoneId::work().as_str(),
+        );
+        let (request, _) = build_n8n_official_mcp_invoke_request(provider_plan, capability_token);
+        (claim_plan, request)
+    }
+
     #[test]
     fn n8n_official_mcp_plan_is_tools_list_only_and_bearer_bound() {
         let config = run_once_n8n_official_mcp_test_config();
@@ -33727,7 +34093,7 @@ done"#;
         let approval = signed_external_approval(
             "chat-lifecycle-approval",
             "fcp.mcp-bridge",
-            plan.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION,
             mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
             official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
             ZoneId::work(),
@@ -33736,7 +34102,12 @@ done"#;
         let ApprovalScope::Execution(scope) = &approval.scope else {
             panic!("lifecycle approval must carry execution scope");
         };
+        assert_eq!(scope.method_pattern, N8N_APPROVAL_WRAPPER_OPERATION);
         assert_eq!(scope.input_constraints.len(), 7);
+        assert!(scope.input_constraints.iter().any(|constraint| {
+            constraint.pointer == "/operation"
+                && constraint.expected == json!(N8N_APPROVAL_WRAPPER_OPERATION)
+        }));
         assert_eq!(
             scope.input_hash,
             Some(mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash")),
@@ -33745,13 +34116,36 @@ done"#;
             Some(&approval),
             "chat-lifecycle-approval",
             "fcp.mcp-bridge",
-            plan.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION,
             &ZoneId::work(),
             mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
             &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
             Some(&signing_key.verifying_key()),
         )
         .expect("external lifecycle approval verifies");
+
+        let provider_scoped_approval = signed_external_approval(
+            "chat-lifecycle-approval",
+            "fcp.mcp-bridge",
+            N8N_OFFICIAL_MCP_CALL_OPERATION,
+            mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
+            official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
+            ZoneId::work(),
+            &signing_key,
+        );
+        assert!(
+            validate_external_n8n_approval(
+                Some(&provider_scoped_approval),
+                "chat-lifecycle-approval",
+                "fcp.mcp-bridge",
+                N8N_APPROVAL_WRAPPER_OPERATION,
+                &ZoneId::work(),
+                mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
+                &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
+                Some(&signing_key.verifying_key()),
+            )
+            .is_err()
+        );
 
         let mut changed_idempotency = n8n_official_mcp_lifecycle_test_input("publish");
         changed_idempotency.input["guard"]["idempotencyKey"] =
@@ -33764,7 +34158,7 @@ done"#;
                 Some(&approval),
                 "chat-lifecycle-approval",
                 "fcp.mcp-bridge",
-                changed_idempotency_plan.operation.as_str(),
+                N8N_APPROVAL_WRAPPER_OPERATION,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_idempotency_plan.input)
                     .expect("changed payload hash"),
@@ -33786,7 +34180,7 @@ done"#;
                 Some(&approval),
                 "chat-lifecycle-approval",
                 "fcp.mcp-bridge",
-                changed_precondition_plan.operation.as_str(),
+                N8N_APPROVAL_WRAPPER_OPERATION,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_precondition_plan.input)
                     .expect("changed payload hash"),
@@ -33955,7 +34349,7 @@ done"#;
         let approval = signed_external_approval(
             "chat-archive-approval",
             "fcp.mcp-bridge",
-            plan.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION,
             mcp_tools_call_payload_digest(&plan.input).expect("archive payload hash"),
             official_mcp_approval_constraints(&plan).expect("archive constraints"),
             ZoneId::work(),
@@ -33975,7 +34369,7 @@ done"#;
                 Some(&approval),
                 "chat-archive-approval",
                 "fcp.mcp-bridge",
-                changed_plan.operation.as_str(),
+                N8N_APPROVAL_WRAPPER_OPERATION,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_plan.input).expect("changed archive hash"),
                 &official_mcp_approval_constraints(&changed_plan)
@@ -34969,6 +35363,129 @@ done"#;
         assert!(receipt.contains("\"resultClass\":\"success\""));
         assert!(!receipt.contains("Draft"));
         assert!(!receipt.contains("connections"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_typed_run_once_orders_claim_and_provider_start_and_recovers_unknown() {
+        let (plan, request) = typed_official_mcp_test_fixture();
+        assert_eq!(request.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
+        let pending_root = tempfile::tempdir().expect("pending claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(pending_root.path().join(name)).expect("claim subdirectory");
+        }
+        drop(
+            n8n_run_once_claim_at(&plan, pending_root.path())
+                .expect("pending claim before simulated restart"),
+        );
+        let pending_restart = n8n_run_once_claim_at(&plan, pending_root.path())
+            .err()
+            .expect("pending restart is terminal unknown");
+        assert!(pending_restart.to_string().contains("outcome is unknown"));
+
+        let root = tempfile::tempdir().expect("typed claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+
+        let claim = n8n_run_once_claim_at(&plan, root.path()).expect("claim before dispatch");
+        let provider_calls = std::cell::Cell::new(0_u8);
+        assert_eq!(provider_calls.get(), 0);
+        claim.write_intent(&plan, &request).expect("intent receipt");
+        claim
+            .mark_provider_started(&plan, &request)
+            .expect("provider-start receipt immediately before dispatch");
+        let provider_start_path = root
+            .path()
+            .join("receipts")
+            .join(format!("{}.provider-start.json", claim.claim_digest));
+        assert!(provider_start_path.is_file());
+        provider_calls.set(provider_calls.get() + 1);
+        assert_eq!(provider_calls.get(), 1);
+
+        let provider_start =
+            std::fs::read_to_string(&provider_start_path).expect("provider-start receipt readback");
+        let expected_input_digest =
+            hex::encode(request_input_hash(&request.input).expect("provider request input digest"));
+        assert!(provider_start.contains(N8N_APPROVAL_WRAPPER_OPERATION));
+        assert!(provider_start.contains(&expected_input_digest));
+        assert!(!provider_start.contains("workflow-1"));
+        assert!(!provider_start.contains("11111111-2222-4333-8444-555555555555"));
+        assert!(!provider_start.contains(N8N_OFFICIAL_MCP_PUBLISH_TOOL));
+
+        drop(claim);
+        let replay_provider_calls = std::cell::Cell::new(0_u8);
+        let restart = match n8n_run_once_claim_at(&plan, root.path()) {
+            Ok(_) => {
+                replay_provider_calls.set(replay_provider_calls.get() + 1);
+                panic!("pending restart must not reacquire a provider permit");
+            }
+            Err(error) => error,
+        };
+        assert_eq!(replay_provider_calls.get(), 0);
+        assert!(restart.to_string().contains("outcome is unknown"));
+        assert!(restart.to_string().contains("automatic retry forbidden"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_typed_terminal_replay_never_calls_provider_and_receipt_is_request_bound() {
+        let (plan, request) = typed_official_mcp_test_fixture();
+        let root = tempfile::tempdir().expect("typed receipt state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+        let claim = n8n_run_once_claim_at(&plan, root.path()).expect("first claim");
+        claim.write_intent(&plan, &request).expect("intent receipt");
+        claim
+            .mark_provider_started(&plan, &request)
+            .expect("provider-start receipt");
+        claim
+            .write_receipt(&plan, &request, "success")
+            .expect("terminal receipt");
+        let receipt_path = root
+            .path()
+            .join("receipts")
+            .join(format!("{}.receipt.json", claim.claim_digest));
+        let receipt: Value = serde_json::from_str(
+            &std::fs::read_to_string(&receipt_path).expect("terminal receipt readback"),
+        )
+        .expect("terminal receipt JSON");
+        assert_eq!(receipt["wrapperOperation"], N8N_APPROVAL_WRAPPER_OPERATION);
+        assert_eq!(
+            receipt["inputDigest"],
+            hex::encode(request_input_hash(&request.input).expect("request input digest"))
+        );
+        assert!(receipt["typedPlanDigest"].as_str().is_some());
+        assert!(receipt["providerPayloadDigest"].as_str().is_some());
+        let rendered = receipt.to_string();
+        assert!(!rendered.contains("workflow-1"));
+        assert!(!rendered.contains("11111111-2222-4333-8444-555555555555"));
+        assert!(!rendered.contains(N8N_OFFICIAL_MCP_PUBLISH_TOOL));
+        drop(claim);
+
+        let provider_calls = std::cell::Cell::new(0_u8);
+        let replay = match n8n_run_once_claim_at(&plan, root.path()) {
+            Ok(_) => {
+                provider_calls.set(provider_calls.get() + 1);
+                panic!("terminal replay must not dispatch");
+            }
+            Err(error) => error,
+        };
+        assert_eq!(provider_calls.get(), 0);
+        assert!(replay.to_string().contains("already consumed"));
+
+        let mut mismatched = plan.clone();
+        mismatched
+            .typed_approval
+            .as_mut()
+            .expect("typed binding")
+            .provider_payload_digest =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        let mismatch = n8n_run_once_claim_at(&mismatched, root.path())
+            .err()
+            .expect("mismatched receipt binding must fail closed");
+        assert!(mismatch.to_string().contains("recovery binding mismatch"));
     }
 
     #[test]

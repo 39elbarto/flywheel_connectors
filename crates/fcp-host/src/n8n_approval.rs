@@ -10,10 +10,11 @@
 
 #![allow(dead_code)]
 
-use std::fmt;
+use std::{env, fmt, fs, str};
 
 use blake3::Hasher;
-use fcp_prelude::{ApprovalScope, ApprovalToken, Uuid, ZoneId};
+use fcp_crypto::{canonicalize::to_deterministic_cbor, ed25519::Ed25519VerifyingKey};
+use fcp_prelude::{ApprovalScope, ApprovalToken, ExecutionScope, InputConstraint, Uuid, ZoneId};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -23,18 +24,23 @@ const INPUT_DOMAIN: &[u8] = b"fwc-n8n.owner-approval-input.v1";
 const PRECONDITION_DOMAIN: &[u8] = b"fwc-n8n.owner-approval-precondition.v1";
 const OFFICIAL_MCP_PAYLOAD_DOMAIN: &str = "sha256:";
 const OFFICIAL_MCP_WRAPPER_OPERATION: &str = "n8n.mcp.call";
+const APPROVAL_REQUEST_SCHEMA: &str = "fwc.n8n.owner-approval-request.v1";
+const APPROVAL_ISSUER: &str = "owner:n8n-approval-issuer";
+const MAX_APPROVAL_TTL_MS: u64 = 60_000;
+const APPROVAL_PUBLIC_KEY_ENV: &str = "FCP_HOST_APPROVAL_PUBLIC_KEY";
+const APPROVAL_PUBLIC_KEY_FILE_ENV: &str = "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE";
 
 /// The typed lifecycle/archive operations covered by this seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum N8nLifecycleOperation {
+pub enum N8nLifecycleOperation {
     Publish,
     Unpublish,
     Archive,
 }
 
 impl N8nLifecycleOperation {
-    pub(crate) const fn operation_id(self) -> &'static str {
+    pub const fn operation_id(self) -> &'static str {
         match self {
             Self::Publish | Self::Unpublish => "n8n.workflows.lifecycle",
             Self::Archive => "n8n.workflows.archive",
@@ -53,7 +59,7 @@ impl N8nLifecycleOperation {
 /// An explicit provider target. Legacy LeviLaser is intentionally absent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum N8nApprovalServer {
+pub enum N8nApprovalServer {
     Eec,
     Hetzner,
 }
@@ -64,6 +70,43 @@ impl N8nApprovalServer {
             Self::Eec => "eec",
             Self::Hetzner => "hetzner",
         }
+    }
+}
+
+/// Non-secret, exact owner request consumed by the isolated issuer.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct N8nApprovalIssueRequest {
+    pub schema: String,
+    pub server: N8nApprovalServer,
+    pub workflow_id: String,
+    pub operation: N8nLifecycleOperation,
+    pub input: Value,
+    pub official_mcp_tool: String,
+    pub official_mcp_resource_uri: String,
+    pub official_mcp_payload_digest: String,
+    pub parent_binding_sha256: String,
+    pub expires_at_ms: u64,
+}
+
+impl fmt::Debug for N8nApprovalIssueRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("N8nApprovalIssueRequest")
+            .field("schema", &self.schema)
+            .field("server", &self.server)
+            .field("workflow_id", &"[REDACTED]")
+            .field("operation", &self.operation)
+            .field("input", &"[REDACTED]")
+            .field("official_mcp_tool", &self.official_mcp_tool)
+            .field("official_mcp_resource_uri", &self.official_mcp_resource_uri)
+            .field(
+                "official_mcp_payload_digest",
+                &self.official_mcp_payload_digest,
+            )
+            .field("parent_binding_sha256", &self.parent_binding_sha256)
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
     }
 }
 
@@ -351,8 +394,377 @@ pub fn n8n_typed_approval_plan_digest(
     .map(|plan| plan.plan_digest)
 }
 
+/// Build the exact provider-side constraints checked by the host for a typed
+/// lifecycle/archive approval.
+pub fn n8n_official_mcp_approval_constraints(
+    server: N8nApprovalServer,
+    official_mcp_tool: &str,
+    official_mcp_resource_uri: &str,
+    official_mcp_payload_digest: &str,
+    parent_binding_sha256: &str,
+    typed_plan_digest: &str,
+) -> Result<Vec<InputConstraint>, N8nApprovalError> {
+    if typed_plan_digest.is_empty()
+        || !is_sha256_digest(official_mcp_payload_digest)
+        || !is_raw_sha256_digest(parent_binding_sha256)
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "official MCP approval binding is invalid",
+        ));
+    }
+    let expected_tool = match official_mcp_tool {
+        "publish_workflow" | "unpublish_workflow" | "archive_workflow" => official_mcp_tool,
+        _ => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "official MCP tool is not lifecycle/archive",
+            ));
+        }
+    };
+    let payload_sha256 = official_mcp_payload_digest
+        .strip_prefix(OFFICIAL_MCP_PAYLOAD_DOMAIN)
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "official MCP payload digest is invalid",
+        ))?;
+    if !is_raw_sha256_digest(payload_sha256) {
+        return Err(N8nApprovalError::InvalidPlan(
+            "official MCP payload digest is invalid",
+        ));
+    }
+    let server_root = format!("fwc-mcp-bridge://{}", server.as_str());
+    if official_mcp_resource_uri != server_root {
+        return Err(N8nApprovalError::InvalidPlan(
+            "official MCP resource binding is invalid",
+        ));
+    }
+    Ok([
+        (
+            "operation",
+            Value::String(OFFICIAL_MCP_WRAPPER_OPERATION.to_owned()),
+        ),
+        (
+            "parent_binding_sha256",
+            Value::String(parent_binding_sha256.to_owned()),
+        ),
+        ("payload_sha256", Value::String(payload_sha256.to_owned())),
+        ("provider", Value::String("mcp".to_owned())),
+        (
+            "resource_uri",
+            Value::String(official_mcp_resource_uri.to_owned()),
+        ),
+        ("server_id", Value::String(server.as_str().to_owned())),
+        ("tool_name", Value::String(expected_tool.to_owned())),
+        (
+            "typed_plan_sha256",
+            Value::String(typed_plan_digest.to_owned()),
+        ),
+    ]
+    .into_iter()
+    .map(|(field, expected)| InputConstraint {
+        pointer: format!("/{field}"),
+        expected,
+    })
+    .collect())
+}
+
+/// Load the same runtime trust-root source used by the host's typed n8n path.
+/// The issuer deliberately does not embed a separate build-time key.
+pub fn n8n_runtime_approval_verifying_key() -> Result<Ed25519VerifyingKey, N8nApprovalError> {
+    let inline = env::var(APPROVAL_PUBLIC_KEY_ENV).ok();
+    let file = env::var(APPROVAL_PUBLIC_KEY_FILE_ENV).ok();
+    if inline.is_some() && file.is_some() {
+        return Err(N8nApprovalError::IssuerUnavailable);
+    }
+    let bytes = if let Some(raw) = inline {
+        decode_public_key_text(&raw)?
+    } else if let Some(path) = file {
+        let raw = fs::read(path).map_err(|_| N8nApprovalError::IssuerUnavailable)?;
+        if raw.len() == 32 {
+            raw
+        } else {
+            let text = str::from_utf8(&raw).map_err(|_| N8nApprovalError::IssuerUnavailable)?;
+            decode_public_key_text(text)?
+        }
+    } else {
+        return Err(N8nApprovalError::IssuerUnavailable);
+    };
+    let bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| N8nApprovalError::IssuerUnavailable)?;
+    Ed25519VerifyingKey::from_bytes(&bytes).map_err(|_| N8nApprovalError::IssuerUnavailable)
+}
+
+fn decode_public_key_text(raw: &str) -> Result<Vec<u8>, N8nApprovalError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(N8nApprovalError::IssuerUnavailable);
+    }
+    hex::decode(trimmed)
+        .or_else(|_| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, trimmed))
+        .or_else(|_| base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, trimmed))
+        .map_err(|_| N8nApprovalError::IssuerUnavailable)
+}
+
+fn n8n_parent_binding_digest(
+    server: N8nApprovalServer,
+    resource_uri: &str,
+    operation: &str,
+    input: &Value,
+) -> Result<String, N8nApprovalError> {
+    let canonical = to_deterministic_cbor(&json!({
+        "server_id": server.as_str(),
+        "resource_uri": resource_uri,
+        "operation": operation,
+        "input": input,
+    }))
+    .map_err(|_| N8nApprovalError::InvalidPlan("high-level binding cannot be canonicalized"))?;
+    Ok(hex::encode(blake3::hash(&canonical).as_bytes()))
+}
+
+/// Construct the unsigned existing FCP `ApprovalToken` shape. The isolated
+/// binary owns private-key handling and signs the canonical bytes separately.
+pub fn build_unsigned_n8n_approval_token(
+    request: &N8nApprovalIssueRequest,
+    now_ms: u64,
+) -> Result<ApprovalToken, N8nApprovalError> {
+    validate_issue_request(request, now_ms)?;
+    let object = request
+        .input
+        .as_object()
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "high-level input must be an object",
+        ))?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or(N8nApprovalError::InvalidPlan("guard is missing"))?;
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .ok_or(N8nApprovalError::InvalidPlan("approvalRef is missing"))?;
+    let idempotency_key = guard
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .ok_or(N8nApprovalError::InvalidPlan("idempotency key is missing"))?;
+    let precondition = guard
+        .get("precondition")
+        .ok_or(N8nApprovalError::InvalidPlan("precondition is missing"))?;
+    let plan = N8nApprovalPlan::from_official_mcp(
+        request.server,
+        &request.workflow_id,
+        request.operation,
+        &request.official_mcp_tool,
+        &request.official_mcp_payload_digest,
+        &request.input,
+        precondition,
+        idempotency_key,
+        request.expires_at_ms,
+    )?;
+    let expected_parent_binding = n8n_parent_binding_digest(
+        request.server,
+        &plan.resource_uri,
+        request.operation.operation_id(),
+        &request.input,
+    )?;
+    if expected_parent_binding != request.parent_binding_sha256 {
+        return Err(N8nApprovalError::InvalidPlan(
+            "parent binding does not match the exact high-level request",
+        ));
+    }
+    let constraints = n8n_official_mcp_approval_constraints(
+        request.server,
+        &request.official_mcp_tool,
+        &request.official_mcp_resource_uri,
+        &request.official_mcp_payload_digest,
+        &request.parent_binding_sha256,
+        &plan.plan_digest,
+    )?;
+    let payload_hex = request
+        .official_mcp_payload_digest
+        .strip_prefix(OFFICIAL_MCP_PAYLOAD_DOMAIN)
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "official MCP payload digest is invalid",
+        ))?;
+    let mut input_hash = [0_u8; 32];
+    hex::decode_to_slice(payload_hex, &mut input_hash)
+        .map_err(|_| N8nApprovalError::InvalidPlan("official MCP payload digest is invalid"))?;
+    Ok(ApprovalToken::approved(
+        approval_ref,
+        now_ms,
+        request.expires_at_ms,
+        APPROVAL_ISSUER,
+        ApprovalScope::Execution(ExecutionScope {
+            connector_id: "fcp.mcp-bridge".to_owned(),
+            method_pattern: OFFICIAL_MCP_WRAPPER_OPERATION.to_owned(),
+            request_object_id: None,
+            input_hash: Some(input_hash),
+            input_constraints: constraints,
+        }),
+        ZoneId::work(),
+        None,
+    ))
+}
+
+fn validate_issue_request(
+    request: &N8nApprovalIssueRequest,
+    now_ms: u64,
+) -> Result<(), N8nApprovalError> {
+    if request.schema != APPROVAL_REQUEST_SCHEMA
+        || request.expires_at_ms <= now_ms
+        || request.expires_at_ms > now_ms.saturating_add(MAX_APPROVAL_TTL_MS)
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "request schema or short expiry is invalid",
+        ));
+    }
+    let object = request
+        .input
+        .as_object()
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "high-level input must be an object",
+        ))?;
+    let allowed_top_level: &[&str] = match request.operation {
+        N8nLifecycleOperation::Publish => &["id", "action", "versionId", "guard"],
+        N8nLifecycleOperation::Unpublish => &["id", "action", "guard"],
+        N8nLifecycleOperation::Archive => &["id", "guard"],
+    };
+    if object
+        .keys()
+        .any(|key| !allowed_top_level.contains(&key.as_str()))
+        || object.get("id").and_then(Value::as_str) != Some(request.workflow_id.as_str())
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "workflow target or high-level input is not exact",
+        ));
+    }
+    match request.operation {
+        N8nLifecycleOperation::Publish => {
+            if object.get("action").and_then(Value::as_str) != Some("publish") {
+                return Err(N8nApprovalError::InvalidPlan("publish action is not exact"));
+            }
+            if let Some(version) = object.get("versionId") {
+                validate_identifier(version, "publish version is invalid")?;
+            }
+        }
+        N8nLifecycleOperation::Unpublish => {
+            if object.get("action").and_then(Value::as_str) != Some("unpublish") {
+                return Err(N8nApprovalError::InvalidPlan(
+                    "unpublish action is not exact",
+                ));
+            }
+        }
+        N8nLifecycleOperation::Archive => {}
+    }
+    validate_identifier(
+        object.get("id").unwrap_or(&Value::Null),
+        "workflow id is invalid",
+    )?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or(N8nApprovalError::InvalidPlan("guard is missing"))?;
+    if guard.len() != 3
+        || !guard.contains_key("approvalRef")
+        || !guard.contains_key("idempotencyKey")
+        || !guard.contains_key("precondition")
+    {
+        return Err(N8nApprovalError::InvalidPlan("guard is not exact"));
+    }
+    guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or(N8nApprovalError::InvalidPlan("approvalRef is invalid"))?;
+    let idempotency_key = guard
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .ok_or(N8nApprovalError::InvalidPlan("idempotency key is missing"))?;
+    Uuid::parse_str(idempotency_key)
+        .map_err(|_| N8nApprovalError::InvalidPlan("idempotency key must be a UUID"))?;
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or(N8nApprovalError::InvalidPlan("precondition is missing"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition.len() != REQUIRED.len()
+        || REQUIRED
+            .iter()
+            .any(|field| !precondition.contains_key(*field))
+    {
+        return Err(N8nApprovalError::InvalidPlan("precondition is not exact"));
+    }
+    validate_identifier(
+        precondition.get("versionId").unwrap_or(&Value::Null),
+        "precondition version is invalid",
+    )?;
+    let active_version = precondition
+        .get("activeVersionId")
+        .ok_or(N8nApprovalError::InvalidPlan("activeVersionId is missing"))?;
+    if !active_version.is_null() {
+        validate_identifier(active_version, "activeVersionId is invalid")?;
+    }
+    if precondition
+        .get("active")
+        .and_then(Value::as_bool)
+        .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "precondition value is invalid",
+        ));
+    }
+    if request.operation == N8nLifecycleOperation::Archive
+        && (precondition.get("active") != Some(&Value::Bool(false))
+            || precondition.get("isArchived") != Some(&Value::Bool(false))
+            || !active_version.is_null())
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "archive precondition is not inactive and unarchived",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &Value, message: &'static str) -> Result<(), N8nApprovalError> {
+    value
+        .as_str()
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or(N8nApprovalError::InvalidPlan(message))?;
+    Ok(())
+}
+
+fn is_blake3_digest(value: &str) -> bool {
+    value.strip_prefix("blake3-256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn is_raw_sha256_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
-pub(crate) enum N8nApprovalError {
+pub enum N8nApprovalError {
     #[error("invalid n8n approval plan: {0}")]
     InvalidPlan(&'static str),
     #[error("owner confirmation does not match the exact n8n plan")]
@@ -711,5 +1123,158 @@ mod tests {
         changed_resource.resource_uri = "fwc-n8n://eec/workflows/other".to_string();
         changed_resource.refresh_digest();
         assert_ne!(changed_resource.plan_digest, exact);
+    }
+
+    fn issue_request() -> N8nApprovalIssueRequest {
+        let mut request = N8nApprovalIssueRequest {
+            schema: APPROVAL_REQUEST_SCHEMA.to_owned(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: "workflow-1".to_owned(),
+            operation: N8nLifecycleOperation::Publish,
+            input: json!({
+                "id": "workflow-1",
+                "action": "publish",
+                "versionId": "version-2",
+                "guard": {
+                    "approvalRef": "approval-1",
+                    "idempotencyKey": "00000000-0000-4000-8000-000000000001",
+                    "precondition": {
+                        "versionId": "version-1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }
+            }),
+            official_mcp_tool: "publish_workflow".to_owned(),
+            official_mcp_resource_uri: "fwc-mcp-bridge://eec".to_owned(),
+            official_mcp_payload_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            parent_binding_sha256: String::new(),
+            expires_at_ms: NOW + MAX_APPROVAL_TTL_MS,
+        };
+        let plan = N8nApprovalPlan::from_official_mcp(
+            request.server,
+            &request.workflow_id,
+            request.operation,
+            &request.official_mcp_tool,
+            &request.official_mcp_payload_digest,
+            &request.input,
+            &request.input["guard"]["precondition"],
+            request.input["guard"]["idempotencyKey"]
+                .as_str()
+                .expect("idempotency key"),
+            request.expires_at_ms,
+        )
+        .expect("plan");
+        request.parent_binding_sha256 = n8n_parent_binding_digest(
+            request.server,
+            &plan.resource_uri,
+            request.operation.operation_id(),
+            &request.input,
+        )
+        .expect("parent binding");
+        request
+    }
+
+    #[test]
+    fn issued_token_has_host_parity_and_valid_signature() {
+        let request = issue_request();
+        let mut token = build_unsigned_n8n_approval_token(&request, NOW).expect("unsigned token");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let bytes = canonical_approval_token_bytes(&token).expect("canonical token");
+        token.signature = Some(signing_key.sign(&bytes).to_bytes().to_vec());
+        let signature = fcp_crypto::ed25519::Ed25519Signature::try_from_slice(
+            token.signature.as_deref().expect("signature"),
+        )
+        .expect("signature bytes");
+        signing_key
+            .verifying_key()
+            .verify(
+                &canonical_approval_token_bytes(&token).expect("canonical signed token"),
+                &signature,
+            )
+            .expect("valid signature");
+        assert!(matches!(token.scope, ApprovalScope::Execution(_)));
+        let ApprovalScope::Execution(scope) = token.scope else {
+            return;
+        };
+        assert_eq!(scope.connector_id, "fcp.mcp-bridge");
+        assert_eq!(scope.method_pattern, OFFICIAL_MCP_WRAPPER_OPERATION);
+        assert_eq!(scope.input_constraints.len(), 8);
+        assert_eq!(
+            scope
+                .input_constraints
+                .iter()
+                .map(|constraint| constraint.pointer.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/operation",
+                "/parent_binding_sha256",
+                "/payload_sha256",
+                "/provider",
+                "/resource_uri",
+                "/server_id",
+                "/tool_name",
+                "/typed_plan_sha256",
+            ]
+        );
+        assert!(scope.input_constraints.iter().any(|constraint| {
+            constraint.pointer == "/parent_binding_sha256"
+                && constraint.expected == Value::String(request.parent_binding_sha256.clone())
+        }));
+    }
+
+    #[test]
+    fn issuer_rejects_wrong_server_tool_precondition_idempotency_and_expiry() {
+        let unknown_server = serde_json::from_value::<N8nApprovalIssueRequest>(json!({
+            "schema": APPROVAL_REQUEST_SCHEMA,
+            "server": "legacy",
+            "workflow_id": "workflow-1",
+            "operation": "publish",
+            "input": {},
+            "official_mcp_tool": "publish_workflow",
+            "official_mcp_resource_uri": "fwc-mcp-bridge://legacy",
+            "official_mcp_payload_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "parent_binding_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "expires_at_ms": NOW + 1,
+        }));
+        assert!(unknown_server.is_err());
+
+        let mut wrong_tool = issue_request();
+        wrong_tool.official_mcp_tool = "update_workflow".to_owned();
+        assert!(build_unsigned_n8n_approval_token(&wrong_tool, NOW).is_err());
+
+        let mut wrong_precondition = issue_request();
+        wrong_precondition.input["guard"]["precondition"]["active"] = Value::String("false".into());
+        assert!(build_unsigned_n8n_approval_token(&wrong_precondition, NOW).is_err());
+
+        let mut wrong_idempotency = issue_request();
+        wrong_idempotency.input["guard"]["idempotencyKey"] = Value::String("not-a-uuid".into());
+        assert!(build_unsigned_n8n_approval_token(&wrong_idempotency, NOW).is_err());
+
+        let mut stale = issue_request();
+        stale.expires_at_ms = NOW;
+        assert!(build_unsigned_n8n_approval_token(&stale, NOW).is_err());
+        let mut too_long = issue_request();
+        too_long.expires_at_ms = NOW + MAX_APPROVAL_TTL_MS + 1;
+        assert!(build_unsigned_n8n_approval_token(&too_long, NOW).is_err());
+    }
+
+    #[test]
+    fn issuer_rejects_parent_binding_that_does_not_match_request() {
+        let mut request = issue_request();
+        request.parent_binding_sha256 =
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+        assert!(build_unsigned_n8n_approval_token(&request, NOW).is_err());
+    }
+
+    #[test]
+    fn issue_request_debug_redacts_workflow_and_high_level_payload() {
+        let debug = format!("{:?}", issue_request());
+        assert!(!debug.contains("workflow-1"));
+        assert!(!debug.contains("approval-1"));
+        assert!(!debug.contains("version-2"));
     }
 }

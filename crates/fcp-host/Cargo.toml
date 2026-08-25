@@ -14,6 +14,12 @@ unsafe_code = "deny"
 [features]
 default = []
 otlp = ["fcp-telemetry/otlp"]
+n8n-approval-issuer = []
+
+[[bin]]
+name = "fcp-n8n-approval-issue"
+path = "src/bin/fcp-n8n-approval-issue.rs"
+required-features = ["n8n-approval-issuer"]
 
 [dependencies]
 # Core FCP types
@@ -51,6 +57,7 @@ base64 = { workspace = true }
 hex = { workspace = true }
 ciborium = { workspace = true }
 subtle = { workspace = true }
+zeroize = { workspace = true }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

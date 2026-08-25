@@ -61,7 +61,6 @@ use fcp_evidence::{
 };
 #[cfg(test)]
 use fcp_host::ConnectorLaunchBinding;
-use fcp_host::n8n_typed_approval_plan_digest;
 use fcp_host::{
     AdaptiveWarmPoolConfig, AdaptiveWarmPoolController, BatchExecutor, BatchInvokeRequest,
     BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions, BatchScheduleHint,
@@ -116,6 +115,10 @@ use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostR
 #[cfg(target_os = "linux")]
 use fcp_host::{
     InheritedEgressCodec, OwnedInvocationConfig, OwnedInvocationError, OwnedInvocationHandle,
+};
+use fcp_host::{
+    N8nApprovalServer, n8n_official_mcp_approval_constraints, n8n_runtime_approval_verifying_key,
+    n8n_typed_approval_plan_digest,
 };
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
@@ -11532,14 +11535,42 @@ fn official_mcp_approval_constraints_with_typed_plan(
     plan: &N8nOfficialMcpRunOncePlan,
     typed_approval: Option<&N8nTypedApprovalReceiptBinding>,
 ) -> HostResult<Vec<InputConstraint>> {
-    let mut constraints = official_mcp_approval_constraints(plan)?;
     if let Some(typed_approval) = typed_approval {
-        constraints.push(InputConstraint {
-            pointer: "/typed_plan_sha256".to_string(),
-            expected: Value::String(typed_approval.plan_digest.clone()),
+        let server = match plan.server_id {
+            N8nReadOnlyServerId::Eec => N8nApprovalServer::Eec,
+            N8nReadOnlyServerId::Hetzner => N8nApprovalServer::Hetzner,
+        };
+        let tool = plan
+            .input
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HostError::PreflightFailed("official MCP tool is missing".to_string())
+            })?;
+        let payload_digest = format!(
+            "sha256:{}",
+            hex::encode(mcp_tools_call_payload_digest(&plan.input)?)
+        );
+        let parent_binding = plan.parent_binding_hash.ok_or_else(|| {
+            HostError::PreflightFailed(
+                "typed official MCP approval parent binding is missing".to_string(),
+            )
+        })?;
+        return n8n_official_mcp_approval_constraints(
+            server,
+            tool,
+            &plan.resource_uri,
+            &payload_digest,
+            &hex::encode(parent_binding),
+            &typed_approval.plan_digest,
+        )
+        .map_err(|_| {
+            HostError::PreflightFailed(
+                "typed official MCP approval constraints were denied".to_string(),
+            )
         });
     }
-    Ok(constraints)
+    official_mcp_approval_constraints(plan)
 }
 
 fn build_n8n_typed_approval_binding(
@@ -14088,11 +14119,8 @@ async fn async_n8n_official_mcp_run_once(
             .pointer("/guard/approvalRef")
             .and_then(Value::as_str)
             .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
-        let verifying_key = resolve_verifying_key(
-            "FCP_HOST_APPROVAL_PUBLIC_KEY",
-            "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE",
-        )?
-        .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        let verifying_key = n8n_runtime_approval_verifying_key()
+            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
         let payload_digest = mcp_tools_call_payload_digest(&plan.input)
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
         let constraints =

@@ -7,6 +7,7 @@
 //! the current local trust root; this module does not claim signature
 //! verification.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File, Metadata};
 use std::io::Read;
@@ -18,6 +19,7 @@ use serde_json::Value;
 
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const RECEIPT_FILE: &str = "receipt.json";
+const OPTIONAL_METADATA_FILES: [&str; 2] = ["provenance.json", "provision-receipt.json"];
 const FIXED_INSTALL_ROOT: &str = "/usr/local/lib/fwc-n8n";
 const FIXED_CURRENT_PATH: &str = "/usr/local/lib/fwc-n8n/current";
 const MAX_RECEIPT_BYTES: usize = 128 * 1024;
@@ -395,6 +397,7 @@ fn verify_release_bundle(
     verify_file(&receipt_path, expected_owner, false)?;
     let receipt = read_receipt(&receipt_path)?;
     validate_receipt_shape(&receipt, root)?;
+    validate_release_tree_entries(root)?;
 
     let verified_artifacts = verify_release_artifacts(root, expected_owner, &receipt)?;
 
@@ -478,6 +481,48 @@ fn verify_release_bundle(
         zone_policy_digest,
         local_mcp_policy,
     })
+}
+
+#[cfg(unix)]
+fn validate_release_tree_entries(root: &Path) -> Result<(), BundleError> {
+    let root_entries = EXPECTED_ARTIFACTS
+        .iter()
+        .filter_map(|path| path.split_once('/').map(|(directory, _)| directory))
+        .chain(std::iter::once(RECEIPT_FILE))
+        .chain(OPTIONAL_METADATA_FILES)
+        .collect::<BTreeSet<_>>();
+    for entry in fs::read_dir(root).map_err(|_| BundleError::new(BundleErrorCode::Layout))? {
+        let entry = entry.map_err(|_| BundleError::new(BundleErrorCode::Layout))?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactPath))?;
+        if !root_entries.contains(name.as_str()) {
+            return Err(BundleError::new(BundleErrorCode::ArtifactSet));
+        }
+    }
+    for directory in ["bin", "manifests", "inventory", "policy"] {
+        let expected = EXPECTED_ARTIFACTS
+            .iter()
+            .filter_map(|path| path.strip_prefix(&format!("{directory}/")))
+            .collect::<BTreeSet<_>>();
+        let directory_path = root.join(directory);
+        for entry in
+            fs::read_dir(&directory_path).map_err(|_| BundleError::new(BundleErrorCode::Layout))?
+        {
+            let entry = entry.map_err(|_| BundleError::new(BundleErrorCode::Layout))?;
+            let name = entry
+                .file_name()
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| BundleError::new(BundleErrorCode::ArtifactPath))?;
+            if !expected.contains(name.as_str()) {
+                return Err(BundleError::new(BundleErrorCode::ArtifactSet));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1676,6 +1721,29 @@ mod tests {
                 .expect_err("dynamic provider must fail")
                 .code(),
             BundleErrorCode::RuntimeFormat
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_issuer_is_not_an_installable_release_artifact() {
+        assert!(!EXPECTED_ARTIFACTS.contains(&"bin/fcp-n8n-approval-issue"));
+        let fixture = ReleaseFixture::new();
+        fs::write(
+            fixture.artifact("bin/fcp-n8n-approval-issue"),
+            b"owner issuer must stay outside runtime bundle",
+        )
+        .expect("write forbidden issuer fixture");
+        fs::set_permissions(
+            fixture.artifact("bin/fcp-n8n-approval-issue"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("restrict forbidden issuer fixture");
+        assert_eq!(
+            verify_release_bundle_for_owner(&fixture.executable, fixture.owner)
+                .expect_err("issuer artifact must be rejected")
+                .code(),
+            BundleErrorCode::ArtifactSet
         );
     }
 

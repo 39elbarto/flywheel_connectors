@@ -383,6 +383,20 @@ or already-consumed tokens never reach provider I/O. Official-MCP lifecycle
 calls bind the child `fcp.mcp-bridge` payload digest and policy constraints in
 the same way.
 
+The bounded owner-confirmation seam is typed to publish, unpublish, and archive
+only. It computes a redaction-safe plan digest over the exact EEC/Hetzner
+target, operation, canonical input and precondition digests, UUID idempotency
+key, and expiry; confirmation must echo that digest. `fcp-host` reuses the
+existing `ApprovalToken` canonicalization contract through a fail-closed issuer
+seam and does not load or accept private key material. This module is not a
+second ledger and is not wired as an independent provider gate: the existing
+host run-once path remains authoritative for cryptographic verification, full
+resource/workflow/input/precondition/idempotency binding, one-use claim,
+provider-attempt receipts, `unknown` recovery, and no-retry behavior. A future
+trusted host/Keepass adapter must map a confirmed plan into that existing path
+before any lifecycle write is enabled. Fallback MCP profiles and release/systemd
+profiles are unchanged.
+
 ### 4.4 Response envelope
 
 ```json

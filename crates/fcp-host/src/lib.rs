@@ -50,6 +50,7 @@ mod local_mcp;
 mod migration_linux;
 #[cfg(target_os = "macos")]
 mod migration_macos;
+mod n8n_approval;
 mod n8n_dispatch;
 mod network_policy;
 mod output_capture;
@@ -84,6 +85,7 @@ pub use local_mcp::*;
 pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
+pub use n8n_approval::canonical_approval_token_bytes;
 pub use n8n_dispatch::*;
 pub use network_policy::*;
 pub use output_capture::*;

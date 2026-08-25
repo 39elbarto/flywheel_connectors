@@ -7325,9 +7325,7 @@ fn request_input_hash(input: &serde_json::Value) -> HostResult<[u8; 32]> {
 }
 
 fn approval_token_signing_bytes(token: &ApprovalToken) -> HostResult<Vec<u8>> {
-    let mut unsigned = token.clone();
-    unsigned.signature = None;
-    fcp_cbor::to_canonical_cbor(&unsigned).map_err(|error| {
+    fcp_host::canonical_approval_token_bytes(token).map_err(|error| {
         HostError::Internal(format!("failed to canonicalize approval token: {error}"))
     })
 }

@@ -1675,7 +1675,7 @@ pub(crate) fn verify_release_signature(
         return Err(ProvisionError::new(ProvisionErrorCode::Signature));
     }
     let configured_key = [
-        &owner_verification.active,
+        Some(&owner_verification.active),
         owner_verification.previous.as_ref(),
     ]
     .into_iter()

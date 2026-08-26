@@ -151,7 +151,7 @@ run_static_smoke() {
     CARGO_TARGET_DIR="$TARGET_DIR" \
     TMPDIR="$TARGET_DIR/tmp" \
     FCP_N8N_OWNED_SMOKE_BINARY="$TARGET_DIR/release/fcp-n8n" \
-    cargo --locked --offline test -p fcp-host --test n8n_owned_static_smoke \
+    cargo --locked --offline test --release -p fcp-host --test n8n_owned_static_smoke \
       static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
 }
 

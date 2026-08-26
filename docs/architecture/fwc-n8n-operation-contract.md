@@ -107,10 +107,15 @@ and never deletes releases; a failed `current` promotion leaves the immutable re
 and old pointer where possible. Non-Linux fails closed. The `fwc-n8n provision`
 CLI provides the narrow owner wiring: it accepts only a bounded
 `fwc.n8n.provision-request.v1` envelope with release metadata and the fixed
-server binding map. The public trust root comes only from immutable
-release-build configuration: stdin cannot select its key ID or public key,
-missing production configuration fails closed, and no private key is read or
-generated. Its default mode is read-only preflight; `--mode apply` requires
+server binding map. The public trust roots come only from immutable
+release-build configuration: stdin cannot select a key ID or public key,
+missing or malformed production configuration fails closed, and no private key
+is read or generated. During a bounded migration,
+`FWC_N8N_OWNER_PUBLIC_KEY_HEX` is the active signing root and the optional
+`FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX` preserves exactly one prior rollback
+root. Verification selects only a configured root by the receipt key ID; the
+signer accepts only the active root, and duplicate roots are rejected. Its
+default mode is read-only preflight; `--mode apply` requires
 effective UID 0, while the installer seam and both Linux mutation functions
 enforce that requirement again independently of the CLI. Promotion accepts
 only the exact direct child `/var/lib/fwc-n8n/staging/<release_id>` with a
@@ -147,8 +152,10 @@ paths. Before producing a receipt it reuses the complete no-follow unsigned
 release validator, including ownership/mode checks, provenance, twelve
 artifact digests, inventory/policy semantics, and exact EEC/Hetzner binding
 equality. The derived Ed25519 public key and key ID must match the immutable
-build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX` trust root. Seed bytes are held in
-zeroizing buffers and never come from an argument, environment variable, or
+build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX` active trust root. A migration
+release may additionally embed `FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX` for
+rollback verification only; seed bytes are held in zeroizing buffers and never
+come from an argument, environment variable, or
 the signer’s own KeePass access. The signer emits only the signed receipt and
 does not call n8n, write the stage, install a release, switch `current`, or
 modify workflows. Placing that receipt into a staged tree and running the

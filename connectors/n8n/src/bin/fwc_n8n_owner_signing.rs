@@ -54,7 +54,7 @@ pub(crate) fn sign_staged_provision_receipt(
             provision::ProvisionError::new(provision::ProvisionErrorCode::Signature)
         })?;
         let verifying_key = signing_key.verifying_key();
-        if !owner_verification.matches_verifying_key(&verifying_key)? {
+        if !owner_verification.matches_active_verifying_key(&verifying_key)? {
             return Err(provision::ProvisionError::new(
                 provision::ProvisionErrorCode::Signature,
             ));

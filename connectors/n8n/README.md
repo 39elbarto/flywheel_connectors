@@ -46,10 +46,15 @@ releases; partial promotion preserves the immutable release and old `current`
 where possible. Non-Linux fails closed. The `fwc-n8n provision` command is the
 bounded owner wiring:
 it reads a strict `fwc.n8n.provision-request.v1` JSON envelope containing only
-release metadata and the fixed server binding map. The owner public trust root
-is embedded by immutable release-build configuration; stdin cannot select a
-key ID or public key, missing configuration fails closed, and the provisioner
-never reads or generates a private key. With no mode (or `--mode preflight`) it
+release metadata and the fixed server binding map. The owner public trust roots
+are embedded by immutable release-build configuration; stdin cannot select a
+key ID or public key, missing or malformed configuration fails closed, and the
+provisioner never reads or generates a private key. During a bounded key
+migration, `FWC_N8N_OWNER_PUBLIC_KEY_HEX` is the active signing root and the
+optional `FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX` preserves exactly one prior
+rollback root. Receipt verification selects only a configured key by the
+receipt key ID; the signer accepts only the active root. With no mode (or
+`--mode preflight`) it
 performs read-only validation and returns a redacted plan summary. `--mode
 apply` requires effective UID 0, and both the installer seam and its Linux
 mutation boundary repeat that check independently of the CLI. The existing
@@ -87,8 +92,11 @@ Before signing, it reuses the provisioner’s complete no-follow unsigned-tree
 validator: ownership/modes, provenance, all twelve artifact digests, inventory
 and policy semantics, and exact EEC/Hetzner schema bindings must pass. The
 derived public key and key ID must match the immutable build-time
-`FWC_N8N_OWNER_PUBLIC_KEY_HEX` trust root. The seed is accepted only as exactly
-32 decoded bytes (44 Base64 characters with at most one final LF), is held in
+`FWC_N8N_OWNER_PUBLIC_KEY_HEX` active trust root. A release may also embed
+`FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX` for rollback verification; it is never
+used for signing, and the two configured roots must be distinct. The seed is
+accepted only as exactly 32 decoded bytes (44 Base64 characters with at most
+one final LF), is held in
 zeroizing buffers, is never read from KeePass by the binary, and is never
 accepted from an argument or environment variable.
 

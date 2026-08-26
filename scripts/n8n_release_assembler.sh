@@ -32,6 +32,7 @@ die() {
 usage() {
   cat >&2 <<'EOF'
 usage: sudo FWC_N8N_OWNER_PUBLIC_KEY_HEX=<64 lowercase hex chars> \
+  [FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX=<64 lowercase hex chars>] \
   scripts/n8n_release_assembler.sh \
   --release-id <safe-release-id> \
   [--target-dir /srv/hdd500gb-internal/fwc-build-cache/<name>]
@@ -99,15 +100,28 @@ build_hash_helper() {
 
 build_one() {
   echo "[build] $*" >&2
-  env \
-    CARGO_HOME="${CARGO_HOME}" \
-    CARGO_NET_OFFLINE=true \
-    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
-    CARGO_INCREMENTAL=0 \
-    CARGO_TARGET_DIR="$TARGET_DIR" \
-    TMPDIR="$TARGET_DIR/tmp" \
-    FWC_N8N_OWNER_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PUBLIC_KEY_HEX" \
-    cargo --locked --offline "$@"
+  if [[ -n "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX:-}" ]]; then
+    env \
+      CARGO_HOME="${CARGO_HOME}" \
+      CARGO_NET_OFFLINE=true \
+      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
+      CARGO_INCREMENTAL=0 \
+      CARGO_TARGET_DIR="$TARGET_DIR" \
+      TMPDIR="$TARGET_DIR/tmp" \
+      FWC_N8N_OWNER_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PUBLIC_KEY_HEX" \
+      FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX" \
+      cargo --locked --offline "$@"
+  else
+    env \
+      CARGO_HOME="${CARGO_HOME}" \
+      CARGO_NET_OFFLINE=true \
+      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
+      CARGO_INCREMENTAL=0 \
+      CARGO_TARGET_DIR="$TARGET_DIR" \
+      TMPDIR="$TARGET_DIR/tmp" \
+      FWC_N8N_OWNER_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PUBLIC_KEY_HEX" \
+      cargo --locked --offline "$@"
+  fi
 }
 
 require_clean_tracked_head() {
@@ -300,6 +314,12 @@ main() {
   is_safe_release_id "$release_id" || die "invalid release id"
   is_hdd_target "$TARGET_DIR" || die "target dir must be below ${HDD_ROOT}/fwc-build-cache"
   [[ "${FWC_N8N_OWNER_PUBLIC_KEY_HEX:-}" =~ ^[0-9a-f]{64}$ ]] || die "FWC_N8N_OWNER_PUBLIC_KEY_HEX must be 64 lowercase hex characters"
+  if [[ -n "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX:-}" ]]; then
+    [[ "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX}" =~ ^[0-9a-f]{64}$ ]] \
+      || die "FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX must be 64 lowercase hex characters"
+    [[ "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX}" != "${FWC_N8N_OWNER_PUBLIC_KEY_HEX}" ]] \
+      || die "active and previous owner public keys must differ"
+  fi
   CARGO_HOME="${CARGO_HOME:-${HDD_ROOT}/fwc-build-cache/cargo-home}"
   is_hdd_target "$CARGO_HOME" || die "CARGO_HOME must be below ${HDD_ROOT}/fwc-build-cache"
   require_hdd_mount

@@ -132,8 +132,22 @@ the current symlink, direct-child release layout, ownership, provenance, and
 the complete old immutable-bundle verifier all pass. This fallback has no
 caller-controlled path and is not used when a provision receipt exists but is
 invalid. The staged candidate still requires a complete owner-signed provision
-receipt. Once the first candidate is promoted, the current pointer must pass
-the new signed provision-receipt contract for every later promotion.
+receipt.
+
+Migration from an older signed release has a separate, narrower compatibility
+mode. When fixed `current` has a structurally valid signed provision receipt
+but both EEC and Hetzner lifecycle inventories use the old common
+official-MCP schema bindings, validation first attempts the normal per-server
+contract and may then revalidate that fixed predecessor in the legacy-schema
+mode. The compatibility pass repeats the complete release-tree, provenance,
+artifact, ownership, policy, network, archive/execute binding, and signature
+checks, and requires both server bindings to match the known old common
+lifecycle values. It never applies to a staged candidate. Missing or malformed
+receipts, invalid signatures, digest mismatches, and other non-policy integrity
+failures do not fall through to this mode. After promotion of the new
+candidate, the current pointer must pass the per-server signed provision-
+receipt contract, so later promotions cannot continue using the compatibility
+mode.
 
 Output is redacted and does not expose signatures, keys, or paths. No sudo,
 shell, systemd, release deletion, or live n8n operation is performed; rollback

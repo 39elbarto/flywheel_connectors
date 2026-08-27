@@ -489,7 +489,14 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptLegacySchema,
     LegacyBootstrap,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecycleSchemaMode {
+    CurrentPerServer,
+    LegacyCommon,
 }
 
 /// A validated, but not yet owner-promoted, plan.  There is intentionally no
@@ -1430,13 +1437,37 @@ fn validate_release_tree(
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
-    validate_unsigned_release_tree(
+    validate_release_tree_with_schema_mode(
         root,
         release_id,
         git_revision,
         bindings,
         expected_owner,
         inventory_release_root,
+        owner_verification,
+        LifecycleSchemaMode::CurrentPerServer,
+    )
+}
+
+#[cfg(unix)]
+fn validate_release_tree_with_schema_mode(
+    root: &Path,
+    release_id: &str,
+    git_revision: &str,
+    bindings: &[OfficialMcpBinding],
+    expected_owner: u32,
+    inventory_release_root: &Path,
+    owner_verification: &OwnerVerificationConfig,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+) -> Result<(), ProvisionError> {
+    validate_unsigned_release_tree_with_schema_mode(
+        root,
+        release_id,
+        git_revision,
+        bindings,
+        expected_owner,
+        inventory_release_root,
+        lifecycle_schema_mode,
     )?;
     let provision_receipt: ProvisionReceipt = read_json(
         &root.join(PROVISION_RECEIPT_FILE),
@@ -1473,6 +1504,27 @@ pub(crate) fn validate_unsigned_release_tree(
     bindings: &[OfficialMcpBinding],
     expected_owner: u32,
     inventory_release_root: &Path,
+) -> Result<(), ProvisionError> {
+    validate_unsigned_release_tree_with_schema_mode(
+        root,
+        release_id,
+        git_revision,
+        bindings,
+        expected_owner,
+        inventory_release_root,
+        LifecycleSchemaMode::CurrentPerServer,
+    )
+}
+
+#[cfg(unix)]
+fn validate_unsigned_release_tree_with_schema_mode(
+    root: &Path,
+    release_id: &str,
+    git_revision: &str,
+    bindings: &[OfficialMcpBinding],
+    expected_owner: u32,
+    inventory_release_root: &Path,
+    lifecycle_schema_mode: LifecycleSchemaMode,
 ) -> Result<(), ProvisionError> {
     validate_release_directories(root, expected_owner)?;
     let provenance: Provenance = read_json(
@@ -1531,7 +1583,13 @@ pub(crate) fn validate_unsigned_release_tree(
                 .find(|binding| binding.server == server)
                 .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
             let inventory = read_value(&path, MAX_INVENTORY_BYTES)?;
-            validate_inventory(&inventory, server, inventory_release_root, binding)?;
+            validate_inventory(
+                &inventory,
+                server,
+                inventory_release_root,
+                binding,
+                lifecycle_schema_mode,
+            )?;
         } else if relative_path == "policy/zone-policies.json" {
             let value = read_value(&path, MAX_POLICY_BYTES)?;
             validate_zone_policies(&value)?;
@@ -2036,6 +2094,7 @@ fn validate_inventory(
     server: ServerId,
     release_root: &Path,
     binding: &OfficialMcpBinding,
+    lifecycle_schema_mode: LifecycleSchemaMode,
 ) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
     let entries = value
@@ -2189,8 +2248,13 @@ fn validate_inventory(
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
         let expected = match name {
-            "publish_workflow" | "unpublish_workflow" => lifecycle_schema_digests(server, name)
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?,
+            "publish_workflow" | "unpublish_workflow" => match lifecycle_schema_mode {
+                LifecycleSchemaMode::CurrentPerServer => lifecycle_schema_digests(server, name),
+                LifecycleSchemaMode::LegacyCommon => {
+                    fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
+                }
+            }
+            .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?,
             "archive_workflow" => (
                 binding.archive_input_schema_digest.as_str(),
                 binding.archive_output_schema_digest.as_str(),
@@ -2428,7 +2492,41 @@ where
                 ProvisionErrorCode::Receipt,
             )?;
             validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree(
+            let validate_signed_tree = |lifecycle_schema_mode| {
+                validate_release_tree_with_schema_mode(
+                    &current,
+                    release_id,
+                    &provenance.git_revision,
+                    &provision_receipt.bindings,
+                    expected_owner,
+                    &current,
+                    owner_verification,
+                    lifecycle_schema_mode,
+                )
+            };
+            match validate_signed_tree(LifecycleSchemaMode::CurrentPerServer) {
+                Ok(()) => return Ok((current, CurrentValidationMode::SignedProvisionReceipt)),
+                Err(error) if error.code() != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            validate_signed_tree(LifecycleSchemaMode::LegacyCommon)?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+            ));
+        }
+        CurrentValidationMode::SignedProvisionReceiptLegacySchema => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree_with_schema_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2436,7 +2534,12 @@ where
                 expected_owner,
                 &current,
                 owner_verification,
+                LifecycleSchemaMode::LegacyCommon,
             )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+            ));
         }
         CurrentValidationMode::LegacyBootstrap => {
             legacy_verifier(&current, expected_owner)?;
@@ -3342,6 +3445,52 @@ mod tests {
             }
         }
 
+        fn set_legacy_lifecycle_schemas(&self, root: &Path, release_id: &str) {
+            for server in ["eec", "hetzner"] {
+                let path = root.join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(
+                    &fs::read(&path).expect("official MCP inventory for legacy fixture"),
+                )
+                .expect("official MCP inventory JSON for legacy fixture");
+                let tools = value
+                    .pointer_mut("/0/config/capability_policy/approved_tools")
+                    .and_then(Value::as_array_mut)
+                    .expect("legacy fixture approved tools");
+                for tool in tools {
+                    let Some(name) = tool.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some((input, output)) =
+                        fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
+                    else {
+                        continue;
+                    };
+                    tool["input_schema_digest"] = Value::String(input.to_owned());
+                    tool["output_schema_digest"] = Value::String(output.to_owned());
+                }
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&value).expect("legacy fixture inventory JSON"),
+                )
+                .expect("write legacy fixture inventory");
+            }
+            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+                .expect("rewrite legacy fixture receipt");
+            fs::write(
+                root.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(root, release_id),
+            )
+            .expect("rewrite legacy fixture provision receipt");
+        }
+
+        fn set_previous_legacy_lifecycle_schemas(&self) {
+            self.set_legacy_lifecycle_schemas(&self.releases.join("previous"), "previous");
+        }
+
+        fn set_stage_legacy_lifecycle_schemas(&self) {
+            self.set_legacy_lifecycle_schemas(&self.stage, &self.release_id);
+        }
+
         fn set_previous_git_revision(&self) {
             let previous = self.releases.join("previous");
             let revision = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
@@ -3389,6 +3538,132 @@ mod tests {
             Promotion::TemporarySymlinkRename
         );
         assert!(!fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_legacy_current_is_accepted_only_as_compatibility_predecessor() {
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("valid signed legacy predecessor");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptLegacySchema
+        );
+
+        let fixture = Fixture::new();
+        fixture.set_stage_legacy_lifecycle_schemas();
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("legacy schema must not be accepted for the staged candidate")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_legacy_current_requires_both_legacy_server_bindings() {
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let path = fixture
+            .releases
+            .join("previous/inventory/hetzner-official-mcp.json");
+        let mut value: Value =
+            serde_json::from_slice(&fs::read(&path).expect("legacy Hetzner inventory"))
+                .expect("legacy Hetzner inventory JSON");
+        let (input, output) = lifecycle_schema_digests(ServerId::Hetzner, "publish_workflow")
+            .expect("current Hetzner publish schema");
+        value[0]["config"]["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .expect("Hetzner approved tools")
+            .iter_mut()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("publish_workflow"))
+            .expect("Hetzner publish tool")["input_schema_digest"] = Value::String(input.into());
+        value[0]["config"]["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .expect("Hetzner approved tools")
+            .iter_mut()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("publish_workflow"))
+            .expect("Hetzner publish tool")["output_schema_digest"] = Value::String(output.into());
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("mixed schema inventory"),
+        )
+        .expect("write mixed schema inventory");
+        fs::write(
+            fixture.releases.join("previous/receipt.json"),
+            fixture.receipt_for(&fixture.releases.join("previous"), "previous"),
+        )
+        .expect("rewrite mixed schema receipt");
+        fs::write(
+            fixture.releases.join("previous/provision-receipt.json"),
+            fixture.provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+        )
+        .expect("rewrite mixed schema provision receipt");
+        assert!(fixture.request().validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_legacy_current_keeps_signature_and_policy_checks_strict() {
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let path = fixture
+            .releases
+            .join("previous/inventory/hetzner-official-mcp.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("legacy inventory"))
+            .expect("legacy inventory JSON");
+        value[0]["config"]["server_id"] = Value::String("eec".to_owned());
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("drifted inventory"),
+        )
+        .expect("write drifted inventory");
+        fs::write(
+            fixture.releases.join("previous/receipt.json"),
+            fixture.receipt_for(&fixture.releases.join("previous"), "previous"),
+        )
+        .expect("rewrite drifted receipt");
+        fs::write(
+            fixture.releases.join("previous/provision-receipt.json"),
+            fixture.provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+        )
+        .expect("rewrite drifted provision receipt");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("unrelated policy drift")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let path = fixture.releases.join("previous/provision-receipt.json");
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&path).expect("legacy provision receipt"))
+                .expect("legacy provision receipt JSON");
+        receipt["signature"]["signature"] = Value::String("00".repeat(SIGNATURE_SIZE));
+        fs::write(
+            &path,
+            serde_json::to_vec(&receipt).expect("tampered legacy signature"),
+        )
+        .expect("write tampered legacy signature");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("tampered signed legacy predecessor")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
     }
 
     #[cfg(unix)]

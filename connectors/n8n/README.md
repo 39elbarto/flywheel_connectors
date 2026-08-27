@@ -71,8 +71,20 @@ pointer, ownership, provenance, and complete old bundle verifier all pass. This
 is not a generic bypass and accepts no caller path. If the file exists but is
 malformed or its signature is invalid, validation fails closed; the staged
 candidate always requires its complete owner-signed `provision-receipt.json`.
-After the first successful promotion, revalidation requires the new
-signed-current contract, so later promotions do not use the legacy fallback.
+
+Migration from an older **signed** release has a separate, narrower
+compatibility mode. If fixed `current` contains a structurally valid signed
+receipt but its EEC and Hetzner lifecycle inventories still use the old common
+official-MCP schema bindings, the provisioner first attempts the normal
+per-server validation and may then accept `current` only through the legacy
+schema mode. That second path repeats the complete release-tree, provenance,
+artifact, ownership, policy, network, archive/execute binding, and signature
+checks; both server bindings must match the known old common lifecycle values.
+It is available only for the fixed signed predecessor, never for a staged
+candidate, and a malformed receipt, invalid signature, digest mismatch, or
+other non-policy integrity failure never falls through to it. After the new
+candidate is promoted, revalidation requires the current per-server signed
+contract, so subsequent promotions cannot keep using this compatibility mode.
 
 Rollback remains a separate owner-gated boundary, and live installation/current
 acceptance is still not performed by repository tests.

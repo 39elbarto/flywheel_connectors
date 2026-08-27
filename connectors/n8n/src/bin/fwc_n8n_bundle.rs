@@ -97,6 +97,23 @@ const LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
     OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC;
 const LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC;
+
+pub(crate) fn legacy_official_mcp_lifecycle_schema_digests(
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match tool_name {
+        "publish_workflow" => Some((
+            LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+            LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+        )),
+        "unpublish_workflow" => Some((
+            LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+            LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+        )),
+        _ => None,
+    }
+}
+
 const OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";

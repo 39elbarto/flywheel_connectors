@@ -31,9 +31,10 @@ use crate::{
     error::{N8nError, N8nResult},
     types::{
         ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
-        ListView, Workflow, WorkflowDetail, WorkflowDraftMutationInput, WorkflowExecuteInput,
-        WorkflowExecuteMode, WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleInput,
-        WorkflowStateView, WorkflowVersion,
+        ListView, Workflow, WorkflowDeleteDisposableInput, WorkflowDetail,
+        WorkflowDraftMutationInput, WorkflowExecuteInput, WorkflowExecuteMode,
+        WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleInput, WorkflowStateView,
+        WorkflowVersion,
     },
 };
 
@@ -777,6 +778,7 @@ impl N8nConnector {
             let lifecycle =
                 parse_workflow_lifecycle_input(&input).map_err(|error| error.to_fcp_error())?;
             self.require_workflow_lifecycle_approval(
+                "n8n.workflows.lifecycle",
                 &lifecycle,
                 &input,
                 canonical_resource,
@@ -789,6 +791,23 @@ impl N8nConnector {
                 capability: "n8n.workflows.archive".into(),
                 reason: "archive requires the mediated official MCP host path".into(),
             });
+        }
+
+        if operation == "n8n.workflows.delete_disposable" {
+            let typed = parse_workflow_delete_disposable_input(&input)
+                .map_err(|error| error.to_fcp_error())?;
+            self.require_workflow_lifecycle_approval(
+                "n8n.workflows.delete_disposable",
+                &WorkflowLifecycleInput {
+                    id: typed.id.clone(),
+                    action: WorkflowLifecycleAction::Unpublish,
+                    version_id: None,
+                    guard: typed.guard.clone(),
+                },
+                &input,
+                canonical_resource,
+                &params,
+            )?;
         }
 
         if operation == "n8n.workflows.execute" {
@@ -880,6 +899,10 @@ impl N8nConnector {
             }
             "n8n.workflows.lifecycle" => {
                 self.invoke_workflow_lifecycle(client, &input, Some(context))
+                    .await
+            }
+            "n8n.workflows.delete_disposable" => {
+                self.invoke_workflow_delete_disposable(client, &input, Some(context))
                     .await
             }
             _ => {
@@ -1480,6 +1503,55 @@ impl N8nConnector {
         .map_err(N8nError::from)
     }
 
+    async fn invoke_workflow_delete_disposable(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let typed = parse_workflow_delete_disposable_input(input)?;
+        let baseline_workflow = client
+            .get_workflow_typed(&typed.id, context.clone())
+            .await?;
+        if baseline_workflow.id != typed.id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let baseline = normalize_workflow_state(baseline_workflow.clone())?;
+        verify_workflow_lifecycle_precondition(
+            &typed.guard.precondition,
+            &baseline_workflow,
+            &baseline,
+        )?;
+
+        let deleted = client
+            .delete_workflow_disposable(&typed.id, context.clone())
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        if deleted.id != typed.id {
+            return Err(N8nError::UnknownOutcome);
+        }
+
+        match client.get_workflow_typed(&typed.id, context).await {
+            Err(N8nError::NotFound { .. }) => Ok(json!({
+                "status": "deleted",
+                "operation": "n8n.workflows.delete_disposable",
+                "provider": "rest",
+                "retry": "never_automatic",
+                "readback": "independent_get_404",
+                "workflowIdDigest": digest_canonical_json(
+                    b"fwc-n8n.workflow-id.v1",
+                    &Value::String(typed.id),
+                )?,
+                "creationReceiptDigest": digest_canonical_json(
+                    b"fwc-n8n.creation-receipt.v1",
+                    &Value::String(typed.creation_receipt),
+                )?,
+            })),
+            Err(_) => Err(N8nError::UnknownOutcome),
+            Ok(_) => Err(N8nError::ReadbackMismatch),
+        }
+    }
+
     async fn invoke_projects_list(
         &self,
         client: &N8nClient,
@@ -1762,6 +1834,7 @@ impl N8nConnector {
 
     fn require_workflow_lifecycle_approval(
         &self,
+        operation: &str,
         input: &WorkflowLifecycleInput,
         raw_input: &Value,
         canonical_resource: &str,
@@ -1775,7 +1848,7 @@ impl N8nConnector {
             .get("approval_tokens")
             .and_then(Value::as_array)
             .ok_or_else(|| FcpError::CapabilityDenied {
-                capability: "n8n.workflows.lifecycle".into(),
+                capability: operation.into(),
                 reason: "workflow lifecycle requires approval_tokens".into(),
             })?;
         let approvals: Vec<ApprovalToken> = approval_values
@@ -1791,7 +1864,7 @@ impl N8nConnector {
             .filter(|approval| {
                 is_matching_draft_approval(
                     approval,
-                    "n8n.workflows.lifecycle",
+                    operation,
                     &input.guard.approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
@@ -1803,7 +1876,7 @@ impl N8nConnector {
             .count();
         if matching != 1 {
             return Err(FcpError::CapabilityDenied {
-                capability: "n8n.workflows.lifecycle".into(),
+                capability: operation.into(),
                 reason: "workflow lifecycle requires exactly one matching approval bound to server, workflow, action, precondition, and expiry".into(),
             });
         }
@@ -1911,7 +1984,8 @@ impl N8nConnector {
             | "n8n.workflows.activate"
             | "n8n.workflows.update_draft"
             | "n8n.workflows.lifecycle"
-            | "n8n.workflows.archive" => {
+            | "n8n.workflows.archive"
+            | "n8n.workflows.delete_disposable" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
                     .map_err(|error| error.to_fcp_error())?
@@ -2864,6 +2938,9 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
         "n8n.workflows.execute" => parse_workflow_execute_input(input).map(|_| ()),
         "n8n.workflows.archive" => parse_workflow_archive_input(input),
+        "n8n.workflows.delete_disposable" => {
+            parse_workflow_delete_disposable_input(input).map(|_| ())
+        }
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             validate_draft_input_presence(operation, input)?;
             let typed: WorkflowDraftMutationInput =
@@ -3027,6 +3104,29 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
             "unpublish must not include a versionId".into(),
         ));
     }
+    Ok(typed)
+}
+
+fn parse_workflow_delete_disposable_input(
+    input: &Value,
+) -> N8nResult<WorkflowDeleteDisposableInput> {
+    let typed: WorkflowDeleteDisposableInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "disposable workflow deletion requires id, creationReceipt, and exact guard precondition".into(),
+        )
+    })?;
+    if !is_blake3_digest(&typed.creation_receipt) {
+        return Err(N8nError::InvalidInput(
+            "creationReceipt must be a bounded host-issued digest".into(),
+        ));
+    }
+    parse_workflow_archive_input(&json!({
+        "id": typed.id.clone(),
+        "guard": input
+            .get("guard")
+            .cloned()
+            .ok_or_else(|| N8nError::InvalidInput("guard is required".into()))?,
+    }))?;
     Ok(typed)
 }
 
@@ -3814,7 +3914,8 @@ fn op_info(
             "n8n.mcp_access.reconcile"
             | "n8n.workflows.lifecycle"
             | "n8n.workflows.archive"
-            | "n8n.workflows.execute" => ApprovalMode::Interactive,
+            | "n8n.workflows.execute"
+            | "n8n.workflows.delete_disposable" => ApprovalMode::Interactive,
             _ => ApprovalMode::None,
         }),
         safety_tier,
@@ -4197,6 +4298,7 @@ fn workflow_draft_output_schema() -> serde_json::Value {
             "activeVersionId": {"type": ["string", "null"]},
             "isArchived": {"type": "boolean"},
             "published": {"type": ["object", "null"]},
+            "creationReceipt": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
         },
     })
 }
@@ -4384,6 +4486,55 @@ fn workflow_archive_output_schema() -> serde_json::Value {
                 },
             },
         },
+    })
+}
+
+fn workflow_delete_disposable_input_schema() -> serde_json::Value {
+    let mut schema = workflow_archive_input_schema();
+    let object = schema
+        .as_object_mut()
+        .expect("workflow archive schema must be an object");
+    object.insert(
+        "required".to_string(),
+        json!(["id", "creationReceipt", "guard"]),
+    );
+    object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("workflow archive schema properties must be an object")
+        .insert(
+            "creationReceipt".to_string(),
+            json!({
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+                "maxLength": 75,
+            }),
+        );
+    schema
+}
+
+fn workflow_delete_disposable_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+            "status",
+            "operation",
+            "provider",
+            "retry",
+            "readback",
+            "workflowIdDigest",
+            "creationReceiptDigest"
+        ],
+        "properties": {
+            "status": {"const": "deleted"},
+            "operation": {"const": "n8n.workflows.delete_disposable"},
+            "provider": {"const": "rest"},
+            "retry": {"const": "never_automatic"},
+            "readback": {"const": "independent_get_404"},
+            "workflowIdDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
+            "creationReceiptDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75}
+        }
     })
 }
 
@@ -4718,6 +4869,29 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.lifecycle"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.delete_disposable",
+            "Delete only a workflow created by the bounded disposable draft path and verify independent GET 404 readback",
+            workflow_delete_disposable_input_schema(),
+            workflow_delete_disposable_output_schema(),
+            "n8n.workflows.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use only to clean up a workflow with a host-issued creationReceipt, exact inactive/unarchived precondition, and current-chat approval.".into(),
+                common_mistakes: vec![
+                    "This is not a general workflow delete operation; the host rejects receipts that do not prove a successful disposable create on the same server.".into(),
+                    "The connector performs one typed REST DELETE followed by an independent GET that must return 404; timeout or any uncertain result is never retried automatically.".into(),
+                    "Do not use the workflow name, an arbitrary ID, or a caller-created receipt.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","creationReceipt":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000006","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.create_draft"),
+                    CapabilityId::from_static("n8n.workflows.get"),
                 ],
             },
         ),
@@ -5453,9 +5627,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_16_operations() {
+    fn operations_info_has_17_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 16);
+        assert_eq!(ops.len(), 17);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -5467,6 +5641,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
         assert!(operation_ids.contains(&"n8n.workflows.archive"));
+        assert!(operation_ids.contains(&"n8n.workflows.delete_disposable"));
         assert!(operation_ids.contains(&"n8n.workflows.execute"));
         assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
     }

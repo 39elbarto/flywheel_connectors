@@ -169,6 +169,8 @@ enum HostRunOnceOperation {
     WorkflowsArchive,
     #[serde(rename = "n8n.workflows.execute")]
     WorkflowsExecute,
+    #[serde(rename = "n8n.workflows.delete_disposable")]
+    WorkflowsDeleteDisposable,
     #[serde(rename = "n8n.mcp_access.reconcile")]
     McpAccessReconcile,
 }
@@ -191,6 +193,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
             Self::WorkflowsArchive => "n8n.workflows.archive",
             Self::WorkflowsExecute => "n8n.workflows.execute",
+            Self::WorkflowsDeleteDisposable => "n8n.workflows.delete_disposable",
             Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
         }
     }
@@ -212,6 +215,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
             "n8n.workflows.archive" => Ok(Self::WorkflowsArchive),
             "n8n.workflows.execute" => Ok(Self::WorkflowsExecute),
+            "n8n.workflows.delete_disposable" => Ok(Self::WorkflowsDeleteDisposable),
             "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
             _ => Err(AppError::new("operation_not_allowed")),
         }
@@ -235,6 +239,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsLifecycle | Self::WorkflowsArchive | Self::WorkflowsExecute => {
                 BrokerCredentialPurpose::OfficialMcp
             }
+            Self::WorkflowsDeleteDisposable => BrokerCredentialPurpose::RestApi,
         }
     }
 }
@@ -1803,6 +1808,10 @@ fn validate_host_run_once_input(
             &["id", "mode", "versionId", "inputs", "guard"],
             &["id", "mode", "versionId", "guard"],
         ),
+        HostRunOnceOperation::WorkflowsDeleteDisposable => (
+            &["id", "creationReceipt", "guard"],
+            &["id", "creationReceipt", "guard"],
+        ),
         HostRunOnceOperation::McpAccessReconcile => (
             &[
                 "scope",
@@ -1857,6 +1866,9 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
         HostRunOnceOperation::WorkflowsArchive => validate_workflow_archive_input(object),
         HostRunOnceOperation::WorkflowsExecute => validate_workflow_execute_input(object),
+        HostRunOnceOperation::WorkflowsDeleteDisposable => {
+            validate_workflow_delete_disposable_input(object)
+        }
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
 }
@@ -2025,6 +2037,35 @@ fn validate_workflow_archive_input(
         return Err(AppError::new("invalid_operation_input"));
     }
     Ok(())
+}
+
+fn validate_workflow_delete_disposable_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "creationReceipt" | "guard"))
+        || !["id", "creationReceipt", "guard"]
+            .iter()
+            .all(|field| object.contains_key(*field))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let receipt = object
+        .get("creationReceipt")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() == "blake3-256:".len() + 64
+                && value.starts_with("blake3-256:")
+                && value["blake3-256:".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let _ = receipt;
+    let mut archive_input = object.clone();
+    archive_input.remove("creationReceipt");
+    validate_workflow_archive_input(&archive_input)
 }
 
 fn validate_workflow_execute_input(
@@ -2454,12 +2495,12 @@ fn expected_host_run_once_resource_uri(
             "fwc-mcp-bridge://{}/tools/execute%5Fworkflow",
             server_id.as_str()
         )),
-        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsUpdateDraft => {
-            Ok(format!(
-                "{root}/workflows/{}",
-                encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-            ))
-        }
+        HostRunOnceOperation::WorkflowsGet
+        | HostRunOnceOperation::WorkflowsUpdateDraft
+        | HostRunOnceOperation::WorkflowsDeleteDisposable => Ok(format!(
+            "{root}/workflows/{}",
+            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+        )),
         HostRunOnceOperation::WorkflowsCreateDraft => input
             .get("project_id")
             .map(|_| {
@@ -4128,6 +4169,40 @@ mod tests {
         );
         assert_eq!(
             HostRunOnceOperation::WorkflowsGet.credential_purpose(),
+            BrokerCredentialPurpose::RestApi
+        );
+    }
+
+    #[test]
+    fn host_run_once_disposable_delete_binds_receipt_and_workflow_resource() {
+        let operation = HostRunOnceOperation::parse("n8n.workflows.delete_disposable")
+            .expect("closed disposable delete operation");
+        let input = json!({
+            "id": "workflow-1",
+            "creationReceipt": format!("blake3-256:{}", "0".repeat(64)),
+            "guard": {
+                "approvalRef": "chat-disposable-delete",
+                "idempotencyKey": "55555555-6666-4777-8888-999999999999",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": format!("blake3-256:{}", "1".repeat(64)),
+                }
+            }
+        });
+        let envelope = build_host_run_once_envelope(
+            operation,
+            host_input(HostRunOnceServerId::Hetzner, input),
+        )
+        .expect("valid disposable delete envelope");
+        assert_eq!(
+            envelope.resource_uri,
+            "fwc-n8n://hetzner/workflows/workflow%2D1"
+        );
+        assert_eq!(
+            operation.credential_purpose(),
             BrokerCredentialPurpose::RestApi
         );
     }

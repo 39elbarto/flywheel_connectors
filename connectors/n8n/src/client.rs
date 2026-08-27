@@ -837,6 +837,22 @@ impl N8nClient {
         decode_typed(response)
     }
 
+    /// Delete one disposable workflow through the exact REST route.  The
+    /// caller performs an independent GET afterwards; a transport error or
+    /// malformed 2xx response is therefore an unknown outcome.
+    pub(crate) async fn delete_workflow_disposable(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowDetail> {
+        let url =
+            self.resolve_path_segments(&[("path segment", "workflows"), ("workflow id", id)])?;
+        let response = self
+            .write_no_body(Method::DELETE, url, context, true)
+            .await?;
+        decode_typed(response)
+    }
+
     /// Attempt one draft create and return only the provider-assigned ID.
     pub(crate) async fn create_workflow_draft(
         &self,

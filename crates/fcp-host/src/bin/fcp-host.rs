@@ -418,15 +418,16 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 6] = [
+const N8N_WRITE_OPERATIONS: [&str; 7] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
     "n8n.workflows.execute",
+    "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 15] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 16] = [
     "n8n.credentials.list",
     "n8n.executions.get",
     "n8n.executions.list",
@@ -442,6 +443,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 15] = [
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
     "n8n.workflows.execute",
+    "n8n.workflows.delete_disposable",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10778,6 +10780,44 @@ fn validate_n8n_workflow_archive_input(input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_workflow_delete_disposable_input(input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter(
+            "n8n disposable workflow delete input must be an object".to_string(),
+        )
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "creationReceipt" | "guard"))
+        || !["id", "creationReceipt", "guard"]
+            .iter()
+            .all(|field| object.contains_key(*field))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n disposable workflow delete input contains unsupported or missing fields"
+                .to_string(),
+        ));
+    }
+    let receipt = object
+        .get("creationReceipt")
+        .and_then(Value::as_str)
+        .filter(|value| is_blake3_digest(value))
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n disposable creation receipt is invalid".to_string())
+        })?;
+    if receipt["blake3-256:".len()..]
+        .bytes()
+        .any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n disposable creation receipt is invalid".to_string(),
+        ));
+    }
+    let mut archive_input = object.clone();
+    archive_input.remove("creationReceipt");
+    validate_n8n_workflow_archive_input(&Value::Object(archive_input))
+}
+
 fn validate_n8n_mcp_access_input(input: &Value) -> HostResult<()> {
     let object = input.as_object().ok_or_else(|| {
         HostError::InvalidFilter("n8n MCP access input must be an object".to_string())
@@ -10978,6 +11018,10 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.delete_disposable" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.workflows.execute" => Ok(format!(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
@@ -11028,6 +11072,8 @@ fn build_n8n_read_only_run_once_plan(
         validate_n8n_workflow_lifecycle_input(&input.input)?;
     } else if input.operation == "n8n.workflows.archive" {
         validate_n8n_workflow_archive_input(&input.input)?;
+    } else if input.operation == "n8n.workflows.delete_disposable" {
+        validate_n8n_workflow_delete_disposable_input(&input.input)?;
     } else if input.operation == "n8n.workflows.execute" {
         validate_n8n_workflow_execute_input(&input.input)?;
     } else if N8N_WRITE_OPERATIONS.contains(&input.operation.as_str()) {
@@ -11853,6 +11899,76 @@ fn n8n_run_once_approval_material(
         });
         return Ok((material, String::new(), mutation_digest));
     }
+    if plan.operation.as_str() == "n8n.workflows.delete_disposable" {
+        let object = plan.input.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n disposable workflow delete input is invalid".to_string())
+        })?;
+        let guard = object
+            .get("guard")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(
+                    "n8n disposable workflow delete guard is invalid".to_string(),
+                )
+            })?;
+        let precondition = guard
+            .get("precondition")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(
+                    "n8n disposable workflow delete precondition is invalid".to_string(),
+                )
+            })?;
+        let resource_digest = n8n_run_once_digest(
+            b"fwc-n8n.resource.v1",
+            &Value::String(plan.resource_uri.clone()),
+        );
+        let workflow_id_digest = n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            object.get("id").unwrap_or(&Value::Null),
+        );
+        let creation_receipt_digest = n8n_run_once_digest(
+            b"fwc-n8n.creation-receipt.v1",
+            object.get("creationReceipt").unwrap_or(&Value::Null),
+        );
+        let idempotency_key_hash = n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            guard.get("idempotencyKey").unwrap_or(&Value::Null),
+        );
+        let approval_ref_hash = n8n_run_once_digest(
+            b"fwc-n8n.approval-ref.v1",
+            guard.get("approvalRef").unwrap_or(&Value::Null),
+        );
+        let mutation_digest = n8n_run_once_digest(
+            b"fwc-n8n.disposable-delete-mutation.v1",
+            &json!({
+                "server_id": plan.server_id.as_str(),
+                "resource_digest": resource_digest.clone(),
+                "workflow_id_digest": workflow_id_digest.clone(),
+                "creation_receipt_digest": creation_receipt_digest.clone(),
+                "precondition": precondition,
+            }),
+        );
+        let material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_digest": resource_digest,
+            "operation": plan.operation.as_str(),
+            "workflow_id_digest": workflow_id_digest,
+            "creation_receipt_digest": creation_receipt_digest,
+            "precondition_version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+            "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
+            "active_version_id_present": precondition.contains_key("activeVersionId"),
+            "active": precondition.get("active").cloned().unwrap_or(Value::Null),
+            "is_archived": precondition.get("isArchived").cloned().unwrap_or(Value::Null),
+            "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+            "approval_ref_hash": approval_ref_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest.clone(),
+            "provider": "rest",
+            "side_effect": "workflow_delete_disposable",
+        });
+        return Ok((material, String::new(), mutation_digest));
+    }
     if matches!(
         plan.operation.as_str(),
         "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
@@ -11994,6 +12110,13 @@ struct N8nRunOnceClaim {
 }
 
 #[cfg(unix)]
+struct N8nDisposableCreationReceipt {
+    receipt: String,
+    workflow_id_digest: String,
+    state_digest: String,
+}
+
+#[cfg(unix)]
 fn ensure_n8n_private_dir(path: &FsPath, owner_uid: u32) -> HostResult<()> {
     match fs::create_dir(path) {
         Ok(()) => {
@@ -12096,7 +12219,7 @@ fn n8n_run_once_expected_receipt_binding(plan: &N8nReadOnlyRunOncePlan) -> Value
         .pointer("/guard/idempotencyKey")
         .unwrap_or(&Value::Null);
     let typed = plan.typed_approval.as_ref();
-    json!({
+    let mut binding = json!({
         "operation": plan.operation.as_str(),
         "server": plan.server_id.as_str(),
         "resourceDigest": n8n_run_once_digest(
@@ -12114,7 +12237,26 @@ fn n8n_run_once_expected_receipt_binding(plan: &N8nReadOnlyRunOncePlan) -> Value
         "officialMcpToolDigest": typed.map(|binding| binding.official_mcp_tool_digest.clone()),
         "providerPayloadDigest": typed.map(|binding| binding.provider_payload_digest.clone()),
         "expiryMs": typed.map(|binding| binding.expires_at_ms),
-    })
+    });
+    if plan.operation.as_str() == "n8n.workflows.delete_disposable" {
+        if let Some(object) = binding.as_object_mut() {
+            object.insert(
+                "workflowIdDigest".to_string(),
+                Value::String(n8n_run_once_digest(
+                    b"fwc-n8n.workflow-id.v1",
+                    plan.input.get("id").unwrap_or(&Value::Null),
+                )),
+            );
+            object.insert(
+                "creationReceiptDigest".to_string(),
+                Value::String(n8n_run_once_digest(
+                    b"fwc-n8n.creation-receipt.v1",
+                    plan.input.get("creationReceipt").unwrap_or(&Value::Null),
+                )),
+            );
+        }
+    }
+    binding
 }
 
 #[cfg(unix)]
@@ -12143,6 +12285,56 @@ fn n8n_run_once_validate_existing_record(
 ) -> HostResult<()> {
     let record = read_n8n_private_json(path)?;
     validate_n8n_recovery_binding(&n8n_run_once_expected_receipt_binding(plan), &record, phase)
+}
+
+#[cfg(unix)]
+fn n8n_run_once_validate_disposable_creation_receipt(
+    plan: &N8nReadOnlyRunOncePlan,
+    root: &FsPath,
+) -> HostResult<()> {
+    let receipt = plan
+        .input
+        .get("creationReceipt")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            HostError::PreflightFailed("n8n disposable creation receipt is missing".to_string())
+        })?;
+    if !is_blake3_digest(receipt)
+        || receipt["blake3-256:".len()..]
+            .bytes()
+            .any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n disposable creation receipt is invalid".to_string(),
+        ));
+    }
+    let path = root
+        .join("receipts")
+        .join(format!("{receipt}.receipt.json"));
+    let record = read_n8n_private_json(&path)?;
+    let precondition_state_digest = plan
+        .input
+        .pointer("/guard/precondition/stateDigest")
+        .cloned()
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n disposable workflow delete state precondition is missing".to_string(),
+            )
+        })?;
+    let expected = json!({
+        "schema": "fwc.n8n.run-once-receipt.v1",
+        "phase": "outcome",
+        "resultClass": "success",
+        "operation": "n8n.workflows.create_draft",
+        "server": plan.server_id.as_str(),
+        "disposableReceipt": receipt,
+        "disposableWorkflowIdDigest": n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            plan.input.get("id").unwrap_or(&Value::Null),
+        ),
+        "disposableStateDigest": precondition_state_digest,
+    });
+    validate_n8n_recovery_binding(&expected, &record, "disposable-create")
 }
 
 #[cfg(not(unix))]
@@ -12223,6 +12415,9 @@ fn n8n_run_once_claim_at(
             }
         },
     )?;
+    if plan.operation.as_str() == "n8n.workflows.delete_disposable" {
+        n8n_run_once_validate_disposable_creation_receipt(plan, root)?;
+    }
     // The external token validator requires token_id == approvalRef before
     // this claim is reached. Persist a marker keyed by that token id so a
     // valid token cannot be replayed with a different idempotency/request
@@ -12452,12 +12647,36 @@ impl N8nRunOnceClaim {
         request: &InvokeRequest,
         result_class: &str,
     ) -> HostResult<()> {
+        self.write_receipt_with_disposable_creation(plan, request, result_class, None)
+    }
+
+    fn write_receipt_with_disposable_creation(
+        &self,
+        plan: &N8nReadOnlyRunOncePlan,
+        request: &InvokeRequest,
+        result_class: &str,
+        disposable: Option<&N8nDisposableCreationReceipt>,
+    ) -> HostResult<()> {
         let mut payload = Self::receipt_binding(plan, request)?;
         payload.insert("phase".to_string(), Value::String("outcome".to_string()));
         payload.insert(
             "resultClass".to_string(),
             Value::String(result_class.to_string()),
         );
+        if let Some(disposable) = disposable {
+            payload.insert(
+                "disposableReceipt".to_string(),
+                Value::String(disposable.receipt.clone()),
+            );
+            payload.insert(
+                "disposableWorkflowIdDigest".to_string(),
+                Value::String(disposable.workflow_id_digest.clone()),
+            );
+            payload.insert(
+                "disposableStateDigest".to_string(),
+                Value::String(disposable.state_digest.clone()),
+            );
+        }
         let path = self
             .receipts_dir
             .join(format!("{}.receipt.json", self.claim_digest));
@@ -13174,6 +13393,65 @@ fn n8n_unknown_outcome_error(error: &FcpError) -> bool {
                 message.contains("outcome unknown") || message.contains("readback mismatch")
             }
     )
+}
+
+#[cfg(unix)]
+fn attach_n8n_disposable_creation_receipt(
+    plan: &N8nReadOnlyRunOncePlan,
+    claim: &N8nRunOnceClaim,
+    response: &mut InvokeResponse,
+) -> HostResult<N8nDisposableCreationReceipt> {
+    if plan.operation.as_str() != "n8n.workflows.create_draft"
+        || !matches!(response.status, InvokeStatus::Ok)
+        || response.error.is_some()
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n disposable creation receipt is only available for a successful draft create"
+                .to_string(),
+        ));
+    }
+    let result = response
+        .result
+        .as_mut()
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n disposable create returned no structured result".to_string(),
+            )
+        })?;
+    let workflow_id = result
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n disposable create returned no workflow identifier".to_string(),
+            )
+        })?;
+    let state_digest = result
+        .get("stateDigest")
+        .and_then(Value::as_str)
+        .filter(|value| is_blake3_digest(value))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n disposable create returned no valid state digest".to_string(),
+            )
+        })?;
+    let receipt = claim.claim_digest.clone();
+    let workflow_id_digest = n8n_run_once_digest(
+        b"fwc-n8n.workflow-id.v1",
+        &Value::String(workflow_id.to_string()),
+    );
+    result.insert(
+        "creationReceipt".to_string(),
+        Value::String(receipt.clone()),
+    );
+    Ok(N8nDisposableCreationReceipt {
+        receipt,
+        workflow_id_digest,
+        state_digest,
+    })
 }
 
 fn run_once_error_code(error: &HostError) -> &'static str {
@@ -14033,7 +14311,7 @@ async fn async_n8n_read_only_run_once(
             .mark_provider_started(&plan, &request)
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
     }
-    let invoke_result = invoke_handler_inner(
+    let mut invoke_result = invoke_handler_inner(
         state,
         HeaderMap::new(),
         request.clone(),
@@ -14047,6 +14325,28 @@ async fn async_n8n_read_only_run_once(
     });
     #[cfg(unix)]
     if let Some(claim) = claim.as_ref() {
+        let disposable_creation = if plan.operation.as_str() == "n8n.workflows.create_draft"
+            && matches!(
+                invoke_result.as_ref(),
+                Ok(response)
+                    if matches!(response.status, InvokeStatus::Ok) && response.error.is_none()
+            ) {
+            match attach_n8n_disposable_creation_receipt(
+                &plan,
+                claim,
+                invoke_result
+                    .as_mut()
+                    .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?,
+            ) {
+                Ok(receipt) => Some(receipt),
+                Err(_) => {
+                    invoke_result = Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke));
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let result_class = match invoke_result.as_ref() {
             Ok(response)
                 if matches!(response.status, InvokeStatus::Ok) && response.error.is_none() =>
@@ -14065,7 +14365,12 @@ async fn async_n8n_read_only_run_once(
             _ => "failed",
         };
         claim
-            .write_receipt(&plan, &request, result_class)
+            .write_receipt_with_disposable_creation(
+                &plan,
+                &request,
+                result_class,
+                disposable_creation.as_ref(),
+            )
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke))?;
     }
     invoke_result.and_then(accept_n8n_run_once_invoke_response)
@@ -35391,6 +35696,91 @@ done"#;
         assert!(receipt.contains("\"resultClass\":\"success\""));
         assert!(!receipt.contains("Draft"));
         assert!(!receipt.contains("connections"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn n8n_disposable_create_receipt_is_attached_and_bound_for_delete() {
+        let plan = build_n8n_read_only_run_once_plan(
+            n8n_draft_test_input(
+                "n8n.workflows.create_draft",
+                "55555555-6666-4777-8888-999999999998",
+            ),
+            &run_once_n8n_draft_test_config(),
+        )
+        .expect("typed create plan");
+        let root = tempfile::tempdir().expect("claim state root");
+        for name in ["locks", "consumed", "receipts"] {
+            std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
+        }
+        let claim = n8n_run_once_claim_at(&plan, root.path()).expect("create claim");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let (request, _) = build_n8n_read_only_invoke_request(
+            plan.clone(),
+            test_capability_token(
+                &signing_key,
+                "n8n.workflows.write",
+                "n8n.workflows.create_draft",
+                ZoneId::work().as_str(),
+            ),
+            None,
+        );
+        let state_digest =
+            "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut response = InvokeResponse::ok(
+            RequestId::random(),
+            json!({
+                "status": "verified",
+                "operation": "n8n.workflows.create_draft",
+                "id": "workflow-1",
+                "stateDigest": state_digest,
+            }),
+        );
+        let creation = attach_n8n_disposable_creation_receipt(&plan, &claim, &mut response)
+            .expect("successful create receives an opaque receipt");
+        assert_eq!(
+            response.result.as_ref().unwrap()["creationReceipt"],
+            creation.receipt
+        );
+        claim
+            .write_receipt_with_disposable_creation(&plan, &request, "success", Some(&creation))
+            .expect("durable create receipt");
+
+        let delete_input = json!({
+            "id": "workflow-1",
+            "creationReceipt": creation.receipt,
+            "guard": {
+                "approvalRef": "delete-approval",
+                "idempotencyKey": "66666666-7777-4888-9999-aaaaaaaaaaaa",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": state_digest,
+                }
+            }
+        });
+        let delete_plan = N8nReadOnlyRunOncePlan {
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: OperationId::from_static("n8n.workflows.delete_disposable"),
+            zone_id: ZoneId::work(),
+            resource_uri: "fwc-n8n://eec/workflows/workflow%2D1".to_string(),
+            input: delete_input,
+            approval_token: None,
+            deadline_ms: plan.deadline_ms,
+            correlation_id: plan.correlation_id.clone(),
+            credential_binding: plan.credential_binding,
+            typed_approval: None,
+        };
+        n8n_run_once_validate_disposable_creation_receipt(&delete_plan, root.path())
+            .expect("delete must accept only the matching create receipt");
+
+        let mut mismatched = delete_plan.clone();
+        mismatched.input["id"] = json!("other-workflow");
+        assert!(
+            n8n_run_once_validate_disposable_creation_receipt(&mismatched, root.path()).is_err()
+        );
     }
 
     #[cfg(unix)]

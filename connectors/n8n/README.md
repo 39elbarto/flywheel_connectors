@@ -1,6 +1,6 @@
 # n8n Connector Security Contract
 
-> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. The disposable workflow cleanup and acceptance statements are historical evidence, not current-release live acceptance. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain a separate opt-in path, and prior immutable releases remain available for rollback.
+> **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.workflows.delete_disposable` cleanup path, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. Disposable cleanup requires a host-issued creation receipt and is not a general workflow-delete path; no current-release live acceptance is claimed. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain a separate opt-in path, and prior immutable releases remain available for rollback.
 > **Current host evidence (2026-08-25, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260824-90819213-static`, and that installed binary reports `{"bundleAvailable":true}`. The resolved tree contains `provenance.json` and `provision-receipt.json`, with matching release/revision metadata. Their presence does **not** by itself prove cryptographic receipt verification, live provider acceptance, or current-release live acceptance; no live/API invocation is claimed here. The fixed runtime policy records local `n8n-mcp` package version `2.69.2`, and the source update fixtures pin the same version. No release switch or runtime mutation was performed by this documentation update.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
@@ -9,7 +9,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update and typed official-MCP publish/unpublish/archive writes. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved MCP tool with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update, typed official-MCP publish/unpublish/archive writes, and a narrowly scoped disposable-workflow REST delete. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved provider path with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed. Disposable delete additionally requires a host-issued receipt proving the same workflow was created through the bounded draft path.
 
 ### Immutable release provisioner (source-only packet)
 
@@ -168,13 +168,14 @@ The current crate exposes these operations:
 - `n8n.workflows.update_draft`
 - `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; one guarded provider attempt plus independent readback)
 - `n8n.workflows.archive` (typed official-MCP `archive_workflow`; inactive/unarchived baseline only, one guarded provider attempt plus independent readback)
+- `n8n.workflows.delete_disposable` (typed REST `DELETE /workflows/{id}` only for a host-receipted disposable draft; one guarded provider attempt plus independent `GET` requiring 404)
 - `n8n.workflows.execute` (typed official-MCP `execute_workflow` seam; wrapper/host/connector validate identical bounded manual or production inputs, and the typed result is limited to workflow/execution IDs, initial status, mode/version, and an independent execution GET classification. Host admission requires the immutable owner-provisioned EEC/Hetzner schema binding; no live acceptance)
 - `n8n.mcp_access.reconcile`
 
 The list above is the manifest/runtime declaration surface, not a promise that
 every provider path is enabled. The documentation separates the layers:
 
-- **Manifest operations:** the 16 operations listed above are declared by
+- **Manifest operations:** the 17 operations listed above are declared by
   `connectors/n8n/manifest.toml`; activation remains fail-closed because its
   provider lifecycle path is deferred.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is not in the
@@ -191,7 +192,8 @@ every provider path is enabled. The documentation separates the layers:
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and router intents
   without a corresponding host/connector dispatch remain future or
   unimplemented execution paths. Restore/unarchive, versions, credential
-  mutation, permanent deletion, and provider activation remain fail-closed.
+  mutation, permanent/general deletion, and provider activation remain
+  fail-closed.
 
 Important runtime truths:
 
@@ -202,7 +204,8 @@ Important runtime truths:
   `provision` defaults to read-only `preflight`; mutation requires the explicit
   owner-gated `provision --mode apply`. `run-once` accepts the nine Phase-1 host
   reads, guarded
-  `n8n.workflows.create_draft` and `n8n.workflows.update_draft`, the typed
+  `n8n.workflows.create_draft`, `n8n.workflows.update_draft`, and the typed
+  `n8n.workflows.delete_disposable` cleanup path, the typed
   publish/unpublish lifecycle path (unknown outcomes fail closed), plus the closed
   `n8n.capabilities.inspect` operation, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
@@ -623,6 +626,7 @@ This packet documents and verifies:
 | `n8n.workflows.create_draft` | one `POST /workflows`, then independent `GET /workflows/{id}` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | name, typed graph, exact approval reference, UUID idempotency key |
 | `n8n.workflows.update_draft` | baseline `GET`, one `PUT /workflows/{id}`, then independent `GET` | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, typed graph, full lifecycle/state precondition, exact approval reference, UUID idempotency key |
 | `n8n.workflows.lifecycle` | baseline REST `GET`, one exact official-MCP `publish_workflow`/`unpublish_workflow` call, then independent REST detail `GET` | `n8n.workflows.lifecycle` | `Risky` | `High` | `BestEffort` | id, `action=publish|unpublish`, optional publish `versionId`, full lifecycle precondition, exact approval reference, UUID idempotency key |
+| `n8n.workflows.delete_disposable` | baseline `GET`, one `DELETE /workflows/{id}`, then independent `GET` requiring 404 | `n8n.workflows.write` | `Risky` | `High` | `BestEffort` | id, host-issued `creationReceipt`, inactive/unarchived full precondition, exact approval reference, UUID idempotency key |
 | `n8n.mcp_access.reconcile` | dry-run: bounded paginated `GET /workflows`; apply: current-plan reads, one full required `PUT /workflows/{id}` with only the logical `settings.availableInMCP` change, and independent detail GET | `n8n.mcp_access.write` | `Risky` | `High` | `BestEffort` | scope, desired, dryRun; apply guard with approvalRef, exact dryRunDigest, and UUID idempotencyKey |
 
 For `n8n.mcp_access.reconcile`, a present REST `settings` object without an
@@ -701,10 +705,10 @@ Read output boundary:
 
 The current implementation does not include:
 
-- workflow create, update, delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations
+- workflow create, update, general delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations; the only deletion exception is the separately guarded `delete_disposable` cleanup path
 - provider-specific filtering and sorting for workflow or execution list calls
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
-- restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent deletion; execution data/result retrieval and execution management remain out of scope
+- restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent/general deletion; execution data/result retrieval and execution management remain out of scope
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
 - API-key provisioning or secret injection inside the connector process;
   production credential injection and egress enforcement belong to the

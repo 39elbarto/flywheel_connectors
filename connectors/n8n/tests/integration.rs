@@ -58,7 +58,10 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             let folder_id = utf8_percent_encode(folder_id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/folders/{folder_id}")
         }
-        "n8n.workflows.get" | "n8n.workflows.activate" | "n8n.workflows.lifecycle" => {
+        "n8n.workflows.get"
+        | "n8n.workflows.activate"
+        | "n8n.workflows.lifecycle"
+        | "n8n.workflows.delete_disposable" => {
             let id = input["id"].as_str().expect("workflow id for test token");
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{id}")
@@ -111,9 +114,10 @@ fn capability_token_with_options(
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> CapabilityToken {
     let capability = match operation {
-        "n8n.workflows.activate" | "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
-            "n8n.workflows.write"
-        }
+        "n8n.workflows.activate"
+        | "n8n.workflows.create_draft"
+        | "n8n.workflows.update_draft"
+        | "n8n.workflows.delete_disposable" => "n8n.workflows.write",
         "n8n.workflows.lifecycle" => "n8n.workflows.lifecycle",
         "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
@@ -327,6 +331,7 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
         "n8n.workflows.create_draft"
             | "n8n.workflows.update_draft"
             | "n8n.workflows.lifecycle"
+            | "n8n.workflows.delete_disposable"
             | "n8n.mcp_access.reconcile"
     ) && (operation != "n8n.mcp_access.reconcile" || input["dryRun"] == json!(false))
     {
@@ -605,6 +610,38 @@ impl Respond for SequentialJsonResponse {
             .expect("response sequence lock")
             .remove(0);
         ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+#[derive(Clone)]
+struct DisposableDeleteResponse {
+    baseline: Value,
+    calls: Arc<Mutex<usize>>,
+}
+
+impl DisposableDeleteResponse {
+    fn new(baseline: Value) -> Self {
+        Self {
+            baseline,
+            calls: Arc::new(Mutex::new(0)),
+        }
+    }
+}
+
+impl Respond for DisposableDeleteResponse {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let mut calls = self.calls.lock().expect("delete response sequence lock");
+        let call = *calls;
+        *calls = calls.saturating_add(1);
+        if call == 0 {
+            ResponseTemplate::new(200).set_body_json(self.baseline.clone())
+        } else if call == 1 {
+            ResponseTemplate::new(404).set_body_json(json!({
+                "message": "Workflow not found"
+            }))
+        } else {
+            ResponseTemplate::new(500)
+        }
     }
 }
 
@@ -4527,6 +4564,63 @@ async fn workflows_lifecycle_rejects_unsupported_action_without_provider_call() 
     });
     assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_delete_disposable_requires_receipt_and_verifies_404_readback() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001",
+        "name": "Disposable workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(DisposableDeleteResponse::new(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/workflows/1001"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "creationReceipt": format!("blake3-256:{}", "1".repeat(64)),
+        "guard": {
+            "approvalRef": "approval-delete-disposable",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000012",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let result = invoke(&c, "n8n.workflows.delete_disposable", input)
+        .await
+        .expect("disposable deletion should verify independent 404");
+    assert_eq!(result["status"], "deleted");
+    assert_eq!(result["readback"], "independent_get_404");
+    assert!(result["workflowIdDigest"].as_str().is_some());
+    assert!(result["creationReceiptDigest"].as_str().is_some());
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3, "baseline GET, one DELETE, readback GET");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(requests[1].method, "DELETE");
+    assert_eq!(requests[2].method, "GET");
 }
 
 // -- Executions List --

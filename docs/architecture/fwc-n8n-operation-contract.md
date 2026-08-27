@@ -33,7 +33,10 @@ Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
 explicit owner-gated `provision --mode apply`. `run-once` supports nine Phase-1
 REST reads, guarded REST draft create/update, typed source paths for lifecycle
 `publish`/`unpublish` and archive, two local knowledge/validation operations,
-and one official-MCP discovery operation, `n8n.capabilities.inspect`. The
+and one official-MCP discovery operation, `n8n.capabilities.inspect`, plus the
+bounded `n8n.workflows.delete_disposable` cleanup path. The latter is not a
+general workflow-delete capability: it requires a host-issued receipt proving
+that the same workflow was created through the bounded draft path.
 draft-write
 packet is source-only: the installed immutable release remains the accepted
 read-only/discovery bundle until a separate owner-gated release and disposable
@@ -221,8 +224,9 @@ names.
   `tools/call` escape hatch.
 - Existing opt-in Codex MCP profiles remain a fallback until a separate
   acceptance and retirement decision.
-- Credential mutation and permanent workflow deletion are future-only. They
-  are specified as closed gates, not v1 operations.
+- Credential mutation and general/permanent workflow deletion are future-only.
+  The bounded disposable cleanup operation is a separate v1 exception with its
+  own host-issued creation receipt and 404 readback contract.
 - The local provider target is zero processes and zero provider RSS/PSS/private
   memory while idle.
 
@@ -503,6 +507,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
+| `n8n.workflows.delete_disposable` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST `DELETE /workflows/{id}` with independent REST GET requiring 404 | exact host-issued creation receipt; inactive/unarchived precondition | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | Risky / High | Interactive | BestEffort | owner-gated official MCP `execute_workflow` with exact immutable EEC/Hetzner input/output schema bindings | bounded workflow/execution IDs and initial status plus independent typed execution GET readback; post-provider readback failures are terminal unknown/no-retry; live acceptance deferred | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
@@ -522,7 +527,8 @@ separate:
   `executions.get`, `projects.list`, `credentials.list`, `tags.list`,
   `folders.list`, `folders.get`, `workflows.create_draft`,
   `workflows.update_draft`, `workflows.lifecycle`, `workflows.archive`,
-  `workflows.execute`, and `mcp_access.reconcile`. A manifest declaration does
+  `workflows.delete_disposable`, `workflows.execute`, and
+  `mcp_access.reconcile`. A manifest declaration does
   not override an operation's fail-closed provider gate.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is absent from
   the connector manifest. The wrapper/host path accepts an empty operation
@@ -538,7 +544,7 @@ separate:
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
   without a corresponding host/connector dispatch remain future or
   unimplemented execution paths. `restore/unarchive`, `versions`, credential
-  mutation, permanent deletion, and the provider activation path remain
+  mutation, permanent/general deletion, and the provider activation path remain
   fail-closed/non-goals.
 
 Historical live acceptance boundary (2026-08-21; release ID and evidence receipt
@@ -1120,11 +1126,23 @@ rotate/delete operations require a separate owner decision, KeePass or a
 protected host channel, consumer preflight, secret-free readback, and rollback.
 OAuth refresh tokens and client secrets must never cross the model boundary.
 
-### 13.2 Permanent workflow deletion
+### 13.2 Disposable workflow deletion and permanent workflow deletion
 
-No v1 operation maps to provider delete. Future deletion requires prior archive,
-`active=false`, `isArchived=true`, an encrypted recovery export without
-credentials/sensitive execution data, dependency inspection, Strict
+The narrowly scoped `n8n.workflows.delete_disposable` operation is the only v1
+provider-delete path. It is reserved for cleanup of a workflow created by the
+bounded `n8n.workflows.create_draft` path. A delete request must carry the
+host-issued `creationReceipt`, the exact same-server workflow target, a full
+inactive/unarchived precondition, a UUID idempotency key, and current-chat
+approval. The host validates the receipt against its existing create outcome
+record before provider access. The connector performs one typed
+`DELETE /workflows/{id}` attempt and an independent `GET`; only a 404 readback
+is success. Timeout, transport failure, malformed response, conflict, or a
+still-present workflow is terminal unknown and is never retried automatically.
+The durable host run-once receipt remains the sole replay/unknown boundary.
+
+General and permanent workflow deletion remain future-only. They require prior
+archive, `active=false`, `isArchived=true`, an encrypted recovery export
+without credentials/sensitive execution data, dependency inspection, Strict
 idempotency, a separate short-lived approval, and unknown-result reconciliation.
 
 ### 13.3 Other destructive provider sub-actions

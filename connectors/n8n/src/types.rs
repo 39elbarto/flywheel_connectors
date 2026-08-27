@@ -300,6 +300,18 @@ pub struct WorkflowLifecycleInput {
     pub guard: WorkflowLifecycleGuard,
 }
 
+/// Typed deletion input for a workflow that was created through the bounded
+/// disposable-draft host path.  The receipt is an opaque host-issued digest;
+/// it is not a caller assertion and is checked by the host before dispatch.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDeleteDisposableInput {
+    pub id: String,
+    #[serde(rename = "creationReceipt")]
+    pub creation_receipt: String,
+    pub guard: WorkflowLifecycleGuard,
+}
+
 /// Execution modes supported by the mediated official MCP path.  Test and
 /// prepare-test execution are intentionally not represented here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

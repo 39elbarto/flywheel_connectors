@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0c9040683dcf6dd8fcb5578c407f30e6dbc56e9108db5504a69324aee9062a68"
+interface_hash = "blake3-256:fcp.interface.v2:9597a5ec5a4429d599f2ff9394330aa1de00bc3ed0d65d68b25e941ef97296e7"
 
 [connector]
 id = "fcp.n8n"
@@ -1840,6 +1840,12 @@ type = [
     "null",
 ]
 
+[provides.operations."n8n.workflows.create_draft".output_schema.properties.creationReceipt]
+description = "Host-issued receipt required for bounded disposable cleanup"
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
 [provides.operations."n8n.workflows.create_draft".output_schema.properties.graphDigest]
 type = "string"
 
@@ -1909,6 +1915,134 @@ related = [
     "n8n.workflows.get",
     "n8n.workflows.update_draft",
 ]
+
+[provides.operations."n8n.workflows.delete_disposable"]
+description = "Delete only a workflow created by the bounded disposable draft path and verify independent GET 404 readback"
+capability = "n8n.workflows.write"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema]
+additionalProperties = false
+required = ["id", "creationReceipt", "guard"]
+type = "object"
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.id]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.creationReceipt]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard]
+additionalProperties = false
+required = ["approvalRef", "idempotencyKey", "precondition"]
+type = "object"
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.approvalRef]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.idempotencyKey]
+type = "string"
+format = "uuid"
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"]
+type = "object"
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = ["string", "null"]
+maxLength = 256
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+const = false
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+const = false
+
+[provides.operations."n8n.workflows.delete_disposable".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema]
+additionalProperties = false
+required = ["status", "operation", "provider", "retry", "readback", "workflowIdDigest", "creationReceiptDigest"]
+type = "object"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.status]
+type = "string"
+const = "deleted"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.operation]
+type = "string"
+const = "n8n.workflows.delete_disposable"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.provider]
+type = "string"
+const = "rest"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.retry]
+type = "string"
+const = "never_automatic"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.readback]
+type = "string"
+const = "independent_get_404"
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.workflowIdDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.delete_disposable".output_schema.properties.creationReceiptDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.delete_disposable".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."n8n.workflows.delete_disposable".ai_hints]
+when_to_use = "Use only to clean up a workflow created by the bounded disposable draft path, with a host-issued creationReceipt, exact inactive/unarchived precondition, and current-chat approval."
+common_mistakes = [
+    "This is not a general workflow delete operation; arbitrary existing workflow IDs and caller-created receipts are rejected.",
+    "The typed REST path performs one DELETE followed by an independent GET that must return 404; timeout, conflict, malformed response, or readback uncertainty is never retried automatically.",
+    "Permanent deletion, credentials, activation, and generic MCP tools/call remain outside this operation.",
+]
+examples = ["{\"id\":\"1001\",\"creationReceipt\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000006\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
+related = ["n8n.workflows.create_draft", "n8n.workflows.get"]
 
 [provides.operations."n8n.workflows.get"]
 description = "Get a specific workflow by ID"

@@ -829,6 +829,7 @@ fn owner_boundary_effective_uid() -> u32 {
 #[cfg(all(target_os = "linux", test))]
 std::thread_local! {
     static TEST_OWNER_BOUNDARY_EFFECTIVE_UID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static TEST_FAIL_CURRENT_PROMOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -842,6 +843,16 @@ fn with_test_owner_boundary_effective_uid<T>(uid: u32, operation: impl FnOnce() 
         let previous = effective_uid.replace(uid);
         let result = operation();
         effective_uid.set(previous);
+        result
+    })
+}
+
+#[cfg(all(target_os = "linux", test))]
+fn with_test_current_promotion_failure<T>(operation: impl FnOnce() -> T) -> T {
+    TEST_FAIL_CURRENT_PROMOTION.with(|failure| {
+        let previous = failure.replace(true);
+        let result = operation();
+        failure.set(previous);
         result
     })
 }
@@ -1117,6 +1128,11 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
         owner_verification,
         plan.plan.current_validation,
     ) {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion)?;
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    #[cfg(all(target_os = "linux", test))]
+    if TEST_FAIL_CURRENT_PROMOTION.with(|failure| failure.replace(false)) {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Promotion)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
     }
@@ -2450,7 +2466,12 @@ where
     validate_release_directories(&current, expected_owner)?;
     let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
     let mode = match fs::symlink_metadata(&provision_receipt_path) {
-        Ok(_) => CurrentValidationMode::SignedProvisionReceipt,
+        Ok(_) => match expected_mode {
+            Some(CurrentValidationMode::SignedProvisionReceiptLegacySchema) => {
+                CurrentValidationMode::SignedProvisionReceiptLegacySchema
+            }
+            _ => CurrentValidationMode::SignedProvisionReceipt,
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             CurrentValidationMode::LegacyBootstrap
         }
@@ -3568,6 +3589,41 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn signed_legacy_current_mode_survives_owner_revalidation() {
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let (_, mode) = validate_current_pointer_with_verifier(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+            None,
+            legacy_bundle_verifier,
+        )
+        .expect("signed legacy current validation");
+        assert_eq!(
+            mode,
+            CurrentValidationMode::SignedProvisionReceiptLegacySchema
+        );
+
+        let (current, revalidated_mode) = validate_current_pointer_with_verifier(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+            Some(mode),
+            legacy_bundle_verifier,
+        )
+        .expect("signed legacy current revalidation");
+        assert_eq!(current, fixture.releases.join("previous"));
+        assert_eq!(
+            revalidated_mode,
+            CurrentValidationMode::SignedProvisionReceiptLegacySchema
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn signed_legacy_current_requires_both_legacy_server_bindings() {
         let fixture = Fixture::new();
         fixture.set_previous_legacy_lifecycle_schemas();
@@ -4335,12 +4391,10 @@ mod tests {
         let fixture = Fixture::new();
         let plan = fixture.request().validate().expect("valid plan");
         let before = fs::canonicalize(&fixture.current).expect("current target");
-        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o555))
-            .expect("make install root non-writable");
-        let result = FilesystemOwnerAtomicInstaller::new()
-            .promote(plan.revalidate().expect("revalidated plan"));
-        fs::set_permissions(&fixture.root, fs::Permissions::from_mode(0o755))
-            .expect("restore install root mode");
+        let result = with_test_current_promotion_failure(|| {
+            FilesystemOwnerAtomicInstaller::new()
+                .promote(plan.revalidate().expect("revalidated plan"))
+        });
 
         assert_eq!(
             result.expect_err("current promotion must fail").code(),

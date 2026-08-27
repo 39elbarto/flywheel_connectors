@@ -1755,11 +1755,50 @@ mod tests {
                 .get_mut("approved_tools")
                 .and_then(Value::as_array_mut)
                 .expect("approved tools")
-                .retain(|tool| {
-                    matches!(
+                .retain_mut(|tool| {
+                    let keep = matches!(
                         tool.get("name").and_then(Value::as_str),
                         Some("publish_workflow") | Some("unpublish_workflow")
-                    )
+                    );
+                    if keep {
+                        let Some(tool) = tool.as_object_mut() else {
+                            return false;
+                        };
+                        match tool.get("name").and_then(Value::as_str) {
+                            Some("publish_workflow") => {
+                                tool.insert(
+                                    "input_schema_digest".to_owned(),
+                                    Value::String(
+                                        LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST.to_owned(),
+                                    ),
+                                );
+                                tool.insert(
+                                    "output_schema_digest".to_owned(),
+                                    Value::String(
+                                        LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST.to_owned(),
+                                    ),
+                                );
+                            }
+                            Some("unpublish_workflow") => {
+                                tool.insert(
+                                    "input_schema_digest".to_owned(),
+                                    Value::String(
+                                        LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST
+                                            .to_owned(),
+                                    ),
+                                );
+                                tool.insert(
+                                    "output_schema_digest".to_owned(),
+                                    Value::String(
+                                        LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST
+                                            .to_owned(),
+                                    ),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+                    keep
                 });
             policy.remove("archive_workflow_schema");
             policy.remove("execute_workflow_schema");

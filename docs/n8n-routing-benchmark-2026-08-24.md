@@ -160,6 +160,34 @@ nested teardown proof, current-profile parity for every operation class, and a
 routing-policy change were not performed. The harness contract records these
 gaps honestly instead of inferring them from persistent-process snapshots.
 
+## Owner-approved live read-only benchmark — 2026-08-27
+
+An owner-approved, sequential read-only run covered EEC and Hetzner using the
+immutable current release `release-20260827-b43afd0ce-static`. The benchmark
+metadata was bound to the fixed current reference with
+`binary_sha256_16=b8a923f7bda30ef3` and
+`policy_sha256_16=7fe825fcda28a330`. Three samples were collected for each
+operation. Every sample had `rc=0`, `writes=0`, and `retries=0`; workflow IDs
+and response bodies were discarded.
+
+The reported latency is total FWC wrapper-invocation wall-clock time, not
+provider latency:
+
+| Server | Operation / route | p50/p95 total ms | Mean response bytes | Byte estimate | Samples | rc / writes / retries |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| EEC | `workflows.list` / `typed_rest_fcp` | 697 / 784 | 482 | 121 | 3 | 0 / 0 / 0 |
+| EEC | `workflows.get` / `typed_rest_fcp` | 821 / 917 | 611 | 153 | 3 | 0 / 0 / 0 |
+| EEC | `capabilities.inspect` / `official_mcp` | 1849 / 2504 | 9067 | 2267 | 3 | 0 / 0 / 0 |
+| Hetzner | `workflows.list` / `typed_rest_fcp` | 1116 / 1163 | 510 | 128 | 3 | 0 / 0 / 0 |
+| Hetzner | `workflows.get` / `typed_rest_fcp` | 1174 / 1244 | 757 | 190 | 3 | 0 / 0 / 0 |
+| Hetzner | `capabilities.inspect` / `official_mcp` | 1222 / 1280 | 9071 | 2268 | 3 | 0 / 0 / 0 |
+
+The following remain explicitly `not_collected`: provider latency, provider
+call count, per-invocation peak RSS/PSS/private memory, real tokenization, and
+nested teardown state. The FWC wrappers completed for these samples. That
+completion is not proof of zero-idle memory or process state for a persistent
+MCP profile.
+
 ## Offline verification performed
 
 Only the following checks are in scope for this packet:

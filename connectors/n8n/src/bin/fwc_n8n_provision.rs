@@ -2506,7 +2506,7 @@ where
             };
             match validate_signed_tree(LifecycleSchemaMode::CurrentPerServer) {
                 Ok(()) => return Ok((current, CurrentValidationMode::SignedProvisionReceipt)),
-                Err(error) if error.code() != ProvisionErrorCode::Policy => return Err(error),
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
                 Err(_) => {}
             }
             validate_signed_tree(LifecycleSchemaMode::LegacyCommon)?;

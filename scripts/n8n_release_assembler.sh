@@ -23,6 +23,14 @@ readonly ARTIFACTS=(
   "policy/zone-policies.json"
   "policy/local-mcp.json"
 )
+readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf"
+readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf"
+readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115"
+readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c"
+readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4"
+readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0"
+readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a"
+readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957"
 
 die() {
   echo "n8n_release_assembler: $*" >&2
@@ -202,12 +210,33 @@ write_inventory_and_request() {
   n8n_digest="$($hash_helper "$stage_root/bin/fcp-n8n")"
   bridge_digest="$($hash_helper "$stage_root/bin/fcp-mcp-bridge")"
 
-  python3 - "$stage_root" "$source_release" "$new_root" "$n8n_digest" "$bridge_digest" "$request_path" "$PROVISION_REQUEST_SCHEMA" "$git_revision" <<'PY'
+  python3 - "$stage_root" "$source_release" "$new_root" "$n8n_digest" "$bridge_digest" "$request_path" "$PROVISION_REQUEST_SCHEMA" "$git_revision" \
+    "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" <<'PY'
 import json
 import pathlib
 import sys
 
-stage, old_root, new_root, n8n_digest, bridge_digest, request_path, request_schema, git_revision = sys.argv[1:]
+(
+    stage,
+    old_root,
+    new_root,
+    n8n_digest,
+    bridge_digest,
+    request_path,
+    request_schema,
+    git_revision,
+    eec_publish_input,
+    eec_publish_output,
+    eec_unpublish_input,
+    eec_unpublish_output,
+    hetzner_publish_input,
+    hetzner_publish_output,
+    hetzner_unpublish_input,
+    hetzner_unpublish_output,
+) = sys.argv[1:]
 stage = pathlib.Path(stage)
 
 def load(name):
@@ -229,6 +258,20 @@ for server in ("eec", "hetzner"):
     common["launch_binding"]["runtime_executable_digest"] = n8n_digest
     official["launch_binding"]["launcher_digest"] = bridge_digest
     official["launch_binding"]["runtime_executable_digest"] = bridge_digest
+    lifecycle = {
+        "eec": {
+            "publish_workflow": (eec_publish_input, eec_publish_output),
+            "unpublish_workflow": (eec_unpublish_input, eec_unpublish_output),
+        },
+        "hetzner": {
+            "publish_workflow": (hetzner_publish_input, hetzner_publish_output),
+            "unpublish_workflow": (hetzner_unpublish_input, hetzner_unpublish_output),
+        },
+    }
+    for tool in official["config"]["capability_policy"]["approved_tools"]:
+        schema = lifecycle[server].get(tool["name"])
+        if schema is not None:
+            tool["input_schema_digest"], tool["output_schema_digest"] = schema
     save(f"{server}.json", common)
     save(f"{server}-official-mcp.json", official)
     policy = official["config"]["capability_policy"]

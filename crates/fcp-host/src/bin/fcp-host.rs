@@ -373,14 +373,22 @@ const N8N_OFFICIAL_MCP_PUBLISH_TOOL: &str = "publish_workflow";
 const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
 const N8N_OFFICIAL_MCP_ARCHIVE_TOOL: &str = "archive_workflow";
 const N8N_OFFICIAL_MCP_EXECUTE_TOOL: &str = "execute_workflow";
-const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
-const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
-const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
-const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957";
 const N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
 const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
@@ -393,6 +401,31 @@ const N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
+
+fn n8n_official_mcp_lifecycle_schema_digests(
+    server_id: &str,
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (server_id, tool_name) {
+        ("eec", N8N_OFFICIAL_MCP_PUBLISH_TOOL) => Some((
+            N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+            N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC,
+        )),
+        ("eec", N8N_OFFICIAL_MCP_UNPUBLISH_TOOL) => Some((
+            N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+            N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC,
+        )),
+        ("hetzner", N8N_OFFICIAL_MCP_PUBLISH_TOOL) => Some((
+            N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER,
+            N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )),
+        ("hetzner", N8N_OFFICIAL_MCP_UNPUBLISH_TOOL) => Some((
+            N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER,
+            N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )),
+        _ => None,
+    }
+}
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
@@ -11159,8 +11192,8 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
     let Some(Value::Object(policy)) = config.get("capability_policy") else {
         return false;
     };
+    let server_id = config.get("server_id").and_then(Value::as_str);
     if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
-        let server_id = config.get("server_id").and_then(Value::as_str);
         let (expected_input, expected_output) = match server_id {
             Some("eec") => (
                 N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
@@ -11242,20 +11275,23 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
                 )
             })
             && tools.iter().any(|tool| {
-                tool_matches(
-                    tool,
-                    N8N_OFFICIAL_MCP_PUBLISH_TOOL,
-                    N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-                    N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
-                )
+                let Some((input, output)) = server_id.and_then(|server| {
+                    n8n_official_mcp_lifecycle_schema_digests(server, N8N_OFFICIAL_MCP_PUBLISH_TOOL)
+                }) else {
+                    return false;
+                };
+                tool_matches(tool, N8N_OFFICIAL_MCP_PUBLISH_TOOL, input, output)
             })
             && tools.iter().any(|tool| {
-                tool_matches(
-                    tool,
-                    N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
-                    N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-                    N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
-                )
+                let Some((input, output)) = server_id.and_then(|server| {
+                    n8n_official_mcp_lifecycle_schema_digests(
+                        server,
+                        N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
+                    )
+                }) else {
+                    return false;
+                };
+                tool_matches(tool, N8N_OFFICIAL_MCP_UNPUBLISH_TOOL, input, output)
             })
             && tools.iter().any(|tool| {
                 tool_matches(
@@ -11276,17 +11312,14 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         }
         return false;
     }
-    let (expected_input_digest, expected_output_digest) = match tool_name {
-        N8N_OFFICIAL_MCP_PUBLISH_TOOL => (
-            N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-            N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
-        ),
-        N8N_OFFICIAL_MCP_UNPUBLISH_TOOL => (
-            N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-            N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
-        ),
-        N8N_OFFICIAL_MCP_ARCHIVE_TOOL => ("", ""),
-        _ => return false,
+    let expected_schema = match tool_name {
+        N8N_OFFICIAL_MCP_PUBLISH_TOOL | N8N_OFFICIAL_MCP_UNPUBLISH_TOOL => server_id
+            .and_then(|server| n8n_official_mcp_lifecycle_schema_digests(server, tool_name)),
+        N8N_OFFICIAL_MCP_ARCHIVE_TOOL => Some(("", "")),
+        _ => None,
+    };
+    let Some((expected_input_digest, expected_output_digest)) = expected_schema else {
+        return false;
     };
     let archive_binding = policy
         .get("archive_workflow_schema")
@@ -34544,6 +34577,90 @@ done"#;
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn n8n_official_mcp_lifecycle_schema_binding_is_exact_per_server() {
+        let eec = ManagedConnectorConfig {
+            id: "fcp.mcp-bridge".to_string(),
+            binary: "/bin/true".to_string(),
+            manifest_path: None,
+            name: Some("official MCP policy fixture".to_string()),
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: Some(json!({
+                "server_id": "eec",
+                "capability_policy": {
+                    "approved_tools": [
+                        {
+                            "name": N8N_OFFICIAL_MCP_PUBLISH_TOOL,
+                            "class": "write",
+                            "input_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                            "output_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC
+                        },
+                        {
+                            "name": N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
+                            "class": "write",
+                            "input_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                            "output_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC
+                        }
+                    ]
+                }
+            })),
+            categories: Vec::new(),
+            version: None,
+            allowed_zones: vec![ZoneId::work().to_string()],
+            allowed_operations: vec![N8N_OFFICIAL_MCP_CALL_OPERATION.to_string()],
+            enforce_operation_network_constraints: false,
+            enforce_empty_allow_lists: false,
+            runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+            prewarm: Default::default(),
+            lifecycle_mode: ConnectorLifecycleMode::PerInvocation,
+            launch_binding: None,
+            operation_network_constraints: BTreeMap::new(),
+        };
+        assert!(official_mcp_policy_allows_tool(
+            &eec,
+            N8N_OFFICIAL_MCP_PUBLISH_TOOL
+        ));
+        assert!(official_mcp_policy_allows_tool(
+            &eec,
+            N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+        ));
+
+        let mut copied_eec_policy = eec.clone();
+        copied_eec_policy.config.as_mut().expect("config")["server_id"] = json!("hetzner");
+        assert!(!official_mcp_policy_allows_tool(
+            &copied_eec_policy,
+            N8N_OFFICIAL_MCP_PUBLISH_TOOL
+        ));
+        assert!(!official_mcp_policy_allows_tool(
+            &copied_eec_policy,
+            N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+        ));
+
+        let mut hetzner = copied_eec_policy;
+        let approved_tools =
+            hetzner.config.as_mut().expect("config")["capability_policy"]["approved_tools"]
+                .as_array_mut()
+                .expect("approved tools");
+        approved_tools[0]["input_schema_digest"] =
+            json!(N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER);
+        approved_tools[0]["output_schema_digest"] =
+            json!(N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER);
+        approved_tools[1]["input_schema_digest"] =
+            json!(N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER);
+        approved_tools[1]["output_schema_digest"] =
+            json!(N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER);
+        assert!(official_mcp_policy_allows_tool(
+            &hetzner,
+            N8N_OFFICIAL_MCP_PUBLISH_TOOL
+        ));
+        assert!(official_mcp_policy_allows_tool(
+            &hetzner,
+            N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+        ));
     }
 
     #[test]

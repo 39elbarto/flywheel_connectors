@@ -63,14 +63,39 @@ const APPROVED_TOOLS: [&str; 4] = [
     "unpublish_workflow",
     "execute_workflow",
 ];
-const PUBLISH_INPUT: &str =
+const EEC_PUBLISH_INPUT: &str =
     "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
-const PUBLISH_OUTPUT: &str =
+const EEC_PUBLISH_OUTPUT: &str =
     "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
-const UNPUBLISH_INPUT: &str =
+const EEC_UNPUBLISH_INPUT: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
-const UNPUBLISH_OUTPUT: &str =
+const EEC_UNPUBLISH_OUTPUT: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+const HETZNER_PUBLISH_INPUT: &str =
+    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+const HETZNER_PUBLISH_OUTPUT: &str =
+    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+const HETZNER_UNPUBLISH_INPUT: &str =
+    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+const HETZNER_UNPUBLISH_OUTPUT: &str =
+    "sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957";
+
+fn lifecycle_schema_digests(
+    server: ServerId,
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (server, tool_name) {
+        (ServerId::Eec, "publish_workflow") => Some((EEC_PUBLISH_INPUT, EEC_PUBLISH_OUTPUT)),
+        (ServerId::Eec, "unpublish_workflow") => Some((EEC_UNPUBLISH_INPUT, EEC_UNPUBLISH_OUTPUT)),
+        (ServerId::Hetzner, "publish_workflow") => {
+            Some((HETZNER_PUBLISH_INPUT, HETZNER_PUBLISH_OUTPUT))
+        }
+        (ServerId::Hetzner, "unpublish_workflow") => {
+            Some((HETZNER_UNPUBLISH_INPUT, HETZNER_UNPUBLISH_OUTPUT))
+        }
+        _ => None,
+    }
+}
 const EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const EEC_EXECUTE_INPUT: &str =
     "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
@@ -2164,8 +2189,8 @@ fn validate_inventory(
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
         let expected = match name {
-            "publish_workflow" => (PUBLISH_INPUT, PUBLISH_OUTPUT),
-            "unpublish_workflow" => (UNPUBLISH_INPUT, UNPUBLISH_OUTPUT),
+            "publish_workflow" | "unpublish_workflow" => lifecycle_schema_digests(server, name)
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?,
             "archive_workflow" => (
                 binding.archive_input_schema_digest.as_str(),
                 binding.archive_output_schema_digest.as_str(),
@@ -2963,6 +2988,17 @@ mod tests {
                         HETZNER_N8N_VERSION,
                     )
                 };
+                let server_id = if server == "eec" {
+                    ServerId::Eec
+                } else {
+                    ServerId::Hetzner
+                };
+                let (publish_input, publish_output) =
+                    lifecycle_schema_digests(server_id, "publish_workflow")
+                        .expect("fixture publish schema");
+                let (unpublish_input, unpublish_output) =
+                    lifecycle_schema_digests(server_id, "unpublish_workflow")
+                        .expect("fixture unpublish schema");
                 let inventory = serde_json::json!([{
                     "id": "fcp.mcp-bridge",
                     "binary": make_path("bin/fcp-mcp-bridge"),
@@ -2973,8 +3009,8 @@ mod tests {
                         "api_scope_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
                         "approved_tools": [
                             {"name":"archive_workflow","class":"write","input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},
-                            {"name":"publish_workflow","class":"write","input_schema_digest":PUBLISH_INPUT,"output_schema_digest":PUBLISH_OUTPUT},
-                            {"name":"unpublish_workflow","class":"write","input_schema_digest":UNPUBLISH_INPUT,"output_schema_digest":UNPUBLISH_OUTPUT},
+                            {"name":"publish_workflow","class":"write","input_schema_digest":publish_input,"output_schema_digest":publish_output},
+                            {"name":"unpublish_workflow","class":"write","input_schema_digest":unpublish_input,"output_schema_digest":unpublish_output},
                             {"name":"execute_workflow","class":"write","input_schema_digest": if server=="eec" {EEC_EXECUTE_INPUT} else {HETZNER_EXECUTE_INPUT},"output_schema_digest": if server=="eec" {EEC_EXECUTE_OUTPUT} else {HETZNER_EXECUTE_OUTPUT}}
                         ],
                         "archive_workflow_schema": {"input_schema_digest": if server=="eec" {"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} else {"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"output_schema_digest": if server=="eec" {"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"} else {"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}},

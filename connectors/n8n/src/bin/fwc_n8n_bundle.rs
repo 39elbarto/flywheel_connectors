@@ -45,14 +45,58 @@ const EXECUTABLE_ARTIFACTS: [&str; 4] = [
     "bin/fcp-n8n",
     "bin/fcp-mcp-bridge",
 ];
-const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
-const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
-const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
-const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
+    "sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957";
+
+fn official_mcp_lifecycle_schema_digests(
+    server_id: &str,
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (server_id, tool_name) {
+        ("eec", "publish_workflow") => Some((
+            OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+            OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC,
+        )),
+        ("eec", "unpublish_workflow") => Some((
+            OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+            OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC,
+        )),
+        ("hetzner", "publish_workflow") => Some((
+            OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER,
+            OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )),
+        ("hetzner", "unpublish_workflow") => Some((
+            OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER,
+            OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )),
+        _ => None,
+    }
+}
+
+// Legacy bundles used the original EEC-shaped lifecycle contract. Keep that
+// bootstrap acceptance separate from current per-server bindings.
+const LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC;
+const LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC;
+const LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC;
+const LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC;
 const OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
@@ -625,6 +669,8 @@ fn verify_inventory_binding(
                 ),
                 _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
             };
+        let lifecycle_schema =
+            |tool_name: &str| official_mcp_lifecycle_schema_digests(expected_server_id, tool_name);
         let exact_network = |operation: &str| {
             let exact_host = entry
                 .pointer(&format!(
@@ -801,14 +847,14 @@ fn verify_inventory_binding(
                                 && exact_approved_tool(
                                     policy,
                                     "publish_workflow",
-                                    OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-                                    OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+                                    LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                                    LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
                                 )
                                 && exact_approved_tool(
                                     policy,
                                     "unpublish_workflow",
-                                    OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-                                    OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+                                    LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                                    LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
                                 )
                         });
                 (policy.len() == 6 || legacy_policy)
@@ -819,20 +865,14 @@ fn verify_inventory_binding(
                         .get("api_scope_digest")
                         .and_then(Value::as_str)
                         .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
-                    && exact_approved_tool(
-                        policy,
-                        "publish_workflow",
-                        OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-                        OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
-                    )
-                    && exact_approved_tool(
-                        policy,
-                        "unpublish_workflow",
-                        OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-                        OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
-                    )
                     && (legacy_policy
-                        || (archive_approved_tool(policy)
+                        || (lifecycle_schema("publish_workflow").is_some_and(|(input, output)| {
+                            exact_approved_tool(policy, "publish_workflow", input, output)
+                        }) && lifecycle_schema("unpublish_workflow").is_some_and(
+                            |(input, output)| {
+                                exact_approved_tool(policy, "unpublish_workflow", input, output)
+                            },
+                        ) && archive_approved_tool(policy)
                             && archive_schema_binding_matches(policy)
                             && ((owner_tools && execute_schema_owner(policy))
                                 || (sentinel_tools && execute_schema_sentinel(policy)))))
@@ -1200,6 +1240,12 @@ mod tests {
                 "hetzner" => "2.34.6",
                 _ => panic!("unsupported fixture server"),
             };
+            let (publish_input, publish_output) =
+                official_mcp_lifecycle_schema_digests(server_id, "publish_workflow")
+                    .expect("fixture publish schema");
+            let (unpublish_input, unpublish_output) =
+                official_mcp_lifecycle_schema_digests(server_id, "unpublish_workflow")
+                    .expect("fixture unpublish schema");
             let value = serde_json::json!([{
                 "id": "fcp.mcp-bridge",
                 "binary": executable,
@@ -1217,14 +1263,14 @@ mod tests {
                             {
                                 "name": "publish_workflow",
                                 "class": "write",
-                                "input_schema_digest": OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-                                "output_schema_digest": OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST
+                                "input_schema_digest": publish_input,
+                                "output_schema_digest": publish_output
                             },
                             {
                                 "name": "unpublish_workflow",
                                 "class": "write",
-                                "input_schema_digest": OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-                                "output_schema_digest": OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST
+                                "input_schema_digest": unpublish_input,
+                                "output_schema_digest": unpublish_output
                             },
                             {
                                 "name": "archive_workflow",
@@ -1643,6 +1689,53 @@ mod tests {
         sentinel.write_receipt(None);
         verify_release_bundle_for_owner(&sentinel.executable, sentinel.owner)
             .expect("legacy sentinel policy remains structurally accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifecycle_schema_binding_is_rejected_when_copied_between_servers() {
+        for (target_server, source_server) in [("eec", "hetzner"), ("hetzner", "eec")] {
+            let fixture = ReleaseFixture::new();
+            let inventory_path =
+                fixture.artifact(&format!("inventory/{target_server}-official-mcp.json"));
+            let mut inventory: Value =
+                serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                    .expect("decode inventory fixture");
+            let (publish_input, publish_output) =
+                official_mcp_lifecycle_schema_digests(source_server, "publish_workflow")
+                    .expect("source publish schema");
+            let (unpublish_input, unpublish_output) =
+                official_mcp_lifecycle_schema_digests(source_server, "unpublish_workflow")
+                    .expect("source unpublish schema");
+            for tool in inventory[0]["config"]["capability_policy"]["approved_tools"]
+                .as_array_mut()
+                .expect("approved tools")
+            {
+                match tool.get("name").and_then(Value::as_str) {
+                    Some("publish_workflow") => {
+                        tool["input_schema_digest"] = Value::String(publish_input.to_owned());
+                        tool["output_schema_digest"] = Value::String(publish_output.to_owned());
+                    }
+                    Some("unpublish_workflow") => {
+                        tool["input_schema_digest"] = Value::String(unpublish_input.to_owned());
+                        tool["output_schema_digest"] = Value::String(unpublish_output.to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            fs::write(
+                &inventory_path,
+                serde_json::to_vec(&inventory).expect("encode cross-server inventory"),
+            )
+            .expect("write cross-server inventory");
+            fixture.write_receipt(None);
+            assert_eq!(
+                verify_release_bundle_for_owner(&fixture.executable, fixture.owner)
+                    .expect_err("cross-server lifecycle schema binding")
+                    .code(),
+                BundleErrorCode::InventoryBinding
+            );
+        }
     }
 
     #[cfg(unix)]

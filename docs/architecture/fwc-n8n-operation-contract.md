@@ -14,15 +14,19 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current host evidence (2026-08-25, read-only):**
+**Current host evidence (2026-08-28, read-only):**
 `/usr/local/lib/fwc-n8n/current` points to
-`release-20260824-90819213-static`, whose installed `fwc-n8n status` reports
+`release-20260828-d4e8b288e-static` (git revision
+`d4e8b288e9415484978ea4a047e575a9ffddd7cb`), whose installed `fwc-n8n status`
+reports
 `{"bundleAvailable":true}`. The resolved tree contains both `provenance.json`
 and `provision-receipt.json`, and their release/revision metadata agrees with
 this release. Receipt presence and matching metadata alone do not establish
 cryptographic verification, live provider acceptance, or current-release live
 acceptance; no such live/API invocation is claimed here. No release switch was
 performed by this documentation update.
+The source `main` is newer (`2a908c742`); the committed redacted host-error-detail
+propagation is not yet installed in `current`.
 The fixed runtime policy records local `n8n-mcp` package version `2.69.2`;
 the source update fixtures pin the same version. This is version evidence only,
 not a live provider check.

@@ -505,6 +505,7 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptLegacyCommonInventory,
     SignedProvisionReceiptLegacySchema,
     LegacyBootstrap,
 }
@@ -513,6 +514,12 @@ enum CurrentValidationMode {
 enum LifecycleSchemaMode {
     CurrentPerServer,
     LegacyCommon,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommonInventorySchemaMode {
+    Current,
+    Legacy,
 }
 
 /// A validated, but not yet owner-promoted, plan.  There is intentionally no
@@ -1478,6 +1485,7 @@ fn validate_release_tree(
         inventory_release_root,
         owner_verification,
         LifecycleSchemaMode::CurrentPerServer,
+        CommonInventorySchemaMode::Current,
     )
 }
 
@@ -1491,6 +1499,7 @@ fn validate_release_tree_with_schema_mode(
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
     lifecycle_schema_mode: LifecycleSchemaMode,
+    common_inventory_schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
     validate_unsigned_release_tree_with_schema_mode(
         root,
@@ -1500,6 +1509,7 @@ fn validate_release_tree_with_schema_mode(
         expected_owner,
         inventory_release_root,
         lifecycle_schema_mode,
+        common_inventory_schema_mode,
     )?;
     let provision_receipt: ProvisionReceipt = read_json(
         &root.join(PROVISION_RECEIPT_FILE),
@@ -1545,6 +1555,7 @@ pub(crate) fn validate_unsigned_release_tree(
         expected_owner,
         inventory_release_root,
         LifecycleSchemaMode::CurrentPerServer,
+        CommonInventorySchemaMode::Current,
     )
 }
 
@@ -1557,6 +1568,7 @@ fn validate_unsigned_release_tree_with_schema_mode(
     expected_owner: u32,
     inventory_release_root: &Path,
     lifecycle_schema_mode: LifecycleSchemaMode,
+    common_inventory_schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
     validate_release_directories(root, expected_owner)?;
     let provenance: Provenance = read_json(
@@ -1608,7 +1620,7 @@ fn validate_unsigned_release_tree_with_schema_mode(
                 server,
                 inventory_release_root,
                 root,
-                lifecycle_schema_mode,
+                common_inventory_schema_mode,
             )?;
         } else if relative_path.ends_with("official-mcp.json") {
             let server = if relative_path.starts_with("inventory/eec") {
@@ -1906,7 +1918,7 @@ fn validate_common_inventory(
     server: ServerId,
     release_root: &Path,
     artifact_root: &Path,
-    schema_mode: LifecycleSchemaMode,
+    schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
     let entries: Vec<CommonInventoryEntry> = serde_json::from_value(value.clone())
@@ -1927,8 +1939,8 @@ fn validate_common_inventory(
         ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
     };
     let expected_operations = match schema_mode {
-        LifecycleSchemaMode::CurrentPerServer => &COMMON_ALLOWED_OPERATIONS[..],
-        LifecycleSchemaMode::LegacyCommon => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
+        CommonInventorySchemaMode::Current => &COMMON_ALLOWED_OPERATIONS[..],
+        CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
     };
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
@@ -2491,6 +2503,9 @@ where
     let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
     let mode = match fs::symlink_metadata(&provision_receipt_path) {
         Ok(_) => match expected_mode {
+            Some(CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory) => {
+                CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
+            }
             Some(CurrentValidationMode::SignedProvisionReceiptLegacySchema) => {
                 CurrentValidationMode::SignedProvisionReceiptLegacySchema
             }
@@ -2537,7 +2552,7 @@ where
                 ProvisionErrorCode::Receipt,
             )?;
             validate_binding_shape(&provision_receipt.bindings)?;
-            let validate_signed_tree = |lifecycle_schema_mode| {
+            let validate_signed_tree = |lifecycle_schema_mode, common_inventory_schema_mode| {
                 validate_release_tree_with_schema_mode(
                     &current,
                     release_id,
@@ -2547,17 +2562,64 @@ where
                     &current,
                     owner_verification,
                     lifecycle_schema_mode,
+                    common_inventory_schema_mode,
                 )
             };
-            match validate_signed_tree(LifecycleSchemaMode::CurrentPerServer) {
+            match validate_signed_tree(
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Current,
+            ) {
                 Ok(()) => return Ok((current, CurrentValidationMode::SignedProvisionReceipt)),
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
                 Err(_) => {}
             }
-            validate_signed_tree(LifecycleSchemaMode::LegacyCommon)?;
+            match validate_signed_tree(
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Legacy,
+            ) {
+                Ok(()) => {
+                    return Ok((
+                        current,
+                        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
+                    ));
+                }
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            validate_signed_tree(
+                LifecycleSchemaMode::LegacyCommon,
+                CommonInventorySchemaMode::Legacy,
+            )?;
             return Ok((
                 current,
                 CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+            ));
+        }
+        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree_with_schema_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Legacy,
+            )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
             ));
         }
         CurrentValidationMode::SignedProvisionReceiptLegacySchema => {
@@ -2580,6 +2642,7 @@ where
                 &current,
                 owner_verification,
                 LifecycleSchemaMode::LegacyCommon,
+                CommonInventorySchemaMode::Legacy,
             )?;
             return Ok((
                 current,
@@ -2644,7 +2707,7 @@ fn validate_release_target(
     ) {
         Ok(()) => Ok(()),
         Err(error) if error.code == ProvisionErrorCode::Policy => {
-            validate_release_tree_with_schema_mode(
+            match validate_release_tree_with_schema_mode(
                 target,
                 release_id,
                 &provenance.git_revision,
@@ -2652,8 +2715,25 @@ fn validate_release_target(
                 expected_owner,
                 target,
                 owner_verification,
-                LifecycleSchemaMode::LegacyCommon,
-            )
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Legacy,
+            ) {
+                Ok(()) => Ok(()),
+                Err(error) if error.code == ProvisionErrorCode::Policy => {
+                    validate_release_tree_with_schema_mode(
+                        target,
+                        release_id,
+                        &provenance.git_revision,
+                        &provision_receipt.bindings,
+                        expected_owner,
+                        target,
+                        owner_verification,
+                        LifecycleSchemaMode::LegacyCommon,
+                        CommonInventorySchemaMode::Legacy,
+                    )
+                }
+                Err(error) => Err(error),
+            }
         }
         Err(error) => Err(error),
     }
@@ -3573,6 +3653,21 @@ mod tests {
             self.set_legacy_lifecycle_schemas(&self.releases.join("previous"), "previous");
         }
 
+        fn set_previous_legacy_common_inventory(&self) {
+            let previous = self.releases.join("previous");
+            self.set_legacy_common_operations(&previous);
+            fs::write(
+                previous.join(RECEIPT_FILE),
+                self.receipt_for(&previous, "previous"),
+            )
+            .expect("rewrite mixed-schema fixture receipt");
+            fs::write(
+                previous.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(&previous, "previous"),
+            )
+            .expect("rewrite mixed-schema fixture provision receipt");
+        }
+
         fn set_stage_legacy_lifecycle_schemas(&self) {
             self.set_legacy_lifecycle_schemas(&self.stage, &self.release_id);
         }
@@ -3654,6 +3749,49 @@ mod tests {
                 .request()
                 .validate()
                 .expect_err("legacy schema must not be accepted for the staged candidate")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_mixed_current_is_accepted_only_as_compatibility_predecessor() {
+        let fixture = Fixture::new();
+        fixture.set_previous_legacy_common_inventory();
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("valid signed mixed-schema predecessor");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
+        );
+        validate_release_target(
+            &fixture.releases.join("previous"),
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("mixed-schema rollback target remains valid");
+
+        let fixture = Fixture::new();
+        fixture.set_legacy_common_operations(&fixture.stage);
+        fs::write(
+            fixture.stage.join(RECEIPT_FILE),
+            fixture.receipt_for(&fixture.stage, &fixture.release_id),
+        )
+        .expect("rewrite mixed-schema stage receipt");
+        fs::write(
+            fixture.stage.join(PROVISION_RECEIPT_FILE),
+            fixture.provision_receipt_for(&fixture.stage, &fixture.release_id),
+        )
+        .expect("rewrite mixed-schema stage provision receipt");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("staged candidate must require current common inventory")
                 .code(),
             ProvisionErrorCode::Policy
         );

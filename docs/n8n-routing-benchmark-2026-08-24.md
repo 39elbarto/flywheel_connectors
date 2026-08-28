@@ -188,6 +188,38 @@ nested teardown state. The FWC wrappers completed for these samples. That
 completion is not proof of zero-idle memory or process state for a persistent
 MCP profile.
 
+## Current-release live capability verification — 2026-08-28
+
+An owner-approved, sequential read-only `capabilities.inspect` run used the
+installed immutable current release `release-20260828-d88e9d018-static`.
+The fixed-current metadata was recorded as
+`binary_sha256_16=5003243a224998f5f` and
+`policy_sha256_16=7fe825fcda28a330`. Both server calls returned `rc=0`,
+`status=ok`, `provider=official_mcp`, and `toolCount=34`; no workflow write,
+`tools/call`, retry, credential value, workflow ID, or response body was
+retained.
+
+The live response marked every tool `class=unknown` and
+`status=unreviewed`. The four release-bound tools needed by the current
+lifecycle/execute contract nevertheless returned the following exact schema
+digests:
+
+| Server | Tool | Input schema digest | Output schema digest |
+| --- | --- | --- | --- |
+| EEC | `publish_workflow` | `sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf` | `sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf` |
+| EEC | `unpublish_workflow` | `sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115` | `sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c` |
+| EEC | `archive_workflow` | `sha256:e4d70f8c252f37f524219cb7f49d356823f3aa90db65a83a4e05f6fae0b89aac` | `sha256:ace6f4d62ecae252208fc3f17ef34d73f1cbb8044d42cb87add79146a56b4472` |
+| EEC | `execute_workflow` | `sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7` | `sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f` |
+| Hetzner | `publish_workflow` | `sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4` | `sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0` |
+| Hetzner | `unpublish_workflow` | `sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a` | `sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957` |
+| Hetzner | `archive_workflow` | `sha256:9f4b360851418b0d0f3d71208a2465cd36c801cc3d452311c14d238720d0cdcf` | `sha256:83ca4eed4b170a03ef636348e35e28c0fcf5f217a176208fe8893f10ab4476b0` |
+| Hetzner | `execute_workflow` | `sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd` | `sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b` |
+
+This is current-release capability evidence, not lifecycle acceptance. The
+unreviewed server classification remains a deliberate gate: publish,
+unpublish, archive, execute, and generic MCP calls still require their
+separate owner-approved disposable acceptance and independent readback.
+
 ## Offline verification performed
 
 Only the following checks are in scope for this packet:

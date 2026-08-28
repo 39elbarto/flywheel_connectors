@@ -12933,6 +12933,8 @@ const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const N8N_RUN_ONCE_HOST_ERROR_DETAIL_PREFIX: &str = "FCP-N8N-HOST-ERROR-DETAIL/v1 ";
+#[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-CHILD-ERROR-DIAGNOSTIC/v1 ";
@@ -13301,7 +13303,48 @@ fn emit_n8n_run_once_host_error_diagnostic(error: &HostError) {
             "{N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX}{}",
             normalized_host_error_class(error)
         );
+        eprintln!(
+            "{N8N_RUN_ONCE_HOST_ERROR_DETAIL_PREFIX}{}",
+            n8n_run_once_host_error_detail(error)
+        );
     }
+}
+
+#[cfg(target_os = "linux")]
+fn n8n_run_once_host_error_detail(error: &HostError) -> &'static str {
+    let message = match error {
+        HostError::PreflightFailed(message) | HostError::ZoneEnvelopeRequired(message) => message,
+        _ => return "host.other",
+    };
+
+    if message.starts_with("policy denied live request: approval.")
+        || message.contains("approval token")
+        || message.contains("approval")
+    {
+        return "policy.approval";
+    }
+    if message.contains("capability token")
+        || message.contains("capability")
+        || message.contains("operation is absent")
+    {
+        return "policy.capability";
+    }
+    if message.contains("deployment") || message.contains("owner admission") {
+        return "policy.deployment";
+    }
+    if message.contains("network") || message.contains("egress") {
+        return "policy.network";
+    }
+    if message.contains("HRW") || message.contains("lease") {
+        return "policy.lease";
+    }
+    if message.contains("zone") || message.contains("connector") {
+        return "policy.binding";
+    }
+    if message.starts_with("policy denied live request:") {
+        return "policy.decision";
+    }
+    "policy.other"
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -34227,6 +34270,51 @@ done"#;
             approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_run_once_host_error_detail_is_stable_and_redacted() {
+        let cases = [
+            (
+                HostError::PreflightFailed(
+                    "policy denied live request: approval.execution_scope_mismatch".to_string(),
+                ),
+                "policy.approval",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "capability token rejected by host state: PRIVATE-CONTENT-CANARY".to_string(),
+                ),
+                "policy.capability",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "deployment tier refused PRIVATE-CONTENT-CANARY".to_string(),
+                ),
+                "policy.deployment",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "connector `fcp.n8n` operation `n8n.workflows.create_draft` selected network constraint"
+                        .to_string(),
+                ),
+                "policy.network",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "connector `fcp.n8n` is not bound to zone `z:work`".to_string(),
+                ),
+                "policy.binding",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(n8n_run_once_host_error_detail(&error), expected);
+            assert_ne!(
+                n8n_run_once_host_error_detail(&error),
+                "PRIVATE-CONTENT-CANARY"
+            );
         }
     }
 

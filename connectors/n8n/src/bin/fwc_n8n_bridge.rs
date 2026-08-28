@@ -336,6 +336,12 @@ fn process_spec(
             OsString::from(admission),
         );
     }
+    if write {
+        fixed_env.insert(
+            OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE"),
+            OsString::from("/etc/fwc-n8n/approval-public-key"),
+        );
+    }
 
     Ok(fcp_sandbox::ProcessSpec {
         launcher_path: host_path.to_path_buf(),
@@ -1665,6 +1671,11 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_LIFECYCLE_STATE_FILE")),
             Some(&OsString::new())
         );
+        assert!(
+            spec.fixed_env
+                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE"))
+                .is_none()
+        );
         assert!(!spec.network_disabled);
         assert_eq!(
             bundle_working_directory(&bundle).expect("bundle cwd"),
@@ -1712,6 +1723,12 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
             Some(&OsString::from(CREATE_DRAFT_OWNER_ADMISSION))
         );
+        assert_eq!(
+            write
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE")),
+            Some(&OsString::from("/etc/fwc-n8n/approval-public-key"))
+        );
         let admission: Value = serde_json::from_str(CREATE_DRAFT_OWNER_ADMISSION)
             .expect("fixed owner admission must remain valid JSON");
         assert_eq!(admission["version"], 1);
@@ -1734,6 +1751,28 @@ mod tests {
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
             Some(&OsString::from(UPDATE_DRAFT_OWNER_ADMISSION))
+        );
+
+        let delete_disposable = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsDeleteDisposable,
+                Value::Null,
+            ),
+        )
+        .expect("delete disposable spec");
+        assert_eq!(
+            delete_disposable
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(DELETE_DISPOSABLE_OWNER_ADMISSION))
+        );
+        assert_eq!(
+            delete_disposable
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE")),
+            Some(&OsString::from("/etc/fwc-n8n/approval-public-key"))
         );
 
         let lifecycle = process_spec(

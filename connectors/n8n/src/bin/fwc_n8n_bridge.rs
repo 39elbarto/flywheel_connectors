@@ -33,6 +33,10 @@ const CHILD_HOST_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-HOST-ERROR-DIAGNOSTI
 #[cfg(target_os = "linux")]
 const BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const CHILD_HOST_ERROR_DETAIL_PREFIX: &[u8] = b"FCP-N8N-HOST-ERROR-DETAIL/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_HOST_ERROR_DETAIL_PREFIX: &str = "FWC-N8N-HOST-ERROR-DETAIL/v1 ";
+#[cfg(target_os = "linux")]
 const CHILD_OWNED_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-OWNED-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const BRIDGE_OWNED_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-OWNED-DIAGNOSTIC/v1 ";
@@ -1070,6 +1074,9 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_host_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
+    if let Some(label) = child_host_error_detail(stderr) {
+        eprintln!("{BRIDGE_HOST_ERROR_DETAIL_PREFIX}{label}");
+    }
     for label in child_owned_diagnostics(stderr) {
         eprintln!("{BRIDGE_OWNED_DIAGNOSTIC_PREFIX}{label}");
     }
@@ -1146,6 +1153,25 @@ fn child_host_error_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             b"internal.registry" => Some("internal.registry"),
             b"internal.cache" => Some("internal.cache"),
             b"internal.runtime" => Some("internal.runtime"),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn child_host_error_detail(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_HOST_ERROR_DETAIL_PREFIX)?;
+        match label {
+            b"policy.approval" => Some("policy.approval"),
+            b"policy.capability" => Some("policy.capability"),
+            b"policy.deployment" => Some("policy.deployment"),
+            b"policy.network" => Some("policy.network"),
+            b"policy.lease" => Some("policy.lease"),
+            b"policy.binding" => Some("policy.binding"),
+            b"policy.decision" => Some("policy.decision"),
+            b"policy.other" => Some("policy.other"),
+            b"host.other" => Some("host.other"),
             _ => None,
         }
     })
@@ -2088,6 +2114,34 @@ mod tests {
             b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v2 internal",
         ] {
             assert_eq!(child_host_error_diagnostic(stderr), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_host_error_detail_accepts_only_redacted_categories() {
+        for label in [
+            "policy.approval",
+            "policy.capability",
+            "policy.deployment",
+            "policy.network",
+            "policy.lease",
+            "policy.binding",
+            "policy.decision",
+            "policy.other",
+            "host.other",
+        ] {
+            let stderr = format!("noise\nFCP-N8N-HOST-ERROR-DETAIL/v1 {label}\n");
+            assert_eq!(child_host_error_detail(stderr.as_bytes()), Some(label));
+        }
+
+        for stderr in [
+            b"FCP-N8N-HOST-ERROR-DETAIL/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network PRIVATE",
+            b"prefix FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network",
+            b"FCP-N8N-HOST-ERROR-DETAIL/v2 policy.network",
+        ] {
+            assert_eq!(child_host_error_detail(stderr), None);
         }
     }
 

@@ -220,6 +220,40 @@ unreviewed server classification remains a deliberate gate: publish,
 unpublish, archive, execute, and generic MCP calls still require their
 separate owner-approved disposable acceptance and independent readback.
 
+## Owner-approved live read-only routing benchmark — 2026-08-28
+
+An owner-approved, sequential read-only run covered EEC and Hetzner using the
+immutable fixed current release `release-20260828-dabea2e10-static`. The six
+redacted JSONL evidence files use `schema=fwc.n8n.routing-benchmark.v3` and
+record `binary_sha256_16=a787d6bbe0f4d234` and
+`policy_sha256_16=7fe825fcda28a330`. Each operation has three samples. Every
+sample returned `rc=0`, with `writes=0` and `retries=0`; workflow IDs,
+response bodies, tokens, and secrets were not retained.
+The redacted sample rows serialize `rc` and teardown state; `writes` and
+`retries` are retained here as the run's read-only benchmark metadata rather
+than as per-row JSONL fields.
+
+The reported latency is total FWC wrapper-invocation wall-clock time, not
+provider latency. Byte estimates are the redaction-safe byte-count estimate,
+not real tokenization:
+
+| Server | Operation / route | p50/p95 total ms | Mean response bytes | Byte estimate | Samples | rc / writes / retries |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| EEC | `workflows.list` / `typed_rest_fcp` | 696 / 720 | 482 | 121 | 3 | 0 / 0 / 0 |
+| EEC | `workflows.get` / `typed_rest_fcp` | 775 / 838 | 611 | 153 | 3 | 0 / 0 / 0 |
+| EEC | `capabilities.inspect` / `official_mcp` | 1563 / 3083 | 9067 | 2267 | 3 | 0 / 0 / 0 |
+| Hetzner | `workflows.list` / `typed_rest_fcp` | 1261 / 1470 | 510 | 128 | 3 | 0 / 0 / 0 |
+| Hetzner | `workflows.get` / `typed_rest_fcp` | 1159 / 1169 | 757 | 190 | 3 | 0 / 0 / 0 |
+| Hetzner | `capabilities.inspect` / `official_mcp` | 1278 / 1360 | 9071 | 2268 | 3 | 0 / 0 / 0 |
+
+The evidence marks the following as `not_collected`: startup latency,
+provider latency, provider-vs-total latency, provider call count,
+per-invocation peak RSS/PSS/private memory, nested teardown state, real
+tokenization, and live acceptance. All six teardown records report
+`all_wrappers_exited`, and the samples report `wrapper_exit_zero`. FWC wrapper
+completion is not proof of zero-idle memory or process state for a persistent
+MCP profile.
+
 ## Offline verification performed
 
 Only the following checks are in scope for this packet:

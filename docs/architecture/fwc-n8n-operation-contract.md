@@ -415,11 +415,16 @@ marker, or missing terminal receipt is `unknown` and never auto-retried. Receipt
 and marker fields are digests only and are checked against the reconstructed
 typed plan before replay is refused.
 
-The bounded owner-confirmation seam is typed to publish, unpublish, and archive
-only. It computes a redaction-safe plan digest over the exact EEC/Hetzner
-target, operation, canonical input and precondition digests, official-MCP tool
-and payload digest, UUID idempotency key, and expiry; confirmation must echo
-that digest. `fcp-host` reuses the
+The bounded owner-confirmation seam is typed to publish, unpublish, archive,
+`n8n.workflows.create_draft`, and `n8n.workflows.delete_disposable`. It computes
+a redaction-safe plan digest over the exact EEC/Hetzner target, operation,
+canonical input and precondition digests, provider binding, UUID idempotency
+key, and expiry; confirmation must echo that digest. Lifecycle/archive retain
+their exact official-MCP tool and payload binding. Draft creation and
+disposable deletion use the direct REST `fcp.n8n` token shape with the exact
+canonical server/resource/input hash; disposable deletion also requires the
+host-issued creation receipt and inactive/unarchived precondition.
+`fcp-host` reuses the
 existing `ApprovalToken` canonicalization contract through a fail-closed issuer
 seam and does not load or accept private key material. This module is not a
 second ledger and is not wired as an independent provider gate: the existing

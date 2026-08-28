@@ -34279,42 +34279,83 @@ done"#;
         let cases = [
             (
                 HostError::PreflightFailed(
-                    "policy denied live request: approval.execution_scope_mismatch".to_string(),
+                    "policy denied live request: approval.execution_scope_mismatch user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
                 ),
                 "policy.approval",
             ),
             (
                 HostError::PreflightFailed(
-                    "capability token rejected by host state: PRIVATE-CONTENT-CANARY".to_string(),
+                    "capability token rejected by host state: PRIVATE-CONTENT-CANARY user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
                 ),
                 "policy.capability",
             ),
             (
                 HostError::PreflightFailed(
-                    "deployment tier refused PRIVATE-CONTENT-CANARY".to_string(),
+                    "deployment tier refused PRIVATE-CONTENT-CANARY user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
                 ),
                 "policy.deployment",
             ),
             (
                 HostError::PreflightFailed(
-                    "connector `fcp.n8n` operation `n8n.workflows.create_draft` selected network constraint"
-                        .to_string(),
+                    "connector `fcp.n8n` operation `n8n.workflows.create_draft` selected network constraint user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
                 ),
                 "policy.network",
             ),
             (
                 HostError::PreflightFailed(
-                    "connector `fcp.n8n` is not bound to zone `z:work`".to_string(),
+                    "HRW lease held for user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
+                ),
+                "policy.lease",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "connector `fcp.n8n` is not bound to zone `z:work` user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
                 ),
                 "policy.binding",
             ),
+            (
+                HostError::PreflightFailed(
+                    "policy denied live request: exact.private.rule user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
+                ),
+                "policy.decision",
+            ),
+            (
+                HostError::PreflightFailed(
+                    "unclassified policy detail user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
+                ),
+                "policy.other",
+            ),
+            (
+                HostError::Internal(
+                    "internal detail user=alice@example.com secret=PRIVATE-SECRET-CANARY path=/srv/private/policy.toml".to_string(),
+                ),
+                "host.other",
+            ),
+        ];
+        let redacted_categories = [
+            "policy.approval",
+            "policy.capability",
+            "policy.deployment",
+            "policy.network",
+            "policy.lease",
+            "policy.binding",
+            "policy.decision",
+            "policy.other",
+            "host.other",
+        ];
+        let forbidden_content = [
+            "alice@example.com",
+            "PRIVATE-SECRET-CANARY",
+            "/srv/private/policy.toml",
+            "exact.private.rule",
         ];
         for (error, expected) in cases {
-            assert_eq!(n8n_run_once_host_error_detail(&error), expected);
-            assert_ne!(
-                n8n_run_once_host_error_detail(&error),
-                "PRIVATE-CONTENT-CANARY"
-            );
+            let emitted_category = n8n_run_once_host_error_detail(&error);
+            assert_eq!(emitted_category, expected);
+            assert!(redacted_categories.contains(&emitted_category));
+            for forbidden in forbidden_content {
+                assert!(!emitted_category.contains(forbidden));
+            }
         }
     }
 

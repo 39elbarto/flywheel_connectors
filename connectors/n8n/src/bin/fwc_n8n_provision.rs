@@ -114,6 +114,21 @@ const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
 const HETZNER_N8N_VERSION: &str = "2.34.6";
 pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
+const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 13] = [
+    "n8n.credentials.list",
+    "n8n.executions.get",
+    "n8n.executions.list",
+    "n8n.folders.get",
+    "n8n.folders.list",
+    "n8n.mcp_access.reconcile",
+    "n8n.projects.list",
+    "n8n.tags.list",
+    "n8n.workflows.create_draft",
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+    "n8n.workflows.lifecycle",
+    "n8n.workflows.update_draft",
+];
 const COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.credentials.list",
     "n8n.executions.get",
@@ -1588,7 +1603,13 @@ fn validate_unsigned_release_tree_with_schema_mode(
                 ServerId::Hetzner
             };
             let inventory = read_value(&path, MAX_INVENTORY_BYTES)?;
-            validate_common_inventory(&inventory, server, inventory_release_root, root)?;
+            validate_common_inventory(
+                &inventory,
+                server,
+                inventory_release_root,
+                root,
+                lifecycle_schema_mode,
+            )?;
         } else if relative_path.ends_with("official-mcp.json") {
             let server = if relative_path.starts_with("inventory/eec") {
                 ServerId::Eec
@@ -1885,6 +1906,7 @@ fn validate_common_inventory(
     server: ServerId,
     release_root: &Path,
     artifact_root: &Path,
+    schema_mode: LifecycleSchemaMode,
 ) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
     let entries: Vec<CommonInventoryEntry> = serde_json::from_value(value.clone())
@@ -1904,10 +1926,11 @@ fn validate_common_inventory(
         ServerId::Eec => (EEC_MCP_HOST, 443_u64),
         ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
     };
-    let expected_operations = COMMON_ALLOWED_OPERATIONS
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>();
+    let expected_operations = match schema_mode {
+        LifecycleSchemaMode::CurrentPerServer => &COMMON_ALLOWED_OPERATIONS[..],
+        LifecycleSchemaMode::LegacyCommon => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
+    };
+    let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
         .allowed_operations
         .iter()
@@ -1920,9 +1943,9 @@ fn validate_common_inventory(
         || !is_uuid_ref(&entry.config.credential_id)
         || entry.config.server_id != server.as_str()
         || entry.allowed_zones != ["z:work"]
-        || entry.allowed_operations.len() != COMMON_ALLOWED_OPERATIONS.len()
-        || actual_operations != expected_operations
-        || entry.operation_network_constraints.len() != COMMON_ALLOWED_OPERATIONS.len()
+        || entry.allowed_operations.len() != expected_operations.len()
+        || actual_operations != expected_operations_set
+        || entry.operation_network_constraints.len() != expected_operations.len()
         || !entry.enforce_empty_allow_lists
         || !entry.enforce_operation_network_constraints
         || entry.runtime_network_enforcement != "host_egress_proxy"
@@ -1935,7 +1958,7 @@ fn validate_common_inventory(
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
-    if COMMON_ALLOWED_OPERATIONS.iter().any(|operation| {
+    if expected_operations.iter().any(|operation| {
         entry.operation_network_constraints.get(*operation) != Some(&expected_network)
     }) {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
@@ -2610,7 +2633,7 @@ fn validate_release_target(
         ProvisionErrorCode::Receipt,
     )?;
     validate_binding_shape(&provision_receipt.bindings)?;
-    validate_release_tree(
+    match validate_release_tree(
         target,
         release_id,
         &provenance.git_revision,
@@ -2618,7 +2641,22 @@ fn validate_release_target(
         expected_owner,
         target,
         owner_verification,
-    )
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == ProvisionErrorCode::Policy => {
+            validate_release_tree_with_schema_mode(
+                target,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                target,
+                owner_verification,
+                LifecycleSchemaMode::LegacyCommon,
+            )
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(unix)]
@@ -3496,6 +3534,7 @@ mod tests {
                 )
                 .expect("write legacy fixture inventory");
             }
+            self.set_legacy_common_operations(root);
             fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
                 .expect("rewrite legacy fixture receipt");
             fs::write(
@@ -3503,6 +3542,31 @@ mod tests {
                 self.provision_receipt_for(root, release_id),
             )
             .expect("rewrite legacy fixture provision receipt");
+        }
+
+        fn set_legacy_common_operations(&self, root: &Path) {
+            for server in ["eec", "hetzner"] {
+                let path = root.join(format!("inventory/{server}.json"));
+                let mut value: Value = serde_json::from_slice(
+                    &fs::read(&path).expect("common inventory for legacy fixture"),
+                )
+                .expect("common inventory JSON for legacy fixture");
+                value[0]["allowed_operations"]
+                    .as_array_mut()
+                    .expect("legacy fixture allowed operations")
+                    .retain(|operation| {
+                        operation.as_str() != Some("n8n.workflows.delete_disposable")
+                    });
+                value[0]["operation_network_constraints"]
+                    .as_object_mut()
+                    .expect("legacy fixture operation network constraints")
+                    .remove("n8n.workflows.delete_disposable");
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&value).expect("legacy fixture common inventory JSON"),
+                )
+                .expect("write legacy fixture common inventory");
+            }
         }
 
         fn set_previous_legacy_lifecycle_schemas(&self) {
@@ -3575,6 +3639,13 @@ mod tests {
             plan.current_validation,
             CurrentValidationMode::SignedProvisionReceiptLegacySchema
         );
+        validate_release_target(
+            &fixture.releases.join("previous"),
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("legacy common rollback target remains valid");
 
         let fixture = Fixture::new();
         fixture.set_stage_legacy_lifecycle_schemas();

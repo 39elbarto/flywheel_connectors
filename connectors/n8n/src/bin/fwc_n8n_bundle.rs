@@ -1877,6 +1877,12 @@ mod tests {
     #[test]
     fn owner_issuer_is_not_an_installable_release_artifact() {
         assert!(!EXPECTED_ARTIFACTS.contains(&"bin/fcp-n8n-approval-issue"));
+        let assembler = include_str!("../../../../scripts/n8n_release_assembler.sh");
+        assert!(assembler.contains("readonly EXTERNAL_APPROVAL_ISSUER=\"fcp-n8n-approval-issue\""));
+        assert!(assembler.contains(
+            "build_one build --release --package fcp-host --features n8n-approval-issuer"
+        ));
+        assert!(assembler.contains("assert_external_approval_issuer_is_not_staged"));
         let fixture = ReleaseFixture::new();
         fs::write(
             fixture.artifact("bin/fcp-n8n-approval-issue"),

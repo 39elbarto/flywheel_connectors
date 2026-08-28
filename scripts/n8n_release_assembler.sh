@@ -9,6 +9,8 @@ readonly CURRENT_PATH="${INSTALL_ROOT}/current"
 readonly STAGING_ROOT="/var/lib/fwc-n8n/staging"
 readonly HDD_ROOT="/srv/hdd500gb-internal"
 readonly PROVISION_REQUEST_SCHEMA="fwc.n8n.provision-request.v1"
+readonly EXTERNAL_APPROVAL_ISSUER="fcp-n8n-approval-issue"
+readonly EXTERNAL_APPROVAL_ISSUER_INSTALL_PATH="/usr/local/sbin/fcp-n8n-approval-issue"
 readonly ARTIFACTS=(
   "bin/fwc-n8n"
   "bin/fcp-host"
@@ -175,6 +177,20 @@ run_static_smoke() {
     FCP_N8N_OWNED_SMOKE_BINARY="$TARGET_DIR/release/fcp-n8n" \
     cargo --locked --offline test --release -p fcp-host --test n8n_owned_static_smoke \
       static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
+}
+
+build_external_approval_issuer() {
+  echo "[build] external approval issuer (kept outside runtime release)" >&2
+  build_one build --release --package fcp-host --features n8n-approval-issuer \
+    --bin "$EXTERNAL_APPROVAL_ISSUER"
+  [[ -x "$TARGET_DIR/release/$EXTERNAL_APPROVAL_ISSUER" ]] \
+    || die "Cargo did not produce the external approval issuer"
+}
+
+assert_external_approval_issuer_is_not_staged() {
+  local stage_root="$1"
+  [[ ! -e "$stage_root/bin/$EXTERNAL_APPROVAL_ISSUER" ]] \
+    || die "external approval issuer must not be staged in the runtime release"
 }
 
 copy_templates() {
@@ -413,11 +429,13 @@ main() {
   build_one rustc --release --package fcp-n8n --bin fcp-n8n -- -C target-feature=+crt-static
   build_one rustc --release --package fcp-mcp-bridge --bin fcp-mcp-bridge -- -C target-feature=+crt-static
   build_one build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign
+  build_external_approval_issuer
   run_static_smoke
   build_hash_helper
   hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
 
   copy_templates "$source_release" "$stage_root"
+  assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"
   write_metadata "$stage_root" "$git_revision" "$hash_helper"
   echo "assembled_release=${release_id}"
@@ -425,6 +443,8 @@ main() {
   echo "stage_root=${stage_root}"
   echo "request_file=${request_path}"
   echo "signer=${TARGET_DIR}/release/fwc-n8n-owner-sign"
+  echo "external_approval_issuer=${TARGET_DIR}/release/${EXTERNAL_APPROVAL_ISSUER}"
+  echo "external_approval_issuer_install_target=${EXTERNAL_APPROVAL_ISSUER_INSTALL_PATH}"
   echo "next_step=owner-sign then fwc-n8n provision --mode preflight"
 }
 

@@ -855,6 +855,30 @@ bundle. It generates `provenance.json`, the twelve-artifact `receipt.json`,
 and a non-secret provision request; it never reads n8n API keys, signs a
 receipt, changes `current`, or invokes n8n.
 
+The typed n8n approval issuer is a separate owner tool, not a release
+artifact. The assembler builds the feature-gated
+`fcp-n8n-approval-issue` into its HDD Cargo output and verifies that it is not
+staged under `bin/` or represented in the twelve-artifact receipt. If an owner
+installs that exact binary, the install target is
+`/usr/local/sbin/fcp-n8n-approval-issue`; it must remain outside
+`/usr/local/lib/fwc-n8n/releases/<release-id>` and has no runtime or systemd
+unit contract. The issuer's fixed request root remains
+`/var/lib/fwc-n8n/approval-requests`; its one-component request-file,
+descriptor-safe read, exact seed-on-stdin, and immutable trust-root checks are
+unchanged. A source-only build preflight is:
+
+```bash
+CARGO_HOME=/srv/hdd500gb-internal/fwc-build-cache/cargo-home \
+CARGO_TARGET_DIR=/srv/hdd500gb-internal/fwc-build-cache/fwc-n8n-approval-issuer \
+cargo --locked --offline check -p fcp-host \
+  --features n8n-approval-issuer --bin fcp-n8n-approval-issue
+```
+
+This check reads no seed or request file, makes no provider/API call, and does
+not install or modify any runtime state. The assembler's emitted
+`external_approval_issuer` path is the build output to review before any
+separate owner-controlled installation.
+
 The assembler refuses tracked worktree changes, an existing staging target,
 an HDD target outside the fixed build-cache root, insufficient HDD space, or
 an absent build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX`. Signing remains a separate

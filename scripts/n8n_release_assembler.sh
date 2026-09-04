@@ -272,6 +272,13 @@ for server in ("eec", "hetzner"):
             item["launch_binding"][key] = item["launch_binding"][key].replace(old_root, new_root)
     common["launch_binding"]["launcher_digest"] = n8n_digest
     common["launch_binding"]["runtime_executable_digest"] = n8n_digest
+    diagnostics_operation = "n8n.executions.diagnostics"
+    if diagnostics_operation not in common["allowed_operations"]:
+        common["allowed_operations"].append(diagnostics_operation)
+    diagnostics_network = common["operation_network_constraints"].get("n8n.executions.get")
+    if not isinstance(diagnostics_network, dict):
+        raise SystemExit(f"missing executions.get network constraint for {server}")
+    common["operation_network_constraints"][diagnostics_operation] = dict(diagnostics_network)
     delete_operation = "n8n.workflows.delete_disposable"
     if delete_operation not in common["allowed_operations"]:
         common["allowed_operations"].append(delete_operation)

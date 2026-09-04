@@ -36,6 +36,7 @@ const TEST_INSTANCE_ID: &str = "inst_n8n_local_non_mock";
 const OP_WORKFLOWS_LIST: &str = "n8n.workflows.list";
 const OP_WORKFLOWS_ACTIVATE: &str = "n8n.workflows.activate";
 const OP_EXECUTIONS_LIST: &str = "n8n.executions.list";
+const OP_EXECUTIONS_DIAGNOSTICS: &str = "n8n.executions.diagnostics";
 
 #[derive(Debug)]
 struct CapturedRequest {
@@ -103,6 +104,10 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
             r#"{"data":[{"id":"1001","name":"Ops workflow","active":false}]}"#,
         ),
         HttpResponse::json("200 OK", r#"{"data":[{"id":"5001","finished":true}]}"#),
+        HttpResponse::json(
+            "200 OK",
+            r#"{"id":"5001","finished":true,"workflowId":"1001","data":{"resultData":{"runData":{}}}}"#,
+        ),
     ]);
     let mut connector = setup_connector(&server.base_url).await;
 
@@ -130,12 +135,22 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         .expect("executions.list should invoke n8n client path");
     assert_eq!(executions["data"][0]["id"], "5001");
 
+    let diagnostics = connector
+        .handle_invoke(authorized_params(
+            OP_EXECUTIONS_DIAGNOSTICS,
+            &json!({"workflow_id": "1001", "id": "5001"}),
+        ))
+        .await
+        .expect("executions.diagnostics should invoke n8n client path");
+    assert_eq!(diagnostics["id"], "5001");
+    assert_eq!(diagnostics["diagnostics"], json!([]));
+
     connector
         .handle_shutdown(json!({}))
         .await
         .expect("shutdown connector");
     let requests = server.join();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_request(
         &requests[0],
         "GET /api/v1/workflows?limit=50&excludePinnedData=true HTTP/1.1",
@@ -144,12 +159,18 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         &requests[1],
         "GET /api/v1/executions?limit=50&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true HTTP/1.1",
     );
+    assert_request(
+        &requests[2],
+        "GET /api/v1/executions/5001?includeData=true HTTP/1.1",
+    );
     assert_eq!(requests[0].body, json!({}));
     assert_eq!(requests[1].body, json!({}));
+    assert_eq!(requests[2].body, json!({}));
 
     let rendered = serde_json::to_string(&json!({
         "workflows": workflows,
         "executions": executions,
+        "diagnostics": diagnostics,
     }))
     .expect("rendered result should serialize");
     assert!(!rendered.contains(LOOPBACK_API_KEY));
@@ -168,6 +189,12 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
             "executions_list": {
                 "method": "GET",
                 "path": "/api/v1/executions",
+                "status": 200
+            },
+            "executions_diagnostics": {
+                "method": "GET",
+                "path": "/api/v1/executions/5001",
+                "query": "includeData=true",
                 "status": 200
             }
         },
@@ -320,6 +347,17 @@ fn test_signing_key() -> Ed25519SigningKey {
 fn resource_uri(operation: &str, input: &Value) -> String {
     match operation {
         OP_WORKFLOWS_LIST | OP_EXECUTIONS_LIST => format!("fwc-n8n://{TEST_SERVER_ID}"),
+        OP_EXECUTIONS_DIAGNOSTICS => {
+            let workflow_id = input["workflow_id"]
+                .as_str()
+                .expect("workflow id for execution diagnostics token");
+            let execution_id = input["id"]
+                .as_str()
+                .expect("execution id for execution diagnostics token");
+            let workflow_id = utf8_percent_encode(workflow_id, NON_ALPHANUMERIC);
+            let execution_id = utf8_percent_encode(execution_id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{workflow_id}/executions/{execution_id}")
+        }
         OP_WORKFLOWS_ACTIVATE => {
             let id = input["id"].as_str().expect("workflow id for test token");
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
@@ -333,7 +371,7 @@ fn capability_token(operation: &str, input: &Value) -> CapabilityToken {
     let capability = match operation {
         OP_WORKFLOWS_ACTIVATE => "n8n.workflows.write",
         OP_WORKFLOWS_LIST => "n8n.workflows.read",
-        OP_EXECUTIONS_LIST => "n8n.executions.read",
+        OP_EXECUTIONS_LIST | OP_EXECUTIONS_DIAGNOSTICS => "n8n.executions.read",
         _ => panic!("unknown operation in test token: {operation}"),
     };
     let constraints = CapabilityConstraints {

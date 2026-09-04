@@ -440,8 +440,9 @@ const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
 #[cfg(target_os = "linux")]
 static FIXED_READ_ONLY_LANDLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
-const N8N_READ_ONLY_OPERATIONS: [&str; 9] = [
+const N8N_READ_ONLY_OPERATIONS: [&str; 10] = [
     "n8n.credentials.list",
+    "n8n.executions.diagnostics",
     "n8n.executions.get",
     "n8n.executions.list",
     "n8n.folders.get",
@@ -460,8 +461,9 @@ const N8N_WRITE_OPERATIONS: [&str; 7] = [
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 16] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 17] = [
     "n8n.credentials.list",
+    "n8n.executions.diagnostics",
     "n8n.executions.get",
     "n8n.executions.list",
     "n8n.folders.get",
@@ -4634,6 +4636,12 @@ fn owned_invocation_config(
         // wrapper that strips descriptions and schemas before model output.
         config.max_frame_bytes = 2 * 1024 * 1024;
     }
+    if connector_id.as_str() == "fcp.n8n" && operation.as_str() == "n8n.executions.diagnostics" {
+        // Diagnostics returns a bounded error projection, but its fixed
+        // includeData provider response needs more room than the generic RPC
+        // frame. Keep the exception aligned with the bridge result cap.
+        config.max_frame_bytes = N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES;
+    }
     if connector_id.as_str() == "fcp.n8n"
         && matches!(
             operation.as_str(),
@@ -4727,6 +4735,14 @@ mod owned_per_invocation_unit_tests {
             .rpc_timeout,
             Duration::from_secs(60)
         );
+        assert_eq!(
+            owned_invocation_config(
+                &ConnectorId::from_static("fcp.n8n"),
+                &OperationId::from_static("n8n.executions.diagnostics"),
+            )
+            .max_frame_bytes,
+            N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES
+        );
     }
 
     #[test]
@@ -4738,6 +4754,10 @@ mod owned_per_invocation_unit_tests {
         assert_eq!(
             connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.mcp_access.reconcile")),
             N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+        );
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.executions.diagnostics")),
+            N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES
         );
         assert_eq!(
             connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.get")),
@@ -6187,6 +6207,7 @@ const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 /// delimiter. Larger results must use a bounded connector-level page or compact
 /// receipt instead of widening this transport frame.
 const CONNECTOR_RPC_MAX_FRAME_BYTES: usize = 64 * 1024;
+const N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES: usize = 256 * 1024;
 /// Bounded frame for the two n8n operations whose compact, page-bounded result
 /// can legitimately exceed the generic connector frame. This is selected only
 /// when the host-owned connector identity and operation both match.
@@ -6194,13 +6215,14 @@ const N8N_BOUNDED_RPC_MAX_FRAME_BYTES: usize = 512 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 
 fn connector_rpc_frame_limit(connector_id: Option<&str>, operation: Option<&str>) -> usize {
-    if connector_id == Some("fcp.n8n")
-        && matches!(
-            operation,
-            Some("n8n.workflows.list" | "n8n.mcp_access.reconcile")
-        )
-    {
-        N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+    if connector_id == Some("fcp.n8n") {
+        match operation {
+            Some("n8n.executions.diagnostics") => N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES,
+            Some("n8n.workflows.list" | "n8n.mcp_access.reconcile") => {
+                N8N_BOUNDED_RPC_MAX_FRAME_BYTES
+            }
+            _ => CONNECTOR_RPC_MAX_FRAME_BYTES,
+        }
     } else {
         CONNECTOR_RPC_MAX_FRAME_BYTES
     }
@@ -11060,7 +11082,7 @@ fn expected_n8n_read_only_resource_uri(
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
         "n8n.mcp_access.reconcile" => Ok(root),
-        "n8n.executions.get" => Ok(format!(
+        "n8n.executions.get" | "n8n.executions.diagnostics" => Ok(format!(
             "{root}/workflows/{}/executions/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "workflow_id")?),
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
@@ -35212,6 +35234,10 @@ done"#;
                 json!({"id": "workflow-1"}),
             ),
             "n8n.executions.get" => (
+                "fwc-n8n://eec/workflows/workflow%2D1/executions/execution%2D1",
+                json!({"workflow_id": "workflow-1", "id": "execution-1"}),
+            ),
+            "n8n.executions.diagnostics" => (
                 "fwc-n8n://eec/workflows/workflow%2D1/executions/execution%2D1",
                 json!({"workflow_id": "workflow-1", "id": "execution-1"}),
             ),

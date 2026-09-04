@@ -6204,11 +6204,24 @@ fn n8n_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
+        "n8n.credentials.list",
+        "n8n.executions.diagnostics",
         "n8n.executions.get",
         "n8n.executions.list",
+        "n8n.folders.get",
+        "n8n.folders.list",
+        "n8n.mcp_access.reconcile",
+        "n8n.projects.list",
+        "n8n.tags.list",
         "n8n.workflows.activate",
+        "n8n.workflows.archive",
+        "n8n.workflows.create_draft",
+        "n8n.workflows.delete_disposable",
+        "n8n.workflows.execute",
         "n8n.workflows.get",
         "n8n.workflows.list",
+        "n8n.workflows.lifecycle",
+        "n8n.workflows.update_draft",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -6216,7 +6229,7 @@ fn n8n_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 9);
 }
 
 // =============================================================================

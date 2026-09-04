@@ -145,6 +145,8 @@ enum HostRunOnceOperation {
     CredentialsList,
     #[serde(rename = "n8n.executions.get")]
     ExecutionsGet,
+    #[serde(rename = "n8n.executions.diagnostics")]
+    ExecutionsDiagnostics,
     #[serde(rename = "n8n.executions.list")]
     ExecutionsList,
     #[serde(rename = "n8n.folders.get")]
@@ -181,6 +183,7 @@ impl HostRunOnceOperation {
             Self::CapabilitiesInspect => "n8n.capabilities.inspect",
             Self::CredentialsList => "n8n.credentials.list",
             Self::ExecutionsGet => "n8n.executions.get",
+            Self::ExecutionsDiagnostics => "n8n.executions.diagnostics",
             Self::ExecutionsList => "n8n.executions.list",
             Self::FoldersGet => "n8n.folders.get",
             Self::FoldersList => "n8n.folders.list",
@@ -203,6 +206,7 @@ impl HostRunOnceOperation {
             "n8n.capabilities.inspect" => Ok(Self::CapabilitiesInspect),
             "n8n.credentials.list" => Ok(Self::CredentialsList),
             "n8n.executions.get" => Ok(Self::ExecutionsGet),
+            "n8n.executions.diagnostics" => Ok(Self::ExecutionsDiagnostics),
             "n8n.executions.list" => Ok(Self::ExecutionsList),
             "n8n.folders.get" => Ok(Self::FoldersGet),
             "n8n.folders.list" => Ok(Self::FoldersList),
@@ -226,6 +230,7 @@ impl HostRunOnceOperation {
             Self::CapabilitiesInspect => BrokerCredentialPurpose::OfficialMcp,
             Self::CredentialsList
             | Self::ExecutionsGet
+            | Self::ExecutionsDiagnostics
             | Self::ExecutionsList
             | Self::FoldersGet
             | Self::FoldersList
@@ -1775,7 +1780,9 @@ fn validate_host_run_once_input(
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList => (&["cursor", "limit"], &[]),
-        HostRunOnceOperation::ExecutionsGet => (&["id", "workflow_id"], &["id", "workflow_id"]),
+        HostRunOnceOperation::ExecutionsGet | HostRunOnceOperation::ExecutionsDiagnostics => {
+            (&["id", "workflow_id"], &["id", "workflow_id"])
+        }
         HostRunOnceOperation::FoldersGet => {
             (&["folder_id", "project_id"], &["folder_id", "project_id"])
         }
@@ -1838,7 +1845,7 @@ fn validate_host_run_once_input(
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList => validate_page_input(object),
-        HostRunOnceOperation::ExecutionsGet => {
+        HostRunOnceOperation::ExecutionsGet | HostRunOnceOperation::ExecutionsDiagnostics => {
             host_run_once_input_id(input, "id")?;
             host_run_once_input_id(input, "workflow_id")?;
             Ok(())
@@ -2510,11 +2517,13 @@ fn expected_host_run_once_resource_uri(
                 ))
             })
             .unwrap_or(Ok(root)),
-        HostRunOnceOperation::ExecutionsGet => Ok(format!(
-            "{root}/workflows/{}/executions/{}",
-            encode_host_resource_segment(host_run_once_input_id(input, "workflow_id")?),
-            encode_host_resource_segment(host_run_once_input_id(input, "id")?)
-        )),
+        HostRunOnceOperation::ExecutionsGet | HostRunOnceOperation::ExecutionsDiagnostics => {
+            Ok(format!(
+                "{root}/workflows/{}/executions/{}",
+                encode_host_resource_segment(host_run_once_input_id(input, "workflow_id")?),
+                encode_host_resource_segment(host_run_once_input_id(input, "id")?)
+            ))
+        }
         HostRunOnceOperation::FoldersList => Ok(format!(
             "{root}/projects/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "project_id")?)
@@ -2571,7 +2580,9 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.capabilities.inspect" => OperationIntent::CapabilitiesInspection,
         "n8n.knowledge.query" => OperationIntent::NodeKnowledge,
         "n8n.validation.run" => OperationIntent::Validation,
-        "n8n.workflows.get" | "n8n.executions.get" => OperationIntent::KnownIdRead,
+        "n8n.workflows.get" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
+            OperationIntent::KnownIdRead
+        }
         "n8n.workflows.search" | "n8n.executions.search" | "n8n.structure.search" => {
             OperationIntent::Search
         }
@@ -3074,6 +3085,14 @@ mod tests {
     fn upstream_tool_name_is_not_a_public_operation() {
         let error = public_operation_intent("n8n_delete_workflow").expect_err("must deny");
         assert_eq!(error.code, "unknown_public_operation");
+    }
+
+    #[test]
+    fn execution_diagnostics_is_a_public_known_id_read() {
+        assert_eq!(
+            public_operation_intent("n8n.executions.diagnostics").unwrap(),
+            OperationIntent::KnownIdRead
+        );
     }
 
     struct DelayedEof(std::time::Duration);
@@ -4039,6 +4058,11 @@ mod tests {
                 json!({"workflow_id": "workflow-1", "id": "execution-1"}),
                 "fwc-n8n://eec/workflows/workflow%2D1/executions/execution%2D1",
             ),
+            (
+                "n8n.executions.diagnostics",
+                json!({"workflow_id": "workflow-1", "id": "execution-1"}),
+                "fwc-n8n://eec/workflows/workflow%2D1/executions/execution%2D1",
+            ),
             ("n8n.executions.list", json!({}), "fwc-n8n://eec"),
             (
                 "n8n.folders.get",
@@ -4354,6 +4378,10 @@ mod tests {
                 json!({"workflow_id": "workflow-1", "id": "id?query"}),
             ),
             (
+                "n8n.executions.diagnostics",
+                json!({"workflow_id": "workflow-1", "id": "id?query"}),
+            ),
+            (
                 "n8n.folders.get",
                 json!({"project_id": "project-1", "folder_id": "id%2Fadmin"}),
             ),
@@ -4377,6 +4405,10 @@ mod tests {
             (
                 "n8n.executions.list",
                 json!({"authorization": "PRIVATE-TOKEN"}),
+            ),
+            (
+                "n8n.executions.diagnostics",
+                json!({"workflow_id": "workflow-1", "id": "execution-1", "includeData": true}),
             ),
             ("n8n.workflows.get", json!({})),
             ("n8n.credentials.list", json!({"limit": 201})),

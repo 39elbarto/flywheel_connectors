@@ -34,7 +34,7 @@ not a live provider check.
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
 `run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
 `status`. `provision` defaults to read-only `preflight`; mutation requires the
-explicit owner-gated `provision --mode apply`. `run-once` supports nine Phase-1
+explicit owner-gated `provision --mode apply`. `run-once` supports ten Phase-1
 REST reads, guarded REST draft create/update, typed source paths for lifecycle
 `publish`/`unpublish` and archive, two local knowledge/validation operations,
 and one official-MCP discovery operation, `n8n.capabilities.inspect`, plus the
@@ -534,7 +534,8 @@ guarantees, not permission to replay.
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | Risky / High | Interactive | BestEffort | owner-gated official MCP `execute_workflow` with exact immutable EEC/Hetzner input/output schema bindings | bounded workflow/execution IDs and initial status plus independent typed execution GET readback; post-provider readback failures are terminal unknown/no-retry; live acceptance deferred | 256 KiB |
 | `n8n.executions.search` | `n8n.executions.read` | Safe / Medium | None | None | REST | execution preview URIs | 128 KiB |
-| `n8n.executions.get` | `n8n.executions.read` | Safe / High | None | None | REST | execution status; data opt-in | 1 MiB full |
+| `n8n.executions.get` | `n8n.executions.read` | Safe / High | None | None | REST | metadata-only execution status; no query | 1 MiB metadata envelope |
+| `n8n.executions.diagnostics` | `n8n.executions.read` | Safe / Low | None | Strict | REST | bounded node error diagnostics via `includeData=true`; no raw data | 256 KiB |
 | `n8n.credentials.list` | `n8n.credentials.metadata.read` | Safe / Medium | None | None | official MCP | credential metadata URI | 128 KiB |
 | `n8n.data_tables.search` | `n8n.data_tables.read` | Safe / Medium | None | None | official MCP | data-table URI/schema only | 256 KiB |
 | `n8n.data_tables.mutate` | `n8n.data_tables.write` | action-dependent | Interactive | BestEffort | official MCP | table/schema/row-count readback | 256 KiB |
@@ -547,7 +548,7 @@ separate:
 
 - **Manifest operations:** the current `fcp.n8n` manifest declares
   `workflows.list`, `workflows.get`, `workflows.activate`, `executions.list`,
-  `executions.get`, `projects.list`, `credentials.list`, `tags.list`,
+  `executions.get`, `executions.diagnostics`, `projects.list`, `credentials.list`, `tags.list`,
   `folders.list`, `folders.get`, `workflows.create_draft`,
   `workflows.update_draft`, `workflows.lifecycle`, `workflows.archive`,
   `workflows.delete_disposable`, `workflows.execute`, and
@@ -613,7 +614,8 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
 | `workflows.execute` | exact workflow target, `mode`, `versionId`, `guard` | `inputs` (bounded), `wait=false` | `{status,operation,provider,workflowId,mode,versionId,executionId,initialStatus,retry,readback}`; only bounded identifiers/status are returned. Host admission requires the exact immutable owner-provisioned EEC/Hetzner schema binding; after any provider attempt, readback transport/decode/mismatch is terminal `unknown_outcome` with no automatic retry. |
 | `executions.search` | `target.server` | `workflowId`, `status[]`, `startedAfter`, `startedBefore`, `page` | `{executions:[{resourceUri,id,workflowId,status,mode,startedAt?,stoppedAt?}]}` |
-| `executions.get` | exact execution target | `includeData=false`, `nodeNames[1..20]`, `maxItemsPerNode` | `{execution:{id,workflowId,status,mode,startedAt?,stoppedAt?,retryOf?,waitTill?},data?}` |
+| `executions.get` | exact execution target | metadata-only; provider queryless | `{id,finished,workflowId?,status?,mode?,startedAt?,stoppedAt?,workflowVersionId?,retryOf?,retrySuccessId?,waitTill?}` |
+| `executions.diagnostics` | exact execution target | fixed `includeData=true`; node/run/message/type/stack bounds | `{id,finished,mode?,startedAt?,stoppedAt?,workflowId?,workflowVersionId?,status?,retryOf?,retrySuccessId?,waitTill?,diagnostics:[{nodeName,nodeType?,errors:[{runIndex,message?,type?,stack?}]}]}` |
 | `credentials.list` | `target.server` | `query`, `type`, `projectId`, `onlySharedWithMe`, `page` | `{credentials:[{resourceUri,id,name,type,scopes,isManaged,isGlobal,homeProject?}]}` |
 | `data_tables.search` | `target.server` | `query`, `projectId`, `page`, `includeSchema=false` | `{tables:[{resourceUri,id,name,projectId?,columns?,rowCount?}]}` |
 | `data_tables.mutate` | exact table target or target project for create, `action`, `guard` | action payload | `{before?,after,affectedRows?,schemaDigest}` |
@@ -687,10 +689,12 @@ rejects authorization, cookie, proxy authorization, API-key, and other
 credential-bearing headers; secrets must come from the workflow's existing
 credential references, not model input.
 
-For `executions.get`, `includeData=false` forbids `nodeNames` and
-`maxItemsPerNode`. `includeData=true` requires `nodeNames[1..20]` and
-`maxItemsPerNode` from 1 through 100. This prevents an unbounded execution dump;
-the provider may apply a lower bound when its own truncation support is stricter.
+For `executions.get`, the provider request remains queryless and the public
+result is metadata-only. `executions.diagnostics` is the only execution
+operation that enables `includeData=true`; it decodes only typed metadata,
+workflow node names/types, and bounded run errors, discarding execution items,
+credentials, headers/cookies/authorization, request/response bodies, binary,
+pinData, and unknown fields before serialization.
 
 Execution status filters are limited to `canceled`, `crashed`, `error`, `new`,
 `running`, `success`, `unknown`, and `waiting`. Timestamps are RFC 3339 UTC.
@@ -792,10 +796,11 @@ serializer for the default-off state. Missing, `null`, or non-object
 projection remains presence-aware and does not infer a value for its output.
 
 The current host implementation keeps the generic owned connector frame and
-RPC timeout at `64 KiB` and `10 seconds`. Only typed
+RPC timeout at `64 KiB` and `10 seconds`. Typed
 `n8n.workflows.list` and `n8n.mcp_access.reconcile` receive the bounded
 `512 KiB` result frame; their per-invocation budgets are `30 seconds` and
-`60 seconds` respectively. The provider response remains subject to the
+`60 seconds` respectively. Typed `n8n.executions.diagnostics` receives a
+separate `256 KiB` frame with the generic `10-second` timeout. The provider response remains subject to the
 independent `10 MiB` body cap and is compacted to an allow-listed result before
 it crosses the connector boundary. This exception is not a generic MCP or
 caller-configurable frame expansion.
@@ -837,7 +842,8 @@ Official instance-level MCP:
 | `test_workflow`, `prepare_test_pin_data` | `workflows.execute` (`test` or `prepare_test`) |
 | `publish_workflow`, `unpublish_workflow`, `archive_workflow` | `workflows.lifecycle` |
 | `search_projects`, `search_folders`, `list_tags` | `structure.search` |
-| `get_execution`, `search_executions` | `executions.get` / `executions.search` |
+| `get_execution` | `executions.get` / `executions.diagnostics` (typed REST projection) |
+| `search_executions` | `executions.search` |
 | `list_credentials` | `credentials.list` |
 | `get_sdk_reference`, `search_nodes`, `get_node_types`, `get_workflow_best_practices` | `knowledge.query` |
 | `explore_node_resources` | `node_resources.explore` |
@@ -958,7 +964,8 @@ from these model-facing caps.
 | Validation/knowledge | 256 KiB | bounded examples and definitions |
 | Workflow standard | 512 KiB | no full Code source by default |
 | Workflow full | 2 MiB | exact workflow only; no secrets; may be returned as a protected ephemeral reference |
-| Execution full | 1 MiB | `includeData=true`, node filter, and item cap required |
+| Execution metadata | 1 MiB | `n8n.executions.get` remains queryless and metadata-only |
+| Execution diagnostics | 256 KiB | fixed `includeData=true`; bounded node/run/message/type/stack projection only |
 | Provider response hard stop | 10 MiB | fail with `response_too_large`; never stream unlimited data into memory |
 
 Truncation occurs only on arrays or text fields with a declared continuation or

@@ -1,5 +1,7 @@
 //! n8n API types.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -397,6 +399,76 @@ pub struct Execution {
     pub wait_till: Option<String>,
 }
 
+/// Maximum number of provider run-data node entries inspected for one
+/// diagnostic response. Entries without an error are discarded after this
+/// bound has been enforced.
+pub const MAX_DIAGNOSTIC_NODES: usize = 100;
+/// Maximum number of runs inspected for one provider node entry.
+pub const MAX_DIAGNOSTIC_RUNS_PER_NODE: usize = 100;
+/// Maximum UTF-8 byte length of a normalized diagnostic text field.
+pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 2048;
+const MAX_DIAGNOSTIC_NODE_NAME_LENGTH: usize = 256;
+const MAX_DIAGNOSTIC_WORKFLOW_NODES: usize = 1_000;
+
+/// Typed provider response for a diagnostics execution read.
+///
+/// The provider's `data` and `workflowData` objects are decoded only into the
+/// fields needed to identify failed nodes and their error metadata. Raw
+/// execution items, request/response data, credentials, and pin data have no
+/// representation in this type.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionDiagnostics {
+    #[serde(flatten)]
+    pub metadata: Execution,
+    #[serde(default)]
+    pub data: Option<ExecutionDiagnosticsData>,
+    #[serde(default, rename = "workflowData")]
+    pub workflow_data: Option<ExecutionWorkflowData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionDiagnosticsData {
+    #[serde(default, rename = "resultData")]
+    pub result_data: Option<ExecutionResultData>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionResultData {
+    #[serde(default, rename = "runData")]
+    pub run_data: BTreeMap<String, Vec<ExecutionRun>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionRun {
+    #[serde(default)]
+    pub error: Option<ExecutionError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionError {
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default, rename = "type")]
+    pub error_type: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub stack: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionWorkflowData {
+    #[serde(default)]
+    pub nodes: Vec<ExecutionWorkflowNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionWorkflowNode {
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub node_type: Option<String>,
+}
+
 /// Deserialize-only provider project DTO. Unknown provider fields are
 /// intentionally ignored before the runtime view is serialized.
 #[derive(Debug, Clone, Deserialize)]
@@ -583,6 +655,37 @@ pub struct ExecutionView {
     pub wait_till: Option<String>,
 }
 
+/// Serialize-only normalized execution diagnostics view. It intentionally
+/// shares the exact metadata projection used by `n8n.executions.get` and adds
+/// only bounded node errors.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionDiagnosticsView {
+    #[serde(flatten)]
+    pub execution: ExecutionView,
+    pub diagnostics: Vec<NodeDiagnosticView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeDiagnosticView {
+    #[serde(rename = "nodeName")]
+    pub node_name: String,
+    #[serde(rename = "nodeType", skip_serializing_if = "Option::is_none")]
+    pub node_type: Option<String>,
+    pub errors: Vec<NodeErrorView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NodeErrorView {
+    #[serde(rename = "runIndex")]
+    pub run_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub error_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+}
+
 /// Serialize-only allowlisted project view returned by the connector.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProjectView {
@@ -755,6 +858,135 @@ impl Execution {
             wait_till: self.wait_till,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ExecutionDiagnosticsProjectionError;
+
+fn validate_execution_metadata(
+    execution: &Execution,
+) -> Result<(), ExecutionDiagnosticsProjectionError> {
+    validate_diagnostic_label(&execution.id)?;
+    for value in [
+        execution.mode.as_deref(),
+        execution.started_at.as_deref(),
+        execution.stopped_at.as_deref(),
+        execution.workflow_id.as_deref(),
+        execution.workflow_version_id.as_deref(),
+        execution.status.as_deref(),
+        execution.retry_of.as_deref(),
+        execution.retry_success_id.as_deref(),
+        execution.wait_till.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        validate_diagnostic_label(value)?;
+    }
+    Ok(())
+}
+
+impl ExecutionDiagnostics {
+    /// Project a provider diagnostics response into the bounded public view.
+    ///
+    /// Any provider shape that exceeds the diagnostic bounds is rejected
+    /// before serialization. This keeps oversized or malformed provider data
+    /// out of both successful responses and error messages.
+    pub(crate) fn into_view(
+        self,
+    ) -> Result<ExecutionDiagnosticsView, ExecutionDiagnosticsProjectionError> {
+        validate_execution_metadata(&self.metadata)?;
+        let mut node_types = BTreeMap::new();
+        if let Some(workflow_data) = &self.workflow_data {
+            if workflow_data.nodes.len() > MAX_DIAGNOSTIC_WORKFLOW_NODES {
+                return Err(ExecutionDiagnosticsProjectionError);
+            }
+            for node in &workflow_data.nodes {
+                validate_diagnostic_label(&node.name)?;
+                if let Some(node_type) = &node.node_type {
+                    validate_diagnostic_label(node_type)?;
+                }
+                node_types.insert(node.name.clone(), node.node_type.clone());
+            }
+        }
+
+        let run_data = self
+            .data
+            .and_then(|data| data.result_data)
+            .map_or_else(BTreeMap::new, |result| result.run_data);
+        if run_data.len() > MAX_DIAGNOSTIC_NODES {
+            return Err(ExecutionDiagnosticsProjectionError);
+        }
+
+        let mut diagnostics = Vec::new();
+        for (node_name, runs) in run_data {
+            validate_diagnostic_label(&node_name)?;
+            if runs.len() > MAX_DIAGNOSTIC_RUNS_PER_NODE {
+                return Err(ExecutionDiagnosticsProjectionError);
+            }
+
+            let mut errors = Vec::new();
+            for (run_index, run) in runs.into_iter().enumerate() {
+                let Some(error) = run.error else {
+                    continue;
+                };
+                let message = normalize_diagnostic_text(error.message)?;
+                let error_type = normalize_diagnostic_text(error.error_type.or(error.name))?;
+                let stack = normalize_diagnostic_text(error.stack)?;
+                if message.is_none() && error_type.is_none() && stack.is_none() {
+                    continue;
+                }
+                errors.push(NodeErrorView {
+                    run_index,
+                    message,
+                    error_type,
+                    stack,
+                });
+            }
+            if !errors.is_empty() {
+                diagnostics.push(NodeDiagnosticView {
+                    node_type: node_types.get(&node_name).cloned().flatten(),
+                    node_name,
+                    errors,
+                });
+            }
+        }
+        if diagnostics.len() > MAX_DIAGNOSTIC_NODES {
+            return Err(ExecutionDiagnosticsProjectionError);
+        }
+
+        Ok(ExecutionDiagnosticsView {
+            execution: self.metadata.into_view(),
+            diagnostics,
+        })
+    }
+}
+
+fn validate_diagnostic_label(value: &str) -> Result<(), ExecutionDiagnosticsProjectionError> {
+    if value.is_empty()
+        || value.len() > MAX_DIAGNOSTIC_NODE_NAME_LENGTH
+        || value.chars().any(char::is_control)
+    {
+        return Err(ExecutionDiagnosticsProjectionError);
+    }
+    Ok(())
+}
+
+fn normalize_diagnostic_text(
+    value: Option<String>,
+) -> Result<Option<String>, ExecutionDiagnosticsProjectionError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty()
+        || value.len() > MAX_DIAGNOSTIC_TEXT_LENGTH
+        || value
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(ExecutionDiagnosticsProjectionError);
+    }
+    Ok(Some(value))
 }
 
 impl Project {
@@ -1144,6 +1376,183 @@ mod tests {
         assert!(serialized.get("data").is_none());
         assert!(serialized.get("credentials").is_none());
         assert!(serialized.get("pinData").is_none());
+    }
+
+    #[test]
+    fn execution_diagnostics_projection_discards_provider_data() {
+        let diagnostics: ExecutionDiagnostics = serde_json::from_value(json!({
+            "id": "50003",
+            "finished": true,
+            "status": "error",
+            "data": {
+                "resultData": {
+                    "error": {"message": "marker.top-level"},
+                    "runData": {
+                        "HTTP request": [{
+                            "data": {"body": "marker.body"},
+                            "error": {
+                                "message": "node failed",
+                                "type": "provider-node-error",
+                                "stack": "stack line 1\nstack line 2",
+                                "headers": {"authorization": "marker.authorization"},
+                                "credentials": {"token": "marker.credential"},
+                                "response": {"body": "marker.response"}
+                            }
+                        }]
+                    }
+                },
+                "pinData": {"HTTP request": "marker.pin"},
+                "credentials": {"api": "marker.credential"}
+            },
+            "workflowData": {
+                "nodes": [{
+                    "name": "HTTP request",
+                    "type": "n8n-nodes-base.httpRequest",
+                    "parameters": {"authorization": "marker.authorization"}
+                }],
+                "connections": {"marker": "marker.connections"}
+            },
+            "unknownField": "marker.unknown"
+        }))
+        .unwrap();
+
+        let output = serde_json::to_value(diagnostics.into_view().unwrap()).unwrap();
+        assert_eq!(output["id"], "50003");
+        assert_eq!(output["status"], "error");
+        assert_eq!(
+            output["diagnostics"][0],
+            json!({
+                "nodeName": "HTTP request",
+                "nodeType": "n8n-nodes-base.httpRequest",
+                "errors": [{
+                    "runIndex": 0,
+                    "message": "node failed",
+                    "type": "provider-node-error",
+                    "stack": "stack line 1\nstack line 2"
+                }]
+            })
+        );
+        let serialized = serde_json::to_string(&output).unwrap();
+        for marker in [
+            "marker.top-level",
+            "marker.body",
+            "marker.authorization",
+            "marker.credential",
+            "marker.response",
+            "marker.pin",
+            "marker.connections",
+            "marker.unknown",
+            "data",
+            "credentials",
+            "pinData",
+            "unknownField",
+        ] {
+            assert!(
+                !serialized.contains(marker),
+                "provider field leaked: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_diagnostics_rejects_invalid_labels_and_oversized_text() {
+        let metadata = Execution {
+            id: "50003".into(),
+            finished: Some(true),
+            mode: None,
+            started_at: None,
+            stopped_at: None,
+            workflow_id: None,
+            workflow_version_id: None,
+            status: Some("error".into()),
+            retry_of: None,
+            retry_success_id: None,
+            wait_till: None,
+        };
+        let make =
+            |run_data: BTreeMap<String, Vec<ExecutionRun>>,
+             workflow_data: Option<ExecutionWorkflowData>| ExecutionDiagnostics {
+                metadata: metadata.clone(),
+                data: Some(ExecutionDiagnosticsData {
+                    result_data: Some(ExecutionResultData { run_data }),
+                }),
+                workflow_data,
+            };
+
+        for node_name in [String::new(), "x".repeat(257), "bad\nnode".into()] {
+            let mut run_data = BTreeMap::new();
+            run_data.insert(node_name, Vec::new());
+            assert!(make(run_data, None).into_view().is_err());
+        }
+
+        for (name, node_type) in [
+            (String::new(), None),
+            ("x".repeat(257), None),
+            ("node".into(), Some(String::new())),
+            ("node".into(), Some("x".repeat(257))),
+            ("node".into(), Some("bad\t-type".into())),
+        ] {
+            let workflow_data = Some(ExecutionWorkflowData {
+                nodes: vec![ExecutionWorkflowNode { name, node_type }],
+            });
+            assert!(make(BTreeMap::new(), workflow_data).into_view().is_err());
+        }
+
+        for error in [
+            ExecutionError {
+                message: Some("x".repeat(MAX_DIAGNOSTIC_TEXT_LENGTH + 1)),
+                error_type: None,
+                name: None,
+                stack: None,
+            },
+            ExecutionError {
+                message: None,
+                error_type: Some("x".repeat(MAX_DIAGNOSTIC_TEXT_LENGTH + 1)),
+                name: None,
+                stack: None,
+            },
+            ExecutionError {
+                message: None,
+                error_type: None,
+                name: None,
+                stack: Some("x".repeat(MAX_DIAGNOSTIC_TEXT_LENGTH + 1)),
+            },
+        ] {
+            let mut run_data = BTreeMap::new();
+            run_data.insert("node".into(), vec![ExecutionRun { error: Some(error) }]);
+            assert!(make(run_data, None).into_view().is_err());
+        }
+
+        for metadata in [
+            Execution {
+                id: "bad\nid".into(),
+                ..metadata.clone()
+            },
+            Execution {
+                mode: Some("x".repeat(MAX_DIAGNOSTIC_NODE_NAME_LENGTH + 1)),
+                ..metadata.clone()
+            },
+            Execution {
+                status: Some("bad\tstatus".into()),
+                ..metadata.clone()
+            },
+        ] {
+            assert!(
+                ExecutionDiagnostics {
+                    metadata,
+                    data: None,
+                    workflow_data: None,
+                }
+                .into_view()
+                .is_err()
+            );
+        }
+
+        let mut too_many_nodes = BTreeMap::new();
+        for index in 0..=MAX_DIAGNOSTIC_NODES {
+            too_many_nodes.insert(format!("node-{index}"), Vec::new());
+        }
+        assert!(make(too_many_nodes, None).into_view().is_err());
     }
 
     #[test]

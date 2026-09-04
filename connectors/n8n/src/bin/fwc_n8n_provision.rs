@@ -114,8 +114,9 @@ const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
 const HETZNER_N8N_VERSION: &str = "2.34.6";
 pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
-const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 13] = [
+const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.credentials.list",
+    "n8n.executions.diagnostics",
     "n8n.executions.get",
     "n8n.executions.list",
     "n8n.folders.get",
@@ -129,8 +130,9 @@ const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 13] = [
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
-const COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
+const COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
+    "n8n.executions.diagnostics",
     "n8n.executions.get",
     "n8n.executions.list",
     "n8n.folders.get",

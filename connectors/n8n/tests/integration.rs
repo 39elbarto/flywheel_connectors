@@ -89,6 +89,17 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             let execution_id = utf8_percent_encode(execution_id, NON_ALPHANUMERIC);
             format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{workflow_id}/executions/{execution_id}")
         }
+        "n8n.executions.diagnostics" => {
+            let workflow_id = input["workflow_id"]
+                .as_str()
+                .expect("workflow id for execution diagnostics test token");
+            let execution_id = input["id"]
+                .as_str()
+                .expect("execution id for diagnostics test token");
+            let workflow_id = utf8_percent_encode(workflow_id, NON_ALPHANUMERIC);
+            let execution_id = utf8_percent_encode(execution_id, NON_ALPHANUMERIC);
+            format!("fwc-n8n://{TEST_SERVER_ID}/workflows/{workflow_id}/executions/{execution_id}")
+        }
         _ => panic!("unknown operation in test token: {operation}"),
     }
 }
@@ -121,7 +132,9 @@ fn capability_token_with_options(
         "n8n.workflows.lifecycle" => "n8n.workflows.lifecycle",
         "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
-        "n8n.executions.list" | "n8n.executions.get" => "n8n.executions.read",
+        "n8n.executions.list" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
+            "n8n.executions.read"
+        }
         "n8n.projects.list" => "n8n.projects.read",
         "n8n.credentials.list" => "n8n.credentials.metadata.read",
         "n8n.tags.list" => "n8n.tags.read",
@@ -1648,6 +1661,17 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
             "fwc-n8n://eec/workflows/w1/executions/e1",
         ),
         (
+            "n8n.executions.diagnostics",
+            json!({"workflow_id": "w1", "id": "e1"}),
+            json!({
+                "id": "e1",
+                "finished": true,
+                "data": {"resultData": {"runData": {}}}
+            }),
+            "https://n8n.example.com/api/v1/executions/e1?includeData=true",
+            "fwc-n8n://eec/workflows/w1/executions/e1",
+        ),
+        (
             "n8n.projects.list",
             json!({}),
             json!({"data": [{"id": "p1", "name": "Safe project", "credentials": "marker.project"}]}),
@@ -2391,6 +2415,10 @@ async fn every_credential_read_fails_closed_without_proxy_or_on_proxy_rejection(
         ("n8n.executions.list", json!({})),
         (
             "n8n.executions.get",
+            json!({"workflow_id": "w1", "id": "e1"}),
+        ),
+        (
+            "n8n.executions.diagnostics",
             json!({"workflow_id": "w1", "id": "e1"}),
         ),
         ("n8n.projects.list", json!({})),
@@ -4754,6 +4782,9 @@ async fn executions_get() {
     assert_eq!(result["id"], "50001");
     assert_eq!(result["finished"], true);
     assert_eq!(result["status"], "success");
+    let request = &server.received_requests().await.unwrap()[0];
+    assert_eq!(request.url.path(), "/api/v1/executions/50001");
+    assert_eq!(request.url.query(), None);
 }
 
 #[fcp_async_core::runtime::test]
@@ -4803,6 +4834,155 @@ async fn execution_handle_invoke_redacts_untrusted_fields_and_missing_finished_i
     .unwrap();
     assert!(missing["finished"].is_null());
     assert_no_untrusted_output(&missing);
+}
+
+#[fcp_async_core::runtime::test]
+async fn executions_diagnostics_uses_include_data_and_normalizes_hostile_node_runs() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/50003"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "50003",
+            "finished": true,
+            "mode": "manual",
+            "startedAt": "2025-03-01T08:00:00.000Z",
+            "stoppedAt": "2025-03-01T08:00:05.000Z",
+            "workflowId": "1001",
+            "status": "error",
+            "data": {
+                "resultData": {
+                    "error": {"message": "marker.execution.top-level-error"},
+                    "runData": {
+                        "HTTP request": [
+                            {
+                                "data": {"body": "marker.execution.body"},
+                                "error": {
+                                    "message": "node failed with a useful message",
+                                    "name": "NodeExecutionError",
+                                    "type": "provider-node-error",
+                                    "stack": "stack line 1\nstack line 2",
+                                    "headers": {"authorization": "marker.execution.authorization"},
+                                    "credentials": {"token": "marker.execution.credential"},
+                                    "response": {"body": "marker.execution.response"}
+                                },
+                            },
+                            {"data": {"body": "marker.execution.body-2"}}
+                        ],
+                        "No failure": [
+                            {"data": {"body": "marker.execution.body-3"}}
+                        ]
+                    }
+                },
+                "pinData": {"HTTP request": "marker.execution.pin"},
+                "credentials": {"api": "marker.execution.credential"}
+            },
+            "workflowData": {
+                "nodes": [
+                    {
+                        "name": "HTTP request",
+                        "type": "n8n-nodes-base.httpRequest",
+                        "parameters": {"authorization": "marker.execution.authorization"}
+                    }
+                ],
+                "connections": {"marker": "marker.execution.connections"}
+            },
+            "unknownField": "marker.execution.unknown"
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &c,
+        "n8n.executions.diagnostics",
+        json!({"workflow_id": "1001", "id": "50003"}),
+    )
+    .await
+    .expect("diagnostics should decode the typed response");
+    assert_eq!(result["id"], "50003");
+    assert_eq!(result["status"], "error");
+    assert_eq!(result["diagnostics"].as_array().unwrap().len(), 1);
+    let diagnostic = &result["diagnostics"][0];
+    assert_eq!(diagnostic["nodeName"], "HTTP request");
+    assert_eq!(diagnostic["nodeType"], "n8n-nodes-base.httpRequest");
+    assert_eq!(diagnostic["errors"].as_array().unwrap().len(), 1);
+    assert_eq!(diagnostic["errors"][0]["runIndex"], 0);
+    assert_eq!(
+        diagnostic["errors"][0]["message"],
+        "node failed with a useful message"
+    );
+    assert_eq!(diagnostic["errors"][0]["type"], "provider-node-error");
+    assert_eq!(
+        diagnostic["errors"][0]["stack"],
+        "stack line 1\nstack line 2"
+    );
+    assert_no_untrusted_output(&result);
+    let request = &server.received_requests().await.unwrap()[0];
+    assert_eq!(request.url.query(), Some("includeData=true"));
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/50004"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "50004",
+            "finished": true,
+            "workflowId": "different-workflow",
+            "unknownField": "marker.cross-resource"
+        })))
+        .mount(&server)
+        .await;
+    let mismatched = invoke(
+        &c,
+        "n8n.executions.diagnostics",
+        json!({"workflow_id": "1001", "id": "50004"}),
+    )
+    .await
+    .expect_err("diagnostics must bind the response to the requested workflow");
+    assert!(!mismatched.to_string().contains("marker.cross-resource"));
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions/50005"))
+        .and(query_param("includeData", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "50005",
+            "finished": true,
+            "workflowId": "1001",
+            "mode": "bad\nmode"
+        })))
+        .mount(&server)
+        .await;
+    let invalid_metadata = invoke(
+        &c,
+        "n8n.executions.diagnostics",
+        json!({"workflow_id": "1001", "id": "50005"}),
+    )
+    .await
+    .expect_err("diagnostics must reject control-bearing metadata");
+    assert!(!invalid_metadata.to_string().contains("bad"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn executions_diagnostics_rejects_unknown_input_fields_without_traffic() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    for input in [
+        json!({}),
+        json!({"workflow_id": "1001"}),
+        json!({"id": "50003"}),
+        json!({"workflow_id": "1001", "id": "50003", "includeData": true}),
+        json!({"workflow_id": "1001", "id": "50003", "nodeNames": ["HTTP request"]}),
+    ] {
+        assert!(
+            c.handle_invoke(json!({
+                "operation": "n8n.executions.diagnostics",
+                "input": input,
+            }))
+            .await
+            .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -5029,6 +5209,19 @@ async fn simulate_known_executions_get() {
     let c = setup_connector(&server.uri()).await;
     assert!(
         c.handle_simulate(json!({"operation": "n8n.executions.get"}))
+            .await
+            .unwrap()["allowed"]
+            .as_bool()
+            .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_known_executions_diagnostics() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_simulate(json!({"operation": "n8n.executions.diagnostics"}))
             .await
             .unwrap()["allowed"]
             .as_bool()

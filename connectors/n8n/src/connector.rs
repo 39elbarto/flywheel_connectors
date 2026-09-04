@@ -864,6 +864,10 @@ impl N8nConnector {
                 self.invoke_executions_get(client, &input, Some(context.clone()))
                     .await
             }
+            "n8n.executions.diagnostics" => {
+                self.invoke_executions_diagnostics(client, &input, Some(context.clone()))
+                    .await
+            }
             "n8n.projects.list" => {
                 self.invoke_projects_list(client, &input, Some(context.clone()))
                     .await
@@ -1678,6 +1682,28 @@ impl N8nConnector {
         Ok(serde_json::to_value(execution.into_view())?)
     }
 
+    async fn invoke_executions_diagnostics(
+        &self,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<serde_json::Value, N8nError> {
+        let workflow_id = require_str(input, "workflow_id")?;
+        let id = require_str(input, "id")?;
+        let execution = client.get_execution_diagnostics_typed(id, context).await?;
+        if execution.metadata.id != id
+            || execution.metadata.workflow_id.as_deref() != Some(workflow_id)
+        {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        serde_json::to_value(
+            execution
+                .into_view()
+                .map_err(|_| N8nError::MalformedProviderResponse)?,
+        )
+        .map_err(N8nError::from)
+    }
+
     async fn invoke_folders_list(
         &self,
         client: &N8nClient,
@@ -1991,6 +2017,14 @@ impl N8nConnector {
                     .map_err(|error| error.to_fcp_error())?
             }
             "n8n.executions.get" => {
+                let workflow_id =
+                    require_str(input, "workflow_id").map_err(|error| error.to_fcp_error())?;
+                let execution_id =
+                    require_str(input, "id").map_err(|error| error.to_fcp_error())?;
+                execution_resource_uri(server_id, workflow_id, execution_id)
+                    .map_err(|error| error.to_fcp_error())?
+            }
+            "n8n.executions.diagnostics" => {
                 let workflow_id =
                     require_str(input, "workflow_id").map_err(|error| error.to_fcp_error())?;
                 let execution_id =
@@ -2951,6 +2985,12 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         }
         "n8n.executions.get" => {
             require_exact_object(input, &["workflow_id", "id"], "execution get input")?;
+            require_str(input, "workflow_id")?;
+            require_str(input, "id")?;
+            Ok(())
+        }
+        "n8n.executions.diagnostics" => {
+            require_exact_object(input, &["workflow_id", "id"], "execution diagnostics input")?;
             require_str(input, "workflow_id")?;
             require_str(input, "id")?;
             Ok(())
@@ -4050,6 +4090,55 @@ fn execution_view_schema() -> serde_json::Value {
     })
 }
 
+fn execution_diagnostics_view_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "finished", "diagnostics"],
+        "properties": {
+            "id": {"type": "string"},
+            "finished": {"type": ["boolean", "null"]},
+            "mode": {"type": ["string", "null"]},
+            "startedAt": {"type": ["string", "null"]},
+            "stoppedAt": {"type": ["string", "null"]},
+            "workflowId": {"type": ["string", "null"]},
+            "workflowVersionId": {"type": ["string", "null"]},
+            "status": {"type": ["string", "null"]},
+            "retryOf": {"type": ["string", "null"]},
+            "retrySuccessId": {"type": ["string", "null"]},
+            "waitTill": {"type": ["string", "null"]},
+            "diagnostics": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeName", "errors"],
+                    "properties": {
+                        "nodeName": {"type": "string", "maxLength": 256},
+                        "nodeType": {"type": ["string", "null"], "maxLength": 256},
+                        "errors": {
+                            "type": "array",
+                            "maxItems": 100,
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": ["runIndex"],
+                                "properties": {
+                                    "runIndex": {"type": "integer", "minimum": 0},
+                                    "message": {"type": "string", "maxLength": 2048},
+                                    "type": {"type": "string", "maxLength": 2048},
+                                    "stack": {"type": "string", "maxLength": 2048},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    })
+}
+
 fn project_view_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -4358,8 +4447,8 @@ fn workflow_archive_input_schema() -> serde_json::Value {
                         "properties": {
                             "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
                             "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
-                            "active": {"const": false},
-                            "isArchived": {"const": false},
+                            "active": {"type": "boolean", "const": false},
+                            "isArchived": {"type": "boolean", "const": false},
                             "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
                         },
                     },
@@ -4959,6 +5048,28 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("n8n.executions.list"),
                     CapabilityId::from_static("n8n.workflows.get"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.executions.diagnostics",
+            "Get bounded node error diagnostics for a specific execution",
+            json!({"type": "object", "additionalProperties": false, "required": ["workflow_id", "id"], "properties": {"workflow_id": {"type": "string", "description": "Workflow identifier containing the execution"}, "id": {"type": "string", "description": "Execution identifier"}}}),
+            execution_diagnostics_view_schema(),
+            "n8n.executions.read",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Inspect bounded node error diagnostics for one workflow execution without receiving raw execution data.".into(),
+                common_mistakes: vec![
+                    "This operation is the explicit diagnostics path and enables provider includeData; n8n.executions.get remains metadata-only.".into(),
+                    "Only node names, optional node types, and bounded message/type/stack fields are returned; execution items, credentials, headers/cookies/authorization, request/response bodies, binary data, pinData, and unknown fields are discarded.".into(),
+                ],
+                examples: vec![r#"{"workflow_id": "1001", "id": "50001"}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.executions.get"),
+                    CapabilityId::from_static("n8n.executions.list"),
                 ],
             },
         ),
@@ -5627,9 +5738,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_17_operations() {
+    fn operations_info_has_18_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 17);
+        assert_eq!(ops.len(), 18);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -5643,6 +5754,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.workflows.archive"));
         assert!(operation_ids.contains(&"n8n.workflows.delete_disposable"));
         assert!(operation_ids.contains(&"n8n.workflows.execute"));
+        assert!(operation_ids.contains(&"n8n.executions.diagnostics"));
         assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
     }
 
@@ -6248,6 +6360,7 @@ mod tests {
         assert!(ids.contains(&"n8n.workflows.activate"));
         assert!(ids.contains(&"n8n.executions.list"));
         assert!(ids.contains(&"n8n.executions.get"));
+        assert!(ids.contains(&"n8n.executions.diagnostics"));
         assert!(ids.contains(&"n8n.projects.list"));
         assert!(ids.contains(&"n8n.credentials.list"));
         assert!(ids.contains(&"n8n.tags.list"));

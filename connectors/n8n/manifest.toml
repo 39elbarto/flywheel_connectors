@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9597a5ec5a4429d599f2ff9394330aa1de00bc3ed0d65d68b25e941ef97296e7"
+interface_hash = "blake3-256:fcp.interface.v2:5699a0f48ada42f42c1fd00ba757be32695363f2d9a84a003d75403095a07dba"
 
 [connector]
 id = "fcp.n8n"
@@ -265,6 +265,114 @@ examples = ['{"workflow_id": "1001", "id": "50001"}']
 related = [
     "n8n.executions.list",
     "n8n.workflows.get",
+]
+
+[provides.operations."n8n.executions.diagnostics"]
+description = "Get bounded node error diagnostics for a specific execution"
+capability = "n8n.executions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.executions.diagnostics".input_schema]
+additionalProperties = false
+required = [
+    "workflow_id",
+    "id",
+]
+type = "object"
+
+[provides.operations."n8n.executions.diagnostics".input_schema.properties.id]
+description = "Execution identifier"
+type = "string"
+
+[provides.operations."n8n.executions.diagnostics".input_schema.properties.workflow_id]
+description = "Workflow identifier containing the execution"
+type = "string"
+
+[provides.operations."n8n.executions.diagnostics".output_schema]
+additionalProperties = false
+required = [
+    "id",
+    "finished",
+    "diagnostics",
+]
+type = "object"
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties]
+finished = { type = ["boolean", "null"] }
+id = { type = "string" }
+mode = { type = ["string", "null"] }
+startedAt = { type = ["string", "null"] }
+stoppedAt = { type = ["string", "null"] }
+workflowId = { type = ["string", "null"] }
+workflowVersionId = { type = ["string", "null"] }
+status = { type = ["string", "null"] }
+retryOf = { type = ["string", "null"] }
+retrySuccessId = { type = ["string", "null"] }
+waitTill = { type = ["string", "null"] }
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics]
+type = "array"
+maxItems = 100
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics.items]
+additionalProperties = false
+required = [
+    "nodeName",
+    "errors",
+]
+type = "object"
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics.items.properties]
+nodeName = { type = "string", maxLength = 256 }
+nodeType = { type = ["string", "null"], maxLength = 256 }
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics.items.properties.errors]
+type = "array"
+maxItems = 100
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics.items.properties.errors.items]
+additionalProperties = false
+required = ["runIndex"]
+type = "object"
+
+[provides.operations."n8n.executions.diagnostics".output_schema.properties.diagnostics.items.properties.errors.items.properties]
+runIndex = { type = "integer", minimum = 0 }
+message = { type = "string", maxLength = 2048 }
+type = { type = "string", maxLength = 2048 }
+stack = { type = "string", maxLength = 2048 }
+
+[provides.operations."n8n.executions.diagnostics".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.executions.diagnostics".ai_hints]
+when_to_use = "Inspect bounded node errors for one workflow execution without receiving raw execution data."
+common_mistakes = [
+    "Use n8n.executions.diagnostics for node-level errors; n8n.executions.get remains metadata-only and does not enable includeData.",
+    "Only node names, optional node types, and bounded message/type/stack fields are returned; execution items, credentials, headers/cookies/authorization, request/response bodies, binary data, pinData, and unknown fields are discarded.",
+]
+examples = ['{"workflow_id": "1001", "id": "50001"}']
+related = [
+    "n8n.executions.get",
+    "n8n.executions.list",
 ]
 
 [provides.operations."n8n.executions.list"]
@@ -2643,6 +2751,7 @@ scope = "instance"
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
 "n8n.mcp_access.reconcile" = ["n8n.mcp_access.write"]
 "n8n.executions.get" = ["n8n.executions.read"]
+"n8n.executions.diagnostics" = ["n8n.executions.read"]
 "n8n.executions.list" = ["n8n.executions.read"]
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.lifecycle" = ["n8n.workflows.lifecycle"]

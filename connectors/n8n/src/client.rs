@@ -20,8 +20,9 @@ use tracing::{debug, instrument};
 use crate::{
     error::{N8nError, N8nResult},
     types::{
-        CredentialListResponse, Execution, ExecutionListResponse, Folder, FolderListResponse,
-        ListResponse, ProjectListResponse, TagListResponse, WorkflowDetail, WorkflowListResponse,
+        CredentialListResponse, Execution, ExecutionDiagnostics, ExecutionListResponse, Folder,
+        FolderListResponse, ListResponse, ProjectListResponse, TagListResponse, WorkflowDetail,
+        WorkflowListResponse,
     },
 };
 
@@ -999,6 +1000,20 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<Execution> {
         decode_typed(self.get_execution(id, context).await?)
+    }
+
+    /// Get one execution with provider execution data enabled for the
+    /// diagnostics-only projection. The ordinary execution GET above is kept
+    /// queryless so its public contract and provider request remain unchanged.
+    pub(crate) async fn get_execution_diagnostics_typed(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<ExecutionDiagnostics> {
+        let mut url =
+            self.resolve_path_segments(&[("path segment", "executions"), ("execution id", id)])?;
+        url.query_pairs_mut().append_pair("includeData", "true");
+        decode_typed(self.get_url_with_context(url, context).await?)
     }
 }
 

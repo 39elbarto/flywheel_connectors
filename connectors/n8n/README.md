@@ -9,7 +9,7 @@
 
 ## Purpose
 
-This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update, typed official-MCP publish/unpublish/archive writes, and a narrowly scoped disposable-workflow REST delete. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved provider path with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed. Disposable delete additionally requires a host-issued receipt proving the same workflow was created through the bounded draft path.
+This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update, typed official-MCP publish/unpublish/archive writes, and a narrowly scoped disposable-workflow REST delete. Execution reads include the unchanged metadata-only `n8n.executions.get` contract and the separately named `n8n.executions.diagnostics` projection for bounded node errors. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved provider path with an independent typed readback; direct REST lifecycle/archive/execution routes remain fail-closed and no legacy endpoint is guessed. Disposable delete additionally requires a host-issued receipt proving the same workflow was created through the bounded draft path.
 
 ### Immutable release provisioner (source-only packet)
 
@@ -171,6 +171,7 @@ The current crate exposes these operations:
 - `n8n.workflows.activate`
 - `n8n.executions.list`
 - `n8n.executions.get`
+- `n8n.executions.diagnostics`
 - `n8n.projects.list`
 - `n8n.credentials.list`
 - `n8n.tags.list`
@@ -187,7 +188,7 @@ The current crate exposes these operations:
 The list above is the manifest/runtime declaration surface, not a promise that
 every provider path is enabled. The documentation separates the layers:
 
-- **Manifest operations:** the 17 operations listed above are declared by
+- **Manifest operations:** the 18 operations listed above are declared by
   `connectors/n8n/manifest.toml`; activation remains fail-closed because its
   provider lifecycle path is deferred.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is not in the
@@ -214,7 +215,7 @@ Important runtime truths:
   `resolve`, `route <public-operation>`, `run-once <host-operation>`,
   `update-review detect`, `provision [--mode preflight|apply]`, and `status`.
   `provision` defaults to read-only `preflight`; mutation requires the explicit
-  owner-gated `provision --mode apply`. `run-once` accepts the nine Phase-1 host
+  owner-gated `provision --mode apply`. `run-once` accepts the ten Phase-1 host
   reads, guarded
   `n8n.workflows.create_draft`, `n8n.workflows.update_draft`, and the typed
   `n8n.workflows.delete_disposable` cleanup path, the typed
@@ -342,7 +343,8 @@ Important runtime truths:
 - Large workflow pages use an operation-scoped transport budget: the typed
   `n8n.workflows.list` and `n8n.mcp_access.reconcile` paths allow at most
   `512 KiB` for the compact inter-process result. Their owned invocation
-  deadlines are `30 seconds` and `60 seconds` respectively; the generic
+  deadlines are `30 seconds` and `60 seconds` respectively. The typed
+  `n8n.executions.diagnostics` path allows at most `256 KiB`; the generic
   connector/owned defaults remain `64 KiB` and `10 seconds`. The provider
   response itself remains bounded to `10 MiB`, is typed and compacted before
   crossing the connector boundary, and is never logged as raw payload.
@@ -414,7 +416,7 @@ Important runtime truths:
 - Each n8n run-once invocation generates a fresh host-owned connector instance ID in memory, passes that exact ID through the owned handshake, and issues the capability token with the matching instance claim. A stale or inventory-pinned instance value is replaced for the one-shot launch, and a different connector instance cannot reuse the token.
 - `credential_id` must be a valid UUID.
 - `base_url` is required and canonicalized to the `/api/v1` root.
-- Runtime endpoint shape is `{base_url}/workflows`, `{base_url}/workflows/{id}`, `{base_url}/executions`, `{base_url}/executions/{id}`, `{base_url}/projects`, `{base_url}/credentials`, `{base_url}/tags`, `{base_url}/projects/{projectId}/folders`, and `{base_url}/projects/{projectId}/folders/{folderId}`.
+- Runtime endpoint shape is `{base_url}/workflows`, `{base_url}/workflows/{id}`, `{base_url}/executions`, `{base_url}/executions/{id}`, `{base_url}/executions/{id}?includeData=true` (diagnostics only), `{base_url}/projects`, `{base_url}/credentials`, `{base_url}/tags`, `{base_url}/projects/{projectId}/folders`, and `{base_url}/projects/{projectId}/folders/{folderId}`.
 - Runtime request and connect timeouts come from the supplied `ConnectorRuntimeConfig` (the connector default request timeout is 30 seconds); each direct provider call or host-proxy attempt is single-attempt and has no automatic retry.
 - Runtime `invoke` requires the canonical `operation` field.
 - A host-key-backed `CapabilityVerifier` validates the bound capability token before provider dispatch.
@@ -545,7 +547,7 @@ This packet documents and verifies:
 - workflow reads and the activation approval boundary
 - safe project metadata reads
 - compact tag metadata reads
-- execution read operations
+- execution metadata and bounded diagnostics read operations
 - typed folder list/get reads with strict redaction and project-scoped provider access
 - handshake, self-check, introspection, simulation, and reset behavior
 - deterministic WireMock tests and direct proof commands
@@ -561,7 +563,7 @@ This packet documents and verifies:
 - Runtime capability surface:
   - `n8n.workflows.read` gates workflow list/get provider calls.
   - `n8n.workflows.write` gates the activation approval boundary; a valid request is then denied before provider traffic in this packet.
-  - `n8n.executions.read` gates execution list/get provider calls.
+  - `n8n.executions.read` gates execution list/get/diagnostics provider calls.
   - `n8n.projects.read` gates safe project list provider calls.
   - `n8n.credentials.metadata.read` gates safe credential metadata list provider calls.
   - `n8n.tags.read` gates compact tag list provider calls.
@@ -577,7 +579,10 @@ This packet documents and verifies:
 - Provider responses are untrusted work-zone data. Runtime read operations return only
   the explicit safe metadata views; workflow graph/nodes/connections,
   `activeVersion`, `meta`, credential references/bodies, Code source, `pinData`,
-  execution `data`/`resultData`, and unknown fields are discarded before output.
+  execution items, and unknown fields are discarded before output. The ordinary
+  `n8n.executions.get` path remains metadata-only and queryless; the separate
+  `n8n.executions.diagnostics` path enables `includeData=true` but emits only
+  bounded node names/types and normalized message/type/stack errors.
 - Compact workflow-list metadata preserves provider `activeVersionId` presence:
   an omitted field is omitted, explicit `null` remains `null`, and a string is
   returned exactly. Workflow get is stricter: the field and matching
@@ -590,6 +595,7 @@ This packet documents and verifies:
   - `GET {base_url}/workflows/{id}`
   - `GET {base_url}/executions?limit=<1..200>&cursor=<opaque>&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true`
   - `GET {base_url}/executions/{id}`
+  - `GET {base_url}/executions/{id}?includeData=true` for `n8n.executions.diagnostics` only
   - `GET {base_url}/projects?limit=<1..200>&cursor=<opaque>`
   - `GET {base_url}/credentials?limit=<1..200>&cursor=<opaque>`
   - `GET {base_url}/tags?limit=<1..200>&cursor=<opaque>`
@@ -631,6 +637,7 @@ This packet documents and verifies:
 | `n8n.workflows.activate` | no provider request; lifecycle deferred | `n8n.workflows.write` | `Risky` | `Medium` | `None` | `id` string and `active` bool plus one matching approval |
 | `n8n.executions.list` | `GET /executions` with bounded `limit`/opaque `cursor` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.executions.get` | `GET /executions/{id}` | `n8n.executions.read` | `Safe` | `Low` | `Strict` | `workflow_id` and `id` strings |
+| `n8n.executions.diagnostics` | `GET /executions/{id}?includeData=true`, typed bounded error projection only | `n8n.executions.read` | `Safe` | `Low` | `Strict` | `workflow_id` and `id` strings |
 | `n8n.projects.list` | `GET /projects` with bounded `limit`/opaque `cursor`; direct loopback API-key or canonical-resource host-egress credential reference | `n8n.projects.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.credentials.list` | `GET /credentials` with bounded `limit`/opaque `cursor`; owner/admin and upstream `credential:list` caveat | `n8n.credentials.metadata.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
 | `n8n.tags.list` | `GET /tags` with bounded `limit`/opaque `cursor` | `n8n.tags.read` | `Safe` | `Low` | `Strict` | optional `limit` and `cursor` |
@@ -675,8 +682,10 @@ Read output boundary:
   authorize a write without a typed REST readback that reproduces this digest.
 - Raw nodes, connections, Code source, credential references, pinned data, and
   either digest preimage never cross the connector output or log boundary.
-- Execution reads serialize only `id`, `finished`, `mode`, `startedAt`, `stoppedAt`,
-  `workflowId`, `status`, `retryOf`, `retrySuccessId`, and `waitTill`.
+- Execution metadata reads serialize only `id`, `finished`, `mode`, `startedAt`,
+  `stoppedAt`, `workflowId`, `status`, `retryOf`, `retrySuccessId`, and `waitTill`.
+  `n8n.executions.diagnostics` adds only bounded node names/types and normalized
+  message/type/stack errors to that same metadata projection.
 - Project reads serialize only `id`, `name`, and optional `type`. Users, roles,
   memberships, credentials, workflow data, and arbitrary provider metadata are discarded.
 - The project projection assumes the current provider shape includes `id`; if it is absent, the connector fails closed rather than inventing an identifier.
@@ -721,7 +730,7 @@ The current implementation does not include:
 - workflow create, update, general delete, import, export, clone, test-run, tag write, project write, folder write, credential write/secret retrieval, variable, user, audit, or source-control operations; the only deletion exception is the separately guarded `delete_disposable` cleanup path
 - provider-specific filtering and sorting for workflow or execution list calls
 - activation provider lifecycle; capability and approval gates are present, but the provider write path is deferred
-- restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent/general deletion; execution data/result retrieval and execution management remain out of scope
+- restore/unarchive, versions, test/prepare-test execution, credential mutation, and permanent/general deletion; raw execution data/result retrieval and execution management remain out of scope (diagnostics returns only its bounded normalized error projection)
 - execution retry, stop, delete, log streaming, custom-data filtering, or execution-data redaction management
 - API-key provisioning or secret injection inside the connector process;
   production credential injection and egress enforcement belong to the

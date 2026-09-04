@@ -273,6 +273,7 @@ fn required_capability(operation: &str) -> fcp_core::FcpResult<CapabilityId> {
         "n8n.workflows.activate" => "n8n.workflows.write",
         "n8n.executions.list" => "n8n.executions.read",
         "n8n.executions.get" => "n8n.executions.read",
+        "n8n.executions.diagnostics" => "n8n.executions.read",
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1002,
@@ -537,8 +538,8 @@ fn n8n_manifest_network_guard_allows_and_denies() {
 
     assert_eq!(
         operations.len(),
-        5,
-        "n8n manifest should declare 5 operations"
+        18,
+        "n8n manifest should declare 18 operations"
     );
 
     let expected_hosts = vec!["localhost.localdomain".to_string()];

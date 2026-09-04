@@ -3155,13 +3155,24 @@ mod tests {
             );
             let root = base.join(id);
             fs::create_dir(&root).expect("fixture root");
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+                .expect("fixture root mode");
             let stage = root.join("staging/release-test");
             let releases = root.join("releases");
             fs::create_dir_all(&stage).expect("stage");
+            fs::set_permissions(root.join("staging"), fs::Permissions::from_mode(0o755))
+                .expect("staging mode");
+            fs::set_permissions(&stage, fs::Permissions::from_mode(0o755)).expect("stage mode");
             fs::create_dir(&releases).expect("releases");
+            fs::set_permissions(&releases, fs::Permissions::from_mode(0o755))
+                .expect("releases mode");
             let previous = releases.join("previous");
             fs::create_dir(&previous).expect("previous");
+            fs::set_permissions(&previous, fs::Permissions::from_mode(0o755))
+                .expect("previous mode");
             fs::create_dir(previous.join("bin")).expect("previous bin");
+            fs::set_permissions(previous.join("bin"), fs::Permissions::from_mode(0o755))
+                .expect("previous bin mode");
             fs::write(previous.join("bin/fwc-n8n"), b"previous binary").expect("previous binary");
             fs::set_permissions(
                 previous.join("bin/fwc-n8n"),
@@ -3292,7 +3303,7 @@ mod tests {
                 self.provision_receipt(),
             )
             .expect("provision receipt");
-            for name in [RECEIPT_FILE, PROVENANCE_FILE] {
+            for name in [RECEIPT_FILE, PROVENANCE_FILE, PROVISION_RECEIPT_FILE] {
                 fs::set_permissions(self.stage.join(name), fs::Permissions::from_mode(0o644))
                     .expect("metadata mode");
             }

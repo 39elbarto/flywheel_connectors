@@ -2720,6 +2720,13 @@ burst = 5
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "n8n.workflows.execute"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "n8n.mcp_access.write"
 requests = 50
 window_ms = 60000
@@ -2755,6 +2762,9 @@ scope = "instance"
 "n8n.executions.list" = ["n8n.executions.read"]
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.lifecycle" = ["n8n.workflows.lifecycle"]
+"n8n.workflows.archive" = ["n8n.workflows.lifecycle"]
+"n8n.workflows.delete_disposable" = ["n8n.workflows.write"]
+"n8n.workflows.execute" = ["n8n.workflows.execute"]
 "n8n.workflows.list" = ["n8n.workflows.read"]
 "n8n.folders.list" = ["n8n.folders.read"]
 "n8n.workflows.update_draft" = ["n8n.workflows.write"]

@@ -788,7 +788,7 @@ impl N8nConnector {
 
         if operation == "n8n.workflows.archive" {
             return Err(FcpError::CapabilityDenied {
-                capability: "n8n.workflows.archive".into(),
+                capability: "n8n.workflows.lifecycle".into(),
                 reason: "archive requires the mediated official MCP host path".into(),
             });
         }
@@ -4081,7 +4081,6 @@ fn execution_view_schema() -> serde_json::Value {
             "startedAt": {"type": ["string", "null"]},
             "stoppedAt": {"type": ["string", "null"]},
             "workflowId": {"type": ["string", "null"]},
-            "workflowVersionId": {"type": ["string", "null"]},
             "status": {"type": ["string", "null"]},
             "retryOf": {"type": ["string", "null"]},
             "retrySuccessId": {"type": ["string", "null"]},
@@ -4367,8 +4366,8 @@ fn workflow_draft_input_schema(update: bool) -> serde_json::Value {
     })
 }
 
-fn workflow_draft_output_schema() -> serde_json::Value {
-    json!({
+fn workflow_draft_output_schema(include_creation_receipt: bool) -> serde_json::Value {
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["status", "operation", "id", "versionId", "graphDigest", "stateDigest", "active", "activeVersionId", "isArchived", "lifecycle", "readback"],
@@ -4389,7 +4388,25 @@ fn workflow_draft_output_schema() -> serde_json::Value {
             "published": {"type": ["object", "null"]},
             "creationReceipt": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
         },
-    })
+    });
+    let properties = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("workflow draft output schema properties must be an object");
+    if include_creation_receipt {
+        properties.insert(
+            "creationReceipt".into(),
+            json!({
+                "description": "Host-issued receipt required for bounded disposable cleanup",
+                "type": "string",
+                "pattern": "^blake3-256:[0-9a-f]{64}$",
+                "maxLength": 75,
+            }),
+        );
+    } else {
+        properties.remove("creationReceipt");
+    }
+    schema
 }
 
 fn workflow_lifecycle_input_schema() -> serde_json::Value {
@@ -4523,7 +4540,7 @@ fn workflow_execute_input_schema() -> serde_json::Value {
                             "activeVersionId": {"type": ["string", "null"], "maxLength": 256},
                             "active": {"type": "boolean"},
                             "isArchived": {"type": "boolean"},
-                            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$"}
+                            "stateDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75}
                         }
                     }
                 }
@@ -4552,26 +4569,25 @@ fn workflow_execute_output_schema() -> serde_json::Value {
 }
 
 fn workflow_archive_output_schema() -> serde_json::Value {
-    let state = workflow_lifecycle_output_schema()["properties"]["before"].clone();
     json!({
         "type": "object",
         "additionalProperties": false,
         "required": ["status", "operation", "provider", "retry", "readback", "before", "after", "providerResult"],
         "properties": {
-            "status": {"type": "string", "enum": ["verified", "unknown"]},
-            "operation": {"const": "n8n.workflows.archive"},
-            "provider": {"const": "official_mcp"},
-            "retry": {"const": "never_automatic"},
-            "readback": {"const": "independent_get"},
-            "before": state,
-            "after": state,
+            "status": {"type": "string", "enum": ["verified"]},
+            "operation": {"type": "string", "const": "n8n.workflows.archive"},
+            "provider": {"type": "string", "const": "official_mcp"},
+            "retry": {"type": "string", "const": "never_automatic"},
+            "readback": {"type": "string", "const": "independent_get"},
+            "before": {"type": "object"},
+            "after": {"type": "object"},
             "providerResult": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["archived", "workflowId"],
                 "properties": {
-                    "archived": {"const": true},
-                    "workflowId": {"type": "string", "maxLength": 256},
+                    "archived": {"type": "boolean", "const": true},
+                    "workflowId": {"type": "string", "minLength": 1, "maxLength": 256},
                 },
             },
         },
@@ -4616,11 +4632,11 @@ fn workflow_delete_disposable_output_schema() -> serde_json::Value {
             "creationReceiptDigest"
         ],
         "properties": {
-            "status": {"const": "deleted"},
-            "operation": {"const": "n8n.workflows.delete_disposable"},
-            "provider": {"const": "rest"},
-            "retry": {"const": "never_automatic"},
-            "readback": {"const": "independent_get_404"},
+            "status": {"type": "string", "const": "deleted"},
+            "operation": {"type": "string", "const": "n8n.workflows.delete_disposable"},
+            "provider": {"type": "string", "const": "rest"},
+            "retry": {"type": "string", "const": "never_automatic"},
+            "readback": {"type": "string", "const": "independent_get_404"},
             "workflowIdDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75},
             "creationReceiptDigest": {"type": "string", "pattern": "^blake3-256:[0-9a-f]{64}$", "maxLength": 75}
         }
@@ -4849,7 +4865,7 @@ fn operations_info() -> Vec<OperationInfo> {
             "n8n.workflows.create_draft",
             "Create an inactive n8n workflow draft and verify it by independent readback",
             workflow_draft_input_schema(false),
-            workflow_draft_output_schema(),
+            workflow_draft_output_schema(true),
             "n8n.workflows.write",
             RiskLevel::Medium,
             SafetyTier::Risky,
@@ -4872,7 +4888,7 @@ fn operations_info() -> Vec<OperationInfo> {
             "n8n.workflows.update_draft",
             "Update an n8n workflow draft with full lifecycle preconditions and verify readback",
             workflow_draft_input_schema(true),
-            workflow_draft_output_schema(),
+            workflow_draft_output_schema(false),
             "n8n.workflows.write",
             RiskLevel::High,
             SafetyTier::Risky,
@@ -4940,19 +4956,20 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.archive",
-            "Archive an inactive workflow through the mediated official n8n MCP path with independent REST GET readback",
+            "Archive an exact n8n workflow through the owner-approved official MCP archive_workflow tool with independent REST GET readback",
             workflow_archive_input_schema(),
             workflow_archive_output_schema(),
-            "n8n.workflows.archive",
+            "n8n.workflows.lifecycle",
             RiskLevel::High,
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only through the host-mediated official MCP archive_workflow path with exact per-server schema binding, fresh tools/list approval, inactive/unarchived precondition, and external signed approval.".into(),
+                when_to_use: "Use only with an exact workflow target, UUID idempotency key, explicit inactive/unarchived lifecycle precondition, external signed approval, and an owner-provisioned archive_workflow policy entry whose digest is matched by fresh tools/list.".into(),
                 common_mistakes: vec![
-                    "Active or already archived workflows are rejected; archive never performs incidental deactivation or restore.".into(),
-                    "The direct connector path is fail-closed; host run-once performs one archive_workflow call followed by an independent REST GET readback.".into(),
-                    "Restore/unarchive, delete, credential mutation, and all other lifecycle actions are unsupported; ambiguous outcomes are never retried automatically.".into(),
+                    "The archive path rejects active or already archived baselines to avoid incidental deactivation; it performs no REST archive fallback.".into(),
+                    "The owner policy must carry an exact archive_workflow_schema input/output digest pair equal to the approved_tools entry; missing or mismatched binding fails before the side-effect call.".into(),
+                    "One archive_workflow MCP call is followed by an independent REST GET; timeout, disconnect, conflict, malformed response, or readback mismatch is unknown and never retried automatically.".into(),
+                    "Restore/unarchive has no proven approved route and remains fail-closed/out of scope.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000004","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
@@ -4971,11 +4988,11 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only to clean up a workflow with a host-issued creationReceipt, exact inactive/unarchived precondition, and current-chat approval.".into(),
+                when_to_use: "Use only to clean up a workflow created by the bounded disposable draft path, with a host-issued creationReceipt, exact inactive/unarchived precondition, and current-chat approval.".into(),
                 common_mistakes: vec![
-                    "This is not a general workflow delete operation; the host rejects receipts that do not prove a successful disposable create on the same server.".into(),
-                    "The connector performs one typed REST DELETE followed by an independent GET that must return 404; timeout or any uncertain result is never retried automatically.".into(),
-                    "Do not use the workflow name, an arbitrary ID, or a caller-created receipt.".into(),
+                    "This is not a general workflow delete operation; arbitrary existing workflow IDs and caller-created receipts are rejected.".into(),
+                    "The typed REST path performs one DELETE followed by an independent GET that must return 404; timeout, conflict, malformed response, or readback uncertainty is never retried automatically.".into(),
+                    "Permanent deletion, credentials, activation, and generic MCP tools/call remain outside this operation.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","creationReceipt":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000006","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
@@ -4986,7 +5003,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.execute",
-            "Execute one exact workflow version through the owner-approved official n8n MCP tool",
+            "Owner-gated execute_workflow seam; unavailable until exact per-server schema policy and execution readback are provisioned",
             workflow_execute_input_schema(),
             workflow_execute_output_schema(),
             "n8n.workflows.execute",
@@ -4994,11 +5011,11 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only with an exact server/workflow/version, bounded input class, current-chat approval, and owner policy binding execute_workflow.".into(),
+                when_to_use: "Execute one manually or in production only after exact workflow/version precondition and current-chat approval; manual is not side-effect free.".into(),
                 common_mistakes: vec![
-                    "Manual execution is not presumed side-effect free; production approval binds the published version and side-effect summary.".into(),
-                    "The public operation never exposes generic MCP tools/call, caller URLs, headers, credentials, or execution data.".into(),
-                    "A timeout, disconnect, malformed result, or readback mismatch is unknown and is never retried automatically.".into(),
+                    "Only an owner-provisioned execute_workflow policy with exact per-server schema digests may be admitted; generic tools/call and REST execution routes are not exposed, and missing policy fails closed.".into(),
+                    "Inputs are bounded and classified; credentials, headers, URLs, commands, paths, and arbitrary execution data are rejected or redacted.".into(),
+                    "Timeout, disconnect, malformed response, teardown uncertainty, or readback mismatch is unknown and never retried automatically.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","mode":"manual","versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000005","inputClass":"none","sideEffectSummary":"manual approved run","precondition":{"versionId":"published-v1","activeVersionId":"published-v1","active":true,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
@@ -5061,9 +5078,9 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Safe,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Inspect bounded node error diagnostics for one workflow execution without receiving raw execution data.".into(),
+                when_to_use: "Inspect bounded node errors for one workflow execution without receiving raw execution data.".into(),
                 common_mistakes: vec![
-                    "This operation is the explicit diagnostics path and enables provider includeData; n8n.executions.get remains metadata-only.".into(),
+                    "Use n8n.executions.diagnostics for node-level errors; n8n.executions.get remains metadata-only and does not enable includeData.".into(),
                     "Only node names, optional node types, and bounded message/type/stack fields are returned; execution items, credentials, headers/cookies/authorization, request/response bodies, binary data, pinData, and unknown fields are discarded.".into(),
                 ],
                 examples: vec![r#"{"workflow_id": "1001", "id": "50001"}"#.into()],

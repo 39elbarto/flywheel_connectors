@@ -914,18 +914,18 @@ other HDD folder is included in this scope:
 | `/srv/hdd500gb-internal/fwc-n8n-operator-target` | shared `/srv/dev-ssd/fcp/targets/n8n` |
 
 The replacement verification suite intentionally shares one SSD target tree;
-separate gate/operator copies are not required for retirement. The original
-ACFS cleanup preflight for `fwc-n8n-target` was refused with
-`external_path_scope`. A separately authorized exact-three ACFS extension is
-under review; HDD retirement is not complete. The build launcher itself never
-deletes those HDD bytes, and all other HDD folders remain preserved.
+separate gate/operator copies are not required for retirement. The owner
+manually deleted exactly the three retired HDD directories above after SSD
+verification; their absence was independently checked on 2026-09-07. This was
+manual retirement, not a successful ACFS automatic purge. The build launcher
+never deletes HDD data, and no other HDD directory was included in retirement.
 The dependency cache was copied from
 `/srv/hdd500gb-internal/fwc-build-cache/cargo-home/{registry,git}` into
 `/srv/dev-ssd/fcp/cargo-home/`; that source is not a retirement candidate.
 Do not copy the whole `fwc-build-cache` tree: it also holds release and approval
-evidence. Retirement requires successful replacement tests and an accepted,
-identity-checked cleanup plan for each exact candidate; a failed test or tool
-refusal keeps the HDD originals intact. Track acceptance in
+evidence. Any future retirement requires successful replacement tests and
+separate approval for each exact candidate; no standing cleanup permission is
+implied by this completed operation. Track the completed SSD migration in
 `flywheel_connectors-nqm81.29`.
 The fixed immutable staging root, signing boundary, install root, and promotion
 rules below remain unchanged.

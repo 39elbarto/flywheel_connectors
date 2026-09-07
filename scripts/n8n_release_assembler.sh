@@ -129,7 +129,7 @@ require_fixed_local_mcp_file() {
   local mode
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0022) == 0 )) || die "local n8n-mcp file is group/world writable: $path"
-  (( (8#$mode & 7000) == 0 )) || die "local n8n-mcp file has special mode bits: $path"
+  (( (8#$mode & 07000) == 0 )) || die "local n8n-mcp file has special mode bits: $path"
   if [[ "$executable" == "1" ]]; then
     (( (8#$mode & 0111) != 0 )) || die "local n8n-mcp wrapper is not executable: $path"
   fi

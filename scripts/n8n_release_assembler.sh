@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Owner-side, HDD-only assembler for one immutable fwc-n8n release.  This
-# script stages a candidate; signing and promotion are deliberately separate.
+# Owner-side assembler for one immutable fwc-n8n release.  Build artifacts use
+# the guarded local SSD launcher; staging, signing, and promotion remain
+# deliberately separate boundaries.
 
 readonly INSTALL_ROOT="/usr/local/lib/fwc-n8n"
 readonly CURRENT_PATH="${INSTALL_ROOT}/current"
 readonly STAGING_ROOT="/var/lib/fwc-n8n/staging"
-readonly HDD_ROOT="/srv/hdd500gb-internal"
+readonly SSD_ROOT="/srv/dev-ssd/fcp"
 readonly PROVISION_REQUEST_SCHEMA="fwc.n8n.provision-request.v1"
 readonly EXTERNAL_APPROVAL_ISSUER="fcp-n8n-approval-issue"
 readonly EXTERNAL_APPROVAL_ISSUER_INSTALL_PATH="/usr/local/sbin/fcp-n8n-approval-issue"
@@ -45,11 +46,12 @@ usage: sudo FWC_N8N_OWNER_PUBLIC_KEY_HEX=<64 lowercase hex chars> \
   [FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX=<64 lowercase hex chars>] \
   scripts/n8n_release_assembler.sh \
   --release-id <safe-release-id> \
-  [--target-dir /srv/hdd500gb-internal/fwc-build-cache/<name>]
+  [--target-dir /srv/dev-ssd/fcp/targets/<name>]
 
 Builds and stages a release only. It does not sign, install, switch current,
 invoke n8n, read API keys, or run a provider operation.
 The script adds /home/ubuntu/.cargo/bin to PATH for the host Rust toolchain.
+Cargo output and temporary files are guarded below /srv/dev-ssd/fcp.
 EOF
 }
 
@@ -61,13 +63,6 @@ is_safe_release_id() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
 }
 
-is_hdd_target() {
-  [[ "$1" == "${HDD_ROOT}/fwc-build-cache/"* ]] \
-    && [[ "$1" != *".."* ]] \
-    && [[ "$1" != *$'\n'* ]] \
-    && [[ "$1" != *$'\r'* ]]
-}
-
 require_safe_directory() {
   local path="$1"
   [[ -d "$path" ]] || die "directory is missing: $path"
@@ -75,13 +70,6 @@ require_safe_directory() {
   local mode
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0022) == 0 )) || die "directory is group/world writable: $path"
-}
-
-require_hdd_mount() {
-  need_cmd findmnt
-  [[ "$(findmnt -no SOURCE --target "$HDD_ROOT")" == "/dev/sdc1" ]] \
-    || die "${HDD_ROOT} is not mounted from the approved HDD /dev/sdc1"
-  require_safe_directory "$HDD_ROOT"
 }
 
 find_blake3_rlib() {
@@ -101,7 +89,7 @@ build_hash_helper() {
     'extern crate blake3;' \
     'use std::{env,fs::File,io::{Read,Write}};' \
     'fn main(){let p=env::args().nth(1).expect("path");let mut f=File::open(p).expect("open");let mut h=blake3::Hasher::new();let mut b=[0u8;65536];loop{let n=f.read(&mut b).expect("read");if n==0{break}h.update(&b[..n]);}writeln!(std::io::stdout(),"{}",h.finalize().to_hex()).expect("write");}' \
-    | TMPDIR="$TARGET_DIR/tmp" rustc - --edition=2024 \
+    | bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- rustc - --edition=2024 \
         -L "dependency=${TARGET_DIR}/release/deps" \
         --extern "blake3=${rlib}" \
         -o "$helper"
@@ -112,25 +100,13 @@ build_one() {
   echo "[build] $*" >&2
   if [[ -n "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX:-}" ]]; then
     env \
-      CARGO_HOME="${CARGO_HOME}" \
-      CARGO_NET_OFFLINE=true \
-      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
-      CARGO_INCREMENTAL=0 \
-      CARGO_TARGET_DIR="$TARGET_DIR" \
-      TMPDIR="$TARGET_DIR/tmp" \
       FWC_N8N_OWNER_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PUBLIC_KEY_HEX" \
       FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX" \
-      cargo --locked --offline "$@"
+      bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline "$@"
   else
     env \
-      CARGO_HOME="${CARGO_HOME}" \
-      CARGO_NET_OFFLINE=true \
-      CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
-      CARGO_INCREMENTAL=0 \
-      CARGO_TARGET_DIR="$TARGET_DIR" \
-      TMPDIR="$TARGET_DIR/tmp" \
       FWC_N8N_OWNER_PUBLIC_KEY_HEX="$FWC_N8N_OWNER_PUBLIC_KEY_HEX" \
-      cargo --locked --offline "$@"
+      bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline "$@"
   fi
 }
 
@@ -167,15 +143,8 @@ require_immutable_template_release() {
 
 run_static_smoke() {
   echo "[test] owned static fcp-n8n smoke" >&2
-  env \
-    CARGO_HOME="$CARGO_HOME" \
-    CARGO_NET_OFFLINE=true \
-    CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}" \
-    CARGO_INCREMENTAL=0 \
-    CARGO_TARGET_DIR="$TARGET_DIR" \
-    TMPDIR="$TARGET_DIR/tmp" \
-    FCP_N8N_OWNED_SMOKE_BINARY="$TARGET_DIR/release/fcp-n8n" \
-    cargo --locked --offline test --release -p fcp-host --test n8n_owned_static_smoke \
+  env FCP_N8N_OWNED_SMOKE_BINARY="$TARGET_DIR/release/fcp-n8n" \
+    bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test --release -p fcp-host --test n8n_owned_static_smoke \
       static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
 }
 
@@ -370,7 +339,7 @@ PY
 
 main() {
   local release_id=""
-  TARGET_DIR="${HDD_ROOT}/fwc-build-cache/fwc-n8n-release"
+  TARGET_DIR="${SSD_ROOT}/targets/n8n-release"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release-id) [[ $# -ge 2 ]] || die "--release-id requires a value"; release_id="$2"; shift 2 ;;
@@ -384,8 +353,11 @@ main() {
   export PATH
   need_cmd cargo; need_cmd git; need_cmd install; need_cmd python3; need_cmd rustc
   need_cmd stat; need_cmd readlink
+  REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
+  SSD_LAUNCHER="${REPO_ROOT}/scripts/fcp_ssd.sh"
+  [[ -f "$SSD_LAUNCHER" && ! -L "$SSD_LAUNCHER" ]] \
+    || die "SSD launcher is missing or symlinked: $SSD_LAUNCHER"
   is_safe_release_id "$release_id" || die "invalid release id"
-  is_hdd_target "$TARGET_DIR" || die "target dir must be below ${HDD_ROOT}/fwc-build-cache"
   [[ "${FWC_N8N_OWNER_PUBLIC_KEY_HEX:-}" =~ ^[0-9a-f]{64}$ ]] || die "FWC_N8N_OWNER_PUBLIC_KEY_HEX must be 64 lowercase hex characters"
   if [[ -n "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX:-}" ]]; then
     [[ "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX}" =~ ^[0-9a-f]{64}$ ]] \
@@ -393,12 +365,7 @@ main() {
     [[ "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX}" != "${FWC_N8N_OWNER_PUBLIC_KEY_HEX}" ]] \
       || die "active and previous owner public keys must differ"
   fi
-  CARGO_HOME="${CARGO_HOME:-${HDD_ROOT}/fwc-build-cache/cargo-home}"
-  is_hdd_target "$CARGO_HOME" || die "CARGO_HOME must be below ${HDD_ROOT}/fwc-build-cache"
-  require_hdd_mount
-  require_safe_directory "${HDD_ROOT}/fwc-build-cache"
-  [[ -d "$CARGO_HOME/registry" ]] || die "HDD CARGO_HOME is not provisioned: $CARGO_HOME"
-  require_safe_directory "$CARGO_HOME"
+  bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- true >/dev/null
   require_safe_directory "/var/lib/fwc-n8n"
   require_safe_directory "$STAGING_ROOT"
   if [[ -e "$TARGET_DIR" ]]; then
@@ -407,17 +374,10 @@ main() {
     mkdir "$TARGET_DIR"
     require_safe_directory "$TARGET_DIR"
   fi
-  if [[ -e "$TARGET_DIR/tmp" ]]; then
-    require_safe_directory "$TARGET_DIR/tmp"
-  else
-    mkdir "$TARGET_DIR/tmp"
-  fi
-  require_safe_directory "$TARGET_DIR/tmp"
   local available
-  available="$(df --output=avail -B1 "$HDD_ROOT" | tail -1 | tr -d ' ')"
-  (( available >= 20 * 1024 * 1024 * 1024 )) || die "less than 20 GiB free on HDD"
+  available="$(df --output=avail -B1 "$SSD_ROOT" | tail -1 | tr -d ' ')"
+  (( available >= 20 * 1024 * 1024 * 1024 )) || die "less than 20 GiB free on SSD"
 
-  REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
   require_clean_tracked_head
   local git_revision source_release stage_root request_path hash_helper
   git_revision="$(git -C "$REPO_ROOT" rev-parse HEAD)"

@@ -20,6 +20,18 @@ pub use types::*;
 
 pub const PACKAGE_OUTPUT_FILENAME: &str = "package-output.json";
 
+const FWC_PACKAGE_BUILD_BACKEND_ENV: &str = "FWC_PACKAGE_BUILD_BACKEND";
+const RCH_REQUIRE_REMOTE_ENV: &str = "RCH_REQUIRE_REMOTE";
+const RCH_FORCE_REMOTE_ENV: &str = "RCH_FORCE_REMOTE";
+const RCH_BUILD_ARGS: &[&str] = &["exec", "--", "cargo", "build"];
+const LOCAL_BUILD_ARGS: &[&str] = &["build"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildBackend {
+    Rch,
+    Local,
+}
+
 /// Run the package command.
 pub fn run(args: &PackageArgs) -> Result<()> {
     let output = package_connector(args)?;
@@ -49,10 +61,11 @@ pub fn package_connector(args: &PackageArgs) -> Result<PackageOutput> {
     tracing::info!("Found manifest at {}", manifest_path.display());
 
     // Determine output directory
-    let output_dir = args
-        .output
-        .clone()
-        .unwrap_or_else(|| crate_path.join("target").join("package"));
+    let configured_target_dir =
+        std::env::var_os("CARGO_TARGET_DIR").filter(|path| !path.is_empty());
+    let output_dir = args.output.clone().unwrap_or_else(|| {
+        resolve_package_output_dir(&crate_path, configured_target_dir.as_deref().map(Path::new))
+    });
     fs::create_dir_all(&output_dir).context("failed to create output directory")?;
 
     // Build the connector
@@ -139,14 +152,74 @@ fn find_manifest(crate_path: &Path) -> Result<PathBuf> {
     );
 }
 
+fn read_optional_env(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{name} must contain valid UTF-8")
+        }
+    }
+}
+
+fn is_true_or_one(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+fn select_build_backend(
+    configured_backend: Option<&str>,
+    rch_require_remote: Option<&str>,
+    rch_force_remote: Option<&str>,
+) -> Result<BuildBackend> {
+    match configured_backend {
+        None | Some("rch") => Ok(BuildBackend::Rch),
+        Some("local") => {
+            if is_true_or_one(rch_require_remote) || is_true_or_one(rch_force_remote) {
+                bail!(
+                    "{FWC_PACKAGE_BUILD_BACKEND_ENV}=local cannot be used while {RCH_REQUIRE_REMOTE_ENV} or {RCH_FORCE_REMOTE_ENV} is set to true/1"
+                );
+            }
+            Ok(BuildBackend::Local)
+        }
+        Some(value) => bail!(
+            "invalid {FWC_PACKAGE_BUILD_BACKEND_ENV} value {value:?}; expected `rch` or `local`"
+        ),
+    }
+}
+
+fn build_command_spec(backend: BuildBackend) -> (&'static str, &'static [&'static str]) {
+    match backend {
+        BuildBackend::Rch => ("rch", RCH_BUILD_ARGS),
+        BuildBackend::Local => ("cargo", LOCAL_BUILD_ARGS),
+    }
+}
+
 /// Build the connector with deterministic flags.
 fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
-    let mut cmd = Command::new("rch");
-    cmd.arg("exec");
-    cmd.arg("--");
-    cmd.arg("cargo");
-    cmd.arg("build");
-    let target_root = crate_path.join("target");
+    let configured_backend = read_optional_env(FWC_PACKAGE_BUILD_BACKEND_ENV)?;
+    let backend = if configured_backend.as_deref() == Some("local") {
+        let rch_require_remote = read_optional_env(RCH_REQUIRE_REMOTE_ENV)?;
+        let rch_force_remote = read_optional_env(RCH_FORCE_REMOTE_ENV)?;
+        select_build_backend(
+            configured_backend.as_deref(),
+            rch_require_remote.as_deref(),
+            rch_force_remote.as_deref(),
+        )?
+    } else {
+        select_build_backend(configured_backend.as_deref(), None, None)?
+    };
+
+    let (command_program, command_args) = build_command_spec(backend);
+    let mut cmd = Command::new(command_program);
+    cmd.args(command_args);
+    // Cargo resolves a relative CARGO_TARGET_DIR from the command's current
+    // directory. Resolve it explicitly so the lookup below uses the exact
+    // same directory as the build, while keeping the package-local target
+    // directory when no override is configured.
+    let configured_target_dir =
+        std::env::var_os("CARGO_TARGET_DIR").filter(|path| !path.is_empty());
+    let target_root =
+        resolve_target_root(crate_path, configured_target_dir.as_deref().map(Path::new));
 
     if args.release {
         cmd.arg("--release");
@@ -164,7 +237,8 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
     cmd.env("CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO", "off");
     cmd.env("CARGO_PROFILE_RELEASE_STRIP", "none");
     cmd.env_remove("RUSTFLAGS");
-    // Keep packaging builds isolated from parent-process target-dir settings.
+    // Keep packaging builds isolated from parent-process target-dir settings
+    // when no override was configured, while honoring an explicit override.
     cmd.env("CARGO_TARGET_DIR", &target_root);
 
     // Add any extra cargo flags
@@ -174,16 +248,20 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
 
     cmd.current_dir(crate_path);
 
+    let command_description = match backend {
+        BuildBackend::Rch => "rch exec -- cargo build",
+        BuildBackend::Local => "cargo build",
+    };
     let status = cmd
         .status()
-        .context("failed to run `rch exec -- cargo build`")?;
+        .with_context(|| format!("failed to run `{command_description}`"))?;
     if !status.success() {
-        bail!("`rch exec -- cargo build` failed with status: {status}");
+        bail!("`{command_description}` failed with status: {status}");
     }
 
     // Find the built binary
     let profile = if args.release { "release" } else { "debug" };
-    let target_dir = resolve_target_dir(crate_path, profile);
+    let target_dir = resolve_target_dir_from_root(&target_root, profile);
 
     // Get crate name from Cargo.toml
     let cargo_toml = fs::read_to_string(crate_path.join("Cargo.toml"))?;
@@ -214,8 +292,25 @@ fn build_connector(crate_path: &Path, args: &PackageArgs) -> Result<PathBuf> {
     );
 }
 
+#[cfg(test)]
 fn resolve_target_dir(crate_path: &Path, profile: &str) -> PathBuf {
-    crate_path.join("target").join(profile)
+    resolve_target_dir_from_root(&resolve_target_root(crate_path, None), profile)
+}
+
+fn resolve_target_dir_from_root(target_root: &Path, profile: &str) -> PathBuf {
+    target_root.join(profile)
+}
+
+fn resolve_package_output_dir(crate_path: &Path, configured_target_dir: Option<&Path>) -> PathBuf {
+    resolve_target_root(crate_path, configured_target_dir).join("package")
+}
+
+fn resolve_target_root(crate_path: &Path, configured_target_dir: Option<&Path>) -> PathBuf {
+    match configured_target_dir {
+        Some(target_dir) if target_dir.is_absolute() => target_dir.to_path_buf(),
+        Some(target_dir) => crate_path.join(target_dir),
+        None => crate_path.join("target"),
+    }
 }
 
 /// Compute SHA-256 hash of a file.
@@ -418,6 +513,104 @@ mod tests {
         let crate_path = Path::new("/tmp/fcp-example");
         let resolved = resolve_target_dir(crate_path, "debug");
         assert_eq!(resolved, Path::new("/tmp/fcp-example/target/debug"));
+    }
+
+    #[test]
+    fn resolve_target_root_defaults_to_isolated_crate_target() {
+        let crate_path = Path::new("/workspace/connector");
+        let resolved = resolve_target_root(crate_path, None);
+        assert_eq!(resolved, Path::new("/workspace/connector/target"));
+    }
+
+    #[test]
+    fn resolve_target_root_resolves_relative_override_from_crate() {
+        let crate_path = Path::new("/workspace/connector");
+        let resolved = resolve_target_root(crate_path, Some(Path::new("../ssd-target")));
+        assert_eq!(resolved, Path::new("/workspace/connector/../ssd-target"));
+    }
+
+    #[test]
+    fn resolve_target_root_preserves_absolute_override() {
+        let crate_path = Path::new("/workspace/connector");
+        let resolved = resolve_target_root(crate_path, Some(Path::new("/srv/dev-ssd/fcp")));
+        assert_eq!(resolved, Path::new("/srv/dev-ssd/fcp"));
+    }
+
+    #[test]
+    fn resolve_target_dir_from_root_uses_selected_target_root() {
+        let target_root = Path::new("/srv/dev-ssd/fcp");
+        let resolved = resolve_target_dir_from_root(target_root, "release");
+        assert_eq!(resolved, Path::new("/srv/dev-ssd/fcp/release"));
+    }
+
+    #[test]
+    fn resolve_package_output_dir_uses_selected_target_root() {
+        let crate_path = Path::new("/workspace/connector");
+        let resolved =
+            resolve_package_output_dir(crate_path, Some(Path::new("/srv/dev-ssd/fcp/targets/n8n")));
+        assert_eq!(resolved, Path::new("/srv/dev-ssd/fcp/targets/n8n/package"));
+    }
+
+    #[test]
+    fn build_backend_defaults_to_rch() {
+        assert_eq!(
+            select_build_backend(None, None, None).unwrap(),
+            BuildBackend::Rch
+        );
+    }
+
+    #[test]
+    fn build_command_spec_uses_rch_exec_with_cargo_by_default() {
+        let (program, args) = build_command_spec(BuildBackend::Rch);
+        assert_eq!(program, "rch");
+        assert_eq!(args, ["exec", "--", "cargo", "build"]);
+    }
+
+    #[test]
+    fn build_command_spec_uses_local_cargo_directly() {
+        let (program, args) = build_command_spec(BuildBackend::Local);
+        assert_eq!(program, "cargo");
+        assert_eq!(args, ["build"]);
+    }
+
+    #[test]
+    fn build_backend_accepts_explicit_rch() {
+        assert_eq!(
+            select_build_backend(Some("rch"), Some("true"), Some("1")).unwrap(),
+            BuildBackend::Rch
+        );
+    }
+
+    #[test]
+    fn build_backend_accepts_local_without_remote_requirement() {
+        assert_eq!(
+            select_build_backend(Some("local"), None, None).unwrap(),
+            BuildBackend::Local
+        );
+        assert_eq!(
+            select_build_backend(Some("local"), Some("false"), Some("0")).unwrap(),
+            BuildBackend::Local
+        );
+    }
+
+    #[test]
+    fn build_backend_rejects_local_when_remote_is_required() {
+        for (require_remote, force_remote) in [(Some("true"), None), (None, Some("1"))] {
+            let result = select_build_backend(Some("local"), require_remote, force_remote);
+            let error = result.expect_err("local backend must reject remote enforcement");
+            assert!(error.to_string().contains("cannot be used"));
+        }
+    }
+
+    #[test]
+    fn build_backend_rejects_invalid_values_without_fallback() {
+        let result = select_build_backend(Some("remote"), None, None);
+        let error = result.expect_err("unknown backend must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid FWC_PACKAGE_BUILD_BACKEND")
+        );
     }
 
     #[test]

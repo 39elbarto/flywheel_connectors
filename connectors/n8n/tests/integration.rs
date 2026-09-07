@@ -1665,6 +1665,7 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
             json!({"workflow_id": "w1", "id": "e1"}),
             json!({
                 "id": "e1",
+                "workflowId": "w1",
                 "finished": true,
                 "data": {"resultData": {"runData": {}}}
             }),

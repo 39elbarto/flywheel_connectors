@@ -1,7 +1,7 @@
 # n8n Connector Security Contract
 
 > **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, typed official-MCP publish/unpublish and archive paths with independent REST GET readback, a typed REST `n8n.workflows.delete_disposable` cleanup path, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The MCP-access apply path is covered by wire-level tests and a historical owner-gated bundle acceptance on disposable workflows on both EEC and Hetzner. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. Disposable cleanup requires a host-issued creation receipt and is not a general workflow-delete path; no current-release live acceptance is claimed. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain a separate opt-in path, and prior immutable releases remain available for rollback.
-> **Current host evidence (2026-08-28, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260828-d4e8b288e-static` (git revision `d4e8b288e9415484978ea4a047e575a9ffddd7cb`), and that installed binary reports `{"bundleAvailable":true}`. The resolved tree contains `provenance.json` and `provision-receipt.json`, with matching release/revision metadata. Their presence does **not** by itself prove cryptographic receipt verification, live provider acceptance, or current-release live acceptance; no live/API invocation is claimed here. The fixed runtime policy records local `n8n-mcp` package version `2.69.2`, and the source update fixtures pin the same version. The source `main` is newer (`2a908c742`); its redacted host-error-detail propagation is not yet installed. No release switch or runtime mutation was performed by this documentation update.
+> **Current host evidence (2026-09-07, read-only)**: `/usr/local/lib/fwc-n8n/current` points to `release-20260904-9fccc3c46` (git revision `9fccc3c46b3736444e24865b6c3c6c66fefa57da`), and that installed binary reports `{"bundleAvailable":true}`. The resolved tree contains `provenance.json` and `provision-receipt.json`, with matching release/revision metadata. Their presence does **not** by itself prove cryptographic receipt verification, live provider acceptance, or current-release live acceptance; no live/API invocation is claimed here. The fixed runtime policy records local `n8n-mcp` package version `2.69.2`, and the source update fixtures pin the same version. The source `main` is newer (`cd92373c7`), so source-only changes after the installed revision remain outside current-release acceptance. No release switch or runtime mutation was performed by this documentation update.
 > **Beads**: `flywheel_connectors-nqm81.4`, `flywheel_connectors-nqm81.6`, `flywheel_connectors-nqm81.7`, `flywheel_connectors-nqm81.9`, `flywheel_connectors-nqm81.21`
 > **Focused static-provider verification**: `crates/fcp-host/tests/n8n_owned_static_smoke.rs`
 > **n8n public REST API**: https://docs.n8n.io/api/
@@ -851,14 +851,91 @@ The deterministic integration evidence is anchored on connector-local tests cove
 
 ## Verification Bundle
 
-### HDD-only release assembly
+### SSD-backed release assembly
+
+The shared local build launcher
+[`scripts/fcp_ssd.sh`](../../scripts/fcp_ssd.sh) is the only supported build
+environment boundary for local Cargo output. It accepts `--check` (alias
+`check-env`) or executes a command argv directly, without shell evaluation. It
+first requires `/srv/dev-ssd` to be mounted with UUID
+`7b54d2fa-66e1-499d-9c08-68ced7e00f08`; a missing or differently mounted SSD
+fails before the launcher creates `/srv/dev-ssd/fcp` or any child path. The
+launcher rejects symlinked paths and group/world-writable directories, uses
+one shared `/srv/dev-ssd/fcp/build.lock`, and caps `CARGO_BUILD_JOBS` at two
+(default two; set `FCP_SSD_JOBS=1` when a single job is required).
+
+The launcher supplies these child-process values and does not modify the
+caller's shell environment:
+
+| Variable | Fixed/default value |
+| --- | --- |
+| `CARGO_HOME` | `/srv/dev-ssd/fcp/cargo-home` |
+| `CARGO_TARGET_DIR` | `/srv/dev-ssd/fcp/targets/n8n` |
+| `TMPDIR`, `TMP`, `TEMP` | `/srv/dev-ssd/fcp/tmp` |
+| `CARGO_BUILD_JOBS` | `2` (maximum `2`) |
+| `CARGO_INCREMENTAL` | `0` |
+| `CARGO_PROFILE_DEV_DEBUG`, `CARGO_PROFILE_TEST_DEBUG`, `CARGO_PROFILE_RELEASE_DEBUG` | `0` |
+
+It also exports `FWC_PACKAGE_BUILD_BACKEND=local`,
+`OUT_ROOT=/srv/dev-ssd/fcp/artifacts`,
+`OUT_DIR=/srv/dev-ssd/fcp/artifacts/n8n`,
+`PROOF_ARTIFACT_DIR=/srv/dev-ssd/fcp/artifacts/n8n/proof`, and
+`LOG_DIR=/srv/dev-ssd/fcp/logs` to the child. A caller requesting a remote or
+remote-required package backend is refused before execution. The launcher
+prepends the existing `/home/ubuntu/.cargo/bin` only when it is not already in
+`PATH`; rustup state remains on its existing host filesystem.
+
+`--check`/`check-env` is a non-mutating guard: it validates the mount, UUID,
+canonical paths, permissions, and any already-present output directories, but
+does not create directories or the build lock. The first real argv execution
+creates the fixed SSD directories and then takes the shared lock.
+It also refuses `RCH_REQUIRE_REMOTE=true|1`, `RCH_FORCE_REMOTE=true|1`, and a
+non-local `FWC_PACKAGE_BUILD_BACKEND` before any output creation. A child is
+marked `FCP_SSD_ACTIVE=1`; invoking the launcher again from inside that child
+is refused instead of waiting indefinitely on the same lock. The assembler
+therefore invokes `bash scripts/fcp_ssd.sh` directly for each Cargo/rustc/test
+argv and must not itself be wrapped by `fcp_ssd.sh`.
+
+For an isolated gate, operator, release, or probe output tree, pass
+`--target-dir /srv/dev-ssd/fcp/targets/<name>`; the launcher rejects every
+path outside the SSD root. A per-script output flag is not an override to this
+boundary: do not set `CARGO_HOME`, `CARGO_TARGET_DIR`, `TMPDIR`, `TMP`, or
+`TEMP` after invoking the launcher, and do not point a script's own output
+option at the retired HDD tree. The launcher preserves the inherited Rust
+toolchain `PATH`; it does not install or select a toolchain.
+
+The following direct HDD output candidates are retired in the build policy; no
+other HDD folder is included in this scope:
+
+| Retired source | Replacement/status |
+| --- | --- |
+| `/srv/hdd500gb-internal/fwc-n8n-target` | `/srv/dev-ssd/fcp/targets/n8n` |
+| `/srv/hdd500gb-internal/fwc-n8n-gates-target` | shared `/srv/dev-ssd/fcp/targets/n8n` |
+| `/srv/hdd500gb-internal/fwc-n8n-operator-target` | shared `/srv/dev-ssd/fcp/targets/n8n` |
+
+The replacement verification suite intentionally shares one SSD target tree;
+separate gate/operator copies are not required for retirement. The original
+ACFS cleanup preflight for `fwc-n8n-target` was refused with
+`external_path_scope`. A separately authorized exact-three ACFS extension is
+under review; HDD retirement is not complete. The build launcher itself never
+deletes those HDD bytes, and all other HDD folders remain preserved.
+The dependency cache was copied from
+`/srv/hdd500gb-internal/fwc-build-cache/cargo-home/{registry,git}` into
+`/srv/dev-ssd/fcp/cargo-home/`; that source is not a retirement candidate.
+Do not copy the whole `fwc-build-cache` tree: it also holds release and approval
+evidence. Retirement requires successful replacement tests and an accepted,
+identity-checked cleanup plan for each exact candidate; a failed test or tool
+refusal keeps the HDD originals intact. Track acceptance in
+`flywheel_connectors-nqm81.29`.
+The fixed immutable staging root, signing boundary, install root, and promotion
+rules below remain unchanged.
 
 The repository contains the bounded owner-side assembler
 [`scripts/n8n_release_assembler.sh`](../../scripts/n8n_release_assembler.sh).
 It is the reproducible boundary between a committed source `HEAD` and a
 staged release. It requires root only to create the fixed root-owned staging
-tree, keeps `CARGO_TARGET_DIR` and `TMPDIR` below
-`/srv/hdd500gb-internal/fwc-build-cache`, builds the two static provider
+tree, keeps Cargo/TMP output below `/srv/dev-ssd/fcp` through the launcher,
+builds the two static provider
 executables with `+crt-static` only on their final crate invocations, and
 copies only release-bound inventory/policy templates from the fixed current
 bundle. It generates `provenance.json`, the twelve-artifact `receipt.json`,
@@ -867,7 +944,7 @@ receipt, changes `current`, or invokes n8n.
 
 The typed n8n approval issuer is a separate owner tool, not a release
 artifact. The assembler builds the feature-gated
-`fcp-n8n-approval-issue` into its HDD Cargo output and verifies that it is not
+`fcp-n8n-approval-issue` into its SSD Cargo output and verifies that it is not
 staged under `bin/` or represented in the twelve-artifact receipt. If an owner
 installs that exact binary, the install target is
 `/usr/local/sbin/fcp-n8n-approval-issue`; it must remain outside
@@ -878,9 +955,9 @@ descriptor-safe read, exact seed-on-stdin, and immutable trust-root checks are
 unchanged. A source-only build preflight is:
 
 ```bash
-CARGO_HOME=/srv/hdd500gb-internal/fwc-build-cache/cargo-home \
-CARGO_TARGET_DIR=/srv/hdd500gb-internal/fwc-build-cache/fwc-n8n-approval-issuer \
-cargo --locked --offline check -p fcp-host \
+scripts/fcp_ssd.sh \
+  --target-dir /srv/dev-ssd/fcp/targets/fwc-n8n-approval-issuer -- \
+  cargo --locked --offline check -p fcp-host \
   --features n8n-approval-issuer --bin fcp-n8n-approval-issue
 ```
 
@@ -890,11 +967,21 @@ not install or modify any runtime state. The assembler's emitted
 separate owner-controlled installation.
 
 The assembler refuses tracked worktree changes, an existing staging target,
-an HDD target outside the fixed build-cache root, insufficient HDD space, or
-an absent build-time `FWC_N8N_OWNER_PUBLIC_KEY_HEX`. Signing remains a separate
-step using `fwc-n8n-owner-sign` and the KeePass-only seed; promotion remains a
-separate owner/root step. The current release and its rollback target are
-preserved throughout assembly.
+an output target outside the fixed SSD root, an unapproved/missing SSD mount,
+insufficient SSD space, or an absent build-time
+`FWC_N8N_OWNER_PUBLIC_KEY_HEX`. Signing remains a separate step using
+`fwc-n8n-owner-sign` and the KeePass-only seed; promotion remains a separate
+owner/root step. The current release and its rollback target are preserved
+throughout assembly.
+
+The exact assembly success gate is: `scripts/fcp_ssd.sh --check` succeeds for
+the selected target, the assembler exits zero, and its redacted stdout contains
+`assembled_release=`, `git_revision=`, `stage_root=/var/lib/fwc-n8n/staging/`,
+`request_file=`, `signer=/srv/dev-ssd/fcp/targets/`,
+`external_approval_issuer=`, and
+`next_step=owner-sign then fwc-n8n provision --mode preflight`. This proves
+only an immutable candidate was assembled; owner signing, provision preflight,
+and promotion are separate gates and are not performed by this script.
 
 The nqm81.11 security closeout (2026-08-19) is a historical verification record,
 not current-release acceptance; no re-run is implied here. It passed the focused connector proof
@@ -916,7 +1003,8 @@ The static provider build must apply `+crt-static` only to the final
 `fcp-n8n` crate invocation:
 
 ```bash
-cargo rustc -p fcp-n8n --bin fcp-n8n --release -- -C target-feature=+crt-static
+bash scripts/fcp_ssd.sh -- \
+  cargo rustc -p fcp-n8n --bin fcp-n8n --release -- -C target-feature=+crt-static
 ```
 
 Do not set global `RUSTFLAGS=-Ctarget-feature=+crt-static` for this build. A
@@ -925,8 +1013,8 @@ mandatory owned-invocation network seccomp before answering `introspect`.
 Before assembling a release, run the ignored real-artifact smoke explicitly:
 
 ```bash
-FCP_N8N_OWNED_SMOKE_BINARY=/absolute/path/to/fcp-n8n \
-  cargo test -p fcp-host --test n8n_owned_static_smoke \
+FCP_N8N_OWNED_SMOKE_BINARY=/srv/dev-ssd/fcp/targets/n8n/release/fcp-n8n \
+  bash scripts/fcp_ssd.sh -- cargo test -p fcp-host --test n8n_owned_static_smoke \
   static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
 ```
 
@@ -942,10 +1030,10 @@ rg -n '\bmaster\b' connectors/n8n/README.md
 For source or behavior changes, run the connector proof lane:
 
 ```bash
-cargo test -p fcp-n8n --all-targets
-cargo check -p fcp-n8n --all-targets
-cargo clippy -p fcp-n8n --all-targets -- -D warnings
-cargo fmt --all -- --check
+bash scripts/fcp_ssd.sh -- cargo test -p fcp-n8n --all-targets
+bash scripts/fcp_ssd.sh -- cargo check -p fcp-n8n --all-targets
+bash scripts/fcp_ssd.sh -- cargo clippy -p fcp-n8n --all-targets -- -D warnings
+bash scripts/fcp_ssd.sh -- cargo fmt --all -- --check
 ```
 
 ## Operator Guidance

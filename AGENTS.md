@@ -172,6 +172,33 @@ We do not care about backwards compatibility—we're in early development with n
 
 ## Compiler Checks (CRITICAL)
 
+### Local SSD build policy (owner-approved 2026-09-06)
+
+On this host, run local FCP builds and tests through `bash scripts/fcp_ssd.sh --
+<command>`. The launcher must verify the mounted `/srv/dev-ssd` filesystem before
+creating output, and place Cargo dependencies, targets, temporary files and test
+artifacts under `/srv/dev-ssd/fcp`. Source, tracked tests and documentation remain
+in this checkout. The owner explicitly approved local SSD builds; `rch` is not
+currently installed here. This local policy supersedes the HDD-only instructions
+and the remote-build requirement below for this host, not for remote workers.
+
+Use one local build at a time. The launcher pins `CARGO_INCREMENTAL=0`,
+`CARGO_PROFILE_DEV_DEBUG=0`, `CARGO_PROFILE_TEST_DEBUG=0`,
+`CARGO_PROFILE_RELEASE_DEBUG=0`, and `CARGO_BUILD_JOBS=2` (or one when
+`FCP_SSD_JOBS=1` is explicitly selected). Invoke probe Cargo commands through
+the same launcher so its explicit target overrides probe-local `/tmp` defaults. Scripts
+with their own output arguments or provider-specific evidence variables must
+also receive SSD paths; the launcher is not a filesystem sandbox. Never assume
+that `CARGO_TARGET_DIR` alone redirects every script's reports. Remote-only
+verification scripts still require a real remote worker; do not fake `rch`.
+
+The owner authorized retirement of the exact FCP HDD build directories only
+after their SSD replacements pass validation. Keep shared Cargo caches used by
+other projects, installed releases, runtime state and source untouched. A failed
+test, unknown copy result or cleanup-tool refusal prevents retirement. Record
+the verified source/destination list and test results in bead
+`flywheel_connectors-nqm81.29`; do not treat authorization as evidence of success.
+
 **After any substantive code changes, you MUST verify no errors were introduced. In shared sessions, offload the Cargo work through `rch`:**
 
 ```bash

@@ -54,13 +54,13 @@ const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957";
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
 
 fn official_mcp_lifecycle_schema_digests(
     server_id: &str,
@@ -349,7 +349,7 @@ impl VerifiedBundle {
 fn test_local_mcp_policy() -> LocalMcpPolicy {
     serde_json::from_value(serde_json::json!({
         "package_id": "n8n-mcp",
-        "package_version": "2.69.2",
+        "package_version": "2.82.1",
         "launcher_path": "/usr/bin/node",
         "launcher_digest": "0".repeat(64),
         "runtime_executable": "/usr/bin/node",
@@ -361,13 +361,13 @@ fn test_local_mcp_policy() -> LocalMcpPolicy {
         "fixed_env": {"N8N_MCP_TELEMETRY_DISABLED": "true"},
         "allowed_methods": ["initialize", "notifications/initialized", "tools/list", "tools/call"],
         "expected_catalog": {
-            "tools_documentation": "0".repeat(64),
-            "search_nodes": "0".repeat(64),
-            "get_node": "0".repeat(64),
-            "validate_node": "0".repeat(64),
-            "get_template": "0".repeat(64),
-            "search_templates": "0".repeat(64),
-            "validate_workflow": "0".repeat(64),
+            "tools_documentation": "ab5fd93f48f93709bb2c74cbc23adfbf61ae831bec4cdf59c524a7ea6f6d706a",
+            "search_nodes": "634829f67fc0f6119133a26968ce4ff486cbd4a8279b5f8528e0f846025a0be6",
+            "get_node": "ed0e86592617677323c1c3319607db73e393a4e3fb16218838bb351ac89af43a",
+            "validate_node": "db21817477044c2c28b10e968bafeafdc9f8e9a8d3deaa220f03709bd68bce62",
+            "get_template": "c874dcfebbe77c7b21112d5d5da28d31ae95fa68b87c037765d574efb577de88",
+            "search_templates": "2bdd7bdc9e55d04eafdc0948d7b6584d573280dfeb77fe81767bee3d6a0b17c0",
+            "validate_workflow": "0e69609101e4fe8683cd35b7a3b0558d69d3d3005810131f42b4ec53b10a8437",
         },
         "callable_tools": [
             "tools_documentation", "search_nodes", "get_node", "validate_node",

@@ -828,6 +828,12 @@ fn decode_official_mcp_lifecycle_result(
     workflow_id: &str,
 ) -> Result<Value, AppError> {
     let mut result = response_result(response, "unknown_outcome")?;
+    if result
+        .get("isError")
+        .is_some_and(|value| value != &Value::Bool(false))
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
     if let Some(structured) = result.get("structuredContent").cloned() {
         result = structured;
     } else if let Some(content) = result.get("content").and_then(Value::as_array) {
@@ -842,29 +848,41 @@ fn decode_official_mcp_lifecycle_result(
     let object = result
         .as_object()
         .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    if !matches!(action, "publish" | "unpublish") {
+    let allowed_fields: &[&str] = match action {
+        "publish" => &[
+            "success",
+            "workflowId",
+            "activeVersionId",
+            "error",
+            "reason",
+            "workflowReviewRequestId",
+        ],
+        "unpublish" => &["success", "workflowId", "error"],
+        _ => return Err(AppError::new("unknown_outcome")),
+    };
+    if object
+        .keys()
+        .any(|key| !allowed_fields.contains(&key.as_str()))
+        || object.get("reason").is_some_and(|value| !value.is_string())
+        || object
+            .get("workflowReviewRequestId")
+            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
+    {
         return Err(AppError::new("unknown_outcome"));
-    }
-    if let Some(result_action) = object.get("action") {
-        if result_action.as_str() != Some(action) {
-            return Err(AppError::new("unknown_outcome"));
-        }
     }
     if object.get("success").and_then(Value::as_bool) != Some(true)
         || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
     {
         return Err(AppError::new("unknown_outcome"));
     }
-    if object.get("error").is_some_and(|error| !error.is_null()) {
+    if object.contains_key("error") {
         return Err(AppError::new("unknown_outcome"));
     }
     let active_version_id = object.get("activeVersionId");
-    if active_version_id
-        .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
+    if (action == "publish" && active_version_id.is_none())
+        || active_version_id
+            .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
     {
-        return Err(AppError::new("unknown_outcome"));
-    }
-    if action == "unpublish" && active_version_id.is_some_and(|value| !value.is_null()) {
         return Err(AppError::new("unknown_outcome"));
     }
     let mut safe = serde_json::Map::new();
@@ -3361,7 +3379,8 @@ mod tests {
             "success": true,
             "workflowId": "1001",
             "activeVersionId": "version-1",
-            "secret": "drop-me"
+            "reason": "private provider explanation",
+            "workflowReviewRequestId": "private-review-request"
         });
         let response = json!({
             "status": "ok",
@@ -3399,8 +3418,7 @@ mod tests {
             "status": "ok",
             "result": {
                 "success": true,
-                "workflowId": "1001",
-                "error": null
+                "workflowId": "1001"
             }
         });
         assert_eq!(
@@ -3418,13 +3436,52 @@ mod tests {
             "result": {
                 "success": true,
                 "workflowId": "1001",
-                "activeVersionId": null,
-                "error": null
+                "activeVersionId": null
             }
         });
         assert!(
             decode_official_mcp_lifecycle_result(response_with_null_version, "unpublish", "1001")
-                .is_ok()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_decoder_enforces_reviewed_schema_fields() {
+        let valid = json!({"success": true, "workflowId": "1001", "activeVersionId": null});
+        assert!(
+            decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": {"structuredContent": valid}}),
+                "publish",
+                "1001",
+            )
+            .is_ok()
+        );
+        for invalid in [
+            json!({"success": true, "workflowId": "1001"}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "secret": "unexpected"}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "action": "publish"}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "reason": null}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": ""}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": 1}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "error": null}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "error": "provider failure"}),
+            json!({"success": false, "workflowId": "1001", "activeVersionId": null}),
+        ] {
+            let error = decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": {"structuredContent": invalid}}),
+                "publish",
+                "1001",
+            )
+            .expect_err("unexpected provider shape must fail closed");
+            assert_eq!(error.code, "unknown_outcome");
+        }
+        assert!(
+            decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": {"isError": true, "structuredContent": valid}}),
+                "publish",
+                "1001",
+            )
+            .is_err()
         );
     }
 

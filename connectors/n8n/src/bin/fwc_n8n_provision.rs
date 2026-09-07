@@ -72,12 +72,21 @@ const EEC_UNPUBLISH_INPUT: &str =
 const EEC_UNPUBLISH_OUTPUT: &str =
     "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 const HETZNER_PUBLISH_INPUT: &str =
-    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const HETZNER_PUBLISH_OUTPUT: &str =
-    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const HETZNER_UNPUBLISH_INPUT: &str =
-    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const HETZNER_UNPUBLISH_OUTPUT: &str =
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
+// Exact signed predecessor pins; never admitted for a new staged candidate.
+const PREVIOUS_HETZNER_PUBLISH_INPUT: &str =
+    "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
+const PREVIOUS_HETZNER_PUBLISH_OUTPUT: &str =
+    "sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0";
+const PREVIOUS_HETZNER_UNPUBLISH_INPUT: &str =
+    "sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a";
+const PREVIOUS_HETZNER_UNPUBLISH_OUTPUT: &str =
     "sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957";
 
 fn lifecycle_schema_digests(
@@ -523,6 +532,7 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptPreviousLifecycle,
     SignedProvisionReceiptLegacyCommonInventory,
     SignedProvisionReceiptLegacyDisposableInventory,
     SignedProvisionReceiptLegacySchema,
@@ -532,6 +542,7 @@ enum CurrentValidationMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecycleSchemaMode {
     CurrentPerServer,
+    PreviousPerServer,
     LegacyCommon,
 }
 
@@ -2325,6 +2336,17 @@ fn validate_inventory(
         let expected = match name {
             "publish_workflow" | "unpublish_workflow" => match lifecycle_schema_mode {
                 LifecycleSchemaMode::CurrentPerServer => lifecycle_schema_digests(server, name),
+                LifecycleSchemaMode::PreviousPerServer => match (server, name) {
+                    (ServerId::Hetzner, "publish_workflow") => Some((
+                        PREVIOUS_HETZNER_PUBLISH_INPUT,
+                        PREVIOUS_HETZNER_PUBLISH_OUTPUT,
+                    )),
+                    (ServerId::Hetzner, "unpublish_workflow") => Some((
+                        PREVIOUS_HETZNER_UNPUBLISH_INPUT,
+                        PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
+                    )),
+                    _ => lifecycle_schema_digests(server, name),
+                },
                 LifecycleSchemaMode::LegacyCommon => {
                     fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
                 }
@@ -2526,6 +2548,9 @@ where
     let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
     let mode = match fs::symlink_metadata(&provision_receipt_path) {
         Ok(_) => match expected_mode {
+            Some(CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle) => {
+                CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
+            }
             Some(CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory) => {
                 CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
             }
@@ -2600,6 +2625,19 @@ where
                 Err(_) => {}
             }
             match validate_signed_tree(
+                LifecycleSchemaMode::PreviousPerServer,
+                CommonInventorySchemaMode::Current,
+            ) {
+                Ok(()) => {
+                    return Ok((
+                        current,
+                        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
+                    ));
+                }
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_signed_tree(
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Legacy,
             ) {
@@ -2632,6 +2670,33 @@ where
             return Ok((
                 current,
                 CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+            ));
+        }
+        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree_with_schema_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::PreviousPerServer,
+                CommonInventorySchemaMode::Current,
+            )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
             ));
         }
         CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => {
@@ -2773,6 +2838,21 @@ fn validate_release_target(
     ) {
         Ok(()) => Ok(()),
         Err(error) if error.code == ProvisionErrorCode::Policy => {
+            match validate_release_tree_with_schema_mode(
+                target,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                target,
+                owner_verification,
+                LifecycleSchemaMode::PreviousPerServer,
+                CommonInventorySchemaMode::Current,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
             match validate_release_tree_with_schema_mode(
                 target,
                 release_id,
@@ -3131,6 +3211,7 @@ fn looks_secret_like(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -3437,9 +3518,10 @@ mod tests {
         }
 
         fn local_mcp_policy(&self) -> Vec<u8> {
+            // Synthetic policy hashes test signed-tree validation, not a live provider.
             serde_json::to_vec(&serde_json::json!({
                 "package_id": "n8n-mcp",
-                "package_version": "2.69.2",
+                "package_version": "2.82.1",
                 "launcher_path": "/usr/bin/node",
                 "launcher_digest": "0".repeat(64),
                 "runtime_executable": "/usr/bin/node",
@@ -3602,6 +3684,47 @@ mod tests {
                 "signature": {"algorithm": "ed25519", "key_id": test_signing_key().key_id().to_string(), "signature": signature}
             }))
             .expect("provision receipt json")
+        }
+
+        fn set_previous_generation_lifecycle_schemas(&self, root: &Path, release_id: &str) {
+            let path = root.join("inventory/hetzner-official-mcp.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                .expect("inventory JSON");
+            for tool in value[0]["config"]["capability_policy"]["approved_tools"]
+                .as_array_mut()
+                .expect("approved tools")
+            {
+                let pins = match tool["name"].as_str() {
+                    Some("publish_workflow") => Some((
+                        PREVIOUS_HETZNER_PUBLISH_INPUT,
+                        PREVIOUS_HETZNER_PUBLISH_OUTPUT,
+                    )),
+                    Some("unpublish_workflow") => Some((
+                        PREVIOUS_HETZNER_UNPUBLISH_INPUT,
+                        PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
+                    )),
+                    _ => None,
+                };
+                if let Some((input, output)) = pins {
+                    tool["input_schema_digest"] = json!(input);
+                    tool["output_schema_digest"] = json!(output);
+                }
+            }
+            fs::write(&path, serde_json::to_vec(&value).expect("inventory JSON"))
+                .expect("previous inventory");
+            let path = root.join("policy/local-mcp.json");
+            let mut value: Value =
+                serde_json::from_slice(&fs::read(&path).expect("policy")).expect("policy JSON");
+            value["package_version"] = json!("2.69.2");
+            fs::write(path, serde_json::to_vec(&value).expect("policy JSON"))
+                .expect("previous local policy");
+            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+                .expect("previous receipt");
+            fs::write(
+                root.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(root, release_id),
+            )
+            .expect("previous signed receipt");
         }
 
         fn populate_previous_with_receipt(&self, include_provision_receipt: bool) {
@@ -3833,6 +3956,66 @@ mod tests {
             Promotion::TemporarySymlinkRename
         );
         assert!(!fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_previous_lifecycle_is_accepted_only_as_predecessor() {
+        let fixture = Fixture::new();
+        let previous = fixture.releases.join("previous");
+        fixture.set_previous_generation_lifecycle_schemas(&previous, "previous");
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("signed previous lifecycle pins");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
+        );
+        plan.revalidate()
+            .expect("previous mode survives owner revalidation");
+        validate_release_target(
+            &previous,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("signed previous lifecycle rollback target");
+
+        let fixture = Fixture::new();
+        fixture.set_previous_generation_lifecycle_schemas(&fixture.stage, &fixture.release_id);
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("old pins forbidden in new candidate")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_previous_lifecycle_still_requires_valid_signature() {
+        let fixture = Fixture::new();
+        let previous = fixture.releases.join("previous");
+        fixture.set_previous_generation_lifecycle_schemas(&previous, "previous");
+        let path = previous.join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&path).expect("receipt")).expect("receipt JSON");
+        receipt["signature"]["signature"] = json!("A".repeat(88));
+        fs::write(path, serde_json::to_vec(&receipt).expect("receipt JSON"))
+            .expect("invalid signature");
+        assert!(fixture.request().validate().is_err());
+        assert!(
+            validate_release_target(
+                &previous,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification()
+            )
+            .is_err()
+        );
     }
 
     #[cfg(unix)]

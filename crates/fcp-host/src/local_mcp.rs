@@ -21,7 +21,9 @@ use fcp_sandbox::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-const CLIENT_NAME: &str = "fcp-n8n-local";
+// n8n-mcp selects rewritten schemas for names containing "n8n" or "langchain".
+// Request the canonical catalog whose input-schema digests the release pins.
+const CLIENT_NAME: &str = "fcp-local-provider";
 const CLIENT_VERSION: &str = "0.1.0";
 
 /// One fixed local MCP tool call. The tool name is checked against policy.
@@ -1013,6 +1015,12 @@ fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError>
 mod tests {
     use super::*;
     use fcp_manifest::{LOCAL_MCP_CATALOG_TOOLS, LOCAL_MCP_METHODS};
+
+    #[test]
+    fn client_identity_requests_canonical_catalog() {
+        assert!(!CLIENT_NAME.contains("n8n"));
+        assert!(!CLIENT_NAME.contains("langchain"));
+    }
 
     #[test]
     fn request_rejects_unknown_tool_before_spawn() {

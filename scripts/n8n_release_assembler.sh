@@ -30,10 +30,34 @@ readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:b5fd649c299287d5bbf4091589d2e0c
 readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf"
 readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115"
 readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c"
-readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4"
-readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:ff5dd02b739450a5567394322bf7b0c97ff303f91d6980ed480608f41ecbcdd0"
-readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:cc4142a9a5e7c283600ea6f34b6da198d618a2e05de7173f013986ad895a8a1a"
-readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:2ef9307e809a33df73e644c134abad7756d76e5dc7db5484f1786b87bea04957"
+readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
+readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
+readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
+readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983"
+readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
+readonly LOCAL_MCP_PACKAGE_VERSION="2.82.1"
+readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
+readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
+readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
+readonly LOCAL_MCP_PROTOCOL_VERSION="2024-11-05"
+readonly LOCAL_MCP_CATALOG_TOOLS=(
+  "tools_documentation"
+  "search_nodes"
+  "get_node"
+  "validate_node"
+  "get_template"
+  "search_templates"
+  "validate_workflow"
+)
+readonly LOCAL_MCP_CATALOG_DIGESTS=(
+  "ab5fd93f48f93709bb2c74cbc23adfbf61ae831bec4cdf59c524a7ea6f6d706a"
+  "634829f67fc0f6119133a26968ce4ff486cbd4a8279b5f8528e0f846025a0be6"
+  "ed0e86592617677323c1c3319607db73e393a4e3fb16218838bb351ac89af43a"
+  "db21817477044c2c28b10e968bafeafdc9f8e9a8d3deaa220f03709bd68bce62"
+  "c874dcfebbe77c7b21112d5d5da28d31ae95fa68b87c037765d574efb577de88"
+  "2bdd7bdc9e55d04eafdc0948d7b6584d573280dfeb77fe81767bee3d6a0b17c0"
+  "0e69609101e4fe8683cd35b7a3b0558d69d3d3005810131f42b4ec53b10a8437"
+)
 
 die() {
   echo "n8n_release_assembler: $*" >&2
@@ -87,13 +111,241 @@ build_hash_helper() {
   rlib="$(find_blake3_rlib)"
   printf '%s\n' \
     'extern crate blake3;' \
-    'use std::{env,fs::File,io::{Read,Write}};' \
-    'fn main(){let p=env::args().nth(1).expect("path");let mut f=File::open(p).expect("open");let mut h=blake3::Hasher::new();let mut b=[0u8;65536];loop{let n=f.read(&mut b).expect("read");if n==0{break}h.update(&b[..n]);}writeln!(std::io::stdout(),"{}",h.finalize().to_hex()).expect("write");}' \
+    'use std::{env,fs::File,io::{self,Read,Write}};' \
+    'fn main(){let p=env::args().nth(1).expect("path");let mut f:Box<dyn Read>=if p=="-"{Box::new(io::stdin())}else{Box::new(File::open(p).expect("open"))};let mut h=blake3::Hasher::new();let mut b=[0u8;65536];loop{let n=f.read(&mut b).expect("read");if n==0{break}h.update(&b[..n]);}writeln!(io::stdout(),"{}",h.finalize().to_hex()).expect("write");}' \
     | bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- rustc - --edition=2024 \
         -L "dependency=${TARGET_DIR}/release/deps" \
         --extern "blake3=${rlib}" \
         -o "$helper"
   chmod 0755 "$helper"
+}
+
+require_fixed_local_mcp_file() {
+  local path="$1"
+  local executable="${2:-0}"
+  [[ -f "$path" ]] || die "local n8n-mcp file is missing: $path"
+  [[ "$(readlink -f "$path")" == "$path" ]] || die "local n8n-mcp file is symlinked: $path"
+  [[ "$(stat -c '%u:%g' "$path")" == "0:0" ]] || die "local n8n-mcp file is not root-owned: $path"
+  local mode
+  mode="$(stat -c '%a' "$path")"
+  (( (8#$mode & 0022) == 0 )) || die "local n8n-mcp file is group/world writable: $path"
+  (( (8#$mode & 7000) == 0 )) || die "local n8n-mcp file has special mode bits: $path"
+  if [[ "$executable" == "1" ]]; then
+    (( (8#$mode & 0111) != 0 )) || die "local n8n-mcp wrapper is not executable: $path"
+  fi
+}
+
+write_local_mcp_policy() {
+  local stage_root="$1"
+  local hash_helper="$2"
+  require_fixed_local_mcp_file "$LOCAL_MCP_NODE_PATH" 1
+  require_fixed_local_mcp_file "$LOCAL_MCP_PACKAGE_METADATA_PATH"
+  require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
+  python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
+    "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
+    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PACKAGE_VERSION" "$LOCAL_MCP_PROTOCOL_VERSION" \
+    -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
+import json
+import pathlib
+import selectors
+import subprocess
+import sys
+import time
+
+args = sys.argv[1:]
+first_separator = args.index("--")
+second_separator = args.index("--", first_separator + 1)
+(
+    stage,
+    hash_helper,
+    node_path,
+    package_metadata_path,
+    wrapper_path,
+    package_id,
+    package_version,
+    protocol_version,
+) = args[:first_separator]
+catalog_tools = args[first_separator + 1 : second_separator]
+catalog_digests = args[second_separator + 1 :]
+
+if len(catalog_tools) != 7 or len(catalog_digests) != len(catalog_tools):
+    raise SystemExit("local n8n-mcp catalog pins are malformed")
+
+def blake3_bytes(value):
+    return subprocess.check_output([hash_helper, "-"], input=value).decode().strip()
+
+def blake3_path(path):
+    return subprocess.check_output([hash_helper, path], text=True).strip()
+
+package_metadata = pathlib.Path(package_metadata_path).read_bytes()
+try:
+    package = json.loads(package_metadata)
+except json.JSONDecodeError as error:
+    raise SystemExit("installed n8n-mcp package metadata is not valid JSON") from error
+if package.get("name") != package_id or package.get("version") != package_version:
+    raise SystemExit("installed n8n-mcp package identity does not match reviewed pins")
+
+request_frames = [
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            # n8n-mcp rewrites schemas for clients whose name contains "n8n";
+            # this neutral identity keeps the reviewed catalog deterministic.
+            "clientInfo": {"name": "fcp-release-assembler", "version": "1.0.0"},
+        },
+    },
+    {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+]
+request = b"".join(json.dumps(frame, separators=(",", ":")).encode() + b"\n" for frame in request_frames)
+environment = {
+    "PATH": "/usr/bin:/bin",
+    "N8N_MCP_TELEMETRY_DISABLED": "true",
+    "NODE_OPTIONS": "--no-warnings",
+    "TMPDIR": "/srv/dev-ssd/fcp/tmp",
+}
+MAX_STDOUT_BYTES = 512 * 1024
+MAX_STDERR_BYTES = 64 * 1024
+class DiscoveryError(RuntimeError):
+    pass
+
+process = None
+try:
+    process = subprocess.Popen(
+        [
+            "/usr/bin/bwrap",
+            "--unshare-user",
+            "--uid",
+            "65534",
+            "--gid",
+            "65534",
+            "--unshare-net",
+            "--die-with-parent",
+            "--ro-bind",
+            "/",
+            "/",
+            "--chdir",
+            str(pathlib.Path(package_metadata_path).parent),
+            node_path,
+            wrapper_path,
+        ],
+        cwd=pathlib.Path(package_metadata_path).parent,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    process.stdin.write(request)
+    process.stdin.close()
+    selector = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr = bytearray()
+    selector.register(process.stdout, selectors.EVENT_READ, stdout)
+    selector.register(process.stderr, selectors.EVENT_READ, stderr)
+    deadline = time.monotonic() + 30
+    while selector.get_map():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            process.kill()
+            raise DiscoveryError("local n8n-mcp catalog discovery timed out")
+        for key, _ in selector.select(remaining):
+            chunk = key.fileobj.read1(64 * 1024)
+            if not chunk:
+                selector.unregister(key.fileobj)
+                key.fileobj.close()
+                continue
+            sink = key.data
+            sink.extend(chunk)
+            limit = MAX_STDOUT_BYTES if sink is stdout else MAX_STDERR_BYTES
+            if len(sink) > limit:
+                process.kill()
+                raise DiscoveryError("local n8n-mcp catalog discovery output exceeded limit")
+    return_code = process.wait(timeout=2)
+    selector.close()
+except (OSError, subprocess.TimeoutExpired, BrokenPipeError, DiscoveryError) as error:
+    if process is not None:
+        try:
+            process.kill()
+            process.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    raise SystemExit(str(error) or "local n8n-mcp catalog discovery failed") from error
+if return_code != 0:
+    raise SystemExit("local n8n-mcp catalog discovery failed")
+
+messages = []
+for line in stdout.splitlines():
+    try:
+        messages.append(json.loads(line))
+    except json.JSONDecodeError as error:
+        raise SystemExit("local n8n-mcp catalog discovery returned malformed JSON") from error
+initialize = next((message for message in messages if message.get("id") == 1), None)
+catalog = next((message for message in messages if message.get("id") == 2), None)
+if (
+    initialize is None
+    or initialize.get("result", {}).get("protocolVersion") != protocol_version
+    or catalog is None
+    or not isinstance(catalog.get("result", {}).get("tools"), list)
+):
+    raise SystemExit("local n8n-mcp catalog discovery returned an invalid handshake")
+
+tools = catalog["result"]["tools"]
+observed_tools = {}
+for tool in tools:
+    if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+        raise SystemExit("installed n8n-mcp catalog has a malformed tool map")
+    name = tool["name"]
+    if name in observed_tools:
+        raise SystemExit("installed n8n-mcp catalog has duplicate tool names")
+    observed_tools[name] = tool
+if len(observed_tools) != len(catalog_tools) or set(observed_tools) != set(catalog_tools):
+    raise SystemExit("installed n8n-mcp catalog names do not match reviewed pins")
+
+observed_digests = []
+for name in catalog_tools:
+    tool = observed_tools[name]
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict):
+        raise SystemExit("installed n8n-mcp catalog has a malformed input schema")
+    canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    observed_digests.append(blake3_bytes(canonical))
+if observed_digests != catalog_digests:
+    raise SystemExit("installed n8n-mcp catalog schemas do not match reviewed pins")
+
+stage_policy = pathlib.Path(stage) / "policy/local-mcp.json"
+policy = {
+    "package_id": package_id,
+    "package_version": package_version,
+    "launcher_path": node_path,
+    "launcher_digest": blake3_path(node_path),
+    "runtime_executable": node_path,
+    "runtime_executable_digest": blake3_path(node_path),
+    "package_metadata_path": package_metadata_path,
+    "package_metadata_digest": blake3_bytes(package_metadata),
+    "protocol_version": protocol_version,
+    "fixed_args": [wrapper_path],
+    "fixed_env": {"N8N_MCP_TELEMETRY_DISABLED": "true"},
+    "allowed_methods": ["initialize", "notifications/initialized", "tools/list", "tools/call"],
+    "expected_catalog": dict(zip(catalog_tools, catalog_digests)),
+    "callable_tools": catalog_tools,
+    "max_frame_bytes": 262144,
+    "max_request_bytes": 65536,
+    "max_result_bytes": 262144,
+    "max_sequential_calls": 7,
+    "startup_timeout_ms": 30000,
+    "request_timeout_ms": 30000,
+    "shutdown_timeout_ms": 2000,
+    "idle_window_ms": 0,
+    "network_disabled": True,
+}
+stage_policy.write_text(json.dumps(policy, indent=2) + "\n")
+PY
+  chown root:root "$stage_root/policy/local-mcp.json"
+  chmod 0644 "$stage_root/policy/local-mcp.json"
 }
 
 build_one() {
@@ -409,6 +661,7 @@ main() {
   hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
 
   copy_templates "$source_release" "$stage_root"
+  write_local_mcp_policy "$stage_root" "$hash_helper"
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"
   write_metadata "$stage_root" "$git_revision" "$hash_helper"

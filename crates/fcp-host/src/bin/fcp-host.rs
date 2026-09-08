@@ -11659,10 +11659,14 @@ fn official_mcp_approval_constraints_with_typed_plan(
                 "typed official MCP approval parent binding is missing".to_string(),
             )
         })?;
-        let approval_resource_uri = match server {
-            N8nApprovalServer::Eec => "fwc-mcp-bridge://eec",
-            N8nApprovalServer::Hetzner => "fwc-mcp-bridge://hetzner",
+        let server_id = match server {
+            N8nApprovalServer::Eec => "eec",
+            N8nApprovalServer::Hetzner => "hetzner",
         };
+        let approval_resource_uri = format!(
+            "fwc-mcp-bridge://{server_id}/tools/{}",
+            encode_n8n_resource_segment(tool),
+        );
         return n8n_official_mcp_approval_constraints(
             server,
             tool,

@@ -521,8 +521,12 @@ pub fn n8n_official_mcp_approval_constraints(
             "official MCP payload digest is invalid",
         ));
     }
-    let server_root = format!("fwc-mcp-bridge://{}", server.as_str());
-    if official_mcp_resource_uri != server_root {
+    let expected_resource_uri = format!(
+        "fwc-mcp-bridge://{}/tools/{}",
+        server.as_str(),
+        encode_resource_segment(expected_tool),
+    );
+    if official_mcp_resource_uri != expected_resource_uri {
         return Err(N8nApprovalError::InvalidPlan(
             "official MCP resource binding is invalid",
         ));
@@ -1314,7 +1318,7 @@ mod tests {
             "workflow-1",
             N8nLifecycleOperation::Publish,
             "publish_workflow",
-            "fwc-mcp-bridge://eec",
+            "fwc-mcp-bridge://eec/tools/publish%5Fworkflow",
             payload,
             &input,
             precondition,
@@ -1354,7 +1358,7 @@ mod tests {
                 }
             }),
             official_mcp_tool: "publish_workflow".to_owned(),
-            official_mcp_resource_uri: "fwc-mcp-bridge://eec".to_owned(),
+            official_mcp_resource_uri: "fwc-mcp-bridge://eec/tools/publish%5Fworkflow".to_owned(),
             official_mcp_payload_digest:
                 "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
             parent_binding_sha256: String::new(),
@@ -1622,6 +1626,10 @@ mod tests {
         let mut wrong_tool = issue_request();
         wrong_tool.official_mcp_tool = "update_workflow".to_owned();
         assert!(build_unsigned_n8n_approval_token(&wrong_tool, NOW).is_err());
+
+        let mut wrong_resource = issue_request();
+        wrong_resource.official_mcp_resource_uri = "fwc-mcp-bridge://eec".to_owned();
+        assert!(build_unsigned_n8n_approval_token(&wrong_resource, NOW).is_err());
 
         let mut wrong_precondition = issue_request();
         wrong_precondition.input["guard"]["precondition"]["active"] = Value::String("false".into());

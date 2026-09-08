@@ -2,7 +2,9 @@
 # Redaction-safe, read-only harness for the fixed installed fwc-n8n path.
 # It prints JSONL metadata only; provider responses are hashed and discarded.
 # The measured total is wrapper-invocation wall-clock time, not provider
-# latency or live-acceptance evidence.
+# latency or live-acceptance evidence. Linux /proc sampling covers only the
+# request wrapper's observed descendant tree; nested provider telemetry stays
+# explicitly not_collected.
 set -u
 
 SCHEMA=fwc.n8n.routing-benchmark.v3
@@ -13,7 +15,10 @@ POLICY=$CURRENT_ROOT/policy/local-mcp.json
 SAMPLES=${FWC_N8N_SAMPLES:-5}
 MAX_ESTIMATE_BYTES=10485760
 TOKEN_ESTIMATE_MODE=byte_count_estimate_not_tokenization
-NOT_COLLECTED='["startup_latency_ms","provider_latency_ms","provider_vs_total","provider_call_count","peak_rss_kib","peak_pss_kib","peak_private_kib","nested_teardown_state","tokenization","live_acceptance"]'
+BASE_NOT_COLLECTED='["startup_latency_ms","provider_latency_ms","provider_vs_total","provider_call_count","nested_teardown_state","tokenization","live_acceptance"]'
+NOT_COLLECTED=$BASE_NOT_COLLECTED
+MEMORY_SAMPLE_INTERVAL_SECONDS=0.02
+MAX_MEMORY_SAMPLES=2000
 
 release_id=
 binary_sha256_16=
@@ -95,6 +100,133 @@ common_json() {
         "$SCHEMA" "$operation_route" "$operation_class" "$server" "$host_operation" "$release_id" "$binary_sha256_16" "$policy_sha256_16"
 }
 
+append_not_collected() {
+    local field=$1
+
+    case ",$NOT_COLLECTED," in
+        *,"$field",*) return 0 ;;
+    esac
+    NOT_COLLECTED="${NOT_COLLECTED%]},\"$field\"]"
+}
+
+read_process_memory() {
+    local pid=$1
+    local hwm= pss= private_clean= private_dirty= private_hugetlb= private=
+    local key value _
+
+    [[ -r "/proc/$pid/status" && -r "/proc/$pid/smaps_rollup" ]] || return 1
+    while read -r key value _; do
+        case "$key" in
+            VmHWM:) hwm=$value ;;
+        esac
+    done < <(cat "/proc/$pid/status" 2>/dev/null)
+    while IFS=: read -r key value; do
+        value=${value//[!0-9]/}
+        case "$key" in
+            "Pss") pss=$value ;;
+            "Private_Clean") private_clean=$value ;;
+            "Private_Dirty") private_dirty=$value ;;
+            "Private_Hugetlb") private_hugetlb=$value ;;
+        esac
+    done < <(cat "/proc/$pid/smaps_rollup" 2>/dev/null)
+
+    [[ "$hwm" =~ ^[0-9]+$ && "$pss" =~ ^[0-9]+$ ]] || return 1
+    [[ "$private_clean" =~ ^[0-9]+$ && "$private_dirty" =~ ^[0-9]+$ && "$private_hugetlb" =~ ^[0-9]+$ ]] || return 1
+    private=$((private_clean + private_dirty + private_hugetlb))
+    printf '%s %s %s\n' "$hwm" "$pss" "$private"
+}
+
+monitor_process_tree() {
+    local root_pid=$1
+    local sample_count=0
+    local memory_samples=0
+    local peak_rss=0
+    local peak_pss=0
+    local peak_private=0
+    local process_tree_state=tracking_budget_exhausted
+    local post_run_process_count=0
+    local pid task_dir child hwm pss private _
+    local -a queue child_pids
+    local -A tracked active
+
+    while (( sample_count < MAX_MEMORY_SAMPLES )); do
+        active=()
+        queue=()
+        if [[ -r "/proc/$root_pid/status" ]]; then
+            queue+=("$root_pid")
+        fi
+        for pid in "${!tracked[@]}"; do
+            if [[ -r "/proc/$pid/status" ]]; then
+                queue+=("$pid")
+            else
+                unset 'tracked[$pid]'
+            fi
+        done
+
+        while ((${#queue[@]} > 0)); do
+            pid=${queue[0]}
+            queue=("${queue[@]:1}")
+            [[ ${active[$pid]+present} ]] && continue
+            [[ -r "/proc/$pid/status" ]] || continue
+            active[$pid]=1
+            tracked[$pid]=1
+            for task_dir in /proc/"$pid"/task/*; do
+                [[ -r "$task_dir/children" ]] || continue
+                child_pids=()
+                read -r -a child_pids < "$task_dir/children" || true
+                for child in "${child_pids[@]}"; do
+                    [[ -n "$child" && ! ${active[$child]+present} ]] && queue+=("$child")
+                done
+            done
+        done
+
+        if ((${#active[@]} == 0)); then
+            process_tree_state=tracked_process_tree_absent
+            break
+        fi
+
+        local sample_complete=true
+        local sample_rss=0
+        local sample_pss=0
+        local sample_private=0
+        local stats
+        for pid in "${!active[@]}"; do
+            if stats=$(read_process_memory "$pid"); then
+                read -r hwm pss private <<<"$stats"
+                sample_rss=$((sample_rss + hwm))
+                sample_pss=$((sample_pss + pss))
+                sample_private=$((sample_private + private))
+            else
+                sample_complete=false
+            fi
+        done
+        if [[ "$sample_complete" == true ]]; then
+            ((memory_samples += 1))
+            ((sample_rss > peak_rss)) && peak_rss=$sample_rss
+            ((sample_pss > peak_pss)) && peak_pss=$sample_pss
+            ((sample_private > peak_private)) && peak_private=$sample_private
+        fi
+        ((sample_count += 1))
+        sleep "$MEMORY_SAMPLE_INTERVAL_SECONDS"
+    done
+
+    if [[ "$process_tree_state" != tracked_process_tree_absent ]]; then
+        for pid in "${!tracked[@]}"; do
+            [[ -r "/proc/$pid/status" ]] && ((post_run_process_count += 1))
+        done
+    fi
+    if [[ "$process_tree_state" == tracked_process_tree_absent ]]; then
+        post_run_process_count=0
+    fi
+    if ((memory_samples == 0)); then
+        peak_rss=null
+        peak_pss=null
+        peak_private=null
+    fi
+    printf '%s %s %s %s %s %s\n' \
+        "$peak_rss" "$peak_pss" "$peak_private" "$process_tree_state" "$post_run_process_count" "$memory_samples"
+}
+
 run_self_test() {
     workflow_id=self_test_only
 
@@ -136,8 +268,8 @@ run_self_test() {
     binary_sha256_16=0123456789abcdef
     policy_sha256_16=fedcba9876543210
     configure_operation list || return 1
-    fixture=$(printf '%s,"phase":"sample","total_latency_ms":17,"response_bytes":5,"token_estimate":2,"token_estimate_mode":"%s","wrapper_invocation_count":1,"teardown_state":"wrapper_exit_zero","not_collected":%s}' \
-        "$(common_json)" "$TOKEN_ESTIMATE_MODE" "$NOT_COLLECTED")
+    fixture=$(printf '%s,"phase":"sample","total_latency_ms":17,"response_bytes":5,"token_estimate":2,"token_estimate_mode":"%s","peak_rss_kib":64,"peak_pss_kib":32,"peak_private_kib":16,"wrapper_invocation_count":1,"teardown_state":"wrapper_exit_zero","process_tree_state":"tracked_process_tree_absent","post_run_process_count":0,"not_collected":%s}' \
+        "$(common_json)" "$TOKEN_ESTIMATE_MODE" "$BASE_NOT_COLLECTED")
     assert_contains "$fixture" '"schema":"fwc.n8n.routing-benchmark.v3"' || return 1
     assert_contains "$fixture" '"current_ref":"fixed_current"' || return 1
     assert_contains "$fixture" '"binary_sha256_16":"0123456789abcdef"' || return 1
@@ -145,9 +277,15 @@ run_self_test() {
     assert_contains "$fixture" '"total_latency_ms":17' || return 1
     assert_contains "$fixture" '"token_estimate_mode":"byte_count_estimate_not_tokenization"' || return 1
     assert_contains "$fixture" '"provider_latency_ms"' || return 1
-    assert_contains "$fixture" '"peak_rss_kib"' || return 1
+    assert_contains "$fixture" '"peak_rss_kib":64' || return 1
     assert_contains "$fixture" '"provider_call_count"' || return 1
     assert_contains "$fixture" '"nested_teardown_state"' || return 1
+    assert_contains "$fixture" '"process_tree_state":"tracked_process_tree_absent"' || return 1
+    assert_contains "$fixture" '"post_run_process_count":0' || return 1
+    NOT_COLLECTED=$BASE_NOT_COLLECTED
+    append_not_collected peak_rss_kib
+    assert_contains "$NOT_COLLECTED" '"peak_rss_kib"' || return 1
+    NOT_COLLECTED=$BASE_NOT_COLLECTED
 
     printf '%s\n' 'offline self-test: PASS (route/class allowlist, bounded byte estimate, release/policy metadata, schema/not_collected consistency)'
 }
@@ -250,20 +388,47 @@ latencies=()
 bytes_total=0
 token_estimates_total=0
 token_estimates_complete=true
+summary_peak_rss=0
+summary_peak_pss=0
+summary_peak_private=0
+summary_memory_complete=true
+all_process_trees_proven=true
 for ((sample = 1; sample <= SAMPLES; sample++)); do
     request=$(printf '{"server_id":"%s","input":%s,"deadline_ms":30000}\n' "$server" "$input")
     request_bytes=$(LC_ALL=C printf '%s' "$request" | wc -c)
     started_ns=$(date +%s%N)
-    if output=$(printf '%s' "$request" | \
-        "$BIN" run-once "$host_operation" 2>/dev/null); then
-        rc=0
-    else
-        rc=$?
+    coproc FWC_RUN { "$BIN" run-once "$host_operation" 2>/dev/null; }
+    fwc_pid=$FWC_RUN_PID
+    coproc FWC_MONITOR { monitor_process_tree "$fwc_pid"; }
+    fwc_stdin_fd=${FWC_RUN[1]}
+    if ! printf '%s' "$request" >&$fwc_stdin_fd; then
+        :
     fi
+    exec {FWC_RUN[1]}>&-
+    output=$(cat <&"${FWC_RUN[0]}")
+    wait "$fwc_pid"
+    rc=$?
+    monitor_data=$(cat <&"${FWC_MONITOR[0]}")
+    wait "$FWC_MONITOR_PID" || true
     finished_ns=$(date +%s%N)
     latency_ms=$(( (finished_ns - started_ns) / 1000000 ))
     response_bytes=$(LC_ALL=C printf '%s' "$output" | wc -c)
     response_digest=$(LC_ALL=C printf '%s' "$output" | sha256sum | cut -c1-16)
+    read -r sample_peak_rss sample_peak_pss sample_peak_private sample_process_tree_state sample_post_run_count sample_memory_samples <<<"$monitor_data"
+    row_not_collected=$BASE_NOT_COLLECTED
+    NOT_COLLECTED=$row_not_collected
+    [[ "$sample_peak_rss" =~ ^[0-9]+$ ]] || append_not_collected peak_rss_kib
+    [[ "$sample_peak_pss" =~ ^[0-9]+$ ]] || append_not_collected peak_pss_kib
+    [[ "$sample_peak_private" =~ ^[0-9]+$ ]] || append_not_collected peak_private_kib
+    [[ "$sample_process_tree_state" == tracked_process_tree_absent ]] || append_not_collected post_run_process_proof
+    row_not_collected=$NOT_COLLECTED
+    [[ "$sample_peak_rss" =~ ^[0-9]+$ && "$sample_peak_pss" =~ ^[0-9]+$ && "$sample_peak_private" =~ ^[0-9]+$ ]] || summary_memory_complete=false
+    if [[ "$sample_peak_rss" =~ ^[0-9]+$ && "$sample_peak_pss" =~ ^[0-9]+$ && "$sample_peak_private" =~ ^[0-9]+$ ]]; then
+        ((sample_peak_rss > summary_peak_rss)) && summary_peak_rss=$sample_peak_rss
+        ((sample_peak_pss > summary_peak_pss)) && summary_peak_pss=$sample_peak_pss
+        ((sample_peak_private > summary_peak_private)) && summary_peak_private=$sample_peak_private
+    fi
+    [[ "$sample_process_tree_state" == tracked_process_tree_absent ]] || all_process_trees_proven=false
     if token_estimate=$(estimate_tokens_from_bytes "$response_bytes"); then
         token_estimates_total=$((token_estimates_total + token_estimate))
     else
@@ -277,8 +442,8 @@ for ((sample = 1; sample <= SAMPLES; sample++)); do
     fi
     latencies+=("$latency_ms")
     bytes_total=$((bytes_total + response_bytes))
-    printf '%s,"phase":"sample","sample":%s,"rc":%s,"request_bytes":%s,"response_bytes":%s,"response_sha256_16":"%s","total_latency_ms":%s,"startup_latency_ms":null,"provider_latency_ms":null,"provider_vs_total":null,"token_estimate":%s,"token_estimate_mode":"%s","peak_rss_kib":null,"peak_pss_kib":null,"peak_private_kib":null,"provider_call_count":null,"wrapper_invocation_count":1,"observed_process":"fwc-n8n","teardown_state":"%s","nested_teardown_state":null,"not_collected":%s}\n' \
-        "$(common_json)" "$sample" "$rc" "$request_bytes" "$response_bytes" "$response_digest" "$latency_ms" "$token_estimate" "$TOKEN_ESTIMATE_MODE" "$teardown_state" "$NOT_COLLECTED"
+    printf '%s,"phase":"sample","sample":%s,"rc":%s,"request_bytes":%s,"response_bytes":%s,"response_sha256_16":"%s","total_latency_ms":%s,"startup_latency_ms":null,"provider_latency_ms":null,"provider_vs_total":null,"token_estimate":%s,"token_estimate_mode":"%s","peak_rss_kib":%s,"peak_pss_kib":%s,"peak_private_kib":%s,"provider_call_count":null,"wrapper_invocation_count":1,"observed_process":"fwc-n8n","teardown_state":"%s","process_tree_state":"%s","post_run_process_count":%s,"nested_teardown_state":null,"not_collected":%s}\n' \
+        "$(common_json)" "$sample" "$rc" "$request_bytes" "$response_bytes" "$response_digest" "$latency_ms" "$token_estimate" "$TOKEN_ESTIMATE_MODE" "$sample_peak_rss" "$sample_peak_pss" "$sample_peak_private" "$teardown_state" "$sample_process_tree_state" "$sample_post_run_count" "$row_not_collected"
 done
 
 sorted=($(printf '%s\n' "${latencies[@]}" | sort -n))
@@ -290,7 +455,40 @@ if [[ "$token_estimates_complete" == true ]]; then
 else
     mean_token_estimate=null
 fi
-printf '%s,"phase":"summary","samples":%s,"p50_total_latency_ms":%s,"p95_total_latency_ms":%s,"mean_response_bytes":%s,"mean_token_estimate":%s,"token_estimate_mode":"%s","provider_latency_ms":null,"provider_vs_total":null,"provider_call_count":null,"peak_rss_kib":null,"peak_pss_kib":null,"peak_private_kib":null,"not_collected":%s}\n' \
-    "$(common_json)" "$SAMPLES" "$p50" "$p95" "$((bytes_total / SAMPLES))" "$mean_token_estimate" "$TOKEN_ESTIMATE_MODE" "$NOT_COLLECTED"
-printf '%s,"phase":"teardown","wrapper_invocations":%s,"observed_process":"fwc-n8n","teardown_state":"all_wrappers_exited","provider_call_count":null,"nested_teardown_state":null,"not_collected":%s}\n' \
-    "$(common_json)" "$SAMPLES" "$NOT_COLLECTED"
+if [[ "$summary_memory_complete" == true ]]; then
+    summary_peak_rss_value=$summary_peak_rss
+    summary_peak_pss_value=$summary_peak_pss
+    summary_peak_private_value=$summary_peak_private
+else
+    summary_peak_rss_value=null
+    summary_peak_pss_value=null
+    summary_peak_private_value=null
+fi
+summary_not_collected=$BASE_NOT_COLLECTED
+NOT_COLLECTED=$summary_not_collected
+[[ "$summary_memory_complete" == true ]] || {
+    append_not_collected peak_rss_kib
+    append_not_collected peak_pss_kib
+    append_not_collected peak_private_kib
+}
+[[ "$all_process_trees_proven" == true ]] || append_not_collected post_run_process_proof
+summary_not_collected=$NOT_COLLECTED
+if [[ "$all_process_trees_proven" == true ]]; then
+    summary_process_tree_state=all_tracked_process_trees_exited
+    summary_post_run_process_count=0
+else
+    summary_process_tree_state=not_collected
+    summary_post_run_process_count=null
+fi
+printf '%s,"phase":"summary","samples":%s,"p50_total_latency_ms":%s,"p95_total_latency_ms":%s,"mean_response_bytes":%s,"mean_token_estimate":%s,"token_estimate_mode":"%s","provider_latency_ms":null,"provider_vs_total":null,"provider_call_count":null,"peak_rss_kib":%s,"peak_pss_kib":%s,"peak_private_kib":%s,"process_tree_state":"%s","post_run_process_count":%s,"not_collected":%s}\n' \
+    "$(common_json)" "$SAMPLES" "$p50" "$p95" "$((bytes_total / SAMPLES))" "$mean_token_estimate" "$TOKEN_ESTIMATE_MODE" "$summary_peak_rss_value" "$summary_peak_pss_value" "$summary_peak_private_value" "$summary_process_tree_state" "$summary_post_run_process_count" "$summary_not_collected"
+NOT_COLLECTED=$BASE_NOT_COLLECTED
+[[ "$all_process_trees_proven" == true ]] || append_not_collected post_run_process_proof
+teardown_not_collected=$NOT_COLLECTED
+if [[ "$all_process_trees_proven" == true ]]; then
+    teardown_process_tree_state=all_tracked_process_trees_exited
+else
+    teardown_process_tree_state=not_collected
+fi
+printf '%s,"phase":"teardown","wrapper_invocations":%s,"observed_process":"fwc-n8n","teardown_state":"all_wrappers_exited","process_tree_state":"%s","post_run_process_count":%s,"provider_call_count":null,"nested_teardown_state":null,"not_collected":%s}\n' \
+    "$(common_json)" "$SAMPLES" "$teardown_process_tree_state" "$summary_post_run_process_count" "$teardown_not_collected"

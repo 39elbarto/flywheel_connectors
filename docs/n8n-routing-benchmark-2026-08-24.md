@@ -33,10 +33,17 @@ runtime instrumentation.
 `byte_count_estimate_not_tokenization`. No tokenizer runs and no claim of real
 token count is made. The wrapper's own exit is observed as
 `wrapper_exit_zero`/`wrapper_exit_nonzero`; `wrapper_invocation_count` is
-therefore factual. Provider call count, nested-child teardown, and peak
-RSS/PSS/private memory are `null`/`not_collected` because the request-scoped
-child is not safely sampled by this shell-only contract. The old global scan of
-persistent `n8n-mcp` processes is intentionally not part of this schema.
+therefore factual. On Linux, each sample also performs bounded `/proc` sampling
+of the unchanged `fwc-n8n run-once` process and its observed descendants.
+`peak_rss_kib` is the sampled sum of per-process `VmHWM`, while
+`peak_pss_kib` and `peak_private_kib` use `smaps_rollup`; these are
+request-scoped process observations, not provider telemetry. `process_tree_state`
+and `post_run_process_count` prove absence of the tracked tree when sampling
+completes normally. If `/proc` data is unavailable or the sampling budget is
+exhausted, the affected fields are `null` and are added to `not_collected`.
+Provider call count and nested-child teardown remain `null`/`not_collected`.
+The old global scan of persistent `n8n-mcp` processes is intentionally not part
+of this schema.
 
 ## Scope and redaction
 
@@ -46,8 +53,9 @@ persistent `n8n-mcp` processes is intentionally not part of this schema.
   graphs, executions, credentials, and provider bodies were not written to the
   report.
 - The harness records only bounded request/response byte counts, total wrapper
-  time, return code, a short response digest, the byte-count estimate, and the
-  observed wrapper exit state. It discards the response body.
+  time, return code, a short response digest, the byte-count estimate, bounded
+  process-memory fields, tracked-tree teardown state, and the observed wrapper
+  exit state. It discards the response body.
 - No workflow write, activation, execution, deletion, credential operation, or
   automatic retry was performed.
 
@@ -64,8 +72,8 @@ FWC_N8N_SAMPLES=1 scripts/n8n_routing_benchmark.sh hetzner capabilities
 
 The `get` ID is validated but never printed. A normal run emits `preflight`, one
 `sample` per invocation, `summary`, and `teardown` phases. It emits no global
-process baseline and does not claim that wrapper exit proves nested child
-absence.
+process baseline. Its process fields cover only the request wrapper's observed
+descendant tree and do not claim provider-internal or nested-child teardown.
 
 ## Measured latency
 
@@ -254,6 +262,24 @@ tokenization, and live acceptance. All six teardown records report
 completion is not proof of zero-idle memory or process state for a persistent
 MCP profile.
 
+## Current fixed-release read-only verification — 2026-09-08
+
+A fresh redaction-safe packet was collected under
+`/srv/dev-ssd/fcp/reports/nqm81.14-benchmark-20260908/` for the fixed current
+release `release-20260908-413bb5dfa`. It covers two samples each of typed
+`workflows.list` and official-MCP `capabilities.inspect` on both EEC and
+Hetzner. All four runs returned `rc=0`, produced the expected five JSONL phases,
+had empty stderr, numeric per-sample RSS/PSS/private values, and reported
+`post_run_process_count=0` with `all_tracked_process_trees_exited` in summary
+and teardown. Provider latency, provider call count, provider-vs-total latency,
+real tokenization, and nested teardown remain explicitly `not_collected`.
+
+The packet is bound to `binary_sha256_16=d4f800ccd6cb7216` and
+`policy_sha256_16=dba1e5ce57436d17`; a redaction scan found no authorization,
+credential, workflow-ID, or secret fields. This was read-only provider
+verification: no workflow, credential, release/current, systemd, mount, or
+routing-policy state was changed.
+
 ## Offline verification performed
 
 Only the following checks are in scope for this packet:
@@ -265,4 +291,5 @@ git diff --check
 ```
 
 No live n8n/API call, Cargo command, Beads write, workflow write, lifecycle
-action, credential read, or commit/push is part of this verification.
+action, credential read, or commit/push is part of the offline verification
+checks listed above.

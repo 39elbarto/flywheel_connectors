@@ -365,6 +365,8 @@ const N8N_OPERATOR_CONFIGURED_MANIFEST_HOST: &str = "operator-configured";
 const N8N_SUPERVISED_RUN_ONCE_TOKEN: &str = "n8n-run-once-supervised";
 const N8N_SUPERVISED_WRITE_RUN_ONCE_TOKEN: &str = "n8n-write-run-once-supervised";
 const N8N_SUPERVISED_OFFICIAL_MCP_RUN_ONCE_TOKEN: &str = "n8n-official-mcp-run-once-supervised";
+#[cfg(target_os = "linux")]
+const N8N_SUPERVISED_OPERATION_ENV: &str = "FCP_HOST_N8N_SUPERVISED_OPERATION";
 const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
 const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
@@ -14380,6 +14382,48 @@ fn run_n8n_supervisor_gate_before_telemetry() -> HostResult<()> {
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn n8n_supervised_writable_runtime_required_for(
+    action: CliAction,
+    owner_admission: Option<&str>,
+    supervised_operation: Option<&str>,
+) -> HostResult<bool> {
+    match action {
+        CliAction::N8nSupervisedWriteRunOnce => Ok(true),
+        CliAction::N8nSupervisedOfficialMcpRunOnce => {
+            let owner_admission = owner_admission
+                .map(OwnerSingleHostAdmission::parse)
+                .transpose()?;
+            let has_fixed_write_operation = supervised_operation.is_some_and(|operation| {
+                matches!(
+                    operation,
+                    "n8n.workflows.lifecycle" | "n8n.workflows.archive" | "n8n.workflows.execute"
+                )
+            });
+            let has_exact_mcp_call_admission = owner_admission.is_some_and(|admission| {
+                admission.version == 1
+                    && admission.mode == OWNER_SINGLE_HOST_ADMISSION_MODE
+                    && admission.zone_id == "z:work"
+                    && admission.connector_id == "fcp.mcp-bridge"
+                    && admission.operation == N8N_OFFICIAL_MCP_CALL_OPERATION
+            });
+            Ok(has_fixed_write_operation && has_exact_mcp_call_admission)
+        }
+        _ => Ok(false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn n8n_supervised_writable_runtime_required(action: CliAction) -> HostResult<bool> {
+    let owner_admission = read_optional_trimmed_env_string(OWNER_SINGLE_HOST_ADMISSION_ENV)?;
+    let supervised_operation = read_optional_trimmed_env_string(N8N_SUPERVISED_OPERATION_ENV)?;
+    n8n_supervised_writable_runtime_required_for(
+        action,
+        owner_admission.as_deref(),
+        supervised_operation.as_deref(),
+    )
+}
+
 fn n8n_run_once_is_write(operation: &str, input: &Value) -> bool {
     let mcp_access_dry_run = operation == "n8n.mcp_access.reconcile"
         && input.get("dryRun").and_then(Value::as_bool) == Some(true);
@@ -14949,26 +14993,30 @@ fn main() -> HostResult<()> {
                 Ok(provider) => provider,
                 Err(error) => return print_run_once_response(Err(error)),
             };
-            let sandbox_result = if matches!(action, CliAction::N8nSupervisedWriteRunOnce) {
-                n8n_run_once_runtime_dir().and_then(|runtime_dir| {
-                    fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable_and_writable_dir(
-                        &provider,
-                        &runtime_dir,
-                    )
-                    .map_err(|_| {
-                        HostError::PreflightFailed(
-                            "n8n supervised run-once sandbox admission rejected".to_string(),
-                        )
-                    })
-                })
-            } else {
-                fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&provider)
-                    .map_err(|_| {
-                        HostError::PreflightFailed(
-                            "n8n supervised run-once sandbox admission rejected".to_string(),
-                        )
-                    })
-            };
+            let sandbox_result = n8n_supervised_writable_runtime_required(action).and_then(
+                |writable_runtime| {
+                    if writable_runtime {
+                        n8n_run_once_runtime_dir().and_then(|runtime_dir| {
+                            fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable_and_writable_dir(
+                                &provider,
+                                &runtime_dir,
+                            )
+                            .map_err(|_| {
+                                HostError::PreflightFailed(
+                                    "n8n supervised run-once sandbox admission rejected".to_string(),
+                                )
+                            })
+                        })
+                    } else {
+                        fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&provider)
+                            .map_err(|_| {
+                                HostError::PreflightFailed(
+                                    "n8n supervised run-once sandbox admission rejected".to_string(),
+                                )
+                            })
+                    }
+                },
+            );
             if sandbox_result.is_err() {
                 return print_run_once_response(Err(HostError::PreflightFailed(
                     "n8n supervised run-once sandbox admission rejected".to_string(),
@@ -34116,6 +34164,84 @@ done"#;
                 "extra",
             ])
             .is_err()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn official_mcp_landlock_write_requires_fixed_owner_admission() {
+        let exact_mcp_call_admission = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.mcp-bridge","operation":"mcp.tools.call"}"#;
+        assert!(
+            !n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                None,
+                Some("n8n.workflows.lifecycle"),
+            )
+            .expect("missing owner admission is a read-only official MCP launch")
+        );
+        assert!(!n8n_supervised_writable_runtime_required_for(
+            CliAction::N8nSupervisedOfficialMcpRunOnce,
+            Some(
+                r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.mcp_access.reconcile"}"#,
+            ),
+            Some("n8n.workflows.lifecycle"),
+        )
+        .expect("non-MCP-call admission is not an official MCP write"));
+        assert!(
+            !n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                Some(exact_mcp_call_admission),
+                Some(N8N_CAPABILITIES_INSPECT_OPERATION),
+            )
+            .expect("capabilities inspection remains read-only")
+        );
+        assert!(!n8n_supervised_writable_runtime_required_for(
+            CliAction::N8nSupervisedOfficialMcpRunOnce,
+            Some(
+                r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:private","connector_id":"fcp.mcp-bridge","operation":"mcp.tools.call"}"#,
+            ),
+            Some("n8n.workflows.lifecycle"),
+        )
+        .expect("wrong zone cannot enable the private ledger"));
+        assert!(
+            n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                Some(exact_mcp_call_admission),
+                Some("n8n.workflows.lifecycle"),
+            )
+            .expect("fixed lifecycle operation and exact MCP call admission enable the ledger")
+        );
+        assert!(
+            n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                Some(exact_mcp_call_admission),
+                Some("n8n.workflows.archive"),
+            )
+            .expect("fixed archive operation also enables the private ledger")
+        );
+        assert!(
+            n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                Some(exact_mcp_call_admission),
+                Some("n8n.workflows.execute"),
+            )
+            .expect("fixed execute operation also enables the private ledger")
+        );
+        assert!(
+            n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedOfficialMcpRunOnce,
+                Some("not-json"),
+                Some("n8n.workflows.lifecycle"),
+            )
+            .is_err()
+        );
+        assert!(
+            n8n_supervised_writable_runtime_required_for(
+                CliAction::N8nSupervisedWriteRunOnce,
+                None,
+                None,
+            )
+            .expect("typed REST writes retain their private ledger")
         );
     }
 

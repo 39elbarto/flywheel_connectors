@@ -70,6 +70,8 @@ const SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 #[cfg(target_os = "linux")]
 const SUPERVISOR_START_FRAME_LEN: usize = SUPERVISOR_START_PREFIX.len() + 4;
 #[cfg(target_os = "linux")]
+const SUPERVISED_OPERATION_ENV: &str = "FCP_HOST_N8N_SUPERVISED_OPERATION";
+#[cfg(target_os = "linux")]
 const CREATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.create_draft"}"#;
 #[cfg(target_os = "linux")]
 const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.update_draft"}"#;
@@ -339,6 +341,12 @@ fn process_spec(
         OsString::from("FCP_HOST_LIFECYCLE_STATE_FILE"),
         OsString::new(),
     );
+    if official_mcp {
+        fixed_env.insert(
+            OsString::from(SUPERVISED_OPERATION_ENV),
+            OsString::from(envelope.operation.as_str()),
+        );
+    }
     if let Some(admission) = owner_admission {
         fixed_env.insert(
             OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION"),
@@ -1869,6 +1877,12 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
             Some(&OsString::from(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION))
         );
+        assert_eq!(
+            lifecycle
+                .fixed_env
+                .get(&OsString::from(SUPERVISED_OPERATION_ENV)),
+            Some(&OsString::from("n8n.workflows.lifecycle"))
+        );
         let lifecycle_admission: Value = serde_json::from_str(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION)
             .expect("lifecycle child admission must remain valid JSON");
         assert_eq!(lifecycle_admission["version"], 1);
@@ -1896,6 +1910,12 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/eec-official-mcp.json"))
         );
+        assert_eq!(
+            archive
+                .fixed_env
+                .get(&OsString::from(SUPERVISED_OPERATION_ENV)),
+            Some(&OsString::from("n8n.workflows.archive"))
+        );
         let archive_admission: Value = serde_json::from_str(WORKFLOWS_ARCHIVE_OWNER_ADMISSION)
             .expect("archive child admission must remain valid JSON");
         assert_eq!(archive_admission["version"], 1);
@@ -1903,6 +1923,22 @@ mod tests {
         assert_eq!(archive_admission["zone_id"], "z:work");
         assert_eq!(archive_admission["connector_id"], "fcp.mcp-bridge");
         assert_eq!(archive_admission["operation"], "mcp.tools.call");
+
+        let execute = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsExecute,
+                Value::Null,
+            ),
+        )
+        .expect("workflow execute write spec");
+        assert_eq!(
+            execute
+                .fixed_env
+                .get(&OsString::from(SUPERVISED_OPERATION_ENV)),
+            Some(&OsString::from("n8n.workflows.execute"))
+        );
 
         let mcp_access = process_spec(
             &bundle,
@@ -1962,6 +1998,12 @@ mod tests {
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
             Some(&OsString::from("/release/inventory/eec-official-mcp.json"))
+        );
+        assert_eq!(
+            official
+                .fixed_env
+                .get(&OsString::from(SUPERVISED_OPERATION_ENV)),
+            Some(&OsString::from("n8n.capabilities.inspect"))
         );
         assert!(
             official

@@ -30,6 +30,10 @@ const CHILD_INVOKE_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const BRIDGE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
+const CHILD_PLAN_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-PLAN-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const BRIDGE_PLAN_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-PLAN-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
 const CHILD_HOST_ERROR_DIAGNOSTIC_PREFIX: &[u8] = b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FWC-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
@@ -1030,7 +1034,8 @@ pub fn run_process(
         request_deadline_at,
     )?;
     if !status.success() {
-        let diagnostic = child_invoke_diagnostic(&stderr);
+        let diagnostic =
+            child_invoke_diagnostic(&stderr).or_else(|| child_plan_diagnostic(&stderr));
         emit_child_invoke_diagnostic(&stderr);
         return Err(BridgeError::new(child_failure_code(&stdout)).with_diagnostic(diagnostic));
     }
@@ -1070,9 +1075,31 @@ fn child_invoke_diagnostic(stderr: &[u8]) -> Option<&'static str> {
 }
 
 #[cfg(target_os = "linux")]
+fn child_plan_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let label = line.strip_prefix(CHILD_PLAN_DIAGNOSTIC_PREFIX)?;
+        match label {
+            b"plan.build" => Some("plan.build"),
+            b"plan.typed_approval" => Some("plan.typed_approval"),
+            b"plan.approval_ref" => Some("plan.approval_ref"),
+            b"plan.approval_key" => Some("plan.approval_key"),
+            b"plan.payload" => Some("plan.payload"),
+            b"plan.constraints" => Some("plan.constraints"),
+            b"plan.approval_validation" => Some("plan.approval_validation"),
+            b"plan.claim_plan" => Some("plan.claim_plan"),
+            b"plan.claim" => Some("plan.claim"),
+            _ => None,
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
 fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_invoke_diagnostic(stderr) {
         eprintln!("{BRIDGE_INVOKE_DIAGNOSTIC_PREFIX}{label}");
+    }
+    if let Some(label) = child_plan_diagnostic(stderr) {
+        eprintln!("{BRIDGE_PLAN_DIAGNOSTIC_PREFIX}{label}");
     }
     if let Some(label) = child_external_provenance_diagnostic(stderr) {
         eprintln!("{BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{label}");
@@ -2044,6 +2071,34 @@ mod tests {
             b"FCP-N8N-INVOKE-DIAGNOSTIC/v2 response_external_5xx",
         ] {
             assert_eq!(child_invoke_diagnostic(stderr), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_plan_diagnostic_accepts_only_exact_allowlisted_lines() {
+        for label in [
+            "plan.build",
+            "plan.typed_approval",
+            "plan.approval_ref",
+            "plan.approval_key",
+            "plan.payload",
+            "plan.constraints",
+            "plan.approval_validation",
+            "plan.claim_plan",
+            "plan.claim",
+        ] {
+            let stderr = format!("untrusted noise\nFCP-N8N-PLAN-DIAGNOSTIC/v1 {label}\n");
+            assert_eq!(child_plan_diagnostic(stderr.as_bytes()), Some(label));
+        }
+
+        for stderr in [
+            b"FCP-N8N-PLAN-DIAGNOSTIC/v1 PRIVATE".as_slice(),
+            b"FCP-N8N-PLAN-DIAGNOSTIC/v1 plan.payload PRIVATE",
+            b"prefix FCP-N8N-PLAN-DIAGNOSTIC/v1 plan.payload",
+            b"FCP-N8N-PLAN-DIAGNOSTIC/v2 plan.payload",
+        ] {
+            assert_eq!(child_plan_diagnostic(stderr), None);
         }
     }
 

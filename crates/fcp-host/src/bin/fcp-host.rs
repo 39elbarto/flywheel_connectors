@@ -12955,6 +12955,47 @@ fn n8n_run_once_stage_error(stage: N8nRunOnceFailureStage) -> HostError {
     HostError::Internal(stage.marker().to_string())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOncePlanDiagnostic {
+    Build,
+    TypedApproval,
+    ApprovalRef,
+    ApprovalKey,
+    Payload,
+    Constraints,
+    ApprovalValidation,
+    ClaimPlan,
+    Claim,
+}
+
+impl N8nRunOncePlanDiagnostic {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Build => "plan.build",
+            Self::TypedApproval => "plan.typed_approval",
+            Self::ApprovalRef => "plan.approval_ref",
+            Self::ApprovalKey => "plan.approval_key",
+            Self::Payload => "plan.payload",
+            Self::Constraints => "plan.constraints",
+            Self::ApprovalValidation => "plan.approval_validation",
+            Self::ClaimPlan => "plan.claim_plan",
+            Self::Claim => "plan.claim",
+        }
+    }
+}
+
+fn emit_n8n_run_once_plan_diagnostic(diagnostic: N8nRunOncePlanDiagnostic) {
+    #[cfg(target_os = "linux")]
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!("FCP-N8N-PLAN-DIAGNOSTIC/v1 {}", diagnostic.label());
+    }
+}
+
+fn n8n_run_once_plan_error(diagnostic: N8nRunOncePlanDiagnostic) -> HostError {
+    emit_n8n_run_once_plan_diagnostic(diagnostic);
+    n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan)
+}
+
 const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_HOST_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ";
@@ -14502,7 +14543,7 @@ async fn async_n8n_official_mcp_run_once(
         .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Config))?;
     let claim_operation_name = high_level_input.operation.clone();
     let plan = build_n8n_official_mcp_run_once_plan(high_level_input, &selected_config)
-        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::Build))?;
     let typed_approval = lifecycle_input
         .as_ref()
         .filter(|_| {
@@ -14520,19 +14561,19 @@ async fn async_n8n_official_mcp_run_once(
             )
         })
         .transpose()
-        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::TypedApproval))?;
     let approval_verifying_key = if let Some(input) = lifecycle_input.as_ref() {
         let approval_ref = input
             .pointer("/guard/approvalRef")
             .and_then(Value::as_str)
-            .ok_or_else(|| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+            .ok_or_else(|| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::ApprovalRef))?;
         let verifying_key = n8n_runtime_approval_verifying_key()
-            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+            .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::ApprovalKey))?;
         let payload_digest = mcp_tools_call_payload_digest(&plan.input)
-            .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+            .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::Payload))?;
         let constraints =
             official_mcp_approval_constraints_with_typed_plan(&plan, typed_approval.as_ref())
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+                .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::Constraints))?;
         validate_external_n8n_approval(
             external_approval.as_ref(),
             approval_ref,
@@ -14543,7 +14584,7 @@ async fn async_n8n_official_mcp_run_once(
             &constraints,
             Some(&verifying_key),
         )
-        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::ApprovalValidation))?;
         Some(verifying_key)
     } else {
         None
@@ -14577,19 +14618,19 @@ async fn async_n8n_official_mcp_run_once(
             })
         })
         .transpose()
-        .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?;
+        .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::ClaimPlan))?;
     #[cfg(unix)]
     let claim = if let Some(claim_plan) = claim_plan.as_ref() {
         Some(
             n8n_run_once_claim(claim_plan)
-                .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan))?,
+                .map_err(|_| n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::Claim))?,
         )
     } else {
         None
     };
     #[cfg(not(unix))]
     if claim_plan.is_some() {
-        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan));
+        return Err(n8n_run_once_plan_error(N8nRunOncePlanDiagnostic::Claim));
     }
     let credential =
         read_run_once_credential_bootstrap_for_binding(plan.credential_binding.clone())

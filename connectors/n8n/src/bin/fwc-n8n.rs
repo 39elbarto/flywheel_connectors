@@ -740,9 +740,10 @@ fn run_host_bridge_once(
             } else {
                 error.code()
             };
-            let diagnostic = (lifecycle && code == "unknown_outcome")
-                .then(|| error.diagnostic())
-                .flatten();
+            let diagnostic = (lifecycle
+                && matches!(code, "unknown_outcome" | "official_mcp_plan_failed"))
+            .then(|| error.diagnostic())
+            .flatten();
             AppError::with_diagnostic(code, diagnostic)
         },
     )

@@ -11657,10 +11657,14 @@ fn official_mcp_approval_constraints_with_typed_plan(
                 "typed official MCP approval parent binding is missing".to_string(),
             )
         })?;
+        let approval_resource_uri = match server {
+            N8nApprovalServer::Eec => "fwc-mcp-bridge://eec",
+            N8nApprovalServer::Hetzner => "fwc-mcp-bridge://hetzner",
+        };
         return n8n_official_mcp_approval_constraints(
             server,
             tool,
-            &plan.resource_uri,
+            &approval_resource_uri,
             &payload_digest,
             &hex::encode(parent_binding),
             &typed_approval.plan_digest,
@@ -34527,6 +34531,8 @@ done"#;
             Some(&approval),
         )
         .expect("typed approval binding");
+        official_mcp_approval_constraints_with_typed_plan(&provider_plan, Some(&typed_approval))
+            .expect("typed official MCP approval constraints");
         let claim_plan = N8nReadOnlyRunOncePlan {
             server_id: provider_plan.server_id,
             operation: OperationId::from_static("n8n.workflows.lifecycle"),

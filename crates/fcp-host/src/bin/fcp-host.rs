@@ -12405,7 +12405,10 @@ fn n8n_run_once_runtime_dir() -> HostResult<PathBuf> {
 
 #[cfg(unix)]
 fn n8n_run_once_claim(plan: &N8nReadOnlyRunOncePlan) -> HostResult<N8nRunOnceClaim> {
-    n8n_run_once_claim_at(plan, &n8n_run_once_runtime_dir()?)
+    let root = n8n_run_once_runtime_dir().map_err(|error| {
+        n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimRuntime)
+    })?;
+    n8n_run_once_claim_at(plan, &root)
 }
 
 #[cfg(unix)]
@@ -12447,13 +12450,24 @@ fn n8n_run_once_claim_at(
         .mode(0o600)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(&lock_path)
-        .map_err(|_| HostError::Unavailable("n8n run-once lock is unavailable".to_string()))?;
-    let metadata = lock_file
-        .metadata()
-        .map_err(|_| HostError::Unavailable("n8n run-once lock is unavailable".to_string()))?;
+        .map_err(|_| {
+            n8n_run_once_plan_diagnostic_error(
+                HostError::Unavailable("n8n run-once lock is unavailable".to_string()),
+                N8nRunOncePlanDiagnostic::ClaimLockOpen,
+            )
+        })?;
+    let metadata = lock_file.metadata().map_err(|_| {
+        n8n_run_once_plan_diagnostic_error(
+            HostError::Unavailable("n8n run-once lock is unavailable".to_string()),
+            N8nRunOncePlanDiagnostic::ClaimLockMetadata,
+        )
+    })?;
     let owner_uid = fs::metadata("/proc/self")
         .map_err(|_| {
-            HostError::Unavailable("n8n run-once runtime owner is unavailable".to_string())
+            n8n_run_once_plan_diagnostic_error(
+                HostError::Unavailable("n8n run-once runtime owner is unavailable".to_string()),
+                N8nRunOncePlanDiagnostic::ClaimRuntime,
+            )
         })?
         .uid();
     if !metadata.is_file()
@@ -12461,21 +12475,35 @@ fn n8n_run_once_claim_at(
         || metadata.permissions().mode() & 0o777 != 0o600
         || metadata.nlink() != 1
     {
-        return Err(HostError::PreflightFailed(
-            "n8n run-once lock ownership or mode is invalid".to_string(),
+        return Err(n8n_run_once_plan_diagnostic_error(
+            HostError::PreflightFailed(
+                "n8n run-once lock ownership or mode is invalid".to_string(),
+            ),
+            N8nRunOncePlanDiagnostic::ClaimLockIdentity,
         ));
     }
     let lock = Flock::lock(lock_file, FlockArg::LockExclusiveNonblock).map_err(
         |(_lock_file, error)| {
             if error == nix::errno::Errno::EWOULDBLOCK {
-                HostError::PreflightFailed("n8n run-once lock conflict".to_string())
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::PreflightFailed("n8n run-once lock conflict".to_string()),
+                    N8nRunOncePlanDiagnostic::ClaimLock,
+                )
             } else {
-                HostError::Unavailable("n8n run-once lock is unavailable".to_string())
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::Unavailable("n8n run-once lock is unavailable".to_string()),
+                    N8nRunOncePlanDiagnostic::ClaimLock,
+                )
             }
         },
     )?;
     if plan.operation.as_str() == "n8n.workflows.delete_disposable" {
-        n8n_run_once_validate_disposable_creation_receipt(plan, root)?;
+        n8n_run_once_validate_disposable_creation_receipt(plan, root).map_err(|error| {
+            n8n_run_once_plan_diagnostic_error(
+                error,
+                N8nRunOncePlanDiagnostic::ClaimDisposableReceipt,
+            )
+        })?;
     }
     // The external token validator requires token_id == approvalRef before
     // this claim is reached. Persist a marker keyed by that token id so a
@@ -12485,7 +12513,12 @@ fn n8n_run_once_claim_at(
         .input
         .pointer("/guard/approvalRef")
         .and_then(Value::as_str)
-        .ok_or_else(|| HostError::InvalidFilter("n8n write approvalRef is missing".to_string()))?;
+        .ok_or_else(|| {
+            n8n_run_once_plan_diagnostic_error(
+                HostError::InvalidFilter("n8n write approvalRef is missing".to_string()),
+                N8nRunOncePlanDiagnostic::ClaimApprovalRef,
+            )
+        })?;
     let token_id_digest = n8n_run_once_digest(
         b"fwc-n8n.approval-token-id.v1",
         &Value::String(token_id.to_string()),
@@ -12501,12 +12534,21 @@ fn n8n_run_once_claim_at(
     let receipt_exists = fs::symlink_metadata(&receipt_path).is_ok();
     if marker_exists {
         if receipt_exists {
-            n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome")?;
+            n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome").map_err(
+                |error| {
+                    n8n_run_once_plan_diagnostic_error(
+                        error,
+                        N8nRunOncePlanDiagnostic::ClaimExisting,
+                    )
+                },
+            )?;
             return Err(HostError::PreflightFailed(
                 "n8n run-once approval was already consumed".to_string(),
             ));
         }
-        let marker = read_n8n_private_json(&marker_path)?;
+        let marker = read_n8n_private_json(&marker_path).map_err(|error| {
+            n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimExisting)
+        })?;
         let expected_marker = json!({
             "schema": "fwc.n8n.run-once-claim.v1",
             "claimDigest": claim_digest,
@@ -12517,21 +12559,28 @@ fn n8n_run_once_claim_at(
                 .as_ref()
                 .map(|binding| binding.plan_digest.clone()),
         });
-        validate_n8n_recovery_binding(&expected_marker, &marker, "claim")?;
+        validate_n8n_recovery_binding(&expected_marker, &marker, "claim").map_err(|error| {
+            n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimExisting)
+        })?;
         return Err(HostError::PreflightFailed(
             "n8n run-once outcome is unknown; reconcile by readback; automatic retry forbidden"
                 .to_string(),
         ));
     }
     if receipt_exists {
-        n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome")?;
+        n8n_run_once_validate_existing_record(plan, &receipt_path, "outcome").map_err(|error| {
+            n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimExisting)
+        })?;
         return Err(HostError::PreflightFailed(
             "n8n run-once approval was already consumed".to_string(),
         ));
     }
     if fs::symlink_metadata(&token_marker_path).is_ok() {
-        return Err(HostError::PreflightFailed(
-            "n8n run-once approval token was already consumed".to_string(),
+        return Err(n8n_run_once_plan_diagnostic_error(
+            HostError::PreflightFailed(
+                "n8n run-once approval token was already consumed".to_string(),
+            ),
+            N8nRunOncePlanDiagnostic::ClaimExisting,
         ));
     }
     let mut token_marker = OpenOptions::new()
@@ -12542,11 +12591,19 @@ fn n8n_run_once_claim_at(
         .open(&token_marker_path)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                HostError::PreflightFailed(
-                    "n8n run-once approval token was already consumed".to_string(),
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::PreflightFailed(
+                        "n8n run-once approval token was already consumed".to_string(),
+                    ),
+                    N8nRunOncePlanDiagnostic::ClaimExisting,
                 )
             } else {
-                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::Unavailable(
+                        "n8n run-once consumed marker is unavailable".to_string(),
+                    ),
+                    N8nRunOncePlanDiagnostic::ClaimTokenMarker,
+                )
             }
         })?;
     let token_marker_payload = json!({
@@ -12564,9 +12621,14 @@ fn n8n_run_once_claim_at(
         .write_all(token_marker_payload.to_string().as_bytes())
         .and_then(|_| token_marker.sync_all())
         .map_err(|_| {
-            HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+            n8n_run_once_plan_diagnostic_error(
+                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string()),
+                N8nRunOncePlanDiagnostic::ClaimTokenMarkerWrite,
+            )
         })?;
-    sync_n8n_parent_dir(&token_marker_path)?;
+    sync_n8n_parent_dir(&token_marker_path).map_err(|error| {
+        n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimTokenMarkerWrite)
+    })?;
     let mut marker = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -12575,9 +12637,19 @@ fn n8n_run_once_claim_at(
         .open(&marker_path)
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::AlreadyExists {
-                HostError::PreflightFailed("n8n run-once approval was already consumed".to_string())
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::PreflightFailed(
+                        "n8n run-once approval was already consumed".to_string(),
+                    ),
+                    N8nRunOncePlanDiagnostic::ClaimExisting,
+                )
             } else {
-                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+                n8n_run_once_plan_diagnostic_error(
+                    HostError::Unavailable(
+                        "n8n run-once consumed marker is unavailable".to_string(),
+                    ),
+                    N8nRunOncePlanDiagnostic::ClaimMarker,
+                )
             }
         })?;
     let marker_payload = json!({
@@ -12595,9 +12667,14 @@ fn n8n_run_once_claim_at(
         .write_all(marker_payload.to_string().as_bytes())
         .and_then(|_| marker.sync_all())
         .map_err(|_| {
-            HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string())
+            n8n_run_once_plan_diagnostic_error(
+                HostError::Unavailable("n8n run-once consumed marker is unavailable".to_string()),
+                N8nRunOncePlanDiagnostic::ClaimMarkerWrite,
+            )
         })?;
-    sync_n8n_parent_dir(&marker_path)?;
+    sync_n8n_parent_dir(&marker_path).map_err(|error| {
+        n8n_run_once_plan_diagnostic_error(error, N8nRunOncePlanDiagnostic::ClaimMarkerWrite)
+    })?;
     Ok(N8nRunOnceClaim {
         _lock: lock,
         claim_digest,
@@ -12966,6 +13043,18 @@ enum N8nRunOncePlanDiagnostic {
     ApprovalValidation,
     ClaimPlan,
     Claim,
+    ClaimRuntime,
+    ClaimLockOpen,
+    ClaimLockMetadata,
+    ClaimLockIdentity,
+    ClaimLock,
+    ClaimDisposableReceipt,
+    ClaimApprovalRef,
+    ClaimExisting,
+    ClaimTokenMarker,
+    ClaimTokenMarkerWrite,
+    ClaimMarker,
+    ClaimMarkerWrite,
 }
 
 impl N8nRunOncePlanDiagnostic {
@@ -12980,6 +13069,18 @@ impl N8nRunOncePlanDiagnostic {
             Self::ApprovalValidation => "plan.approval_validation",
             Self::ClaimPlan => "plan.claim_plan",
             Self::Claim => "plan.claim",
+            Self::ClaimRuntime => "plan.claim.runtime",
+            Self::ClaimLockOpen => "plan.claim.lock_open",
+            Self::ClaimLockMetadata => "plan.claim.lock_metadata",
+            Self::ClaimLockIdentity => "plan.claim.lock_identity",
+            Self::ClaimLock => "plan.claim.lock",
+            Self::ClaimDisposableReceipt => "plan.claim.disposable_receipt",
+            Self::ClaimApprovalRef => "plan.claim.approval_ref",
+            Self::ClaimExisting => "plan.claim.existing",
+            Self::ClaimTokenMarker => "plan.claim.token_marker",
+            Self::ClaimTokenMarkerWrite => "plan.claim.token_marker_write",
+            Self::ClaimMarker => "plan.claim.marker",
+            Self::ClaimMarkerWrite => "plan.claim.marker_write",
         }
     }
 }
@@ -12994,6 +13095,14 @@ fn emit_n8n_run_once_plan_diagnostic(diagnostic: N8nRunOncePlanDiagnostic) {
 fn n8n_run_once_plan_error(diagnostic: N8nRunOncePlanDiagnostic) -> HostError {
     emit_n8n_run_once_plan_diagnostic(diagnostic);
     n8n_run_once_stage_error(N8nRunOnceFailureStage::Plan)
+}
+
+fn n8n_run_once_plan_diagnostic_error(
+    error: HostError,
+    diagnostic: N8nRunOncePlanDiagnostic,
+) -> HostError {
+    emit_n8n_run_once_plan_diagnostic(diagnostic);
+    error
 }
 
 const N8N_RUN_ONCE_INVOKE_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-INVOKE-DIAGNOSTIC/v1 ";

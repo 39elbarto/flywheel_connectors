@@ -1088,6 +1088,18 @@ fn child_plan_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             b"plan.approval_validation" => Some("plan.approval_validation"),
             b"plan.claim_plan" => Some("plan.claim_plan"),
             b"plan.claim" => Some("plan.claim"),
+            b"plan.claim.runtime" => Some("plan.claim.runtime"),
+            b"plan.claim.lock_open" => Some("plan.claim.lock_open"),
+            b"plan.claim.lock_metadata" => Some("plan.claim.lock_metadata"),
+            b"plan.claim.lock_identity" => Some("plan.claim.lock_identity"),
+            b"plan.claim.lock" => Some("plan.claim.lock"),
+            b"plan.claim.disposable_receipt" => Some("plan.claim.disposable_receipt"),
+            b"plan.claim.approval_ref" => Some("plan.claim.approval_ref"),
+            b"plan.claim.existing" => Some("plan.claim.existing"),
+            b"plan.claim.token_marker" => Some("plan.claim.token_marker"),
+            b"plan.claim.token_marker_write" => Some("plan.claim.token_marker_write"),
+            b"plan.claim.marker" => Some("plan.claim.marker"),
+            b"plan.claim.marker_write" => Some("plan.claim.marker_write"),
             _ => None,
         }
     })
@@ -2087,6 +2099,18 @@ mod tests {
             "plan.approval_validation",
             "plan.claim_plan",
             "plan.claim",
+            "plan.claim.runtime",
+            "plan.claim.lock_open",
+            "plan.claim.lock_metadata",
+            "plan.claim.lock_identity",
+            "plan.claim.lock",
+            "plan.claim.disposable_receipt",
+            "plan.claim.approval_ref",
+            "plan.claim.existing",
+            "plan.claim.token_marker",
+            "plan.claim.token_marker_write",
+            "plan.claim.marker",
+            "plan.claim.marker_write",
         ] {
             let stderr = format!("untrusted noise\nFCP-N8N-PLAN-DIAGNOSTIC/v1 {label}\n");
             assert_eq!(child_plan_diagnostic(stderr.as_bytes()), Some(label));

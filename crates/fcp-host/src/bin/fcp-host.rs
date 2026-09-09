@@ -376,13 +376,13 @@ const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
 const N8N_OFFICIAL_MCP_ARCHIVE_TOOL: &str = "archive_workflow";
 const N8N_OFFICIAL_MCP_EXECUTE_TOOL: &str = "execute_workflow";
 const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
 const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
@@ -391,6 +391,8 @@ const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
+const N8N_OFFICIAL_MCP_EEC_N8N_VERSION: &str = "2.38.4";
+const N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION: &str = "2.34.6";
 const N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
 const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
@@ -11217,6 +11219,14 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         return false;
     };
     let server_id = config.get("server_id").and_then(Value::as_str);
+    let expected_n8n_version = match server_id {
+        Some("eec") => N8N_OFFICIAL_MCP_EEC_N8N_VERSION,
+        Some("hetzner") => N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION,
+        _ => return false,
+    };
+    if policy.get("n8n_version").and_then(Value::as_str) != Some(expected_n8n_version) {
+        return false;
+    }
     if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
         let (expected_input, expected_output) = match server_id {
             Some("eec") => (
@@ -34740,21 +34750,21 @@ done"#;
         config.allowed_zones = vec![ZoneId::work().to_string()];
         config.allowed_operations = vec![N8N_OFFICIAL_MCP_CALL_OPERATION.to_string()];
         config.config.as_mut().expect("config")["capability_policy"] = json!({
-            "n8n_version": "2.34.4",
+            "n8n_version": "2.38.4",
             "auth_mode": "access_token",
             "api_scope_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "approved_tools": [
                 {
                     "name": N8N_OFFICIAL_MCP_PUBLISH_TOOL,
                     "class": "write",
-                    "input_schema_digest": "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf",
-                    "output_schema_digest": "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf"
+                    "input_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                    "output_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC
                 },
                 {
                     "name": N8N_OFFICIAL_MCP_UNPUBLISH_TOOL,
                     "class": "write",
-                    "input_schema_digest": "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115",
-                    "output_schema_digest": "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c"
+                    "input_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                    "output_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC
                 },
                 {
                     "name": N8N_OFFICIAL_MCP_ARCHIVE_TOOL,
@@ -35017,7 +35027,7 @@ done"#;
     }
 
     #[test]
-    fn n8n_official_mcp_lifecycle_schema_binding_is_exact_per_server() {
+    fn n8n_official_mcp_lifecycle_schema_binding_accepts_verified_servers_and_rejects_drift() {
         let eec = ManagedConnectorConfig {
             id: "fcp.mcp-bridge".to_string(),
             binary: "/bin/true".to_string(),
@@ -35029,6 +35039,7 @@ done"#;
             config: Some(json!({
                 "server_id": "eec",
                 "capability_policy": {
+                    "n8n_version": N8N_OFFICIAL_MCP_EEC_N8N_VERSION,
                     "approved_tools": [
                         {
                             "name": N8N_OFFICIAL_MCP_PUBLISH_TOOL,
@@ -35068,13 +35079,22 @@ done"#;
 
         let mut copied_eec_policy = eec.clone();
         copied_eec_policy.config.as_mut().expect("config")["server_id"] = json!("hetzner");
-        assert!(!official_mcp_policy_allows_tool(
+        copied_eec_policy.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!(N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION);
+        assert!(official_mcp_policy_allows_tool(
             &copied_eec_policy,
             N8N_OFFICIAL_MCP_PUBLISH_TOOL
         ));
-        assert!(!official_mcp_policy_allows_tool(
+        assert!(official_mcp_policy_allows_tool(
             &copied_eec_policy,
             N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+        ));
+
+        copied_eec_policy.config.as_mut().expect("config")["capability_policy"]["approved_tools"]
+            [0]["input_schema_digest"] = json!("sha256:wrong");
+        assert!(!official_mcp_policy_allows_tool(
+            &copied_eec_policy,
+            N8N_OFFICIAL_MCP_PUBLISH_TOOL
         ));
 
         let mut hetzner = copied_eec_policy;
@@ -35097,6 +35117,14 @@ done"#;
         assert!(official_mcp_policy_allows_tool(
             &hetzner,
             N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
+        ));
+
+        let mut predecessor = eec;
+        predecessor.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!("2.34.4");
+        assert!(!official_mcp_policy_allows_tool(
+            &predecessor,
+            N8N_OFFICIAL_MCP_PUBLISH_TOOL
         ));
     }
 

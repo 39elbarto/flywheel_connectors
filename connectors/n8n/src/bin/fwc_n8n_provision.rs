@@ -64,13 +64,13 @@ const APPROVED_TOOLS: [&str; 4] = [
     "execute_workflow",
 ];
 const EEC_PUBLISH_INPUT: &str =
-    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const EEC_PUBLISH_OUTPUT: &str =
-    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const EEC_UNPUBLISH_INPUT: &str =
-    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const EEC_UNPUBLISH_OUTPUT: &str =
-    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
 const HETZNER_PUBLISH_INPUT: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const HETZNER_PUBLISH_OUTPUT: &str =
@@ -80,6 +80,14 @@ const HETZNER_UNPUBLISH_INPUT: &str =
 const HETZNER_UNPUBLISH_OUTPUT: &str =
     "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
 // Exact signed predecessor pins; never admitted for a new staged candidate.
+const PREVIOUS_EEC_PUBLISH_INPUT: &str =
+    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+const PREVIOUS_EEC_PUBLISH_OUTPUT: &str =
+    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+const PREVIOUS_EEC_UNPUBLISH_INPUT: &str =
+    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+const PREVIOUS_EEC_UNPUBLISH_OUTPUT: &str =
+    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 const PREVIOUS_HETZNER_PUBLISH_INPUT: &str =
     "sha256:0df0eb8d4d0c0940bde97d3e2e3af5f9a184ed492dd98a23581bc72c8a17dba4";
 const PREVIOUS_HETZNER_PUBLISH_OUTPUT: &str =
@@ -105,6 +113,30 @@ fn lifecycle_schema_digests(
         _ => None,
     }
 }
+
+fn previous_eec_lifecycle_schema_digests(tool_name: &str) -> Option<(&'static str, &'static str)> {
+    match tool_name {
+        "publish_workflow" => Some((PREVIOUS_EEC_PUBLISH_INPUT, PREVIOUS_EEC_PUBLISH_OUTPUT)),
+        "unpublish_workflow" => Some((PREVIOUS_EEC_UNPUBLISH_INPUT, PREVIOUS_EEC_UNPUBLISH_OUTPUT)),
+        _ => None,
+    }
+}
+
+fn previous_hetzner_lifecycle_schema_digests(
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match tool_name {
+        "publish_workflow" => Some((
+            PREVIOUS_HETZNER_PUBLISH_INPUT,
+            PREVIOUS_HETZNER_PUBLISH_OUTPUT,
+        )),
+        "unpublish_workflow" => Some((
+            PREVIOUS_HETZNER_UNPUBLISH_INPUT,
+            PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
+        )),
+        _ => None,
+    }
+}
 const EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const EEC_EXECUTE_INPUT: &str =
     "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
@@ -117,7 +149,8 @@ const HETZNER_EXECUTE_OUTPUT: &str =
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
 const EEC_API_URL: &str = "https://n8n.europeaneyecenter.com/api/v1";
-const EEC_N8N_VERSION: &str = "2.34.4";
+const EEC_N8N_VERSION: &str = "2.38.4";
+const PREVIOUS_EEC_N8N_VERSION: &str = "2.34.4";
 const HETZNER_MCP_URL: &str = "https://n8nhet.levilaser.com:8443/mcp-server/http";
 const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
@@ -2033,6 +2066,22 @@ fn expected_n8n_network_constraint(host: &str, port: u64) -> Value {
     })
 }
 
+fn expected_inventory_n8n_version(
+    server: ServerId,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+) -> &'static str {
+    match (server, lifecycle_schema_mode) {
+        // The current staged candidate is the only path that admits the new
+        // EEC generation. LegacyCommon deliberately keeps its historical
+        // version semantics; it is not a predecessor-policy alias.
+        (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer)
+        | (ServerId::Eec, LifecycleSchemaMode::LegacyCommon) => EEC_N8N_VERSION,
+        (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer) => PREVIOUS_EEC_N8N_VERSION,
+        // Hetzner's current and predecessor pins are intentionally unchanged.
+        (ServerId::Hetzner, _) => HETZNER_N8N_VERSION,
+    }
+}
+
 #[cfg(unix)]
 fn validate_local_mcp_policy(value: &Value) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
@@ -2224,15 +2273,11 @@ fn validate_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
-    let (expected_url, expected_host, expected_port, expected_version) = match server {
-        ServerId::Eec => (EEC_MCP_URL, EEC_MCP_HOST, 443_u64, EEC_N8N_VERSION),
-        ServerId::Hetzner => (
-            HETZNER_MCP_URL,
-            HETZNER_MCP_HOST,
-            8443_u64,
-            HETZNER_N8N_VERSION,
-        ),
+    let (expected_url, expected_host, expected_port) = match server {
+        ServerId::Eec => (EEC_MCP_URL, EEC_MCP_HOST, 443_u64),
+        ServerId::Hetzner => (HETZNER_MCP_URL, HETZNER_MCP_HOST, 8443_u64),
     };
+    let expected_version = expected_inventory_n8n_version(server, lifecycle_schema_mode);
     let config = entry
         .get("config")
         .and_then(Value::as_object)
@@ -2333,36 +2378,55 @@ fn validate_inventory(
         if !is_sha256_digest(input) || !is_sha256_digest(output) {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
-        let expected = match name {
-            "publish_workflow" | "unpublish_workflow" => match lifecycle_schema_mode {
-                LifecycleSchemaMode::CurrentPerServer => lifecycle_schema_digests(server, name),
-                LifecycleSchemaMode::PreviousPerServer => match (server, name) {
-                    (ServerId::Hetzner, "publish_workflow") => Some((
-                        PREVIOUS_HETZNER_PUBLISH_INPUT,
-                        PREVIOUS_HETZNER_PUBLISH_OUTPUT,
-                    )),
-                    (ServerId::Hetzner, "unpublish_workflow") => Some((
-                        PREVIOUS_HETZNER_UNPUBLISH_INPUT,
-                        PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
-                    )),
-                    _ => lifecycle_schema_digests(server, name),
-                },
-                LifecycleSchemaMode::LegacyCommon => {
-                    fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
-                }
+        let lifecycle_matches = match (server, lifecycle_schema_mode, name) {
+            (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer, "publish_workflow")
+            | (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer, "unpublish_workflow")
+            | (ServerId::Hetzner, LifecycleSchemaMode::CurrentPerServer, "publish_workflow")
+            | (ServerId::Hetzner, LifecycleSchemaMode::CurrentPerServer, "unpublish_workflow") => {
+                lifecycle_schema_digests(server, name)
+                    .is_some_and(|expected| expected == (input, output))
             }
-            .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?,
-            "archive_workflow" => (
-                binding.archive_input_schema_digest.as_str(),
-                binding.archive_output_schema_digest.as_str(),
-            ),
-            "execute_workflow" => (
-                binding.execute_input_schema_digest.as_str(),
-                binding.execute_output_schema_digest.as_str(),
-            ),
-            _ => return Err(ProvisionError::new(ProvisionErrorCode::Policy)),
+            (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer, "publish_workflow")
+            | (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer, "unpublish_workflow") => {
+                previous_eec_lifecycle_schema_digests(name)
+                    .is_some_and(|expected| expected == (input, output))
+            }
+            (ServerId::Hetzner, LifecycleSchemaMode::PreviousPerServer, "publish_workflow")
+            | (ServerId::Hetzner, LifecycleSchemaMode::PreviousPerServer, "unpublish_workflow") => {
+                [
+                    previous_hetzner_lifecycle_schema_digests(name),
+                    lifecycle_schema_digests(server, name),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|expected| expected == (input, output))
+            }
+            (_, LifecycleSchemaMode::LegacyCommon, "publish_workflow")
+            | (_, LifecycleSchemaMode::LegacyCommon, "unpublish_workflow") => {
+                fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
+                    .is_some_and(|expected| expected == (input, output))
+            }
+            _ => false,
         };
-        if (input, output) != expected || seen.insert(name, (input, output)).is_some() {
+        let binding_matches = match name {
+            "archive_workflow" => {
+                (input, output)
+                    == (
+                        binding.archive_input_schema_digest.as_str(),
+                        binding.archive_output_schema_digest.as_str(),
+                    )
+            }
+            "execute_workflow" => {
+                (input, output)
+                    == (
+                        binding.execute_input_schema_digest.as_str(),
+                        binding.execute_output_schema_digest.as_str(),
+                    )
+            }
+            "publish_workflow" | "unpublish_workflow" => lifecycle_matches,
+            _ => false,
+        };
+        if !binding_matches || seen.insert(name, (input, output)).is_some() {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
     }
@@ -3686,32 +3750,78 @@ mod tests {
             .expect("provision receipt json")
         }
 
-        fn set_previous_generation_lifecycle_schemas(&self, root: &Path, release_id: &str) {
-            let path = root.join("inventory/hetzner-official-mcp.json");
+        fn set_previous_eec_policy(&self, root: &Path, release_id: &str) {
+            let path = root.join("inventory/eec-official-mcp.json");
             let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
                 .expect("inventory JSON");
+            value[0]["config"]["capability_policy"]["n8n_version"] =
+                json!(PREVIOUS_EEC_N8N_VERSION);
             for tool in value[0]["config"]["capability_policy"]["approved_tools"]
                 .as_array_mut()
                 .expect("approved tools")
             {
-                let pins = match tool["name"].as_str() {
-                    Some("publish_workflow") => Some((
-                        PREVIOUS_HETZNER_PUBLISH_INPUT,
-                        PREVIOUS_HETZNER_PUBLISH_OUTPUT,
-                    )),
-                    Some("unpublish_workflow") => Some((
-                        PREVIOUS_HETZNER_UNPUBLISH_INPUT,
-                        PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
-                    )),
-                    _ => None,
-                };
+                let pins = tool["name"]
+                    .as_str()
+                    .and_then(previous_eec_lifecycle_schema_digests);
                 if let Some((input, output)) = pins {
                     tool["input_schema_digest"] = json!(input);
                     tool["output_schema_digest"] = json!(output);
                 }
             }
             fs::write(&path, serde_json::to_vec(&value).expect("inventory JSON"))
-                .expect("previous inventory");
+                .expect("previous EEC inventory");
+            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+                .expect("previous EEC receipt");
+            fs::write(
+                root.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(root, release_id),
+            )
+            .expect("previous EEC signed receipt");
+        }
+
+        fn set_previous_generation_lifecycle_schemas(&self, root: &Path, release_id: &str) {
+            for (server, publish, unpublish) in [
+                (
+                    "eec",
+                    (PREVIOUS_EEC_PUBLISH_INPUT, PREVIOUS_EEC_PUBLISH_OUTPUT),
+                    (PREVIOUS_EEC_UNPUBLISH_INPUT, PREVIOUS_EEC_UNPUBLISH_OUTPUT),
+                ),
+                (
+                    "hetzner",
+                    (
+                        PREVIOUS_HETZNER_PUBLISH_INPUT,
+                        PREVIOUS_HETZNER_PUBLISH_OUTPUT,
+                    ),
+                    (
+                        PREVIOUS_HETZNER_UNPUBLISH_INPUT,
+                        PREVIOUS_HETZNER_UNPUBLISH_OUTPUT,
+                    ),
+                ),
+            ] {
+                let path = root.join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                    .expect("inventory JSON");
+                for tool in value[0]["config"]["capability_policy"]["approved_tools"]
+                    .as_array_mut()
+                    .expect("approved tools")
+                {
+                    let pins = match tool["name"].as_str() {
+                        Some("publish_workflow") => Some(publish),
+                        Some("unpublish_workflow") => Some(unpublish),
+                        _ => None,
+                    };
+                    if let Some((input, output)) = pins {
+                        tool["input_schema_digest"] = json!(input);
+                        tool["output_schema_digest"] = json!(output);
+                    }
+                }
+                if server == "eec" {
+                    value[0]["config"]["capability_policy"]["n8n_version"] =
+                        json!(PREVIOUS_EEC_N8N_VERSION);
+                }
+                fs::write(&path, serde_json::to_vec(&value).expect("inventory JSON"))
+                    .expect("previous inventory");
+            }
             let path = root.join("policy/local-mcp.json");
             let mut value: Value =
                 serde_json::from_slice(&fs::read(&path).expect("policy")).expect("policy JSON");
@@ -3989,6 +4099,40 @@ mod tests {
                 .request()
                 .validate()
                 .expect_err("old pins forbidden in new candidate")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_previous_eec_policy_accepts_owner_cutover_only() {
+        let fixture = Fixture::new();
+        let previous = fixture.releases.join("previous");
+        fixture.set_previous_eec_policy(&previous, "previous");
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("full signed previous EEC policy");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
+        );
+        validate_release_target(
+            &previous,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("full previous EEC policy remains a signed rollback target");
+
+        let fixture = Fixture::new();
+        fixture.set_previous_eec_policy(&fixture.stage, &fixture.release_id);
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("staged candidate must require current EEC policy")
                 .code(),
             ProvisionErrorCode::Policy
         );

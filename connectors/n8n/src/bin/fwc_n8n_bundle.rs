@@ -46,13 +46,13 @@ const EXECUTABLE_ARTIFACTS: [&str; 4] = [
     "bin/fcp-mcp-bridge",
 ];
 const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
 const OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
@@ -61,6 +61,19 @@ const OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
+
+// The installed EEC release is still on this exact predecessor version. It
+// is accepted only by the owner bootstrap path while the staged release is
+// cut over to the current EEC policy below.
+const PREVIOUS_EEC_N8N_VERSION: &str = "2.34.4";
+const PREVIOUS_EEC_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:b5fd649c299287d5bbf4091589d2e0c2cf54d3d8a87e5b4e97f5022d0bd74fcf";
+const PREVIOUS_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:ec97a0fe010542c1aa3fcf484cc4531f27dfb72ce6d4a161d7dcd31d7f0b8ddf";
+const PREVIOUS_EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
+    "sha256:4d365469269cb9f2e3d2629cd2d86bdb23b1687cbff015895b59c78228d96115";
+const PREVIOUS_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
+    "sha256:31e476b490845afb45d0354ecdfb3fe26015d14d3967747119c5eecef0d2d00c";
 
 fn official_mcp_lifecycle_schema_digests(
     server_id: &str,
@@ -87,16 +100,17 @@ fn official_mcp_lifecycle_schema_digests(
     }
 }
 
-// Legacy bundles used the original EEC-shaped lifecycle contract. Keep that
-// bootstrap acceptance separate from current per-server bindings.
+// Legacy bundles used the original EEC-shaped lifecycle contract. Keep those
+// exact pins separate from the full predecessor policy above and current
+// per-server bindings.
 const LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST: &str =
-    OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC;
+    PREVIOUS_EEC_PUBLISH_INPUT_SCHEMA_DIGEST;
 const LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
-    OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC;
+    PREVIOUS_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST;
 const LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
-    OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC;
+    PREVIOUS_EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST;
 const LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
-    OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC;
+    PREVIOUS_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST;
 
 pub(crate) fn legacy_official_mcp_lifecycle_schema_digests(
     tool_name: &str,
@@ -109,6 +123,22 @@ pub(crate) fn legacy_official_mcp_lifecycle_schema_digests(
         "unpublish_workflow" => Some((
             LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
             LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+        )),
+        _ => None,
+    }
+}
+
+fn previous_eec_official_mcp_lifecycle_schema_digests(
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match tool_name {
+        "publish_workflow" => Some((
+            PREVIOUS_EEC_PUBLISH_INPUT_SCHEMA_DIGEST,
+            PREVIOUS_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+        )),
+        "unpublish_workflow" => Some((
+            PREVIOUS_EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+            PREVIOUS_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
         )),
         _ => None,
     }
@@ -395,9 +425,10 @@ pub fn verify_current_release_bundle() -> Result<(), BundleError> {
 ///
 /// This seam intentionally accepts no path. It starts at the fixed production
 /// `current` symlink, requires a direct child of the fixed `releases/` root,
-/// canonicalizes that release, and only then reuses the legacy bundle
-/// verifier. The ordinary runtime/status verifier below continues to derive
-/// its executable from `current_exe()`.
+/// canonicalizes that release, and only then reuses the bundle verifier with
+/// its narrowly scoped owner-bootstrap predecessor allowance.
+/// The ordinary runtime/status verifier below continues to derive its
+/// executable from `current_exe()` and remains current-policy-only.
 #[cfg(unix)]
 pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
     let current = fs::canonicalize(Path::new(FIXED_CURRENT_PATH))
@@ -434,7 +465,7 @@ pub fn verify_current_release_bundle_for_bridge() -> Result<VerifiedBundle, Bund
 fn verify_release_bundle(
     executable: &Path,
     expected_owner: u32,
-    allow_legacy_policy: bool,
+    allow_owner_bootstrap_policy: bool,
 ) -> Result<VerifiedBundle, BundleError> {
     let executable = verify_file(executable, expected_owner, true)?;
     if executable.file_name().and_then(|name| name.to_str()) != Some("fwc-n8n") {
@@ -498,7 +529,7 @@ fn verify_release_bundle(
         &fcp_n8n_path,
         &fcp_n8n_digest,
         &manifest_path,
-        allow_legacy_policy,
+        allow_owner_bootstrap_policy,
     )?;
     verify_inventory_binding(
         &inventory_hetzner_path,
@@ -507,7 +538,7 @@ fn verify_release_bundle(
         &fcp_n8n_path,
         &fcp_n8n_digest,
         &manifest_path,
-        allow_legacy_policy,
+        allow_owner_bootstrap_policy,
     )?;
     verify_inventory_binding(
         &inventory_eec_official_mcp_path,
@@ -516,7 +547,7 @@ fn verify_release_bundle(
         &fcp_mcp_bridge_path,
         &fcp_mcp_bridge_digest,
         &mcp_manifest_path,
-        allow_legacy_policy,
+        allow_owner_bootstrap_policy,
     )?;
     verify_inventory_binding(
         &inventory_hetzner_official_mcp_path,
@@ -525,7 +556,7 @@ fn verify_release_bundle(
         &fcp_mcp_bridge_path,
         &fcp_mcp_bridge_digest,
         &mcp_manifest_path,
-        allow_legacy_policy,
+        allow_owner_bootstrap_policy,
     )?;
     Ok(VerifiedBundle {
         fcp_host_path,
@@ -635,7 +666,7 @@ fn verify_inventory_binding(
     executable: &Path,
     executable_digest: &str,
     manifest: &Path,
-    allow_legacy_policy: bool,
+    allow_owner_bootstrap_policy: bool,
 ) -> Result<(), BundleError> {
     let value = read_bounded_json(path, MAX_INVENTORY_BYTES)
         .map_err(|_| BundleError::new(BundleErrorCode::InventoryBinding))?;
@@ -676,7 +707,7 @@ fn verify_inventory_binding(
                     "https://n8n.europeaneyecenter.com/mcp-server/http",
                     "n8n.europeaneyecenter.com",
                     443,
-                    "2.34.4",
+                    "2.38.4",
                 ),
                 "hetzner" => (
                     "https://n8nhet.levilaser.com:8443/mcp-server/http",
@@ -852,10 +883,30 @@ fn verify_inventory_binding(
                     .get("approved_tools")
                     .and_then(Value::as_array)
                     .is_some_and(|tools| tools.len() == 3);
-                let legacy_policy = allow_legacy_policy
+                let previous_eec_policy = allow_owner_bootstrap_policy
+                    && expected_server_id == "eec"
+                    && policy.len() == 6
+                    && policy.get("n8n_version").and_then(Value::as_str)
+                        == Some(PREVIOUS_EEC_N8N_VERSION)
+                    && previous_eec_official_mcp_lifecycle_schema_digests("publish_workflow")
+                        .is_some_and(|(input, output)| {
+                            exact_approved_tool(policy, "publish_workflow", input, output)
+                        })
+                    && previous_eec_official_mcp_lifecycle_schema_digests("unpublish_workflow")
+                        .is_some_and(|(input, output)| {
+                            exact_approved_tool(policy, "unpublish_workflow", input, output)
+                        })
+                    && archive_approved_tool(policy)
+                    && archive_schema_binding_matches(policy)
+                    && owner_tools
+                    && execute_schema_owner(policy);
+                let legacy_policy = allow_owner_bootstrap_policy
+                    && expected_server_id == "eec"
                     && policy.len() == 4
                     && !policy.contains_key("archive_workflow_schema")
                     && !policy.contains_key("execute_workflow_schema")
+                    && policy.get("n8n_version").and_then(Value::as_str)
+                        == Some(PREVIOUS_EEC_N8N_VERSION)
                     && policy
                         .get("approved_tools")
                         .and_then(Value::as_array)
@@ -875,24 +926,27 @@ fn verify_inventory_binding(
                                 )
                         });
                 (policy.len() == 6 || legacy_policy)
-                    && policy.get("n8n_version").and_then(Value::as_str)
-                        == Some(expected_n8n_version)
                     && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
                     && policy
                         .get("api_scope_digest")
                         .and_then(Value::as_str)
                         .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
                     && (legacy_policy
-                        || (lifecycle_schema("publish_workflow").is_some_and(|(input, output)| {
-                            exact_approved_tool(policy, "publish_workflow", input, output)
-                        }) && lifecycle_schema("unpublish_workflow").is_some_and(
-                            |(input, output)| {
-                                exact_approved_tool(policy, "unpublish_workflow", input, output)
-                            },
-                        ) && archive_approved_tool(policy)
-                            && archive_schema_binding_matches(policy)
-                            && ((owner_tools && execute_schema_owner(policy))
-                                || (sentinel_tools && execute_schema_sentinel(policy)))))
+                        || previous_eec_policy
+                        || (policy.get("n8n_version").and_then(Value::as_str)
+                            == Some(expected_n8n_version)
+                            && (lifecycle_schema("publish_workflow").is_some_and(
+                                |(input, output)| {
+                                    exact_approved_tool(policy, "publish_workflow", input, output)
+                                },
+                            ) && lifecycle_schema("unpublish_workflow").is_some_and(
+                                |(input, output)| {
+                                    exact_approved_tool(policy, "unpublish_workflow", input, output)
+                                },
+                            ) && archive_approved_tool(policy)
+                                && archive_schema_binding_matches(policy)
+                                && ((owner_tools && execute_schema_owner(policy))
+                                    || (sentinel_tools && execute_schema_sentinel(policy))))))
             });
         if !exact("/config/mcp_url", expected_url)
             || !exact("/config/security/description_scan", "block")
@@ -1253,7 +1307,7 @@ mod tests {
                 _ => panic!("unsupported fixture server"),
             };
             let n8n_version = match server_id {
-                "eec" => "2.34.4",
+                "eec" => "2.38.4",
                 "hetzner" => "2.34.6",
                 _ => panic!("unsupported fixture server"),
             };
@@ -1710,8 +1764,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn lifecycle_schema_binding_is_rejected_when_copied_between_servers() {
-        for (target_server, source_server) in [("eec", "hetzner"), ("hetzner", "eec")] {
+    fn lifecycle_schema_binding_rejects_legacy_predecessor_schema() {
+        for target_server in ["eec", "hetzner"] {
             let fixture = ReleaseFixture::new();
             let inventory_path =
                 fixture.artifact(&format!("inventory/{target_server}-official-mcp.json"));
@@ -1719,10 +1773,10 @@ mod tests {
                 serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
                     .expect("decode inventory fixture");
             let (publish_input, publish_output) =
-                official_mcp_lifecycle_schema_digests(source_server, "publish_workflow")
+                legacy_official_mcp_lifecycle_schema_digests("publish_workflow")
                     .expect("source publish schema");
             let (unpublish_input, unpublish_output) =
-                official_mcp_lifecycle_schema_digests(source_server, "unpublish_workflow")
+                legacy_official_mcp_lifecycle_schema_digests("unpublish_workflow")
                     .expect("source unpublish schema");
             for tool in inventory[0]["config"]["capability_policy"]["approved_tools"]
                 .as_array_mut()
@@ -1757,17 +1811,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn legacy_official_policy_is_accepted_only_in_bootstrap_mode() {
+    fn full_previous_eec_policy_is_bootstrap_only() {
         let fixture = ReleaseFixture::new();
-        for server_id in ["eec", "hetzner"] {
-            let inventory_path =
-                fixture.artifact(&format!("inventory/{server_id}-official-mcp.json"));
-            let mut inventory: Value =
-                serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
-                    .expect("decode inventory fixture");
+        let inventory_path = fixture.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        let policy = inventory[0]["config"]["capability_policy"]
+            .as_object_mut()
+            .expect("capability policy object");
+        policy["n8n_version"] = Value::String(PREVIOUS_EEC_N8N_VERSION.to_owned());
+        for tool in policy["approved_tools"]
+            .as_array_mut()
+            .expect("approved tools")
+        {
+            let Some((input, output)) = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(previous_eec_official_mcp_lifecycle_schema_digests)
+            else {
+                continue;
+            };
+            tool["input_schema_digest"] = Value::String(input.to_owned());
+            tool["output_schema_digest"] = Value::String(output.to_owned());
+        }
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode previous EEC policy"),
+        )
+        .expect("write previous EEC policy");
+        fixture.write_receipt(None);
+
+        verify_release_bundle(&fixture.executable, fixture.owner, true)
+            .expect("owner bootstrap accepts full previous EEC policy");
+        assert_eq!(
+            verify_release_bundle(&fixture.executable, fixture.owner, false)
+                .expect_err("ordinary verifier rejects previous EEC policy")
+                .code(),
+            BundleErrorCode::InventoryBinding
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_official_policy_requires_exact_previous_eec_version() {
+        let fixture = ReleaseFixture::new();
+        let inventory_path = fixture.artifact("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&inventory_path).expect("read inventory fixture"))
+                .expect("decode inventory fixture");
+        {
             let policy = inventory[0]["config"]["capability_policy"]
                 .as_object_mut()
                 .expect("capability policy object");
+            policy["n8n_version"] = Value::String(PREVIOUS_EEC_N8N_VERSION.to_owned());
             policy
                 .get_mut("approved_tools")
                 .and_then(Value::as_array_mut)
@@ -1819,19 +1916,34 @@ mod tests {
                 });
             policy.remove("archive_workflow_schema");
             policy.remove("execute_workflow_schema");
-            fs::write(
-                &inventory_path,
-                serde_json::to_vec(&inventory).expect("encode legacy inventory"),
-            )
-            .expect("write legacy inventory");
         }
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode legacy inventory"),
+        )
+        .expect("write legacy inventory");
         fixture.write_receipt(None);
 
         verify_release_bundle(&fixture.executable, fixture.owner, true)
-            .expect("legacy official policy bootstrap verifier");
+            .expect("exact predecessor legacy policy bootstrap verifier");
         assert_eq!(
             verify_release_bundle(&fixture.executable, fixture.owner, false)
                 .expect_err("legacy official policy outside bootstrap mode")
+                .code(),
+            BundleErrorCode::InventoryBinding
+        );
+
+        inventory[0]["config"]["capability_policy"]["n8n_version"] =
+            Value::String("arbitrary-version".to_owned());
+        fs::write(
+            &inventory_path,
+            serde_json::to_vec(&inventory).expect("encode arbitrary-version legacy inventory"),
+        )
+        .expect("write arbitrary-version legacy inventory");
+        fixture.write_receipt(None);
+        assert_eq!(
+            verify_release_bundle(&fixture.executable, fixture.owner, true)
+                .expect_err("arbitrary n8n version must reject legacy policy")
                 .code(),
             BundleErrorCode::InventoryBinding
         );
@@ -1879,6 +1991,10 @@ mod tests {
         assert!(!EXPECTED_ARTIFACTS.contains(&"bin/fcp-n8n-approval-issue"));
         let assembler = include_str!("../../../../scripts/n8n_release_assembler.sh");
         assert!(assembler.contains("readonly EXTERNAL_APPROVAL_ISSUER=\"fcp-n8n-approval-issue\""));
+        assert!(assembler.contains("readonly EEC_N8N_VERSION=\"2.38.4\""));
+        assert!(assembler.contains(
+            "official[\"config\"][\"capability_policy\"][\"n8n_version\"] = eec_n8n_version"
+        ));
         assert!(assembler.contains(
             "build_one build --release --package fcp-host --features n8n-approval-issuer"
         ));

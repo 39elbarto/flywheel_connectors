@@ -373,7 +373,7 @@ require_clean_tracked_head() {
   local unexpected
   unexpected="$(git -C "$REPO_ROOT" ls-files --others --exclude-standard | while IFS= read -r path; do
     case "$path" in
-      .beads/.br-*.lock|crates/fcp-host/.fcp/*|rustc-ice-*.txt) ;;
+      .beads/.br-*.lock|.slb/state.db|.slb/state.db-shm|.slb/state.db-wal|crates/fcp-host/.fcp/*|rustc-ice-*.txt) ;;
       *) printf '%s\n' "$path" ;;
     esac
   done)"

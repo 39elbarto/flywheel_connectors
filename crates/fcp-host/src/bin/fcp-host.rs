@@ -594,6 +594,8 @@ struct TrustedResourceBinding {
     zone_id: ZoneId,
     request_id: RequestId,
     resource_uri: String,
+    parent_binding_hash: Option<[u8; 32]>,
+    typed_plan_digest: Option<String>,
 }
 
 impl TrustedResourceBinding {
@@ -9268,17 +9270,39 @@ fn n8n_official_mcp_policy_request(
             "official MCP approval requires a verified resource URI".to_string(),
         )
     })?;
+    if binding.resource_uri_for(request)? != resource_uri {
+        return Err(HostError::PreflightFailed(
+            "official MCP approval resource binding was denied".to_string(),
+        ));
+    }
+    let parent_binding_hash = binding.parent_binding_hash.ok_or_else(|| {
+        HostError::PreflightFailed("official MCP approval parent binding is missing".to_string())
+    })?;
+    if request.input.get("name").and_then(Value::as_str) != Some(N8N_OFFICIAL_MCP_EXECUTE_TOOL)
+        && binding.typed_plan_digest.is_none()
+    {
+        return Err(HostError::PreflightFailed(
+            "typed official MCP approval plan binding is missing".to_string(),
+        ));
+    }
     let payload_digest = mcp_tools_call_payload_digest(&request.input)?;
     let tool_name = request.input.get("name").cloned().unwrap_or(Value::Null);
-    let normalized = json!({
+    let mut normalized = json!({
         "server_id": binding.server_id.as_str(),
         "resource_uri": resource_uri,
-        "operation": request.operation.as_str(),
+        "operation": N8N_APPROVAL_WRAPPER_OPERATION,
         "provider": "mcp",
         "payload_sha256": hex::encode(payload_digest),
         "tool_name": tool_name,
+        "parent_binding_sha256": hex::encode(parent_binding_hash),
     });
+    if let Some(typed_plan_digest) = &binding.typed_plan_digest {
+        normalized["typed_plan_sha256"] = json!(typed_plan_digest);
+    }
     let mut policy_request = request.clone();
+    // Approval scopes name the wrapper; capability checks and provider dispatch
+    // continue to use the original mcp.tools.call request.
+    policy_request.operation = OperationId::from_static(N8N_APPROVAL_WRAPPER_OPERATION);
     policy_request.input = normalized;
     Ok((policy_request, payload_digest))
 }
@@ -14163,6 +14187,8 @@ fn build_n8n_read_only_invoke_request(
         zone_id: plan.zone_id.clone(),
         request_id: request_id.clone(),
         resource_uri: plan.resource_uri,
+        parent_binding_hash: None,
+        typed_plan_digest: None,
     };
     let request = InvokeRequest {
         r#type: "invoke".to_string(),
@@ -14187,6 +14213,7 @@ fn build_n8n_read_only_invoke_request(
 fn build_n8n_official_mcp_invoke_request(
     plan: N8nOfficialMcpRunOncePlan,
     capability_token: fcp_core::CapabilityToken,
+    typed_approval: Option<&N8nTypedApprovalReceiptBinding>,
 ) -> (InvokeRequest, TrustedResourceBinding) {
     let request_id = RequestId::random();
     let connector_id = ConnectorId::from_static("fcp.mcp-bridge");
@@ -14197,6 +14224,8 @@ fn build_n8n_official_mcp_invoke_request(
         zone_id: plan.zone_id.clone(),
         request_id: request_id.clone(),
         resource_uri: plan.resource_uri,
+        parent_binding_hash: plan.parent_binding_hash,
+        typed_plan_digest: typed_approval.map(|binding| binding.plan_digest.clone()),
     };
     let request = InvokeRequest {
         r#type: "invoke".to_string(),
@@ -14877,7 +14906,8 @@ async fn async_n8n_official_mcp_run_once(
     let capability_token =
         capability_token_from_cbor_b64(&token_b64, "n8n official MCP run-once capability")
             .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Capability))?;
-    let (request, trusted_resource) = build_n8n_official_mcp_invoke_request(plan, capability_token);
+    let (request, trusted_resource) =
+        build_n8n_official_mcp_invoke_request(plan, capability_token, typed_approval.as_ref());
 
     #[cfg(unix)]
     if let (Some(claim), Some(claim_plan)) = (claim.as_ref(), claim_plan.as_ref()) {
@@ -34847,7 +34877,11 @@ done"#;
             N8N_OFFICIAL_MCP_CALL_OPERATION,
             ZoneId::work().as_str(),
         );
-        let (request, _) = build_n8n_official_mcp_invoke_request(provider_plan, capability_token);
+        let (request, _) = build_n8n_official_mcp_invoke_request(
+            provider_plan,
+            capability_token,
+            claim_plan.typed_approval.as_ref(),
+        );
         (claim_plan, request)
     }
 
@@ -34883,6 +34917,139 @@ done"#;
             build_n8n_official_mcp_run_once_plan(n8n_official_mcp_test_input(), &unsafe_scan,)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn n8n_official_mcp_typed_approval_policy_contract() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let high_level = n8n_official_mcp_lifecycle_test_input("publish");
+        let high_level_input = high_level.input.clone();
+        let mut plan = build_n8n_official_mcp_run_once_plan(high_level, &config)
+            .expect("validated provider plan");
+        let key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let payload_hash = mcp_tools_call_payload_digest(&plan.input).expect("payload digest");
+        let mut approval = signed_external_approval(
+            "chat-lifecycle-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            payload_hash,
+            Vec::new(),
+            ZoneId::work(),
+            &key,
+        );
+        let typed = build_n8n_typed_approval_binding(
+            "n8n.workflows.lifecycle",
+            &high_level_input,
+            &plan,
+            Some(&approval),
+        )
+        .expect("recomputed typed plan binding");
+        let constraints = official_mcp_approval_constraints_with_typed_plan(&plan, Some(&typed))
+            .expect("issuer contract constraints");
+        let ApprovalScope::Execution(scope) = &mut approval.scope else {
+            panic!("execution approval");
+        };
+        scope.input_constraints.clone_from(&constraints);
+        approval.signature = Some(
+            key.sign(&approval_token_signing_bytes(&approval).expect("approval signing bytes"))
+                .to_bytes()
+                .to_vec(),
+        );
+        validate_external_n8n_approval(
+            Some(&approval),
+            "chat-lifecycle-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &plan.zone_id,
+            payload_hash,
+            &constraints,
+            Some(&key.verifying_key()),
+        )
+        .expect("genuine signed typed execution approval");
+        plan.approval_token = Some(approval);
+        let (request, mut binding) = build_n8n_official_mcp_invoke_request(
+            plan,
+            test_capability_token(
+                &key,
+                "mcp.tools.write",
+                N8N_OFFICIAL_MCP_CALL_OPERATION,
+                ZoneId::work().as_str(),
+            ),
+            Some(&typed),
+        );
+        let normalize = |request: &InvokeRequest, binding: &TrustedResourceBinding| {
+            n8n_official_mcp_policy_request(request, Some(binding), Some(&binding.resource_uri))
+        };
+        let evaluate = |request, input_hash| {
+            simulate_policy_decision(&PolicySimulationInput {
+                zone_policy: host_runtime_policy(ZoneId::work()),
+                invoke_request: request,
+                transport: TransportMode::Lan,
+                checkpoint_fresh: true,
+                revocation_fresh: true,
+                execution_approval_required: true,
+                sanitizer_receipts: Vec::new(),
+                related_object_ids: Vec::new(),
+                request_object_id: None,
+                request_input_hash: Some(input_hash),
+                safety_tier: SafetyTier::Risky,
+                principal: Some("agent:fwc-n8n".to_string()),
+                capability_id: Some("mcp.tools.write".to_string()),
+                provenance_record: None,
+                now_ms: Some(n8n_run_once_now_ms()),
+                posture_attestation: None,
+            })
+            .expect("offline policy evaluation")
+            .decision
+        };
+        let (policy_request, policy_hash) = normalize(&request, &binding).expect("policy request");
+        assert_eq!(
+            evaluate(policy_request.clone(), policy_hash),
+            Decision::Allow
+        );
+        assert_eq!(policy_hash, payload_hash);
+        assert_eq!(request.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
+        assert_eq!(request.input.as_object().expect("provider input").len(), 2);
+        assert_eq!(
+            policy_request.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION
+        );
+
+        let mut wrong_method = policy_request.clone();
+        wrong_method.operation = OperationId::from_static(N8N_OFFICIAL_MCP_CALL_OPERATION);
+        assert_eq!(evaluate(wrong_method, policy_hash), Decision::Deny);
+        for field in [
+            "operation",
+            "parent_binding_sha256",
+            "typed_plan_sha256",
+            "resource_uri",
+            "payload_sha256",
+            "server_id",
+            "tool_name",
+        ] {
+            let mut changed = policy_request.clone();
+            changed.input[field] = json!("mismatch");
+            assert_eq!(evaluate(changed, policy_hash), Decision::Deny, "{field}");
+        }
+        let mut changed_payload = request.clone();
+        changed_payload.input["arguments"]["workflowId"] = json!("another-workflow");
+        let (changed, changed_hash) =
+            normalize(&changed_payload, &binding).expect("changed payload");
+        assert_eq!(evaluate(changed, changed_hash), Decision::Deny);
+        let mut smuggled = request.clone();
+        smuggled.input["typed_plan_sha256"] = json!(typed.plan_digest);
+        assert!(normalize(&smuggled, &binding).is_err());
+        assert!(n8n_official_mcp_policy_request(&request, None, None).is_err());
+        assert!(n8n_official_mcp_policy_request(&request, Some(&binding), Some("wrong")).is_err());
+
+        binding.parent_binding_hash = Some([0; 32]);
+        let (changed, hash) = normalize(&request, &binding).expect("changed trusted parent");
+        assert_eq!(evaluate(changed, hash), Decision::Deny);
+        binding.parent_binding_hash = None;
+        assert!(normalize(&request, &binding).is_err());
+        binding.parent_binding_hash = Some([0; 32]);
+        binding.typed_plan_digest = None;
+        assert!(normalize(&request, &binding).is_err());
     }
 
     #[test]

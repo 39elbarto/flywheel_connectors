@@ -14,7 +14,42 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current host evidence (2026-08-28, read-only):**
+**Current lifecycle checkpoint and completion plan (2026-09-10):**
+`current` resolves to `release-20260910-e3d01275b-rc1`, revision
+`e3d01275b3f8f1e9a06f52150fce6a00dd9c0c67`. Owner signing, provision preflight
+and apply completed; installed provenance and signed receipt agree, the bundle
+contains 12 verified artifacts, and `status` reports `bundleAvailable=true`.
+This includes the trusted wrapper-operation/parent/typed-plan approval fix.
+Workspace compilation and the focused approval/no-retry tests passed; Clippy
+remains blocked by unchanged baseline lint errors.
+
+Live lifecycle acceptance is still **NO-GO**: one fresh EEC publish at 01:01 UTC
+returned `unknown_outcome`. Independent reads confirmed both test workflows
+remain inactive, unarchived, without a published version, and with unchanged
+draft versions and graph digests. Hetzner publication was not attempted.
+The released worker evidence is attached to Orca dispatch `ctx_afce57e36d18`.
+
+The owner authorized completing bead `flywheel_connectors-nqm81.10`, including
+necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
+
+1. Diagnose the remaining host/bridge failure from source and retained evidence;
+   distinguish a local dispatch rejection from a provider HTTP failure.
+2. Fix the confirmed cause and add a regression that covers the actual failed
+   boundary, then verify and install the resulting signed release.
+3. On EEC `oD8zytCtv5PiSYzc`, then Hetzner `oPmF5VkbiVRgIS5S`, prove publish,
+   independent readback, unpublish and final independent readback through FCP.
+   Each final state must have `active=false`, `activeVersionId=null`,
+   `published=null`, `isArchived=false`, and the preserved draft graph/version.
+4. Retain redacted evidence, update Beads according to the actual outcomes,
+   and release each completed task-owned worker.
+
+Unknown writes are reconciled before further action and are never replayed
+automatically. Archive remains contract-only for this acceptance; workflow
+execution, production changes and credential mutation are outside this plan.
+Historical checkpoints below describe their stated dates, not the current
+installed release.
+
+**Historical host evidence (2026-08-28, read-only):**
 `/usr/local/lib/fwc-n8n/current` points to
 `release-20260828-d4e8b288e-static` (git revision
 `d4e8b288e9415484978ea4a047e575a9ffddd7cb`), whose installed `fwc-n8n status`

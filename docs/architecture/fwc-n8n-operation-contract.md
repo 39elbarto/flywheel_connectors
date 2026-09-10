@@ -15,17 +15,18 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 **Current lifecycle checkpoint and completion plan (2026-09-10):**
-`current` resolves to `release-20260910-c0d97eb-rc3`, revision
-`c0d97ebfee74a11b835175055f233d34cef50a7e`. Owner signing, provision preflight
-and apply completed; installed provenance and signed receipt agree, the bundle
-contains 12 verified release artifacts, the receipt covers 14 artifacts and
-both EEC/Hetzner bindings, and `status` reports `bundleAvailable=true`.
-This release includes the trusted host policy view and bridge typed
-approval-binding fixes. Workspace compilation, focused approval/no-retry tests,
-all four server/action approval regression cases and release smoke passed;
-Clippy remains blocked by unchanged baseline lint errors. The predecessor is
+`current` resolves to `release-20260910-db3924628-rc4`, revision
+`db3924628e8ea908f463ab05bafde6c79442405a`. Owner signing, provision preflight,
+apply and promotion completed; installed provenance and signed receipt agree,
+the bundle contains 12 verified release artifacts, the receipt covers 14
+artifacts and both EEC/Hetzner bindings, and `status` reports
+`bundleAvailable=true`. This release includes the fixed redaction-safe
+lifecycle diagnostics from `d86b439528abe047b44839d3d7203f64e66f3246`.
+Workspace compilation, focused lifecycle tests and formatting passed; Clippy
+remains blocked by unchanged baseline lint errors. The RC3 predecessor is
 preserved and the external approval issuer is installed from the same release
-candidate.
+candidate. Redacted RC4 assembly and promotion evidence is retained at
+`/srv/dev-ssd/fcp/nqm81.30/release-20260910-db3924628-rc4/report.json`.
 
 Live lifecycle acceptance is still **NO-GO**. The prior fresh EEC publish at
 02:32 UTC returned `unknown_outcome`, correlation
@@ -707,6 +708,22 @@ Hetzner was not started. Evidence remains redacted under
 `/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc3-20260910-uri-fixed/`; the bead
 remains `in_progress`/NO-GO until a fresh candidate release proves the complete
 EEC then Hetzner publish/readback/unpublish/final-readback sequence.
+
+The fresh RC4 acceptance dispatch `ctx_beda0eb83745` (Orca task
+`task_e5e41bebe876`, 10:45--10:58 UTC) verified the exact EEC inactive baseline,
+then stopped before creating the publish approval request because local
+`expires_at_ms` preparation failed the required 13-digit millisecond-width
+check. The canonical parent-binding helper had returned successfully, but no
+request file, approval token, lifecycle wrapper call, or provider lifecycle
+write was made; the one required EEC reconciliation GET remained unchanged and
+exact. Hetzner was not started. The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc4-20260910/report.json`
+(SHA-256
+`6550ecc7b13b53f9f65263c6317add6a8d314b149afb1f20b59359a0da47c55e`). Its
+redaction scan is clean, the RC4 pointer is unchanged, and no matching
+processes remain. Live acceptance remains **NO-GO**; this bounded stop is not to
+be replayed, and any future attempt requires correcting the local expiry
+preparation before a new explicitly bounded EEC-first run.
 
 The provider result is fail-closed unless it contains typed `active`,
 `isArchived`, `activeVersionId`, draft/published graph summaries, and

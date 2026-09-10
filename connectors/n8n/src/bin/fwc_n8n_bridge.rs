@@ -58,6 +58,8 @@ const BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX: &str =
 #[cfg(target_os = "linux")]
 const MAX_OWNED_DIAGNOSTIC_LABELS: usize = 4;
 #[cfg(target_os = "linux")]
+const STDERR_WORKER_INDEX: usize = 2;
+#[cfg(target_os = "linux")]
 const SUPERVISOR_START_PREFIX: &[u8] = b"FCP-HOST-RUN-ONCE/v1/START";
 #[cfg(target_os = "linux")]
 const SUPERVISOR_READY_FRAME: &[u8] = b"FCP-HOST-RUN-ONCE/v1/READY";
@@ -266,7 +268,7 @@ pub fn run_verified_host_bridge(
             working_directory,
             request_deadline_at,
         )?;
-        parse_response(&output.stdout)
+        parse_response_with_stderr(&output.stdout, &output.stderr)
     }
 }
 
@@ -919,6 +921,7 @@ pub fn run_process(
         max_output_bytes(envelope.operation),
         cancel.clone(),
         operation_deadline_at,
+        false,
     ) else {
         cleanup(
             &mut process,
@@ -935,6 +938,7 @@ pub fn run_process(
         MAX_STDERR_BYTES,
         cancel.clone(),
         operation_deadline_at,
+        true,
     ) else {
         cleanup(
             &mut process,
@@ -946,6 +950,7 @@ pub fn run_process(
         return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
     };
     workers.push(stderr_worker);
+    let mut diagnostic = None;
 
     let write_result = write_credential_frame(
         &mut host_endpoint,
@@ -956,25 +961,27 @@ pub fn run_process(
     drop(frame);
     drop(host_endpoint);
     if let Err(error) = write_result {
-        cleanup(
+        let cleanup_result = cleanup_with_diagnostic(
             &mut process,
             &mut request_cgroup,
             &cancel,
             workers,
             request_deadline_at,
-        )?;
-        return Err(error);
+            &mut diagnostic,
+        );
+        return Err(error_after_cleanup(cleanup_result, error, diagnostic));
     }
 
     if let Err(error) = ensure_before(operation_deadline_at) {
-        cleanup(
+        let cleanup_result = cleanup_with_diagnostic(
             &mut process,
             &mut request_cgroup,
             &cancel,
             std::mem::take(&mut workers),
             request_deadline_at,
-        )?;
-        return Err(error);
+            &mut diagnostic,
+        );
+        return Err(error_after_cleanup(cleanup_result, error, diagnostic));
     }
     let mut status = None;
     let mut stdin_result = None;
@@ -985,18 +992,18 @@ pub fn run_process(
         if status.is_none() {
             match process.try_wait() {
                 Ok(child_status) => status = child_status,
-                Err(_) => failure = Some(BridgeErrorCode::WaitFailed),
+                Err(_) => failure = Some(BridgeError::new(BridgeErrorCode::WaitFailed)),
             }
         }
         receive_once(&mut workers[0], &mut stdin_result);
         receive_once(&mut workers[1], &mut stdout_result);
-        receive_once(&mut workers[2], &mut stderr_result);
+        receive_once(&mut workers[STDERR_WORKER_INDEX], &mut stderr_result);
         if let Some(Err(error)) = stdin_result.as_ref() {
-            failure = Some(error.code);
+            failure = Some(*error);
         } else if let Some(Err(error)) = stdout_result.as_ref() {
-            failure = Some(error.code);
+            failure = Some(*error);
         } else if let Some(Err(error)) = stderr_result.as_ref() {
-            failure = Some(error.code);
+            failure = Some(*error);
         }
         if failure.is_some()
             || (status.is_some()
@@ -1015,34 +1022,51 @@ pub fn run_process(
             || stdout_result.is_none()
             || stderr_result.is_none())
     {
-        failure = Some(BridgeErrorCode::Timeout);
+        failure = Some(BridgeError::new(BridgeErrorCode::Timeout));
     }
-    if let Some(code) = failure {
-        cleanup(
+    if let Some(error) = failure {
+        if diagnostic.is_none() {
+            diagnostic = diagnostic_from_stderr_result(stderr_result.as_ref())
+                .or_else(|| error.diagnostic());
+        }
+        let cleanup_result = cleanup_with_diagnostic(
             &mut process,
             &mut request_cgroup,
             &cancel,
             workers,
             request_deadline_at,
-        )?;
-        return Err(BridgeError::new(code));
+            &mut diagnostic,
+        );
+        return Err(error_after_cleanup(cleanup_result, error, diagnostic));
     }
 
-    let status = status.ok_or_else(|| BridgeError::new(BridgeErrorCode::WaitFailed))?;
+    if diagnostic.is_none() {
+        diagnostic = diagnostic_from_stderr_result(stderr_result.as_ref());
+    }
+    let status = status.ok_or_else(|| BridgeError::new(BridgeErrorCode::WaitFailed));
     let stdout =
-        stdout_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::OutputReadFailed))??;
+        stdout_result.unwrap_or_else(|| Err(BridgeError::new(BridgeErrorCode::OutputReadFailed)));
     let stderr =
-        stderr_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::OutputReadFailed))??;
-    stdin_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::StdinWriteFailed))??;
-    let termination = cleanup(
+        stderr_result.unwrap_or_else(|| Err(BridgeError::new(BridgeErrorCode::OutputReadFailed)));
+    let stdin = stdin_result.ok_or_else(|| BridgeError::new(BridgeErrorCode::StdinWriteFailed));
+    let cleanup_result = cleanup_with_diagnostic(
         &mut process,
         &mut request_cgroup,
         &cancel,
         workers,
         request_deadline_at,
-    )?;
+        &mut diagnostic,
+    );
+    let termination = match cleanup_result {
+        Ok(termination) => termination,
+        Err(error) => return Err(with_diagnostic(error, diagnostic)),
+    };
+    let status = status.map_err(|error| with_diagnostic(error, diagnostic))?;
+    let stdout = stdout.map_err(|error| with_diagnostic(error, diagnostic))?;
+    let stderr = stderr.map_err(|error| with_diagnostic(error, diagnostic))?;
+    let _ = stdin.map_err(|error| with_diagnostic(error, diagnostic))?;
     if !status.success() {
-        let diagnostic = child_primary_diagnostic(&stderr);
+        let diagnostic = diagnostic.or_else(|| child_primary_diagnostic(&stderr));
         emit_child_invoke_diagnostic(&stderr);
         return Err(BridgeError::new(child_failure_code(&stdout)).with_diagnostic(diagnostic));
     }
@@ -1070,6 +1094,57 @@ fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
                 .find_map(child_owned_diagnostic_label)
         })
         .or_else(|| child_child_error_diagnostic(stderr))
+}
+
+#[cfg(target_os = "linux")]
+fn with_diagnostic(error: BridgeError, diagnostic: Option<&'static str>) -> BridgeError {
+    error.with_diagnostic(error.diagnostic().or(diagnostic))
+}
+
+#[cfg(target_os = "linux")]
+fn diagnostic_from_stderr_result(
+    result: Option<&Result<Vec<u8>, BridgeError>>,
+) -> Option<&'static str> {
+    result.and_then(|result| match result {
+        Ok(stderr) => child_primary_diagnostic(stderr),
+        Err(error) => error.diagnostic(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn retain_stderr_result_diagnostic(
+    diagnostic: &mut Option<&'static str>,
+    result: &Result<Vec<u8>, BridgeError>,
+) {
+    if diagnostic.is_none() {
+        *diagnostic = match result {
+            Ok(stderr) => child_primary_diagnostic(stderr),
+            Err(error) => error.diagnostic(),
+        };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_error_with_diagnostic(
+    error: BridgeError,
+    output: &[u8],
+    capture_diagnostic: bool,
+) -> BridgeError {
+    if capture_diagnostic {
+        with_diagnostic(error, child_primary_diagnostic(output))
+    } else {
+        error
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn error_after_cleanup(
+    cleanup_result: Result<fcp_sandbox::TerminationReport, BridgeError>,
+    operation_error: BridgeError,
+    diagnostic: Option<&'static str>,
+) -> BridgeError {
+    let error = cleanup_result.err().unwrap_or(operation_error);
+    with_diagnostic(error, diagnostic)
 }
 
 #[cfg(target_os = "linux")]
@@ -1408,12 +1483,19 @@ fn spawn_bounded_reader<R: std::io::Read + Send + 'static>(
     max_bytes: usize,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     deadline: std::time::Instant,
+    capture_diagnostic: bool,
 ) -> Result<WorkerRecord, BridgeError> {
     use std::sync::mpsc;
     let (sender, receiver) = mpsc::channel();
     let join = std::thread::Builder::new()
         .spawn(move || {
-            let result = read_bounded_nonblocking(&mut reader, max_bytes, &cancel, deadline);
+            let result = read_bounded_nonblocking(
+                &mut reader,
+                max_bytes,
+                &cancel,
+                deadline,
+                capture_diagnostic,
+            );
             let _ = sender.send(result);
         })
         .map_err(|_| BridgeError::new(BridgeErrorCode::IoWorkerFailed))?;
@@ -1453,24 +1535,47 @@ fn read_bounded_nonblocking<R: std::io::Read>(
     max_bytes: usize,
     cancel: &std::sync::atomic::AtomicBool,
     deadline: std::time::Instant,
+    capture_diagnostic: bool,
 ) -> Result<Vec<u8>, BridgeError> {
     let mut output = Vec::with_capacity(max_bytes.min(4096));
     let mut buffer = [0_u8; 4096];
     loop {
-        check_worker_deadline(cancel, deadline)?;
+        if let Err(error) = check_worker_deadline(cancel, deadline) {
+            return Err(read_error_with_diagnostic(
+                error,
+                &output,
+                capture_diagnostic,
+            ));
+        }
         match reader.read(&mut buffer) {
             Ok(0) => return Ok(output),
             Ok(bytes) => {
                 if output.len().saturating_add(bytes) > max_bytes {
-                    return Err(BridgeError::new(BridgeErrorCode::OutputTooLarge));
+                    return Err(read_error_with_diagnostic(
+                        BridgeError::new(BridgeErrorCode::OutputTooLarge),
+                        &output,
+                        capture_diagnostic,
+                    ));
                 }
                 output.extend_from_slice(&buffer[..bytes]);
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                wait_for_worker_io(cancel, deadline)?;
+                if let Err(error) = wait_for_worker_io(cancel, deadline) {
+                    return Err(read_error_with_diagnostic(
+                        error,
+                        &output,
+                        capture_diagnostic,
+                    ));
+                }
             }
-            Err(_) => return Err(BridgeError::new(BridgeErrorCode::OutputReadFailed)),
+            Err(_) => {
+                return Err(read_error_with_diagnostic(
+                    BridgeError::new(BridgeErrorCode::OutputReadFailed),
+                    &output,
+                    capture_diagnostic,
+                ));
+            }
         }
     }
 }
@@ -1532,8 +1637,28 @@ fn cleanup(
     process: &mut fcp_sandbox::OwnedProcess,
     cgroup: &mut fcp_sandbox::RequestCgroup,
     cancel: &std::sync::atomic::AtomicBool,
+    workers: Vec<WorkerRecord>,
+    request_deadline_at: std::time::Instant,
+) -> Result<fcp_sandbox::TerminationReport, BridgeError> {
+    let mut diagnostic = None;
+    cleanup_with_diagnostic(
+        process,
+        cgroup,
+        cancel,
+        workers,
+        request_deadline_at,
+        &mut diagnostic,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_with_diagnostic(
+    process: &mut fcp_sandbox::OwnedProcess,
+    cgroup: &mut fcp_sandbox::RequestCgroup,
+    cancel: &std::sync::atomic::AtomicBool,
     mut workers: Vec<WorkerRecord>,
     request_deadline_at: std::time::Instant,
+    diagnostic: &mut Option<&'static str>,
 ) -> Result<fcp_sandbox::TerminationReport, BridgeError> {
     use std::sync::atomic::Ordering;
 
@@ -1544,9 +1669,13 @@ fn cleanup(
     while std::time::Instant::now() < request_deadline_at
         && workers.iter().any(|worker| !worker.completed)
     {
-        for worker in &mut workers {
+        for (index, worker) in workers.iter_mut().enumerate() {
             if !worker.completed {
-                let _ = worker.try_receive();
+                if let Some(result) = worker.try_receive() {
+                    if index == STDERR_WORKER_INDEX {
+                        retain_stderr_result_diagnostic(diagnostic, &result);
+                    }
+                }
             }
         }
         if workers.iter().any(|worker| !worker.completed) {
@@ -1567,22 +1696,46 @@ fn cleanup(
         }
     }
     if cgroup_kill.is_err() || cgroup_remove.is_err() {
-        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+        return Err(with_diagnostic(
+            BridgeError::new(BridgeErrorCode::TeardownFailed),
+            *diagnostic,
+        ));
     }
-    let cgroup_evidence =
-        cgroup_kill.map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed))?;
+    let cgroup_evidence = cgroup_kill.map_err(|_| {
+        with_diagnostic(
+            BridgeError::new(BridgeErrorCode::TeardownFailed),
+            *diagnostic,
+        )
+    })?;
     if !cgroup_evidence.kill_requested() || !cgroup_evidence.populated_zero() {
-        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+        return Err(with_diagnostic(
+            BridgeError::new(BridgeErrorCode::TeardownFailed),
+            *diagnostic,
+        ));
     }
-    let termination = termination.map_err(|_| BridgeError::new(BridgeErrorCode::TeardownFailed))?;
+    let termination = termination.map_err(|_| {
+        with_diagnostic(
+            BridgeError::new(BridgeErrorCode::TeardownFailed),
+            *diagnostic,
+        )
+    })?;
     if !termination.reaped {
-        return Err(BridgeError::new(BridgeErrorCode::TeardownFailed));
+        return Err(with_diagnostic(
+            BridgeError::new(BridgeErrorCode::TeardownFailed),
+            *diagnostic,
+        ));
     }
     if !termination.group_absent {
-        return Err(BridgeError::new(BridgeErrorCode::GroupPresent));
+        return Err(with_diagnostic(
+            BridgeError::new(BridgeErrorCode::GroupPresent),
+            *diagnostic,
+        ));
     }
     if worker_failed {
-        return Err(BridgeError::new(BridgeErrorCode::IoWorkerFailed));
+        return Err(with_diagnostic(
+            BridgeError::new(BridgeErrorCode::IoWorkerFailed),
+            *diagnostic,
+        ));
     }
     Ok(termination)
 }
@@ -1636,6 +1789,14 @@ fn parse_response(bytes: &[u8]) -> Result<Value, BridgeError> {
         .end()
         .map_err(|_| BridgeError::new(BridgeErrorCode::OutputTrailing))?;
     Ok(value)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_response_with_stderr(stdout: &[u8], stderr: &[u8]) -> Result<Value, BridgeError> {
+    parse_response(stdout).map_err(|error| {
+        emit_child_invoke_diagnostic(stderr);
+        with_diagnostic(error, child_primary_diagnostic(stderr))
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -2066,6 +2227,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn response_parse_failure_keeps_only_allowlisted_stderr_diagnostic() {
+        let private = "PRIVATE-PROVIDER-DETAIL";
+        let stderr =
+            format!("{private}\nFCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.provider_5xx\n");
+        let error = parse_response_with_stderr(b"not-json", stderr.as_bytes())
+            .expect_err("malformed response must fail");
+        assert_eq!(error.code(), "output_invalid");
+        assert_eq!(error.diagnostic(), Some("external.provider_5xx"));
+        assert!(!format!("{error:?}").contains(private));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn child_failure_exposes_only_exact_allowlisted_host_error_codes() {
         let cases = [
             ("connector_not_found", "host_connector_not_found"),
@@ -2282,6 +2456,38 @@ mod tests {
         assert_eq!(
             BridgeError::new(BridgeErrorCode::HostN8nInvokeFailed).diagnostic(),
             None
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stderr_read_and_cleanup_failures_keep_static_diagnostics_only() {
+        let private = "PRIVATE-READ-DETAIL";
+        let stderr = format!("{private}\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_unknown\n");
+        let read_error = read_error_with_diagnostic(
+            BridgeError::new(BridgeErrorCode::OutputReadFailed),
+            stderr.as_bytes(),
+            true,
+        );
+        assert_eq!(read_error.code(), "output_read_failed");
+        assert_eq!(read_error.diagnostic(), Some("response_external_unknown"));
+        assert!(!format!("{read_error:?}").contains(private));
+        let stdout_error = read_error_with_diagnostic(
+            BridgeError::new(BridgeErrorCode::OutputReadFailed),
+            stderr.as_bytes(),
+            false,
+        );
+        assert_eq!(stdout_error.diagnostic(), None);
+
+        let cleanup_error = error_after_cleanup(
+            Err(BridgeError::new(BridgeErrorCode::TeardownFailed)),
+            BridgeError::new(BridgeErrorCode::ChildFailed),
+            Some("response_external_unknown"),
+        );
+        assert_eq!(cleanup_error.code(), "teardown_failed");
+        assert_eq!(
+            cleanup_error.diagnostic(),
+            Some("response_external_unknown")
         );
     }
 
@@ -2665,6 +2871,7 @@ FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.teardown\n";
             MAX_OUTPUT_BYTES,
             &cancel,
             Instant::now() + Duration::from_secs(1),
+            false,
         )
         .expect_err("cancelled reader must stop");
         assert_eq!(error.code(), "io_worker_failed");

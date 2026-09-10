@@ -10,29 +10,58 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
-## RULE 0.5 — NO BRANCHES, NO WORKTREES. EVER. ONLY `main`.
+## RULE 0.5 — HYBRID BRANCH/WORKTREE POLICY
 
-**THIS PROJECT HAS EXACTLY ONE BRANCH: `main`.** (`master` exists only as a legacy mirror of `main` — see the branch rule below. It is NOT a second working branch.)
+**`main` is the integration checkout, not a shared task scratchpad.** (`master`
+exists only as a legacy mirror of `main`; see the branch rule below.)
 
-**YOU ARE ABSOLUTELY FORBIDDEN FROM:**
-- Creating ANY git branch other than `main` — no `feature/*`, no `codex/*`, no `icy-*`/`sage-*`, no dated branches, no "just-in-case" safety branches. **NONE.**
-- Creating ANY git worktree — no `git worktree add`, no `.claude/worktrees`, no `/tmp/fcp-*` checkouts, no "isolated copy" of the repo. **NONE.**
-- Doing work on a detached HEAD and pushing it as a new ref.
+**Default implementation workflow:**
 
-**WHY THIS MATTERS:** Branch and worktree proliferation has repeatedly created hundreds of orphaned refs and detached checkouts that bury useful work, waste enormous disk, confuse every other agent, and force expensive manual consolidation passes to fold the scattered work back into `main`. We always want `main` to hold the latest, best, most optimized, most mature and correct code — that is impossible when work is fragmented across a graveyard of branches and worktrees.
+- New implementation and documentation tasks use a short-lived task branch and
+  a separate worktree, based on the verified integration tip (`origin/main`).
+  Use concise names such as `feat/backup-notifications`, `fix/n8n-diagnostics`,
+  or `docs/storage-guide`.
+- The designated integration checkout stays on `main`. Do not switch it to a
+  task branch and do not edit task files directly there. Authorized integration
+  commits and release checks happen on `main` only.
+- For Orca-managed repositories, create and manage worktrees through the
+  installed Orca CLI; do not use ad-hoc `git worktree add` or manually created
+  checkout directories. For non-Orca repositories, use ordinary Git worktree
+  commands with the same naming and base rules.
+- Independent tasks use separate worktrees. Reviewers may share a task
+  checkout read-only, but separate writers must never stage, commit, switch
+  branches, or edit overlapping files in the same checkout.
+- Read-only audits and diagnostics may stay in the existing checkout and do
+  not require a branch or worktree.
 
-**WHAT TO DO INSTEAD — MCP Agent Mail advisory file reservations:**
-Multiple agents work in this single `main` checkout simultaneously. You coordinate to avoid stepping on each other NOT by branching, but by **reserving the files you are about to edit** via MCP Agent Mail (see the "MCP Agent Mail" section below):
+**Coordination and shared-state rules:**
+
+- Reserve the exact files or globs through MCP Agent Mail before editing,
+  including when the worktrees are separate. Reservations prevent overlapping
+  edits; branches and worktrees do not.
+- Worktrees isolate Git files only. They do not isolate Beads, Agent Mail,
+  installed releases, shared build resources, databases, or live provider
+  state. Serialize operations against those systems and designate one writer
+  for live external mutations.
+- Do not create speculative, detached, or long-lived branches/worktrees.
+  Preserve existing stray branches/worktrees until their contents are audited;
+  never delete them merely to reduce clutter.
+- After authorized integration, verify the result on `main`, confirm the
+  checkout and exact finished worktree are clean, and remove only the exact
+  completed local task branch/worktree within the approved cleanup scope.
+
+**WHAT TO RESERVE — MCP Agent Mail advisory file reservations:**
+Coordinate file ownership by **reserving the files you are about to edit** via
+MCP Agent Mail (see the "MCP Agent Mail" section below), whether the work is in
+`main` or in a task worktree:
 
 ```
 file_reservation_paths(project_key, agent_name, ["connectors/foo/**"], ttl_seconds=3600, exclusive=true, reason="<bead-id>")
 ```
 
-Edit directly on `main`, commit on `main`, push `main`. If you hit a `FILE_RESERVATION_CONFLICT`, wait or narrow your patterns — do NOT escape into a branch or worktree to dodge the conflict.
-
-**If you find yourself typing `git branch`, `git checkout -b`, `git switch -c`, or `git worktree add` — STOP. You are about to violate this rule.** The only acceptable answer to "where should this work go?" is: **on `main`, after reserving the files.**
-
-If you encounter pre-existing stray branches or worktrees, do not silently delete them (they may hold unmerged work) — surface them so their content can be folded into `main` first, then cleaned up.
+Reserve before editing in either a task checkout or `main`; if you hit a
+`FILE_RESERVATION_CONFLICT`, wait, narrow the pattern, or coordinate with the
+holder. Do not bypass the conflict by creating an untracked parallel copy.
 
 ---
 
@@ -67,22 +96,31 @@ The `am serve-http` process is a **shared singleton** that all agents depend on.
 
 ---
 
-## Git Branch: ONLY Use `main`, NEVER `master`
+## Git Branch: `main` Integration, Short-Lived Task Branches, `master` Mirror
 
-**The default branch is `main`. The `master` branch exists only for legacy URL compatibility.**
+**The integration branch is `main`.** Short-lived task branches are allowed
+only for the task/worktree workflow above. The `master` branch exists only for
+legacy URL compatibility and must not be used as a task base or integration
+branch.
 
-> **SEE RULE 0.5 ABOVE: NO branches and NO worktrees are permitted in this repo — only `main`.** Coordinate via MCP Agent Mail file reservations, never by branching or creating a worktree. This section governs the `main`/`master` mirror relationship only; it does NOT authorize creating any other branch.
+> **SEE RULE 0.5 ABOVE:** keep the integration checkout on `main`, use
+> short-lived task branches/worktrees for implementation, and coordinate file
+> ownership through MCP Agent Mail. This section governs the `main`/`master`
+> mirror relationship; it does not make `master` a second integration branch.
 
-- **All work happens on `main`** — commits and PRs land on `main`; there are no feature branches
-- **Never reference `master` in code or docs** — if you see `master` anywhere, it's a bug that needs fixing
+- **Integration commits and release checks happen on `main`**; task commits
+  land first on their task branch and are integrated only through the approved
+  project workflow.
+- **Do not use `master` in code or product documentation** — it is only the
+  legacy mirror ref described here.
 - **The `master` branch must stay synchronized with `main`** — after pushing to `main`, also push to `master`:
   ```bash
   git push origin main:master
   ```
 
-**If you see `master` referenced anywhere:**
-1. Update it to `main`
-2. Ensure `master` is synchronized: `git push origin main:master`
+**If you see `master` referenced outside this mirror-policy section:**
+1. Update it to `main` in code and product documentation.
+2. Ensure the legacy mirror is synchronized: `git push origin main:master`.
 
 ---
 

@@ -823,17 +823,29 @@ fn verify_lifecycle_baseline(input: &Value, state: &Value) -> Result<(), AppErro
     Ok(())
 }
 
+fn lifecycle_response_result(response: Value) -> Result<Value, AppError> {
+    response_result(response, "unknown_outcome")
+        .map_err(|_| AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape")))
+}
+
 fn decode_official_mcp_lifecycle_result(
     response: Value,
     action: &str,
     workflow_id: &str,
 ) -> Result<Value, AppError> {
-    let mut result = response_result(response, "unknown_outcome")?;
-    if result
-        .get("isError")
-        .is_some_and(|value| value != &Value::Bool(false))
-    {
-        return Err(AppError::new("unknown_outcome"));
+    let shape_error =
+        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape"));
+    let field_error =
+        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_provider_field_mismatch"));
+    let rejection_error =
+        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_provider_rejected"));
+    let mut result = lifecycle_response_result(response)?;
+    if let Some(is_error) = result.get("isError") {
+        match is_error.as_bool() {
+            Some(false) => {}
+            Some(true) => return Err(rejection_error()),
+            None => return Err(shape_error()),
+        }
     }
     if let Some(structured) = result.get("structuredContent").cloned() {
         result = structured;
@@ -843,12 +855,13 @@ fn decode_official_mcp_lifecycle_result(
                 .then(|| item.get("text").and_then(Value::as_str))
                 .flatten()
         });
-        let text = text.ok_or_else(|| AppError::new("unknown_outcome"))?;
-        result = serde_json::from_str(text).map_err(|_| AppError::new("unknown_outcome"))?;
+        let text = text.ok_or_else(shape_error)?;
+        result = serde_json::from_str(text).map_err(|_| shape_error())?;
     }
-    let object = result
-        .as_object()
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    let object = result.as_object().ok_or_else(shape_error)?;
+    if object.get("success") == Some(&Value::Bool(false)) {
+        return Err(rejection_error());
+    }
     let allowed_fields: &[&str] = match action {
         "publish" => &[
             "success",
@@ -859,32 +872,35 @@ fn decode_official_mcp_lifecycle_result(
             "workflowReviewRequestId",
         ],
         "unpublish" => &["success", "workflowId", "error"],
-        _ => return Err(AppError::new("unknown_outcome")),
+        _ => return Err(field_error()),
     };
     if object
         .keys()
         .any(|key| !allowed_fields.contains(&key.as_str()))
-        || object.get("reason").is_some_and(|value| !value.is_string())
+    {
+        return Err(shape_error());
+    }
+    if object.get("reason").is_some_and(|value| !value.is_string())
         || object
             .get("workflowReviewRequestId")
             .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
     {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(field_error());
     }
     if object.get("success").and_then(Value::as_bool) != Some(true)
         || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
     {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(field_error());
     }
     if object.contains_key("error") {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(field_error());
     }
     let active_version_id = object.get("activeVersionId");
     if (action == "publish" && active_version_id.is_none())
         || active_version_id
             .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
     {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(field_error());
     }
     let mut safe = serde_json::Map::new();
     safe.insert("action".to_string(), Value::String(action.to_string()));
@@ -1077,6 +1093,13 @@ fn verify_lifecycle_readback(
     Ok(expected_version.to_string())
 }
 
+fn lifecycle_state_error(_: AppError) -> AppError {
+    AppError::with_diagnostic(
+        "unknown_outcome",
+        Some("lifecycle_readback_precondition_mismatch"),
+    )
+}
+
 fn execute_workflow_lifecycle_official_mcp(
     bundle: &fwc_n8n_bundle::VerifiedBundle,
     envelope: HostRunOnceEnvelope,
@@ -1089,8 +1112,8 @@ fn execute_workflow_lifecycle_official_mcp(
         BrokerCredentialPurpose::RestApi,
         request_deadline_at,
     )?;
-    let baseline = response_result(baseline_response, "unknown_outcome")?;
-    verify_lifecycle_baseline(&envelope.input, &baseline)?;
+    let baseline = lifecycle_response_result(baseline_response)?;
+    verify_lifecycle_baseline(&envelope.input, &baseline).map_err(lifecycle_state_error)?;
 
     let provider_response = run_host_bridge_once(
         bundle,
@@ -1116,8 +1139,9 @@ fn execute_workflow_lifecycle_official_mcp(
         BrokerCredentialPurpose::RestApi,
         request_deadline_at,
     )?;
-    let readback = response_result(readback_response, "unknown_outcome")?;
-    let _ = verify_lifecycle_readback(&envelope.input, &baseline, &provider, &readback)?;
+    let readback = lifecycle_response_result(readback_response)?;
+    let _ = verify_lifecycle_readback(&envelope.input, &baseline, &provider, &readback)
+        .map_err(lifecycle_state_error)?;
     Ok(json!({
         "status": "verified",
         "operation": "n8n.workflows.lifecycle",
@@ -3372,6 +3396,124 @@ mod tests {
             "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000",
             "updatedAt": null,
         })
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_diagnostics_are_fixed_and_redacted() {
+        let private = "private-token-workflow-error";
+        let success = json!({"success": true, "workflowId": "1001", "activeVersionId": "v1"});
+        for result in [
+            success.clone(),
+            json!({"structuredContent": success}),
+            json!({"content": [{"type": "text", "text": success.to_string()}]}),
+        ] {
+            assert!(
+                decode_official_mcp_lifecycle_result(
+                    json!({"status": "ok", "result": result}),
+                    "publish",
+                    "1001"
+                )
+                .is_ok()
+            );
+        }
+        for (response, diagnostic) in [
+            (
+                json!({"status": "ok", "result": {"structuredContent": {
+                    "success": false, "workflowId": "1001", "activeVersionId": null, "error": private
+                }}}),
+                "lifecycle_provider_rejected",
+            ),
+            (
+                json!({"status": "ok", "result": {"isError": true, "content": private}}),
+                "lifecycle_provider_rejected",
+            ),
+            (
+                json!({"status": private, "error": private}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"structuredContent": [private]}}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"content": [{"type": "text", "text": private}]}}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"content": []}}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"isError": private}}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"unsupported": private}}),
+                "lifecycle_response_shape",
+            ),
+            (
+                json!({"status": "ok", "result": {"success": true, "workflowId": private, "activeVersionId": "v1"}}),
+                "lifecycle_provider_field_mismatch",
+            ),
+            (
+                json!({"status": "ok", "result": {"success": private, "workflowId": "1001", "activeVersionId": "v1"}}),
+                "lifecycle_provider_field_mismatch",
+            ),
+            (
+                json!({"status": "ok", "result": {"success": true, "workflowId": "1001", "activeVersionId": {"private": private}}}),
+                "lifecycle_provider_field_mismatch",
+            ),
+            (
+                json!({"status": "ok", "result": {"success": true, "workflowId": "1001"}}),
+                "lifecycle_provider_field_mismatch",
+            ),
+        ] {
+            let error = decode_official_mcp_lifecycle_result(response, "publish", "1001")
+                .expect_err("unsafe response");
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some(diagnostic));
+            let encoded = serde_json::to_string(&ErrorEnvelope {
+                schema: "fwc.n8n.error.v1",
+                status: "error",
+                code: error.code.to_string(),
+                diagnostic: error.diagnostic,
+                correlation_id: "test".to_string(),
+            })
+            .expect("safe error envelope");
+            assert!(!encoded.contains(private));
+        }
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_state_diagnostic_is_unknown_and_redacted() {
+        let error = lifecycle_response_result(json!({"error": "private-workflow"}))
+            .expect_err("invalid readback envelope");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("lifecycle_response_shape"));
+        let baseline = lifecycle_state(false, Value::Null, false);
+        let input = json!({"id": "private-workflow", "guard": {"precondition": {}}});
+        let error = verify_lifecycle_baseline(&input, &baseline)
+            .map_err(lifecycle_state_error)
+            .expect_err("stale baseline");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(
+            error.diagnostic,
+            Some("lifecycle_readback_precondition_mismatch")
+        );
+        let error = verify_lifecycle_readback(
+            &json!({"action": "publish"}),
+            &baseline,
+            &json!({}),
+            &json!({"id": "private-workflow"}),
+        )
+        .map_err(lifecycle_state_error)
+        .expect_err("invalid readback");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(
+            error.diagnostic,
+            Some("lifecycle_readback_precondition_mismatch")
+        );
+        assert!(!format!("{error:?}").contains("private-workflow"));
     }
 
     #[test]

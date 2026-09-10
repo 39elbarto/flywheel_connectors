@@ -15,37 +15,37 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 **Current lifecycle checkpoint and completion plan (2026-09-10):**
-`current` resolves to `release-20260910-bdab37a-rc1`, revision
-`bdab37a6cb215ce78877e828294baad05e540733`. Owner signing, provision preflight
+`current` resolves to `release-20260910-35547aa-rc2`, revision
+`35547aa15ac301defedf509a3bbe6e2d834505cb`. Owner signing, provision preflight
 and apply completed; installed provenance and signed receipt agree, the bundle
-contains 12 verified artifacts, and `status` reports `bundleAvailable=true`.
-The owner-signed receipt covers 14 artifacts and both server bindings. This
-includes the trusted host policy view and bridge typed approval-binding fixes.
-Workspace compilation, focused approval/no-retry tests, all four server/action
-approval regression cases and the release smoke test passed; Clippy remains
-blocked by unchanged baseline lint errors. The previous release is preserved.
+contains 12 verified release artifacts, the receipt covers 14 artifacts and
+both EEC/Hetzner bindings, and `status` reports `bundleAvailable=true`.
+This release includes the trusted host policy view and bridge typed
+approval-binding fixes. Workspace compilation, focused approval/no-retry tests,
+all four server/action approval regression cases and release smoke passed;
+Clippy remains blocked by unchanged baseline lint errors. The predecessor is
+preserved and the external approval issuer is installed from the same release
+candidate.
 
-Live lifecycle acceptance is still **NO-GO**: one fresh EEC publish at 02:32 UTC
-returned `unknown_outcome`, correlation
-`fbc2af96-0cc8-434a-b7f0-b5d4c38d939b`. Independent reads confirmed both test workflows
-remain inactive, unarchived, without a published version, and with unchanged
-draft versions and graph digests. Hetzner publication was not attempted.
-The released worker evidence is attached to Orca dispatch `ctx_982996b5c42b`.
-Its retained result lacks the detailed diagnostic class: earlier local 4xx
-labels must not be attributed to this attempt. Pre-provider request preparation
-errors were corrected separately; they are not successful provider attempts.
+Live lifecycle acceptance is still **NO-GO**. The prior fresh EEC publish at
+02:32 UTC returned `unknown_outcome`, correlation
+`fbc2af96-0cc8-434a-b7f0-b5d4c38d939b`; its independent reconciliation showed no
+published version and no state mutation, and it is not being replayed. The
+first post-RC2 acceptance dispatch `ctx_9a101b229a88` (06:08--06:15 UTC) made
+only the permitted EEC read-only baseline and one final reconciliation, then
+stopped before any write because the task's expected EEC `stateDigest` was a
+truncated 63-hex value. The provider observed the canonical 64-hex digest
+`blake3-256:1b431688626cba116259425ed22acb74fed2bbe423330a7b7f039b1d2908f91c`.
+The exact redacted evidence is recorded at
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-20260910T060830Z-b483900a-e190-4eb4-b3f2-a814916782ae/live-acceptance-report.json`;
+Hetzner was not started and no provider write was attempted.
 
-At 03:01 UTC, the offline real bridge-process regression passed all five
-`capability_gate` tests (dispatch `ctx_25dc04c4179d`). It sends configure,
-handshake and full `InvokeRequest` messages to the binary using synthetic keys
-and a loopback provider: all four EEC/Hetzner publish/unpublish cases make one
-tool call, while missing/mismatched approval bindings and a wrong handshake
-instance make none. A synthetic provider JSON-RPC error remains a bounded
-`External` error with no HTTP status. Package Clippy and formatting passed;
-workspace Clippy remains blocked by 11 existing `fcp-sandbox` lints. This does
-not cover the full host run-once/owned-host path and does not explain the live
-failure. Read-only EEC logs supplied no attributable provider receipt. No
-production code or installed artifacts changed; live acceptance remains open.
+The offline real bridge-process regression passed all five `capability_gate`
+tests (dispatch `ctx_25dc04c4179d`), including all four EEC/Hetzner
+publish/unpublish paths and fail-closed mismatches. It does not cover the full
+host run-once/owned-host path. Package Clippy and formatting passed; workspace
+Clippy remains blocked by 11 existing `fcp-sandbox` lints. Live acceptance
+remains open pending a corrected, fresh EEC-then-Hetzner lifecycle run.
 
 The owner authorized completing bead `flywheel_connectors-nqm81.10`, including
 necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
@@ -59,6 +59,10 @@ necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
    independent readback, unpublish and final independent readback through FCP.
    Each final state must have `active=false`, `activeVersionId=null`,
    `published=null`, `isArchived=false`, and the preserved draft graph/version.
+   The canonical EEC baseline state digest is
+   `blake3-256:1b431688626cba116259425ed22acb74fed2bbe423330a7b7f039b1d2908f91c`
+   (64 lowercase hex characters after the prefix); baseline checks must use
+   the complete value.
 4. Retain redacted evidence, update Beads according to the actual outcomes,
    and release each completed task-owned worker.
 

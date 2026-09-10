@@ -94,6 +94,24 @@ host run-once/owned-host path. Package Clippy and formatting passed; workspace
 Clippy remains blocked by 11 existing `fcp-sandbox` lints. Live acceptance
 remains open pending a corrected, fresh EEC-then-Hetzner lifecycle run.
 
+The fresh fixed-expiry RC4 acceptance dispatch `ctx_6f07730de760` (Orca task
+`task_3439a6782bbe`, 11:13--11:22 UTC) corrected the local expiry defect and
+passed the exact EEC baseline. Its approval request used the encoded official
+MCP resource URI, a 13-digit Unix-millisecond expiry, the canonical parent
+binding helper, and the isolated issuer; the single EEC publish wrapper call
+then returned `unknown_outcome` (wrapper error, correlation
+`2418798a-5c32-471f-9de2-d042b3129d00`). The fail-closed stop rule prevented a
+retry, unpublish, or any Hetzner call. One EEC reconciliation GET proved the
+workflow remained inactive, unarchived, unpublished, and equal to the exact
+baseline; provider lifecycle writes attempted/verified were `1/0`. The
+redacted report, evidence, and manifest are retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc4-fixed-20260910/`; the report
+SHA-256 is
+`5ca276f6d280154bd526de0426160ac9b3ce709883ff2183f8540ac348286558`, its
+redaction scan is clean, no matching processes remain, and the RC4 release
+pointer is unchanged. Live acceptance remains **NO-GO**; this unknown result
+must not be replayed, and no provider side effect may be inferred from it.
+
 The owner authorized completing bead `flywheel_connectors-nqm81.10`, including
 necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
 
@@ -724,6 +742,23 @@ redaction scan is clean, the RC4 pointer is unchanged, and no matching
 processes remain. Live acceptance remains **NO-GO**; this bounded stop is not to
 be replayed, and any future attempt requires correcting the local expiry
 preparation before a new explicitly bounded EEC-first run.
+
+The subsequent fixed-expiry RC4 acceptance dispatch `ctx_6f07730de760` (Orca
+task `task_3439a6782bbe`, 11:13--11:22 UTC) passed the exact EEC baseline and
+completed approval preparation with the encoded official-MCP URI, a 13-digit
+millisecond expiry, the parent-binding helper, and the isolated issuer. Its
+single EEC publish wrapper call returned `unknown_outcome` with correlation
+`2418798a-5c32-471f-9de2-d042b3129d00`; the fail-closed boundary therefore
+performed no retry, no unpublish, and no Hetzner call. One reconciliation GET
+confirmed the original inactive/unarchived/unpublished EEC state and exact
+draft/state digests, with one provider lifecycle write attempted and zero
+verified. The redacted report/evidence/manifest are retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc4-fixed-20260910/`; report
+SHA-256 is
+`5ca276f6d280154bd526de0426160ac9b3ce709883ff2183f8540ac348286558`.
+Redaction is clean, the RC4 pointer is unchanged, and no matching processes
+remain. Live acceptance remains **NO-GO**; the unknown result is not proof of a
+provider side effect and must not be replayed.
 
 The provider result is fail-closed unless it contains typed `active`,
 `isArchived`, `activeVersionId`, draft/published graph summaries, and

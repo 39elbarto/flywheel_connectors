@@ -15,25 +15,32 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 **Current lifecycle checkpoint and completion plan (2026-09-10):**
-`current` resolves to `release-20260910-e3d01275b-rc1`, revision
-`e3d01275b3f8f1e9a06f52150fce6a00dd9c0c67`. Owner signing, provision preflight
+`current` resolves to `release-20260910-bdab37a-rc1`, revision
+`bdab37a6cb215ce78877e828294baad05e540733`. Owner signing, provision preflight
 and apply completed; installed provenance and signed receipt agree, the bundle
 contains 12 verified artifacts, and `status` reports `bundleAvailable=true`.
-This includes the trusted wrapper-operation/parent/typed-plan approval fix.
-Workspace compilation and the focused approval/no-retry tests passed; Clippy
-remains blocked by unchanged baseline lint errors.
+The owner-signed receipt covers 14 artifacts and both server bindings. This
+includes the trusted host policy view and bridge typed approval-binding fixes.
+Workspace compilation, focused approval/no-retry tests, all four server/action
+approval regression cases and the release smoke test passed; Clippy remains
+blocked by unchanged baseline lint errors. The previous release is preserved.
 
-Live lifecycle acceptance is still **NO-GO**: one fresh EEC publish at 01:01 UTC
-returned `unknown_outcome`. Independent reads confirmed both test workflows
+Live lifecycle acceptance is still **NO-GO**: one fresh EEC publish at 02:32 UTC
+returned `unknown_outcome`, correlation
+`fbc2af96-0cc8-434a-b7f0-b5d4c38d939b`. Independent reads confirmed both test workflows
 remain inactive, unarchived, without a published version, and with unchanged
 draft versions and graph digests. Hetzner publication was not attempted.
-The released worker evidence is attached to Orca dispatch `ctx_afce57e36d18`.
+The released worker evidence is attached to Orca dispatch `ctx_982996b5c42b`.
+Its retained result lacks the detailed diagnostic class: earlier local 4xx
+labels must not be attributed to this attempt. Pre-provider request preparation
+errors were corrected separately; they are not successful provider attempts.
 
 The owner authorized completing bead `flywheel_connectors-nqm81.10`, including
 necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
 
-1. Diagnose the remaining host/bridge failure from source and retained evidence;
-   distinguish a local dispatch rejection from a provider HTTP failure.
+1. Diagnose the remaining real host/bridge process boundary from source and
+   retained evidence, alongside a bounded read-only EEC log check for this
+   attempt; distinguish a local rejection from a proven provider failure.
 2. Fix the confirmed cause and add a regression that covers the actual failed
    boundary, then verify and install the resulting signed release.
 3. On EEC `oD8zytCtv5PiSYzc`, then Hetzner `oPmF5VkbiVRgIS5S`, prove publish,

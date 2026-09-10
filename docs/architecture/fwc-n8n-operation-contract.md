@@ -35,6 +35,18 @@ Its retained result lacks the detailed diagnostic class: earlier local 4xx
 labels must not be attributed to this attempt. Pre-provider request preparation
 errors were corrected separately; they are not successful provider attempts.
 
+At 03:01 UTC, the offline real bridge-process regression passed all five
+`capability_gate` tests (dispatch `ctx_25dc04c4179d`). It sends configure,
+handshake and full `InvokeRequest` messages to the binary using synthetic keys
+and a loopback provider: all four EEC/Hetzner publish/unpublish cases make one
+tool call, while missing/mismatched approval bindings and a wrong handshake
+instance make none. A synthetic provider JSON-RPC error remains a bounded
+`External` error with no HTTP status. Package Clippy and formatting passed;
+workspace Clippy remains blocked by 11 existing `fcp-sandbox` lints. This does
+not cover the full host run-once/owned-host path and does not explain the live
+failure. Read-only EEC logs supplied no attributable provider receipt. No
+production code or installed artifacts changed; live acceptance remains open.
+
 The owner authorized completing bead `flywheel_connectors-nqm81.10`, including
 necessary tested release installation. Run `run_7f59cff02127` tracks this plan:
 

@@ -12,9 +12,15 @@
 )]
 
 use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_core::{ConnectorId, InvokeContext, InvokeRequest, OperationId, RequestId};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_host::{
     N8nApprovalIssueRequest, N8nApprovalServer, N8nLifecycleOperation,
@@ -38,6 +44,82 @@ use fcp_mcp_bridge::protocol::{
 };
 
 const TEST_SERVER_ID: &str = "eec";
+const BRIDGE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct BridgeProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    responses: Receiver<Result<Value, String>>,
+    reader_thread: Option<JoinHandle<()>>,
+}
+
+impl BridgeProcess {
+    fn spawn() -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fcp-mcp-bridge"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn real fcp-mcp-bridge binary");
+        let stdout = child.stdout.take().expect("bridge stdout pipe");
+        let (sender, responses) = mpsc::channel();
+        let reader_thread = thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let parsed = line
+                    .map_err(|error| format!("bridge stdout read failed: {error}"))
+                    .and_then(|line| {
+                        serde_json::from_str::<Value>(&line)
+                            .map_err(|error| format!("bridge emitted invalid JSON: {error}"))
+                    });
+                if sender.send(parsed).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            stdin: Some(child.stdin.take().expect("bridge stdin pipe")),
+            child,
+            responses,
+            reader_thread: Some(reader_thread),
+        }
+    }
+
+    fn request(&mut self, id: &str, method_name: &str, params: Value) -> Value {
+        let mut request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method_name,
+        });
+        request["params"] = params;
+        let stdin = self.stdin.as_mut().expect("bridge process stdin open");
+        writeln!(stdin, "{request}").expect("write bridge JSON-RPC request");
+        stdin.flush().expect("flush bridge JSON-RPC request");
+        let response = self
+            .responses
+            .recv_timeout(BRIDGE_RESPONSE_TIMEOUT)
+            .expect("bounded bridge JSON-RPC response")
+            .expect("bridge JSON-RPC response line");
+        assert_eq!(response["id"], id, "bridge response id must be correlated");
+        response
+    }
+
+    fn stop(mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        if let Some(reader_thread) = self.reader_thread.take() {
+            let _ = reader_thread.join();
+        }
+    }
+}
+
+impl Drop for BridgeProcess {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
 
 struct TestSequenceResponder(Arc<Mutex<VecDeque<ResponseTemplate>>>);
 
@@ -297,6 +379,52 @@ fn typed_n8n_approval_for(
             }
         }),
     )
+}
+
+fn production_shaped_invoke_request(
+    server_id: &str,
+    action: &str,
+    provider_input: Value,
+    capability_instance_id: &str,
+    approval: Option<ApprovalToken>,
+    context: Option<Value>,
+) -> Value {
+    let context = context
+        .map(|value| serde_json::from_value::<InvokeContext>(value).expect("typed invoke context"));
+    let capability_token =
+        capability_token_for_server(server_id, &provider_input, capability_instance_id);
+    let request = InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId(format!("process-{server_id}-{action}")),
+        connector_id: ConnectorId::from_static("fcp.mcp-bridge"),
+        operation: OperationId::from_static("mcp.tools.call"),
+        zone_id: ZoneId::work(),
+        input: provider_input,
+        capability_token,
+        holder_proof: None,
+        context,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: Some(5_000),
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: approval.into_iter().collect(),
+    };
+    serde_json::to_value(request).expect("serialize production-shaped invoke request")
+}
+
+fn process_config(server_id: &str, mock_url: &str, tool_name: &str, input_schema: &Value) -> Value {
+    json!({
+        "server_id": server_id,
+        "mcp_url": mcp_endpoint(mock_url),
+        "api_key": "synthetic-process-test-key",
+        "capability_policy": policy_for_tool_server(
+            server_id,
+            tool_name,
+            input_schema,
+            &Value::Null,
+        )["capability_policy"].clone(),
+    })
 }
 
 fn capability_token(input: &Value, instance_id: &str) -> CapabilityToken {
@@ -730,4 +858,254 @@ async fn tools_call_schema_drift_denies_before_second_provider_request() {
     assert_eq!(requests.len(), 1);
     let request: Value = serde_json::from_slice(&requests[0].body).expect("JSON-RPC request");
     assert_eq!(request["method"], "tools/list");
+}
+
+#[fcp_async_core::runtime::test]
+async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() {
+    for (server_id, action, tool_name) in [
+        ("eec", "publish", "publish_workflow"),
+        ("eec", "unpublish", "unpublish_workflow"),
+        ("hetzner", "publish", "publish_workflow"),
+        ("hetzner", "unpublish", "unpublish_workflow"),
+    ] {
+        let server = MockServer::start().await;
+        let input_schema = json!({"type": "object"});
+        let provider_input = if action == "publish" {
+            json!({
+                "name": tool_name,
+                "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
+            })
+        } else {
+            json!({
+                "name": tool_name,
+                "arguments": {"workflowId": "workflow-1"}
+            })
+        };
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(TestSequenceResponder::new(vec![
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"tools": [{"name": tool_name, "inputSchema": input_schema}]}
+                })),
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"content": [{"type": "text", "text": "synthetic mutation accepted"}]}
+                })),
+            ]))
+            .mount(&server)
+            .await;
+
+        let instance_id = format!("inst-process-{server_id}-{action}");
+        let (approval, context) = typed_n8n_approval_for(server_id, action, &provider_input);
+        let invoke_request = production_shaped_invoke_request(
+            server_id,
+            action,
+            provider_input,
+            &instance_id,
+            Some(approval),
+            Some(context),
+        );
+        assert_eq!(
+            invoke_request["approval_tokens"]
+                .as_array()
+                .expect("production request approvals")
+                .len(),
+            1
+        );
+        assert_eq!(
+            invoke_request["context"]["request_tags"]
+                .as_object()
+                .expect("production request tags")
+                .len(),
+            2
+        );
+        let _: InvokeRequest = serde_json::from_value(invoke_request.clone())
+            .expect("full production-shaped invoke request must deserialize");
+
+        let mut process = BridgeProcess::spawn();
+        let configured = process.request(
+            "configure",
+            "configure",
+            process_config(server_id, &server.uri(), tool_name, &input_schema),
+        );
+        assert_eq!(configured["result"]["configured"], true);
+        let handshake = process.request("handshake", "handshake", handshake_params(&instance_id));
+        assert_eq!(handshake["result"]["status"], "accepted");
+        let response = process.request("invoke", "invoke", invoke_request);
+        assert_eq!(response["result"]["status"], "ok");
+        assert_eq!(
+            response["result"]["result"]["content"][0]["text"],
+            "synthetic mutation accepted"
+        );
+        process.stop();
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let methods: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                serde_json::from_slice::<Value>(&request.body).expect("JSON-RPC request")["method"]
+                    .as_str()
+                    .expect("JSON-RPC method")
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(methods, vec!["tools/list", "tools/call"]);
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|method| method.as_str() == "tools/call")
+                .count(),
+            1
+        );
+    }
+
+    for server_id in ["eec", "hetzner"] {
+        let instance_id = format!("inst-process-invalid-{server_id}");
+        let invalid_cases = {
+            let provider_input = json!({
+                "name": "publish_workflow",
+                "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
+            });
+            let (approval, valid_context) =
+                typed_n8n_approval_for(server_id, "publish", &provider_input);
+            let mut mismatched_context = valid_context.clone();
+            mismatched_context["request_tags"]["fcp.n8n.parent_binding_sha256"] =
+                json!("b".repeat(64));
+            vec![
+                ("missing_typed_binding", None, instance_id.clone()),
+                (
+                    "mismatched_typed_binding",
+                    Some(mismatched_context),
+                    instance_id.clone(),
+                ),
+                (
+                    "mismatched_handshake_instance",
+                    Some(valid_context),
+                    "inst-process-wrong-instance".to_string(),
+                ),
+            ]
+            .into_iter()
+            .map(|(case, context, token_instance_id)| {
+                (
+                    case,
+                    provider_input.clone(),
+                    approval.clone(),
+                    context,
+                    token_instance_id,
+                )
+            })
+            .collect::<Vec<_>>()
+        };
+        for (case, provider_input, approval, context, token_instance_id) in invalid_cases {
+            let server = MockServer::start().await;
+            let input_schema = json!({"type": "object"});
+            let mut process = BridgeProcess::spawn();
+            let configured = process.request(
+                "configure",
+                "configure",
+                process_config(server_id, &server.uri(), "publish_workflow", &input_schema),
+            );
+            assert_eq!(configured["result"]["configured"], true, "{case}");
+            let handshake =
+                process.request("handshake", "handshake", handshake_params(&instance_id));
+            assert_eq!(handshake["result"]["status"], "accepted", "{case}");
+            let response = process.request(
+                "invoke",
+                "invoke",
+                production_shaped_invoke_request(
+                    server_id,
+                    "publish",
+                    provider_input,
+                    &token_instance_id,
+                    Some(approval),
+                    context,
+                ),
+            );
+            assert_eq!(response["result"]["status"], "error", "{case}");
+            if matches!(case, "missing_typed_binding" | "mismatched_typed_binding") {
+                assert_eq!(
+                    response["result"]["error"]["category"], "CapabilityDenied",
+                    "{case}"
+                );
+                assert!(
+                    response["result"]["error"]["reason"].as_str().is_some_and(
+                        |reason| reason.contains("exactly one matching execution approval")
+                    ),
+                    "{case} must fail at typed approval matching"
+                );
+            }
+            process.stop();
+            assert_eq!(
+                server.received_requests().await.unwrap_or_default().len(),
+                0,
+                "{case} must not reach the provider"
+            );
+        }
+    }
+
+    let server = MockServer::start().await;
+    let input_schema = json!({"type": "object"});
+    let provider_input = json!({
+        "name": "publish_workflow",
+        "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
+    });
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(TestSequenceResponder::new(vec![
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"tools": [{"name": "publish_workflow", "inputSchema": input_schema}]}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": {"code": -32077, "message": "synthetic provider failure"}
+            })),
+        ]))
+        .mount(&server)
+        .await;
+    let instance_id = "inst-process-provider-error";
+    let (approval, context) = typed_n8n_approval_for("eec", "publish", &provider_input);
+    let mut process = BridgeProcess::spawn();
+    let configured = process.request(
+        "configure",
+        "configure",
+        process_config("eec", &server.uri(), "publish_workflow", &input_schema),
+    );
+    assert_eq!(configured["result"]["configured"], true);
+    let handshake = process.request("handshake", "handshake", handshake_params(instance_id));
+    assert_eq!(handshake["result"]["status"], "accepted");
+    let response = process.request(
+        "invoke",
+        "invoke",
+        production_shaped_invoke_request(
+            "eec",
+            "publish",
+            provider_input,
+            instance_id,
+            Some(approval),
+            Some(context),
+        ),
+    );
+    assert_eq!(response["result"]["status"], "error");
+    assert_eq!(response["result"]["error"]["category"], "External");
+    assert_eq!(
+        response["result"]["error"]["message"],
+        "MCP JSON-RPC provider error (-32077)"
+    );
+    assert!(
+        response["result"]["error"]["message"]
+            .as_str()
+            .unwrap()
+            .len()
+            < 128
+    );
+    assert!(response["result"]["error"]["status_code"].is_null());
+    process.stop();
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert_eq!(requests.len(), 2);
 }

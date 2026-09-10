@@ -15,8 +15,8 @@ No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
 **Current lifecycle checkpoint and completion plan (2026-09-10):**
-`current` resolves to `release-20260910-35547aa-rc2`, revision
-`35547aa15ac301defedf509a3bbe6e2d834505cb`. Owner signing, provision preflight
+`current` resolves to `release-20260910-c0d97eb-rc3`, revision
+`c0d97ebfee74a11b835175055f233d34cef50a7e`. Owner signing, provision preflight
 and apply completed; installed provenance and signed receipt agree, the bundle
 contains 12 verified release artifacts, the receipt covers 14 artifacts and
 both EEC/Hetzner bindings, and `status` reports `bundleAvailable=true`.
@@ -39,6 +39,23 @@ truncated 63-hex value. The provider observed the canonical 64-hex digest
 The exact redacted evidence is recorded at
 `/srv/dev-ssd/fcp/nqm81.30/live-acceptance-20260910T060830Z-b483900a-e190-4eb4-b3f2-a814916782ae/live-acceptance-report.json`;
 Hetzner was not started and no provider write was attempted.
+
+The next RC3 acceptance dispatch `ctx_6f263199ee9e` (07:10--07:21 UTC)
+performed the corrected EEC read-only baseline and confirmed every required
+invariant, including the complete canonical state digest, inactive state,
+unarchived state, and no published summary. The fresh approval request then
+failed closed with issuer diagnostic `invalid_request`: its expiry was encoded
+at nanosecond scale, so no approval token was issued, the lifecycle wrapper was
+not called, and no provider write was attempted. One immediate independent EEC
+reconciliation remained unchanged and verified; Hetzner was not started. The
+redacted report and three-event evidence are retained at
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc3-20260910/live-acceptance-report.json`
+and `/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc3-20260910/evidence.jsonl`.
+The report records `outcome=bounded_stop`, zero
+provider lifecycle writes, no token on disk, no matching processes remaining,
+and an unchanged `main` checkout at the RC3 revision. Live acceptance remains
+**NO-GO**; a future attempt must correct the expiry representation and start a
+new bounded EEC-then-Hetzner run, without replaying this failed approval.
 
 The offline real bridge-process regression passed all five `capability_gate`
 tests (dispatch `ctx_25dc04c4179d`), including all four EEC/Hetzner

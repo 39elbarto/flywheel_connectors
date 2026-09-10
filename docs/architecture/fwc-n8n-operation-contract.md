@@ -686,6 +686,28 @@ This does not authorize REST lifecycle/archive fallback, restore/unarchive, or
 activation/execution operations. Archive remains policy- and tools/list-gated;
 no live archive acceptance is claimed here.
 
+Current acceptance checkpoint (2026-09-10; main commit
+`d86b439528abe047b44839d3d7203f64e66f3246`): the wrapper now emits only fixed,
+redaction-safe lifecycle diagnostic categories for provider rejection, response
+shape, provider field mismatch, and readback precondition mismatch. The wire
+result remains fail-closed (`unknown_outcome` where outcome is not proven); no
+provider response body, token, or workflow payload is logged. Focused lifecycle
+tests passed 13/13, the workspace compiler check passed, and formatting passed.
+Workspace Clippy still stops on the pre-existing 11 findings in
+`crates/fcp-sandbox/src/process.rs`; the n8n package retains five pre-existing
+Clippy findings outside the wrapper binary.
+
+The URI-corrected RC3 live attempt used the exact EEC baseline and a valid
+13-digit millisecond approval request with 32 decoded seed bytes. One publish
+attempt still returned `unknown_outcome`; one immediate independent REST
+reconciliation proved the EEC workflow unchanged and inactive, so no publish
+side effect was claimed. The host receipt's safe result class indicates only
+that the child invocation completed; it is not lifecycle-result acceptance.
+Hetzner was not started. Evidence remains redacted under
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc3-20260910-uri-fixed/`; the bead
+remains `in_progress`/NO-GO until a fresh candidate release proves the complete
+EEC then Hetzner publish/readback/unpublish/final-readback sequence.
+
 The provider result is fail-closed unless it contains typed `active`,
 `isArchived`, `activeVersionId`, draft/published graph summaries, and
 `stateDigest` fields. Publish must confirm the requested/selected version and

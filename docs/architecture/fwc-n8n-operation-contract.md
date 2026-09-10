@@ -57,6 +57,35 @@ and an unchanged `main` checkout at the RC3 revision. Live acceptance remains
 **NO-GO**; a future attempt must correct the expiry representation and start a
 new bounded EEC-then-Hetzner run, without replaying this failed approval.
 
+A fresh supervised RC3 acceptance dispatch `ctx_04269ae38c65`
+(09:08--09:09 UTC) corrected the previous expiry-unit defect: the request used
+13-digit Unix milliseconds (`expires_at_ms`), and the issuer received exactly
+32 decoded seed bytes. EEC's exact baseline passed, but the isolated issuer
+still failed closed with `invalid_request` before token issuance or any
+lifecycle wrapper/provider call. The redacted request metadata records the
+official MCP resource as
+`fwc-mcp-bridge://eec/tools/publish_workflow`; the issuer contract in
+`crates/fcp-host/src/n8n_approval.rs` requires the canonical encoded form
+`fwc-mcp-bridge://eec/tools/publish%5Fworkflow` because its resource-segment
+encoder escapes `_`. This localizes the new rejection to the request-builder
+resource-URI mismatch, not to expiry or seed length. One reconciliation GET
+confirmed EEC unchanged (`active=false`, `activeVersionId=null`, unpublished,
+unarchived, and the exact draft digests); Hetzner was not started. The report
+records `outcome=failed`, `stopReason=publish_approval_error`, two EEC GETs,
+zero wrapper/provider writes, one issuer attempt, no matching processes, and
+the unchanged RC3 release. Redacted evidence is retained at
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc3-20260910/TurquoiseValley-ctx_04269ae38c65-report.json`,
+with report SHA-256
+`237440a26c874d642b1a8dfe62b27547f17d89ca550b4f213916fba18649198a`,
+evidence SHA-256
+`b7eca1a205367e13cbf6f8498e87284c567f891a07d08f9d9fd5623f8d8688e0`, and
+manifest SHA-256
+`1ef5a0ddfb05fe84364f01640c0e7cee063d1ea719b5d46148254eacb60c75b3`.
+Live acceptance remains **NO-GO**. Do not retry the provider lifecycle; a
+future acceptance requires a reviewed request-builder/issuer URI correction,
+fresh offline proof and release installation, then a new bounded EEC-first
+run.
+
 The offline real bridge-process regression passed all five `capability_gate`
 tests (dispatch `ctx_25dc04c4179d`), including all four EEC/Hetzner
 publish/unpublish paths and fail-closed mismatches. It does not cover the full

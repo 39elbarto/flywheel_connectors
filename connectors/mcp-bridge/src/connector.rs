@@ -42,6 +42,9 @@ const OP_RESOURCES_READ: &str = "mcp.resources.read";
 const OP_PROMPTS_LIST: &str = "mcp.prompts.list";
 const OP_SAMPLING_HANDLE: &str = "mcp.sampling.handle";
 const OP_SERVER_METRICS: &str = "mcp.server.metrics";
+const N8N_APPROVAL_WRAPPER_OPERATION: &str = "n8n.mcp.call";
+const N8N_TYPED_APPROVAL_PARENT_BINDING_TAG: &str = "fcp.n8n.parent_binding_sha256";
+const N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG: &str = "fcp.n8n.typed_plan_sha256";
 const OPERATION_ORDER: [&str; 7] = [
     OP_TOOLS_LIST,
     OP_TOOLS_CALL,
@@ -1406,15 +1409,33 @@ impl McpBridgeConnector {
                 message: format!("Invalid approval token: {error}"),
             })?;
         let now_ms = current_time_ms();
+        let typed_target = if operation == OP_TOOLS_CALL {
+            typed_owner_approval_target(target, params)?
+        } else {
+            None
+        };
         let matching = approvals
             .iter()
             .filter(|approval| {
-                is_matching_execution_approval(
-                    approval,
-                    operation,
-                    self.zone_id.as_ref(),
-                    target,
-                    now_ms,
+                typed_target.as_ref().map_or_else(
+                    || {
+                        is_matching_execution_approval(
+                            approval,
+                            operation,
+                            self.zone_id.as_ref(),
+                            target,
+                            now_ms,
+                        )
+                    },
+                    |typed_target| {
+                        is_matching_execution_approval(
+                            approval,
+                            N8N_APPROVAL_WRAPPER_OPERATION,
+                            self.zone_id.as_ref(),
+                            typed_target,
+                            now_ms,
+                        )
+                    },
                 )
             })
             .count();
@@ -1762,6 +1783,82 @@ fn non_empty_resource_component<'a>(value: &'a str, field: &str) -> McpBridgeRes
     } else {
         Ok(value)
     }
+}
+
+fn typed_owner_approval_target(
+    target: &ApprovalTarget,
+    params: &serde_json::Value,
+) -> FcpResult<Option<ApprovalTarget>> {
+    let tags = params
+        .get("context")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|context| context.get("request_tags"))
+        .and_then(serde_json::Value::as_object);
+    let parent_binding = tags.and_then(|tags| tags.get(N8N_TYPED_APPROVAL_PARENT_BINDING_TAG));
+    let typed_plan = tags.and_then(|tags| tags.get(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG));
+    let (Some(parent_binding), Some(typed_plan)) = (parent_binding, typed_plan) else {
+        if parent_binding.is_none() && typed_plan.is_none() {
+            return Ok(None);
+        }
+        return Err(FcpError::CapabilityDenied {
+            capability: OP_TOOLS_CALL.to_string(),
+            reason: "typed owner approval context is incomplete".into(),
+        });
+    };
+    let parent_binding = parent_binding
+        .as_str()
+        .ok_or_else(|| FcpError::CapabilityDenied {
+            capability: OP_TOOLS_CALL.to_string(),
+            reason: "typed owner approval parent binding is invalid".into(),
+        })?;
+    let typed_plan = typed_plan
+        .as_str()
+        .ok_or_else(|| FcpError::CapabilityDenied {
+            capability: OP_TOOLS_CALL.to_string(),
+            reason: "typed owner approval plan binding is invalid".into(),
+        })?;
+    if !is_lower_hex_digest(parent_binding)
+        || !typed_plan
+            .strip_prefix("blake3-256:")
+            .is_some_and(is_lower_hex_digest)
+    {
+        return Err(FcpError::CapabilityDenied {
+            capability: OP_TOOLS_CALL.to_string(),
+            reason: "typed owner approval context binding is invalid".into(),
+        });
+    }
+
+    let mut normalized_input = target
+        .normalized_input
+        .as_object()
+        .cloned()
+        .ok_or_else(|| FcpError::Internal {
+            message: "MCP approval target is not an object".into(),
+        })?;
+    normalized_input.insert(
+        "operation".to_string(),
+        serde_json::Value::String(N8N_APPROVAL_WRAPPER_OPERATION.to_string()),
+    );
+    normalized_input.insert(
+        "parent_binding_sha256".to_string(),
+        serde_json::Value::String(parent_binding.to_string()),
+    );
+    normalized_input.insert(
+        "typed_plan_sha256".to_string(),
+        serde_json::Value::String(typed_plan.to_string()),
+    );
+    Ok(Some(ApprovalTarget {
+        resource_uri: target.resource_uri.clone(),
+        normalized_input: serde_json::Value::Object(normalized_input),
+        payload_digest: target.payload_digest,
+    }))
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn is_matching_execution_approval(

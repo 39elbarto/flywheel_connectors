@@ -122,10 +122,11 @@ use fcp_host::{
 };
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse,
-    InvokeStatus, LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, LimitType,
-    OperationId, OperationInfo, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
-    RateLimitScope, RateLimitUnit, RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
+    HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeContext, InvokeRequest,
+    InvokeResponse, InvokeStatus, LifecycleError, LifecycleManager, LifecycleState,
+    LifecycleStatus, LimitType, OperationId, OperationInfo, RateLimitDeclarations,
+    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RequestId, SelfCheckReport,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_manifest::{
     ConnectorManifest, HostEgressContext, HostEgressDecisionMetadata, HostEgressHttpHeader,
@@ -371,6 +372,8 @@ const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
 const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
 const N8N_APPROVAL_WRAPPER_OPERATION: &str = "n8n.mcp.call";
+const N8N_TYPED_APPROVAL_PARENT_BINDING_TAG: &str = "fcp.n8n.parent_binding_sha256";
+const N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG: &str = "fcp.n8n.typed_plan_sha256";
 const N8N_OFFICIAL_MCP_PUBLISH_TOOL: &str = "publish_workflow";
 const N8N_OFFICIAL_MCP_UNPUBLISH_TOOL: &str = "unpublish_workflow";
 const N8N_OFFICIAL_MCP_ARCHIVE_TOOL: &str = "archive_workflow";
@@ -14227,6 +14230,23 @@ fn build_n8n_official_mcp_invoke_request(
         parent_binding_hash: plan.parent_binding_hash,
         typed_plan_digest: typed_approval.map(|binding| binding.plan_digest.clone()),
     };
+    let context = typed_approval.map(|typed_approval| {
+        let mut request_tags = std::collections::HashMap::new();
+        if let Some(parent_binding_hash) = plan.parent_binding_hash {
+            request_tags.insert(
+                N8N_TYPED_APPROVAL_PARENT_BINDING_TAG.to_string(),
+                hex::encode(parent_binding_hash),
+            );
+        }
+        request_tags.insert(
+            N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG.to_string(),
+            typed_approval.plan_digest.clone(),
+        );
+        InvokeContext {
+            request_tags,
+            ..InvokeContext::default()
+        }
+    });
     let request = InvokeRequest {
         r#type: "invoke".to_string(),
         id: request_id,
@@ -14236,7 +14256,7 @@ fn build_n8n_official_mcp_invoke_request(
         input: plan.input,
         capability_token,
         holder_proof: None,
-        context: None,
+        context,
         idempotency_key: None,
         lease_seq: None,
         deadline_ms: Some(plan.deadline_ms),
@@ -22583,7 +22603,10 @@ mod tests {
 
     use chrono::TimeZone;
     use fcp_core::FcpConnector;
-    use fcp_host::{CancelReason, CleanupBehavior, CredentialPoolAuditOperation};
+    use fcp_host::{
+        CancelReason, CleanupBehavior, CredentialPoolAuditOperation, N8nApprovalIssueRequest,
+        N8nApprovalServer, N8nLifecycleOperation, build_unsigned_n8n_approval_token,
+    };
     use fcp_kernel::{
         AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
         SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric,
@@ -34928,15 +34951,27 @@ done"#;
             .expect("validated provider plan");
         let key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let payload_hash = mcp_tools_call_payload_digest(&plan.input).expect("payload digest");
-        let mut approval = signed_external_approval(
-            "chat-lifecycle-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
-            payload_hash,
-            Vec::new(),
-            ZoneId::work(),
-            &key,
-        );
+        let now_ms = n8n_run_once_now_ms();
+        let parent_binding_hash = plan
+            .parent_binding_hash
+            .expect("typed approval parent binding");
+        let issue_request = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: high_level_input["id"]
+                .as_str()
+                .expect("workflow id")
+                .to_string(),
+            operation: N8nLifecycleOperation::Publish,
+            input: high_level_input.clone(),
+            official_mcp_tool: N8N_OFFICIAL_MCP_PUBLISH_TOOL.to_string(),
+            official_mcp_resource_uri: plan.resource_uri.clone(),
+            official_mcp_payload_digest: format!("sha256:{}", hex::encode(payload_hash)),
+            parent_binding_sha256: hex::encode(parent_binding_hash),
+            expires_at_ms: now_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000),
+        };
+        let mut approval = build_unsigned_n8n_approval_token(&issue_request, now_ms)
+            .expect("production n8n typed issuer token shape");
         let typed = build_n8n_typed_approval_binding(
             "n8n.workflows.lifecycle",
             &high_level_input,
@@ -34946,10 +34981,13 @@ done"#;
         .expect("recomputed typed plan binding");
         let constraints = official_mcp_approval_constraints_with_typed_plan(&plan, Some(&typed))
             .expect("issuer contract constraints");
-        let ApprovalScope::Execution(scope) = &mut approval.scope else {
+        let ApprovalScope::Execution(scope) = &approval.scope else {
             panic!("execution approval");
         };
-        scope.input_constraints.clone_from(&constraints);
+        assert_eq!(
+            serde_json::to_value(&scope.input_constraints).expect("issuer constraints JSON"),
+            serde_json::to_value(&constraints).expect("host constraints JSON")
+        );
         approval.signature = Some(
             key.sign(&approval_token_signing_bytes(&approval).expect("approval signing bytes"))
                 .to_bytes()
@@ -34966,6 +35004,7 @@ done"#;
             Some(&key.verifying_key()),
         )
         .expect("genuine signed typed execution approval");
+        let signed_approval = approval.clone();
         plan.approval_token = Some(approval);
         let (request, mut binding) = build_n8n_official_mcp_invoke_request(
             plan,
@@ -34976,6 +35015,24 @@ done"#;
                 ZoneId::work().as_str(),
             ),
             Some(&typed),
+        );
+        assert_eq!(request.approval_tokens.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&request.approval_tokens[0]).expect("request approval JSON"),
+            serde_json::to_value(&signed_approval).expect("issuer approval JSON")
+        );
+        let request_tags = &request
+            .context
+            .as_ref()
+            .expect("typed approval context")
+            .request_tags;
+        assert_eq!(
+            request_tags.get(N8N_TYPED_APPROVAL_PARENT_BINDING_TAG),
+            Some(&hex::encode(parent_binding_hash))
+        );
+        assert_eq!(
+            request_tags.get(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG),
+            Some(&typed.plan_digest)
         );
         let normalize = |request: &InvokeRequest, binding: &TrustedResourceBinding| {
             n8n_official_mcp_policy_request(request, Some(binding), Some(&binding.resource_uri))

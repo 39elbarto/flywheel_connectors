@@ -14,7 +14,32 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current lifecycle checkpoint and completion plan (2026-09-10):**
+**Latest live acceptance checkpoint (2026-09-10 15:32 UTC; RC7):**
+`current` resolves to `release-20260910-e30ca9f09-rc1`, built from revision
+`e30ca9f0921d8e0db3f3b3ff173427c6a53758a7`, and `fwc-n8n status` reports
+`bundleAvailable=true`. The release includes the verified dry-run ledger-bypass
+fix. A fresh supervised EEC-first acceptance passed the exact inactive,
+unpublished, unarchived baseline and one `n8n.mcp_access.reconcile` dry-run
+(`desired=true`, `dryRun=true`, one planned change, zero exceptions, and no
+durable ledger claim/commit). The apply gate then stopped fail-closed because
+the installed owner issuer has no exact approval representation for
+`n8n.mcp_access.reconcile`: `N8nApprovalIssueRequest.operation` is the
+`N8nLifecycleOperation` enum, whose supported variants are limited to lifecycle,
+archive, draft-create, and disposable-delete operations. No approval request,
+seed transport, signed token, MCP-access apply, or lifecycle provider write was
+attempted. One independent typed EEC reconciliation GET confirmed the exact
+baseline remained unchanged; Hetzner was not started under the EEC-first rule.
+
+The redaction-safe report, evidence, and SHA-256 manifest are retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc7-20260910/` (report SHA-256
+`3e4f3360e86b44a3b6a9c0c45ecdd66b13b912bab911341b5a6d7c540b520571`; manifest
+check passed; directory mode `0700`, artifacts mode `0600`). Acceptance remains
+**NO-GO**. Do not retry the provider or invent a broader approval payload. A
+future attempt requires a reviewed exact MCP-access approval schema/issuer
+extension, focused offline tests, a freshly assembled and installed signed
+release, and a new bounded EEC-then-Hetzner acceptance run.
+
+**Earlier lifecycle checkpoint and completion plan (2026-09-10):**
 `current` resolves to `release-20260910-db3924628-rc4`, revision
 `db3924628e8ea908f463ab05bafde6c79442405a`. Owner signing, provision preflight,
 apply and promotion completed; installed provenance and signed receipt agree,

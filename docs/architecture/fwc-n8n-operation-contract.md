@@ -760,6 +760,39 @@ Redaction is clean, the RC4 pointer is unchanged, and no matching processes
 remain. Live acceptance remains **NO-GO**; the unknown result is not proof of a
 provider side effect and must not be replayed.
 
+The diagnostic-retention fix was integrated at main commit
+`427092727a90b4a9b7bd61c8d63e449f6261f27a` and installed as
+`release-20260910-42709272-rc1`. The signed provision receipt is
+`fwc.n8n.provision.v1` with 14 artifact hashes, two EEC/Hetzner bindings, and
+an Ed25519 signature; `bundleAvailable=true`, the RC4 predecessor remains
+retained, and the installed external approval issuer SHA-256 is
+`b556d3311b812aa554c25db2dae4386ed2a7b7a2f192031b356cc0cf5c86d5ca`.
+The release report and independent checks found no matching runtime processes;
+the staging path was absent after promotion.
+
+The fresh RC5 live acceptance dispatch `ctx_28e29a0a5126` (Orca task
+`task_adeeb86cc583`, 13:09--13:15 UTC) passed the exact EEC baseline and issued
+one fresh owner approval with a 13-digit millisecond expiry. Its single EEC
+publish invocation returned `unknown_outcome` with the retained safe diagnostic
+`lifecycle_provider_rejected` (wrapper correlation
+`50881b07-025c-4f84-813f-cbe5e0a835e1`; inner lifecycle correlation
+`7b5497e8-df05-4934-9a36-e07240ed1009`). The response body was not retained;
+the diagnostic means the decoded official-MCP result indicated a provider
+rejection, but does not establish whether n8n rejected the request or which
+provider-side condition caused it. One required reconciliation GET matched
+the exact inactive, null-active-version, unpublished, unarchived EEC draft and
+state digests; provider writes verified were `0`. Under the fail-closed rule no
+unpublish and no Hetzner call were attempted. The redacted report
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc5-20260910/live-acceptance-report.json`
+has SHA-256
+`b666e85015302b1137e32c6f608146f2ba4c2cc3d63b88a1797b93cd102ed0e0`, and its
+manifest has SHA-256
+`bb2e68dc19200829d97b57758b60f64b9e65011ad19951b3a5de09543d2b7d6d`.
+The report is redaction-clean and no matching processes remain. The provider
+rejection cause is not proven, so acceptance remains **NO-GO** and this result
+must not be replayed; a future attempt requires a separately justified,
+redaction-safe provider/host diagnosis and a fresh bounded EEC-first run.
+
 The provider result is fail-closed unless it contains typed `active`,
 `isArchived`, `activeVersionId`, draft/published graph summaries, and
 `stateDigest` fields. Publish must confirm the requested/selected version and

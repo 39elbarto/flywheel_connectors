@@ -25,6 +25,7 @@ const PRECONDITION_DOMAIN: &[u8] = b"fwc-n8n.owner-approval-precondition.v1";
 const CREATION_RECEIPT_DOMAIN: &[u8] = b"fwc-n8n.owner-approval-creation-receipt.v1";
 const OFFICIAL_MCP_PAYLOAD_DOMAIN: &str = "sha256:";
 const OFFICIAL_MCP_WRAPPER_OPERATION: &str = "n8n.mcp.call";
+const MCP_ACCESS_RECONCILE_OPERATION: &str = "n8n.mcp_access.reconcile";
 const APPROVAL_REQUEST_SCHEMA: &str = "fwc.n8n.owner-approval-request.v1";
 const APPROVAL_ISSUER: &str = "owner:n8n-approval-issuer";
 const MAX_APPROVAL_TTL_MS: u64 = 60_000;
@@ -40,6 +41,8 @@ pub enum N8nLifecycleOperation {
     Archive,
     CreateDraft,
     DeleteDisposable,
+    #[serde(alias = "n8n.mcp_access.reconcile")]
+    McpAccessReconcile,
 }
 
 impl N8nLifecycleOperation {
@@ -49,6 +52,7 @@ impl N8nLifecycleOperation {
             Self::Archive => "n8n.workflows.archive",
             Self::CreateDraft => "n8n.workflows.create_draft",
             Self::DeleteDisposable => "n8n.workflows.delete_disposable",
+            Self::McpAccessReconcile => MCP_ACCESS_RECONCILE_OPERATION,
         }
     }
 
@@ -59,6 +63,7 @@ impl N8nLifecycleOperation {
             Self::Archive => "archive",
             Self::CreateDraft => "create_draft",
             Self::DeleteDisposable => "delete_disposable",
+            Self::McpAccessReconcile => "mcp_access_reconcile",
         }
     }
 }
@@ -177,8 +182,12 @@ impl N8nApprovalPlan {
             && workflow_id.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~')
             });
-        if (operation == N8nLifecycleOperation::CreateDraft && !workflow_id.is_empty())
-            || (operation != N8nLifecycleOperation::CreateDraft && !valid_workflow_id)
+        let workflow_is_not_a_target = matches!(
+            operation,
+            N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::McpAccessReconcile
+        );
+        if (workflow_is_not_a_target && !workflow_id.is_empty())
+            || (!workflow_is_not_a_target && !valid_workflow_id)
         {
             return Err(N8nApprovalError::InvalidPlan(
                 "workflow id is not a safe exact identifier",
@@ -190,24 +199,29 @@ impl N8nApprovalPlan {
         if expires_at_ms == 0 {
             return Err(N8nApprovalError::InvalidPlan("expiry must be non-zero"));
         }
-        let resource_uri = if operation == N8nLifecycleOperation::CreateDraft {
-            let project_uri = input
-                .get("project_id")
-                .and_then(Value::as_str)
-                .map(|project_id| {
-                    format!(
-                        "fwc-n8n://{}/projects/{}",
-                        server.as_str(),
-                        encode_resource_segment(project_id)
-                    )
-                });
-            project_uri.unwrap_or_else(|| format!("fwc-n8n://{}", server.as_str()))
-        } else {
-            format!(
+        let resource_uri = match operation {
+            N8nLifecycleOperation::CreateDraft => {
+                let project_uri =
+                    input
+                        .get("project_id")
+                        .and_then(Value::as_str)
+                        .map(|project_id| {
+                            format!(
+                                "fwc-n8n://{}/projects/{}",
+                                server.as_str(),
+                                encode_resource_segment(project_id)
+                            )
+                        });
+                project_uri.unwrap_or_else(|| format!("fwc-n8n://{}", server.as_str()))
+            }
+            N8nLifecycleOperation::McpAccessReconcile => {
+                format!("fwc-n8n://{}", server.as_str())
+            }
+            _ => format!(
                 "fwc-n8n://{}/workflows/{}",
                 server.as_str(),
                 encode_resource_segment(&workflow_id)
-            )
+            ),
         };
         let canonical_input_digest = digest(INPUT_DOMAIN, input);
         let creation_receipt_digest = if operation == N8nLifecycleOperation::DeleteDisposable {
@@ -263,11 +277,15 @@ impl N8nApprovalPlan {
             N8nLifecycleOperation::Publish => "publish_workflow",
             N8nLifecycleOperation::Unpublish => "unpublish_workflow",
             N8nLifecycleOperation::Archive => "archive_workflow",
-            N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::DeleteDisposable => "",
+            N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::DeleteDisposable
+            | N8nLifecycleOperation::McpAccessReconcile => "",
         };
         let direct_rest = matches!(
             operation,
-            N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::DeleteDisposable
+            N8nLifecycleOperation::CreateDraft
+                | N8nLifecycleOperation::DeleteDisposable
+                | N8nLifecycleOperation::McpAccessReconcile
         );
         if direct_rest {
             if !official_mcp_tool.is_empty()
@@ -399,22 +417,26 @@ fn validate_issued_token_shape(
         || token.zone_id != ZoneId::work()
         || !token.is_valid(now_ms)
         || token.expires_at_ms > plan.expires_at_ms
+        || (plan.operation == N8nLifecycleOperation::McpAccessReconcile
+            && token.expires_at_ms != plan.expires_at_ms)
     {
         return Err(N8nApprovalError::InvalidIssuedToken);
     }
     let ApprovalScope::Execution(scope) = &token.scope else {
         return Err(N8nApprovalError::InvalidIssuedToken);
     };
-    let direct_rest = matches!(
+    let request_bound = matches!(
         plan.operation,
-        N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::DeleteDisposable
+        N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::DeleteDisposable
+            | N8nLifecycleOperation::McpAccessReconcile
     );
-    let expected_connector = if direct_rest {
+    let expected_connector = if request_bound {
         "fcp.n8n"
     } else {
         "fcp.mcp-bridge"
     };
-    let expected_method = if direct_rest {
+    let expected_method = if request_bound {
         plan.operation.operation_id()
     } else {
         OFFICIAL_MCP_WRAPPER_OPERATION
@@ -425,7 +447,7 @@ fn validate_issued_token_shape(
     if scope.request_object_id.is_some() {
         return Err(N8nApprovalError::InvalidIssuedToken);
     }
-    if direct_rest {
+    if request_bound {
         let mut expected_input_hash = [0_u8; 32];
         hex::decode_to_slice(&plan.parent_binding_sha256, &mut expected_input_hash)
             .map_err(|_| N8nApprovalError::InvalidIssuedToken)?;
@@ -463,6 +485,9 @@ pub fn n8n_typed_approval_plan_digest(
         "archive" => N8nLifecycleOperation::Archive,
         "create_draft" => N8nLifecycleOperation::CreateDraft,
         "delete_disposable" => N8nLifecycleOperation::DeleteDisposable,
+        "mcp_access_reconcile" | MCP_ACCESS_RECONCILE_OPERATION => {
+            N8nLifecycleOperation::McpAccessReconcile
+        }
         _ => return None,
     };
     if now_ms >= expires_at_ms {
@@ -640,9 +665,14 @@ pub fn build_unsigned_n8n_approval_token(
         .get("idempotencyKey")
         .and_then(Value::as_str)
         .ok_or(N8nApprovalError::InvalidPlan("idempotency key is missing"))?;
-    let precondition = guard
-        .get("precondition")
-        .ok_or(N8nApprovalError::InvalidPlan("precondition is missing"))?;
+    let empty_precondition = Value::Null;
+    let precondition = if request.operation == N8nLifecycleOperation::McpAccessReconcile {
+        &empty_precondition
+    } else {
+        guard
+            .get("precondition")
+            .ok_or(N8nApprovalError::InvalidPlan("precondition is missing"))?
+    };
     let plan = N8nApprovalPlan::from_official_mcp(
         request.server,
         &request.workflow_id,
@@ -666,11 +696,13 @@ pub fn build_unsigned_n8n_approval_token(
             "parent binding does not match the exact high-level request",
         ));
     }
-    let direct_rest = matches!(
+    let request_bound = matches!(
         request.operation,
-        N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::DeleteDisposable
+        N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::DeleteDisposable
+            | N8nLifecycleOperation::McpAccessReconcile
     );
-    let (connector_id, method_pattern, input_hash, constraints) = if direct_rest {
+    let (connector_id, method_pattern, input_hash, constraints) = if request_bound {
         let mut input_hash = [0_u8; 32];
         hex::decode_to_slice(&request.parent_binding_sha256, &mut input_hash).map_err(|_| {
             N8nApprovalError::InvalidPlan("parent binding is not a raw SHA-256 value")
@@ -749,18 +781,34 @@ fn validate_issue_request(
             &["name", "project_id", "parent_folder_id", "graph", "guard"]
         }
         N8nLifecycleOperation::DeleteDisposable => &["id", "creationReceipt", "guard"],
+        N8nLifecycleOperation::McpAccessReconcile => &[
+            "scope",
+            "desired",
+            "dryRun",
+            "projectId",
+            "folderId",
+            "workflowIds",
+            "guard",
+        ],
     };
     if object
         .keys()
         .any(|key| !allowed_top_level.contains(&key.as_str()))
         || (request.operation != N8nLifecycleOperation::CreateDraft
+            && request.operation != N8nLifecycleOperation::McpAccessReconcile
             && object.get("id").and_then(Value::as_str) != Some(request.workflow_id.as_str()))
-        || (request.operation == N8nLifecycleOperation::CreateDraft
-            && !request.workflow_id.is_empty())
+        || (matches!(
+            request.operation,
+            N8nLifecycleOperation::CreateDraft | N8nLifecycleOperation::McpAccessReconcile
+        ) && !request.workflow_id.is_empty())
     {
         return Err(N8nApprovalError::InvalidPlan(
             "workflow target or high-level input is not exact",
         ));
+    }
+    if request.operation == N8nLifecycleOperation::McpAccessReconcile {
+        validate_mcp_access_input(&request.input)?;
+        return Ok(());
     }
     match request.operation {
         N8nLifecycleOperation::Publish => {
@@ -850,6 +898,7 @@ fn validate_issue_request(
                 ));
             }
         }
+        N8nLifecycleOperation::McpAccessReconcile => unreachable!("validated above"),
     }
     if request.operation != N8nLifecycleOperation::CreateDraft {
         validate_identifier(
@@ -946,6 +995,192 @@ fn validate_issue_request(
     {
         return Err(N8nApprovalError::InvalidPlan(
             "archive precondition is not inactive and unarchived",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mcp_access_input(input: &Value) -> Result<(), N8nApprovalError> {
+    let object = input.as_object().ok_or(N8nApprovalError::InvalidPlan(
+        "mcp access input must be an object",
+    ))?;
+    const ALLOWED: [&str; 7] = [
+        "scope",
+        "desired",
+        "dryRun",
+        "projectId",
+        "folderId",
+        "workflowIds",
+        "guard",
+    ];
+    if object.keys().any(|key| !ALLOWED.contains(&key.as_str())) {
+        return Err(N8nApprovalError::InvalidPlan(
+            "mcp access input contains an unsupported property",
+        ));
+    }
+    let scope = object
+        .get("scope")
+        .and_then(Value::as_str)
+        .ok_or(N8nApprovalError::InvalidPlan("mcp access scope is invalid"))?;
+    if !matches!(scope, "workflow_ids" | "project" | "folder" | "all_current") {
+        return Err(N8nApprovalError::InvalidPlan("mcp access scope is invalid"));
+    }
+    object
+        .get("desired")
+        .and_then(Value::as_bool)
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "mcp access desired is invalid",
+        ))?;
+    let dry_run =
+        object
+            .get("dryRun")
+            .and_then(Value::as_bool)
+            .ok_or(N8nApprovalError::InvalidPlan(
+                "mcp access dryRun is invalid",
+            ))?;
+
+    for field in ["projectId", "folderId"] {
+        if let Some(value) = object.get(field) {
+            let value = value.as_str().ok_or(N8nApprovalError::InvalidPlan(
+                "mcp access scope filter is invalid",
+            ))?;
+            validate_mcp_path_segment(value)?;
+        }
+    }
+    let workflow_ids = if let Some(value) = object.get("workflowIds") {
+        let values = value.as_array().ok_or(N8nApprovalError::InvalidPlan(
+            "mcp access workflowIds is invalid",
+        ))?;
+        if values.is_empty() || values.len() > 1_000 {
+            return Err(N8nApprovalError::InvalidPlan(
+                "mcp access workflowIds must contain between 1 and 1000 IDs",
+            ));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for value in values {
+            let value = value.as_str().ok_or(N8nApprovalError::InvalidPlan(
+                "mcp access workflow ID is invalid",
+            ))?;
+            validate_mcp_path_segment(value)?;
+            if !unique.insert(value) {
+                return Err(N8nApprovalError::InvalidPlan(
+                    "mcp access workflowIds must not contain duplicates",
+                ));
+            }
+        }
+        true
+    } else {
+        false
+    };
+
+    match scope {
+        "workflow_ids" if !workflow_ids => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "workflow_ids scope requires workflowIds",
+            ));
+        }
+        "workflow_ids" if object.get("projectId").is_some() || object.get("folderId").is_some() => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "workflow_ids scope cannot include projectId or folderId",
+            ));
+        }
+        "project" if object.get("projectId").is_none() => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "project scope requires projectId",
+            ));
+        }
+        "project" if object.get("folderId").is_some() || workflow_ids => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "project scope cannot include folderId or workflowIds",
+            ));
+        }
+        "folder" if object.get("folderId").is_none() => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "folder scope requires folderId",
+            ));
+        }
+        "folder" if object.get("projectId").is_some() || workflow_ids => {
+            return Err(N8nApprovalError::InvalidPlan(
+                "folder scope cannot include projectId or workflowIds",
+            ));
+        }
+        "all_current"
+            if object.get("projectId").is_some()
+                || object.get("folderId").is_some()
+                || workflow_ids =>
+        {
+            return Err(N8nApprovalError::InvalidPlan(
+                "all_current scope cannot include projectId, folderId, or workflowIds",
+            ));
+        }
+        _ => {}
+    }
+
+    if dry_run {
+        return Err(N8nApprovalError::InvalidPlan(
+            "mcp access owner approval requires dryRun false",
+        ));
+    }
+
+    let guard =
+        object
+            .get("guard")
+            .and_then(Value::as_object)
+            .ok_or(N8nApprovalError::InvalidPlan(
+                "non-dry-run MCP access requires guard",
+            ))?;
+    if guard.len() != 3
+        || !guard.contains_key("approvalRef")
+        || !guard.contains_key("dryRunDigest")
+        || !guard.contains_key("idempotencyKey")
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "mcp access guard is not exact",
+        ));
+    }
+    guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "mcp access approvalRef is invalid",
+        ))?;
+    guard
+        .get("dryRunDigest")
+        .and_then(Value::as_str)
+        .filter(|value| is_blake3_digest(value))
+        .ok_or(N8nApprovalError::InvalidPlan(
+            "mcp access dryRunDigest is invalid",
+        ))?;
+    let idempotency_key = guard.get("idempotencyKey").and_then(Value::as_str).ok_or(
+        N8nApprovalError::InvalidPlan("mcp access idempotencyKey is invalid"),
+    )?;
+    Uuid::parse_str(idempotency_key)
+        .map_err(|_| N8nApprovalError::InvalidPlan("mcp access idempotencyKey must be a UUID"))?;
+    Ok(())
+}
+
+fn validate_mcp_path_segment(value: &str) -> Result<(), N8nApprovalError> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.trim() != value
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || value.contains('&')
+        || value.contains('=')
+        || value.contains('%')
+        || value.chars().any(char::is_control)
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "mcp access scope filter contains path traversal characters",
         ));
     }
     Ok(())
@@ -1387,6 +1622,190 @@ mod tests {
         )
         .expect("parent binding");
         request
+    }
+
+    fn mcp_access_issue_request() -> N8nApprovalIssueRequest {
+        let mut request = N8nApprovalIssueRequest {
+            schema: APPROVAL_REQUEST_SCHEMA.to_owned(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: String::new(),
+            operation: N8nLifecycleOperation::McpAccessReconcile,
+            input: json!({
+                "scope": "all_current",
+                "desired": true,
+                "dryRun": false,
+                "guard": {
+                    "approvalRef": "approval-mcp-1",
+                    "dryRunDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "idempotencyKey": "00000000-0000-4000-8000-000000000004"
+                }
+            }),
+            official_mcp_tool: String::new(),
+            official_mcp_resource_uri: String::new(),
+            official_mcp_payload_digest: String::new(),
+            parent_binding_sha256: String::new(),
+            expires_at_ms: NOW + MAX_APPROVAL_TTL_MS,
+        };
+        request.parent_binding_sha256 = n8n_parent_binding_digest(
+            request.server,
+            "fwc-n8n://eec",
+            request.operation.operation_id(),
+            &request.input,
+        )
+        .expect("mcp access parent binding");
+        request
+    }
+
+    #[test]
+    fn mcp_access_reconcile_issuer_matches_connector_binding() {
+        let request = mcp_access_issue_request();
+        let token =
+            build_unsigned_n8n_approval_token(&request, NOW).expect("mcp access unsigned approval");
+        assert_eq!(token.expires_at_ms, request.expires_at_ms);
+        assert_eq!(token.zone_id, ZoneId::work());
+        let ApprovalScope::Execution(scope) = token.scope else {
+            panic!("mcp access approval must use execution scope");
+        };
+        assert_eq!(scope.connector_id, "fcp.n8n");
+        assert_eq!(scope.method_pattern, MCP_ACCESS_RECONCILE_OPERATION);
+        assert!(scope.request_object_id.is_none());
+        assert!(scope.input_constraints.is_empty());
+        assert_eq!(
+            scope.input_hash,
+            Some(
+                hex::decode(request.parent_binding_sha256)
+                    .expect("mcp access binding hex")
+                    .try_into()
+                    .expect("mcp access binding length"),
+            )
+        );
+    }
+
+    #[test]
+    fn mcp_access_reconcile_binding_rejects_cross_server_and_input_changes() {
+        let request = mcp_access_issue_request();
+        let token =
+            build_unsigned_n8n_approval_token(&request, NOW).expect("mcp access unsigned approval");
+        let ApprovalScope::Execution(scope) = &token.scope else {
+            panic!("mcp access approval must use execution scope");
+        };
+        let input_hash = scope.input_hash.expect("mcp access input hash");
+        let changed_input = json!({
+            "scope": "all_current",
+            "desired": false,
+            "dryRun": false,
+            "guard": {
+                "approvalRef": "approval-mcp-1",
+                "dryRunDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000004"
+            }
+        });
+        let mut changed_request = request.clone();
+        changed_request.input = changed_input.clone();
+        assert!(build_unsigned_n8n_approval_token(&changed_request, NOW).is_err());
+        let changed_hash = n8n_parent_binding_digest(
+            request.server,
+            "fwc-n8n://eec",
+            MCP_ACCESS_RECONCILE_OPERATION,
+            &changed_input,
+        )
+        .expect("changed mcp access binding");
+        assert_ne!(
+            input_hash,
+            <[u8; 32]>::try_from(hex::decode(changed_hash).expect("changed hash hex"))
+                .expect("changed hash length")
+        );
+        let mut cross_server_request = request.clone();
+        cross_server_request.server = N8nApprovalServer::Hetzner;
+        assert!(build_unsigned_n8n_approval_token(&cross_server_request, NOW).is_err());
+        let cross_server_hash = n8n_parent_binding_digest(
+            N8nApprovalServer::Hetzner,
+            "fwc-n8n://hetzner",
+            MCP_ACCESS_RECONCILE_OPERATION,
+            &request.input,
+        )
+        .expect("cross-server mcp access binding");
+        assert_ne!(request.parent_binding_sha256, cross_server_hash);
+    }
+
+    #[test]
+    fn mcp_access_reconcile_issuer_rejects_stale_boundary_and_malformed_inputs() {
+        let mut stale = mcp_access_issue_request();
+        stale.expires_at_ms = NOW;
+        assert!(build_unsigned_n8n_approval_token(&stale, NOW).is_err());
+
+        let mut beyond_ttl = mcp_access_issue_request();
+        beyond_ttl.expires_at_ms = NOW + MAX_APPROVAL_TTL_MS + 1;
+        assert!(build_unsigned_n8n_approval_token(&beyond_ttl, NOW).is_err());
+
+        let mut unknown_scope = mcp_access_issue_request();
+        unknown_scope.input["scope"] = json!("server");
+        assert!(build_unsigned_n8n_approval_token(&unknown_scope, NOW).is_err());
+
+        let mut duplicate_workflow_ids = mcp_access_issue_request();
+        duplicate_workflow_ids.input["scope"] = json!("workflow_ids");
+        duplicate_workflow_ids.input["workflowIds"] = json!(["workflow-1", "workflow-1"]);
+        assert!(build_unsigned_n8n_approval_token(&duplicate_workflow_ids, NOW).is_err());
+
+        let mut extra_guard_field = mcp_access_issue_request();
+        extra_guard_field.input["guard"]["unexpected"] = json!(true);
+        assert!(build_unsigned_n8n_approval_token(&extra_guard_field, NOW).is_err());
+    }
+
+    #[test]
+    fn mcp_access_reconcile_serde_and_token_shape_fail_closed() {
+        let mut serialized =
+            serde_json::to_value(mcp_access_issue_request()).expect("request JSON");
+        serialized["unexpected"] = json!(true);
+        assert!(serde_json::from_value::<N8nApprovalIssueRequest>(serialized).is_err());
+
+        let request = mcp_access_issue_request();
+        let plan = N8nApprovalPlan::from_official_mcp(
+            request.server,
+            &request.workflow_id,
+            request.operation,
+            &request.official_mcp_tool,
+            &request.official_mcp_resource_uri,
+            &request.official_mcp_payload_digest,
+            &request.input,
+            &Value::Null,
+            request.input["guard"]["idempotencyKey"]
+                .as_str()
+                .expect("idempotency key"),
+            request.expires_at_ms,
+        )
+        .expect("mcp access plan");
+        let mut token =
+            build_unsigned_n8n_approval_token(&request, NOW).expect("mcp access unsigned approval");
+        token.signature = Some(vec![1]);
+        assert!(validate_issued_token_shape(&token, &plan, NOW).is_ok());
+
+        let mut constrained = token.clone();
+        let ApprovalScope::Execution(scope) = &mut constrained.scope else {
+            panic!("mcp access approval must use execution scope");
+        };
+        scope.input_constraints.push(InputConstraint {
+            pointer: "/server_id".to_owned(),
+            expected: json!("eec"),
+        });
+        assert!(matches!(
+            validate_issued_token_shape(&constrained, &plan, NOW),
+            Err(N8nApprovalError::InvalidIssuedToken)
+        ));
+
+        let mut wrong_expiry = token.clone();
+        wrong_expiry.expires_at_ms -= 1;
+        assert!(matches!(
+            validate_issued_token_shape(&wrong_expiry, &plan, NOW),
+            Err(N8nApprovalError::InvalidIssuedToken)
+        ));
+
+        let mut wrong_zone = token;
+        wrong_zone.zone_id = ZoneId::owner();
+        assert!(matches!(
+            validate_issued_token_shape(&wrong_zone, &plan, NOW),
+            Err(N8nApprovalError::InvalidIssuedToken)
+        ));
     }
 
     fn direct_rest_issue_request(

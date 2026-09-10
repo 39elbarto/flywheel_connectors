@@ -1042,8 +1042,7 @@ pub fn run_process(
         request_deadline_at,
     )?;
     if !status.success() {
-        let diagnostic =
-            child_invoke_diagnostic(&stderr).or_else(|| child_plan_diagnostic(&stderr));
+        let diagnostic = child_primary_diagnostic(&stderr);
         emit_child_invoke_diagnostic(&stderr);
         return Err(BridgeError::new(child_failure_code(&stdout)).with_diagnostic(diagnostic));
     }
@@ -1053,6 +1052,24 @@ pub fn run_process(
         status,
         termination,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
+    // Match stderr forwarding order: invoke, plan, external provenance, host
+    // class, host detail, owned, child error. Within a family, retain the first
+    // allowlisted line, preserving existing invoke/plan precedence.
+    child_invoke_diagnostic(stderr)
+        .or_else(|| child_plan_diagnostic(stderr))
+        .or_else(|| child_external_provenance_diagnostic(stderr))
+        .or_else(|| child_host_error_diagnostic(stderr))
+        .or_else(|| child_host_error_detail(stderr))
+        .or_else(|| {
+            stderr
+                .split(|byte| *byte == b'\n')
+                .find_map(child_owned_diagnostic_label)
+        })
+        .or_else(|| child_child_error_diagnostic(stderr))
 }
 
 #[cfg(target_os = "linux")]
@@ -2093,6 +2110,91 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn child_primary_diagnostic_retains_only_exact_safe_labels() {
+        for (family, label) in [
+            ("INVOKE-DIAGNOSTIC", "response_capability"),
+            ("PLAN-DIAGNOSTIC", "plan.payload"),
+            ("EXTERNAL-PROVENANCE-DIAGNOSTIC", "external.provider_5xx"),
+            ("HOST-ERROR-DIAGNOSTIC", "local.policy_denied"),
+            ("HOST-ERROR-DETAIL", "policy.approval"),
+            ("OWNED-DIAGNOSTIC", "owned.setup"),
+            ("CHILD-ERROR-DIAGNOSTIC", "child.protocol"),
+        ] {
+            let line = format!("FCP-N8N-{family}/v1 {label}");
+            let stderr = format!("private noise\n{line}\n");
+            let error = BridgeError::new(BridgeErrorCode::ChildFailed)
+                .with_diagnostic(child_primary_diagnostic(stderr.as_bytes()));
+            assert_eq!(error.diagnostic(), Some(label));
+            assert_eq!(error.code(), "child_failed");
+            for invalid in [
+                format!("prefix {line}"),
+                format!("{line} PRIVATE"),
+                format!("{line}\r"),
+                format!("{line}\0"),
+                format!("FCP-N8N-{family}/v2 {label}"),
+                format!("FCP-N8N-{family}/v1{label}"),
+                format!("FCP-N8N-{family}/v1 PRIVATE"),
+                format!("FCP-N8N-{family}/v1 \u{fffd}{label}"),
+            ] {
+                assert_eq!(child_primary_diagnostic(invalid.as_bytes()), None);
+            }
+        }
+        assert_eq!(child_primary_diagnostic(b""), None);
+        assert_eq!(child_primary_diagnostic(b"PRIVATE\n\xff"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_primary_diagnostic_follows_forwarding_order() {
+        let lines = [
+            (
+                "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_auth",
+                "response_auth",
+            ),
+            ("FCP-N8N-PLAN-DIAGNOSTIC/v1 plan.build", "plan.build"),
+            (
+                "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.provider_5xx",
+                "external.provider_5xx",
+            ),
+            (
+                "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied",
+                "local.policy_denied",
+            ),
+            (
+                "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.approval",
+                "policy.approval",
+            ),
+            ("FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.setup", "owned.setup"),
+            ("FCP-N8N-CHILD-ERROR-DIAGNOSTIC/v1 child.auth", "child.auth"),
+        ];
+        for start in 0..lines.len() {
+            // Reverse arrival order to distinguish family priority from line order.
+            let stderr = lines[start..]
+                .iter()
+                .rev()
+                .map(|(line, _)| *line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(
+                child_primary_diagnostic(stderr.as_bytes()),
+                Some(lines[start].1)
+            );
+        }
+        for stderr in [
+            "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_auth\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 response_internal",
+            "FCP-N8N-PLAN-DIAGNOSTIC/v1 plan.build\nFCP-N8N-PLAN-DIAGNOSTIC/v1 plan.payload",
+            "FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.setup\nFCP-N8N-OWNED-DIAGNOSTIC/v1 owned.launch.io",
+        ] {
+            let first = stderr.split_once('\n').unwrap().0;
+            assert_eq!(
+                child_primary_diagnostic(stderr.as_bytes()),
+                child_primary_diagnostic(first.as_bytes())
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn child_invoke_diagnostic_accepts_only_exact_allowlisted_lines() {
         let labels = [
             "dispatch_4xx",
@@ -2116,6 +2218,7 @@ mod tests {
         for label in labels {
             let stderr = format!("untrusted noise\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 {label}\n");
             assert_eq!(child_invoke_diagnostic(stderr.as_bytes()), Some(label));
+            assert_eq!(child_primary_diagnostic(stderr.as_bytes()), Some(label));
         }
 
         for stderr in [
@@ -2156,6 +2259,7 @@ mod tests {
         ] {
             let stderr = format!("untrusted noise\nFCP-N8N-PLAN-DIAGNOSTIC/v1 {label}\n");
             assert_eq!(child_plan_diagnostic(stderr.as_bytes()), Some(label));
+            assert_eq!(child_primary_diagnostic(stderr.as_bytes()), Some(label));
         }
 
         for stderr in [

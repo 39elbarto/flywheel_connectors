@@ -323,8 +323,9 @@ Important runtime truths:
   claim remains unknown and is never retried automatically. Expired committed
   receipts and safe temporary outcome files are reaped under the ledger lock;
   pending unknown claims are retained and continue to fail closed. Dry-run
-  receipts are claimed and committed under a deterministic request binding for
-  bounded history. Ledger
+  receipts are returned from the bounded read-only provider plan without claiming
+  or committing the durable ledger; repeated dry-runs perform fresh bounded reads.
+  Ledger
   provisioning is part of the host installer trust root; an unavailable,
   malformed, stale, or over-bound
   ledger fails closed. A stale digest, unknown provider outcome, or readback

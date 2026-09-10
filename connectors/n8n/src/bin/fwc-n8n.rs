@@ -1432,7 +1432,10 @@ fn execute_host_run_once(
     if operation == HostRunOnceOperation::WorkflowsExecute {
         return execute_workflow_execute_official_mcp(&bundle, envelope, request_deadline_at);
     }
-    let mut reconciliation_ledger = if operation == HostRunOnceOperation::McpAccessReconcile {
+    let mcp_access_reconcile = operation == HostRunOnceOperation::McpAccessReconcile;
+    let mcp_access_dry_run =
+        mcp_access_reconcile && envelope.input.get("dryRun").and_then(Value::as_bool) == Some(true);
+    let mut reconciliation_ledger = if mcp_access_reconcile && !mcp_access_dry_run {
         Some(
             fwc_n8n_update_host::McpAccessReconciliationLedger::production()
                 .map_err(|error| AppError::new(error.code()))?,
@@ -1440,7 +1443,7 @@ fn execute_host_run_once(
     } else {
         None
     };
-    let reconciliation_binding = if operation == HostRunOnceOperation::McpAccessReconcile {
+    let reconciliation_binding = if mcp_access_reconcile && !mcp_access_dry_run {
         fwc_n8n_update_host::derive_mcp_access_binding(
             operation.as_str(),
             server_id.as_str(),
@@ -1450,7 +1453,7 @@ fn execute_host_run_once(
     } else {
         None
     };
-    let reconciliation_expectation = if operation == HostRunOnceOperation::McpAccessReconcile {
+    let reconciliation_expectation = if mcp_access_reconcile && !mcp_access_dry_run {
         Some(
             fwc_n8n_update_host::derive_mcp_access_receipt_expectation(
                 server_id.as_str(),
@@ -1501,17 +1504,14 @@ fn execute_host_run_once(
         normalize_host_run_once_response(operation, server_id, response)
     };
 
-    if operation == HostRunOnceOperation::McpAccessReconcile {
-        let ledger = reconciliation_ledger
-            .as_mut()
-            .ok_or_else(|| AppError::new("mcp_access_ledger_unavailable"))?;
-        let binding = reconciliation_binding
-            .as_ref()
-            .ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
-        let expectation = reconciliation_expectation
-            .as_ref()
-            .ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
-        dispatch_mcp_access_once(ledger, binding, expectation, dispatch_provider)
+    if mcp_access_reconcile {
+        dispatch_mcp_access_request(
+            mcp_access_dry_run,
+            reconciliation_ledger.as_mut(),
+            reconciliation_binding.as_ref(),
+            reconciliation_expectation.as_ref(),
+            dispatch_provider,
+        )
     } else {
         dispatch_provider()
     }
@@ -1559,6 +1559,27 @@ impl McpAccessLedgerPort for fwc_n8n_update_host::McpAccessReconciliationLedger 
             Some(expectation),
         )
     }
+}
+
+fn dispatch_mcp_access_request<L, F>(
+    dry_run: bool,
+    ledger: Option<&mut L>,
+    binding: Option<&fwc_n8n_update_host::McpAccessLedgerBinding>,
+    expectation: Option<&fwc_n8n_update_host::McpAccessReceiptExpectation>,
+    provider_attempt: F,
+) -> Result<Value, AppError>
+where
+    L: McpAccessLedgerPort,
+    F: FnOnce() -> Result<Value, AppError>,
+{
+    if dry_run {
+        return provider_attempt();
+    }
+
+    let ledger = ledger.ok_or_else(|| AppError::new("mcp_access_ledger_unavailable"))?;
+    let binding = binding.ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
+    let expectation = expectation.ok_or_else(|| AppError::new("mcp_access_binding_missing"))?;
+    dispatch_mcp_access_once(ledger, binding, expectation, provider_attempt)
 }
 
 fn dispatch_mcp_access_once<L, F>(
@@ -4065,7 +4086,7 @@ mod tests {
             server_id: "eec".into(),
             scope: "all_current".into(),
             desired: true,
-            dry_run: true,
+            dry_run: false,
             plan_digest: None,
             approval_digest: None,
             idempotency_digest: None,
@@ -4083,7 +4104,7 @@ mod tests {
                     "serverId": "eec",
                     "scope": "all_current",
                     "desired": true,
-                    "dryRun": true,
+                    "dryRun": false,
                     "status": "planned",
                     "planDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "readbackDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -4092,6 +4113,33 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn host_reconciliation_dry_run_bypasses_durable_ledger() {
+        let (binding, expectation) = mock_mcp_binding_and_expectation();
+        let mut ledger = MockMcpLedger {
+            pending: true,
+            ..Default::default()
+        };
+        let events = Arc::clone(&ledger.events);
+        let result = dispatch_mcp_access_request(
+            true,
+            Some(&mut ledger),
+            Some(&binding),
+            Some(&expectation),
+            || {
+                events.lock().expect("events lock").push("provider");
+                Ok(mock_mcp_response())
+            },
+        )
+        .expect("dry-run provider response");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(
+            ledger.events.lock().expect("events lock").as_slice(),
+            ["provider"]
+        );
+        assert!(ledger.pending, "dry-run must not mutate the ledger claim");
     }
 
     #[test]
@@ -4150,7 +4198,7 @@ mod tests {
     }
 
     #[test]
-    fn host_reconciliation_durable_commit_precedes_response() {
+    fn host_reconciliation_apply_durable_commit_precedes_response() {
         let (binding, expectation) = mock_mcp_binding_and_expectation();
         let mut ledger = MockMcpLedger::default();
         let events = Arc::clone(&ledger.events);
@@ -4158,7 +4206,7 @@ mod tests {
             events.lock().expect("events lock").push("provider");
             Ok(mock_mcp_response())
         })
-        .expect("durable dry-run receipt");
+        .expect("durable apply receipt");
         assert_eq!(
             ledger.events.lock().expect("events lock").as_slice(),
             ["claim", "provider", "commit"]

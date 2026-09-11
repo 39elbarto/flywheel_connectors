@@ -14,6 +14,33 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+**RC11 release-packet checkpoint (2026-09-11; bounded NO-GO):**
+The fresh SSD candidate `release-20260911-fcee1784b-rc11`, built from main
+revision `1a12c5449cf4b0be487ee6aad78a065239378e51`, completed one assembler
+invocation and the owned static-network smoke passed (`1 passed`). The staged
+issuer gate passed exact digest equality at
+`ce4bc4e44a159645b45ff2641786b7703c52342ff3f06a977e6c067e03b25e8b`; one
+owner-signing operation produced the staged `fwc.n8n.provision.v1` receipt.
+
+The single provision-preflight attempt stopped before entering the candidate
+binary because the non-root shell could not read the root-owned approval
+request (`permission denied`). No retry was made. Root issuer installation,
+apply/promotion, and every provider/API/workflow/credential operation were not
+attempted; the predecessor was preserved. `current` remains
+`release-20260910-e30ca9f09-rc1`, `fwc-n8n status` reports
+`bundleAvailable=true`, and the installed issuer remains SHA-256
+`b556d3311b812aa554c25db2dae4386ed2a7b7a2f192031b356cc0cf5c86d5ca`. The
+post-stop matching-process check was empty.
+
+Redaction-safe evidence is retained at
+`/srv/dev-ssd/fcp/nqm81.30/release-20260911-fcee1784b-rc11/report.md`
+(SHA-256
+`d859a349d21e624850bbc488c43149adf89db6a46aa87cb9dc3ae8ae8e521c45`). Live
+acceptance remains **NO-GO**: EEC and Hetzner publish/readback/unpublish/
+final-readback were not attempted. Do not replay this packet or install the
+candidate without a separately supervised privileged preflight and fresh
+owner-authorized acceptance gates.
+
 **Latest release/acceptance checkpoint (2026-09-11 00:21 UTC; RC8 bounded stop):**
 The fresh SSD candidate `release-20260910-fcee1784b-rc8`, built from main
 revision `fcee1784b1f51aba6c3dd49db9de5162d8116ae3`, assembled successfully;

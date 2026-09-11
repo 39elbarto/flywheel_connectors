@@ -466,18 +466,27 @@ full lifecycle/state-digest preconditions, and current-chat approval binding.
 The host now builds only the exact official MCP `publish_workflow` or
 `unpublish_workflow` call after fresh `tools/list` discovery and an owner-
 reviewed policy entry containing both schema digests; each operation makes one
-side-effecting provider attempt, decodes the typed response, and performs an
-independent REST `GET /workflows/{id}` readback. The connector's direct REST
-routes remain an explicit route only where proven and fail closed otherwise.
+side-effecting provider attempt and then, whenever the attempt may have started
+or an outer response was delivered, performs exactly one independent REST
+`GET /workflows/{id}` readback. The provider response and envelope are bounded
+advisory data only: opaque, version-specific, or provider-rejection shapes do
+not declare success, override the readback, or block reconciliation. The
+independent readback is the sole lifecycle state authority. An explicit publish
+`versionId` must match it exactly; when that input is omitted, the readback may
+select a version only when its active and published version IDs are
+unambiguous. The connector's direct REST routes remain an explicit route only
+where proven and fail closed otherwise.
 Only bounded categories for failures proven before the provider side effect
 (`official_mcp_policy_failed`, `official_mcp_capability_failed`, and related
-preflight classes) may be exposed; invocation, timeout, teardown,
-malformed/ambiguous response, and all other uncertain cases remain
-`unknown_outcome` and are never retried automatically. A supervised child may
-also carry one fixed, redaction-safe diagnostic label in the error envelope;
-that label is classification only and never contains provider text, payload,
-headers, credentials, or a retry instruction.
-Uncertain readback is classified unknown and never retried automatically.
+preflight classes) may be exposed without reconciliation. Invocation, timeout,
+teardown, malformed/ambiguous response, and all other uncertain cases that may
+conceal a provider-side effect receive one reconciliation readback; an exact
+readback may prove success, otherwise the result remains non-success and is
+never retried automatically. A supervised child may also carry one fixed,
+redaction-safe diagnostic label in the error envelope; that label is
+classification only and never contains provider text, payload, headers,
+credentials, or a retry instruction. Uncertain or mismatched readback is never
+retried automatically.
 Activation,
 restore/unarchive, versions, execution, credential mutation, and permanent
 deletion remain outside this packet; no legacy route is guessed. The bounded
@@ -932,14 +941,19 @@ rejection cause is not proven, so acceptance remains **NO-GO** and this result
 must not be replayed; a future attempt requires a separately justified,
 redaction-safe provider/host diagnosis and a fresh bounded EEC-first run.
 
-The provider result is fail-closed unless it contains typed `active`,
-`isArchived`, `activeVersionId`, draft/published graph summaries, and
-`stateDigest` fields. Publish must confirm the requested/selected version and
-active publication state; unpublish must confirm inactive state, a null active
-version, and a null published graph. The provider draft must equal the baseline,
-and every provider lifecycle field and digest must match the independent REST
-readback. Provider-side disagreement is `unknown_outcome`; provider/readback
-disagreement is `readback_mismatch`.
+The provider response is bounded advisory data and is not required to contain
+typed `active`, `isArchived`, `activeVersionId`, draft/published graph summary,
+or `stateDigest` fields. Publish must instead be proven by the independent REST
+readback: active publication, `isArchived=false`, preserved draft, published
+graph consistency, and either the explicit requested version or an unambiguous
+readback-selected version when the input omitted `versionId`. Unpublish must be
+proven by inactive/null active version, a null published graph, and preserved
+draft/archive state in that same readback. Provider fields, including rejection
+markers or contradictory versions, never override the readback. Every possible
+provider attempt, including an ambiguous or `unknown_outcome` attempt, gets
+exactly one reconciliation readback; known pre-provider failures remain
+deterministic, while readback uncertainty or mismatch remains non-success and
+is never retried.
 
 ### 5.1 Exact operation inputs and outputs
 

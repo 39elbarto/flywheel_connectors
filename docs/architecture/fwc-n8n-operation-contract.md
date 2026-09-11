@@ -46,6 +46,31 @@ Do not install the mismatching issuer or replay a provider attempt; a future
 run requires reconciling the approved issuer digest, then a fresh signed
 release and new bounded EEC-first acceptance.
 
+**RC8 issuer-contract diagnosis (2026-09-11 00:44 UTC):**
+Read-only inspection confirmed that the approved issuer digest is a deployment
+and owner-approval value retained in prior release evidence and this contract,
+not a Rust/source constant in the assembler, provisioner, signer, or issuer.
+The installed issuer remains SHA-256
+`b556d3311b812aa554c25db2dae4386ed2a7b7a2f192031b356cc0cf5c86d5ca`, while the
+complete root-owned RC8 staged issuer is SHA-256
+`ce4bc4e44a159645b45ff2641786b7703c52342ff3f06a977e6c067e03b25e8`; their
+metadata also differs (981848 versus 990584 bytes), so this is a genuine
+binary mismatch rather than a path or metadata discrepancy. The RC8 issuer
+source closure includes the reviewed `n8n.mcp_access.reconcile` approval
+extension and cannot be silently replaced with the old binary or accepted by
+overriding the comparison. The redaction-safe diagnosis report is retained at
+`/srv/dev-ssd/fcp/nqm81.30/issuer-contract-diagnosis-20260911/report.md`
+(SHA-256
+`6f19fe67bdef8ef683c2c4bba4014d9683f791acf61e87df37dc234a2ac12137`).
+
+The next owner decision must explicitly either approve the exact RC8 staged
+issuer digest for separate installation, or require a fresh candidate whose
+issuer independently matches the old approved digest. Either choice requires
+a fresh signed release packet, a new issuer gate recording the before/after
+digests, and a new bounded EEC-first acceptance; no packet replay or provider
+write is authorized by this diagnosis. Current remains RC1 and acceptance
+remains **NO-GO**.
+
 **Previous live acceptance checkpoint (2026-09-10 15:32 UTC; RC7):**
 `current` resolves to `release-20260910-e30ca9f09-rc1`, built from revision
 `e30ca9f0921d8e0db3f3b3ff173427c6a53758a7`, and `fwc-n8n status` reports

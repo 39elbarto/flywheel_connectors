@@ -830,131 +830,46 @@ fn lifecycle_response_result(response: Value) -> Result<Value, AppError> {
 
 fn decode_official_mcp_lifecycle_result(
     response: Value,
-    action: &str,
-    workflow_id: &str,
+    _action: &str,
+    _workflow_id: &str,
 ) -> Result<Value, AppError> {
     let shape_error =
         || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape"));
-    let field_error =
-        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_provider_field_mismatch"));
     let rejection_error =
         || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_provider_rejected"));
-    let mut result = lifecycle_response_result(response)?;
-    let mut version_agnostic_envelope = false;
-    if let Some(is_error) = result.get("isError") {
-        match is_error.as_bool() {
-            Some(false) => {}
-            Some(true) => return Err(rejection_error()),
-            None => return Err(shape_error()),
-        }
-    }
-    if let Some(structured) = result.get("structuredContent").cloned() {
-        if structured.as_object().is_none_or(serde_json::Map::is_empty) {
-            return Err(shape_error());
-        }
-        result = structured;
-        version_agnostic_envelope = true;
-    } else if result
-        .as_object()
-        .is_some_and(|object| object.contains_key("content"))
-    {
-        let content = result
-            .get("content")
-            .and_then(Value::as_array)
-            .ok_or_else(shape_error)?;
-        let text = content.iter().find_map(|item| {
-            (item.get("type").and_then(Value::as_str) == Some("text"))
-                .then(|| item.get("text").and_then(Value::as_str))
-                .flatten()
-        });
-        let text = text
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(shape_error)?;
-        result = serde_json::from_str(text).map_err(|_| shape_error())?;
-        if result.as_object().is_none_or(serde_json::Map::is_empty) {
-            return Err(shape_error());
-        }
-        version_agnostic_envelope = true;
-    }
-    let object = result.as_object().ok_or_else(shape_error)?;
-    if !version_agnostic_envelope
-        && !object.keys().any(|key| {
-            matches!(
-                key.as_str(),
-                "action"
-                    | "success"
-                    | "workflowId"
-                    | "activeVersionId"
-                    | "error"
-                    | "reason"
-                    | "workflowReviewRequestId"
-                    | "isError"
-                    | "message"
-                    | "status"
-                    | "data"
-                    | "output"
-                    | "result"
-            )
-        })
-    {
+    if response.get("status").and_then(Value::as_str).is_none() {
         return Err(shape_error());
     }
-    if let Some(is_error) = object.get("isError") {
-        match is_error.as_bool() {
-            Some(false) => {}
-            Some(true) => return Err(rejection_error()),
-            None => return Err(shape_error()),
-        }
-    }
-    if let Some(success) = object.get("success") {
-        match success.as_bool() {
-            Some(false) => return Err(rejection_error()),
-            Some(true) => {}
-            None => return Err(field_error()),
-        }
-    }
-    if object.get("error").is_some_and(|value| !value.is_null()) {
+    if response.get("status").and_then(Value::as_str) != Some("ok")
+        || response.get("error").is_some_and(|value| !value.is_null())
+    {
         return Err(rejection_error());
     }
-    if object
-        .get("action")
-        .is_some_and(|value| value.as_str() != Some(action))
+    let Some(result) = response.get("result") else {
+        return Err(shape_error());
+    };
+
+    // The MCP result is deliberately not parsed here.  n8n-mcp has changed
+    // between releases (raw objects, structured content, text content, and
+    // empty acknowledgements are all valid provider-level envelopes).  It is
+    // an advisory signal only; the independent REST readback below is the
+    // sole authority for lifecycle state.
+    if lifecycle_provider_result_is_rejected(result) {
+        return Err(rejection_error());
+    }
+    Ok(json!({"delivered": true}))
+}
+
+fn lifecycle_provider_result_is_rejected(result: &Value) -> bool {
+    let Some(object) = result.as_object() else {
+        return false;
+    };
+    object.get("isError").and_then(Value::as_bool) == Some(true)
+        || object.get("success").and_then(Value::as_bool) == Some(false)
+        || object.get("error").is_some_and(|value| !value.is_null())
         || object
-            .get("workflowId")
-            .is_some_and(|value| value.as_str() != Some(workflow_id))
-    {
-        return Err(field_error());
-    }
-    if object.get("reason").is_some_and(|value| !value.is_string())
-        || object
-            .get("workflowReviewRequestId")
-            .is_some_and(|value| value.as_str().is_none_or(str::is_empty))
-    {
-        return Err(field_error());
-    }
-    let active_version_id = object.get("activeVersionId");
-    if active_version_id
-        .is_some_and(|value| !value.is_null() && value.as_str().is_none_or(str::is_empty))
-    {
-        return Err(field_error());
-    }
-    if action == "unpublish" && active_version_id.is_some_and(|value| !value.is_null()) {
-        return Err(field_error());
-    }
-    if !matches!(action, "publish" | "unpublish") {
-        return Err(field_error());
-    }
-    let mut safe = serde_json::Map::new();
-    safe.insert("action".to_string(), Value::String(action.to_string()));
-    safe.insert("success".to_string(), Value::Bool(true));
-    safe.insert(
-        "workflowId".to_string(),
-        Value::String(workflow_id.to_string()),
-    );
-    if let Some(active_version_id) = active_version_id {
-        safe.insert("activeVersionId".to_string(), active_version_id.clone());
-    }
-    Ok(Value::Object(safe))
+            .get("structuredContent")
+            .is_some_and(lifecycle_provider_result_is_rejected)
 }
 
 fn decode_official_mcp_archive_result(
@@ -1065,7 +980,7 @@ fn validate_lifecycle_state_summary(state: &Value) -> Result<(), AppError> {
 fn verify_lifecycle_readback(
     input: &Value,
     baseline: &Value,
-    provider: &Value,
+    _provider: &Value,
     readback: &Value,
 ) -> Result<String, AppError> {
     let action = input
@@ -1082,47 +997,29 @@ fn verify_lifecycle_readback(
     if baseline.get("draft") != readback.get("draft") {
         return Err(AppError::new("readback_mismatch"));
     }
-    let expected_version = if action == "publish" {
-        input
-            .get("versionId")
-            .and_then(Value::as_str)
-            .filter(|version| !version.is_empty())
-            .ok_or_else(|| AppError::new("invalid_operation_input"))?
-    } else {
-        ""
-    };
     if action == "publish" {
-        if provider
+        let requested_version = match input.get("versionId") {
+            Some(value) => Some(
+                value
+                    .as_str()
+                    .filter(|version| !version.is_empty())
+                    .ok_or_else(|| AppError::new("invalid_operation_input"))?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        let readback_active_version = readback
             .get("activeVersionId")
             .and_then(Value::as_str)
-            .is_some_and(|provider_version| provider_version != expected_version)
-        {
-            return Err(AppError::with_diagnostic(
-                "unknown_outcome",
-                Some("lifecycle_provider_field_mismatch"),
-            ));
-        }
-    } else if action == "unpublish" {
-        if provider
-            .get("activeVersionId")
-            .is_some_and(|active_version_id| !active_version_id.is_null())
-        {
-            return Err(AppError::with_diagnostic(
-                "unknown_outcome",
-                Some("lifecycle_provider_field_mismatch"),
-            ));
-        }
-    } else {
-        return Err(AppError::new("invalid_operation_input"));
-    }
-    if action == "publish" {
+            .filter(|version| !version.is_empty());
+        let readback_published_version = readback
+            .pointer("/published/versionId")
+            .and_then(Value::as_str)
+            .filter(|version| !version.is_empty());
         if readback.get("active").and_then(Value::as_bool) != Some(true)
             || readback.get("isArchived").and_then(Value::as_bool) != Some(false)
-            || readback.get("activeVersionId").and_then(Value::as_str) != Some(expected_version)
-            || readback
-                .pointer("/published/versionId")
-                .and_then(Value::as_str)
-                != Some(expected_version)
+            || readback_active_version.is_none()
+            || readback_published_version.is_none()
             || readback
                 .pointer("/published/graphDigest")
                 .and_then(Value::as_str)
@@ -1130,14 +1027,35 @@ fn verify_lifecycle_readback(
         {
             return Err(AppError::new("readback_mismatch"));
         }
-    } else if readback.get("active").and_then(Value::as_bool) != Some(false)
-        || !readback.get("activeVersionId").is_some_and(Value::is_null)
-        || readback.get("isArchived") != baseline.get("isArchived")
-        || !readback.get("published").is_some_and(Value::is_null)
-    {
-        return Err(AppError::new("readback_mismatch"));
+        let expected_version = match requested_version {
+            Some(version) => version,
+            None => {
+                if readback_active_version != readback_published_version {
+                    return Err(AppError::new("readback_mismatch"));
+                }
+                readback_active_version
+                    .ok_or_else(|| AppError::new("readback_mismatch"))?
+                    .to_owned()
+            }
+        };
+        if readback_active_version != Some(expected_version.as_str())
+            || readback_published_version != Some(expected_version.as_str())
+        {
+            return Err(AppError::new("readback_mismatch"));
+        }
+        Ok(expected_version)
+    } else if action == "unpublish" {
+        if readback.get("active").and_then(Value::as_bool) != Some(false)
+            || !readback.get("activeVersionId").is_some_and(Value::is_null)
+            || readback.get("isArchived") != baseline.get("isArchived")
+            || !readback.get("published").is_some_and(Value::is_null)
+        {
+            return Err(AppError::new("readback_mismatch"));
+        }
+        Ok(String::new())
+    } else {
+        Err(AppError::new("invalid_operation_input"))
     }
-    Ok(expected_version.to_string())
 }
 
 fn lifecycle_state_error(error: AppError) -> AppError {
@@ -1150,31 +1068,28 @@ fn lifecycle_state_error(error: AppError) -> AppError {
     )
 }
 
-fn execute_workflow_lifecycle_official_mcp(
-    bundle: &fwc_n8n_bundle::VerifiedBundle,
+fn lifecycle_error_after_provider_advisory(
+    provider_advisory: Option<AppError>,
+    readback_error: AppError,
+) -> AppError {
+    provider_advisory
+        .filter(|error| error.diagnostic.is_some())
+        .unwrap_or_else(|| lifecycle_state_error(readback_error))
+}
+
+fn execute_workflow_lifecycle_with_bridge<F>(
     envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
-) -> Result<Value, AppError> {
+    mut bridge: F,
+) -> Result<Value, AppError>
+where
+    F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
+{
     let get = lifecycle_get_envelope(&envelope)?;
-    let baseline_response = run_host_bridge_once(
-        bundle,
-        &get,
-        BrokerCredentialPurpose::RestApi,
-        request_deadline_at,
-    )?;
+    let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = lifecycle_response_result(baseline_response)?;
     verify_lifecycle_baseline(&envelope.input, &baseline).map_err(lifecycle_state_error)?;
 
-    let provider_response = run_host_bridge_once(
-        bundle,
-        &envelope,
-        BrokerCredentialPurpose::OfficialMcp,
-        request_deadline_at,
-    )?;
-    // A valid outer response only proves that the mediated bridge completed.
-    // Keep the independent GET authoritative for the lifecycle transition;
-    // provider-specific inner MCP fields are decoded after that readback.
-    let _ = lifecycle_response_result(provider_response.clone())?;
     let workflow_id = envelope
         .input
         .get("id")
@@ -1185,16 +1100,47 @@ fn execute_workflow_lifecycle_official_mcp(
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    let readback_response = run_host_bridge_once(
-        bundle,
-        &get,
-        BrokerCredentialPurpose::RestApi,
+    let provider_advisory = match bridge(
+        &envelope,
+        BrokerCredentialPurpose::OfficialMcp,
         request_deadline_at,
-    )?;
-    let readback = lifecycle_response_result(readback_response)?;
-    let provider = decode_official_mcp_lifecycle_result(provider_response, action, workflow_id)?;
-    let _ = verify_lifecycle_readback(&envelope.input, &baseline, &provider, &readback)
-        .map_err(lifecycle_state_error)?;
+    ) {
+        Ok(response) => decode_official_mcp_lifecycle_result(response, action, workflow_id).err(),
+        // Once the official-MCP dispatch may have started, an unknown bridge
+        // error is reconciled exactly once.  A known pre-provider category
+        // still returns immediately and cannot cause a readback side effect.
+        Err(error) if error.code == "unknown_outcome" => Some(error),
+        Err(error) => return Err(error),
+    };
+
+    let readback_response =
+        match bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at) {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(lifecycle_error_after_provider_advisory(
+                    provider_advisory,
+                    lifecycle_state_error(error),
+                ));
+            }
+        };
+    let readback = match lifecycle_response_result(readback_response) {
+        Ok(readback) => readback,
+        Err(error) => {
+            return Err(lifecycle_error_after_provider_advisory(
+                provider_advisory,
+                error,
+            ));
+        }
+    };
+    if let Err(error) =
+        verify_lifecycle_readback(&envelope.input, &baseline, &Value::Null, &readback)
+            .map_err(lifecycle_state_error)
+    {
+        return Err(lifecycle_error_after_provider_advisory(
+            provider_advisory,
+            error,
+        ));
+    }
     Ok(json!({
         "status": "verified",
         "operation": "n8n.workflows.lifecycle",
@@ -1205,6 +1151,18 @@ fn execute_workflow_lifecycle_official_mcp(
         "before": baseline,
         "after": readback,
     }))
+}
+
+fn execute_workflow_lifecycle_official_mcp(
+    bundle: &fwc_n8n_bundle::VerifiedBundle,
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+) -> Result<Value, AppError> {
+    execute_workflow_lifecycle_with_bridge(
+        envelope,
+        request_deadline_at,
+        |request, purpose, deadline| run_host_bridge_once(bundle, request, purpose, deadline),
+    )
 }
 
 fn execute_workflow_archive_official_mcp(
@@ -2012,21 +1970,14 @@ fn validate_workflow_lifecycle_input(
     ) {
         return Err(AppError::new("invalid_operation_input"));
     }
-    match object.get("action").and_then(Value::as_str) {
-        Some("publish") => {
-            if object
-                .get("versionId")
-                .and_then(Value::as_str)
+    if let Some(version_id) = object.get("versionId") {
+        if object.get("action").and_then(Value::as_str) == Some("unpublish")
+            || version_id
+                .as_str()
                 .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
-            {
-                return Err(AppError::new("invalid_operation_input"));
-            }
-        }
-        Some("unpublish") if object.contains_key("versionId") => {
+        {
             return Err(AppError::new("invalid_operation_input"));
         }
-        Some("unpublish") => {}
-        _ => return Err(AppError::new("invalid_operation_input")),
     }
     let guard = object
         .get("guard")
@@ -3359,12 +3310,14 @@ mod tests {
             self.requests
                 .push("child:GET /api/v1/workflows/1001".to_owned());
             let call = if action == "publish" {
-                format!(
-                    "child:MCP tools/call publish_workflow {{\"workflowId\":\"1001\",\"versionId\":\"{}\"}}",
-                    envelope.input["versionId"]
-                        .as_str()
-                        .expect("publish version")
-                )
+                match envelope.input.get("versionId").and_then(Value::as_str) {
+                    Some(version_id) => format!(
+                        "child:MCP tools/call publish_workflow {{\"workflowId\":\"1001\",\"versionId\":\"{version_id}\"}}"
+                    ),
+                    None => {
+                        "child:MCP tools/call publish_workflow {\"workflowId\":\"1001\"}".to_owned()
+                    }
+                }
             } else {
                 "child:MCP tools/call unpublish_workflow {\"workflowId\":\"1001\"}".to_owned()
             };
@@ -3386,7 +3339,42 @@ mod tests {
         }
     }
 
-    fn lifecycle_host_input_for(server_id: &str, action: &str) -> Vec<u8> {
+    struct LifecycleSequenceProbe {
+        calls: Vec<String>,
+        responses: std::collections::VecDeque<Result<Value, AppError>>,
+    }
+
+    impl LifecycleSequenceProbe {
+        fn new(responses: impl IntoIterator<Item = Result<Value, AppError>>) -> Self {
+            Self {
+                calls: Vec::new(),
+                responses: responses.into_iter().collect(),
+            }
+        }
+
+        fn dispatch(
+            &mut self,
+            envelope: &HostRunOnceEnvelope,
+            purpose: BrokerCredentialPurpose,
+            _deadline: Instant,
+        ) -> Result<Value, AppError> {
+            let purpose = match purpose {
+                BrokerCredentialPurpose::RestApi => "rest",
+                BrokerCredentialPurpose::OfficialMcp => "official_mcp",
+            };
+            self.calls
+                .push(format!("{purpose}:{}", envelope.resource_uri));
+            self.responses
+                .pop_front()
+                .expect("lifecycle sequence response")
+        }
+    }
+
+    fn lifecycle_host_input_for_version(
+        server_id: &str,
+        action: &str,
+        version_id: Option<&str>,
+    ) -> Vec<u8> {
         let mut input = json!({
             "id": "1001",
             "action": action,
@@ -3402,8 +3390,8 @@ mod tests {
                 }
             }
         });
-        if action == "publish" {
-            input["versionId"] = json!("version-1");
+        if let Some(version_id) = version_id {
+            input["versionId"] = json!(version_id);
         }
         serde_json::to_vec(&json!({
             "server_id": server_id,
@@ -3413,8 +3401,34 @@ mod tests {
         .expect("lifecycle host input")
     }
 
+    fn lifecycle_host_input_for(server_id: &str, action: &str) -> Vec<u8> {
+        lifecycle_host_input_for_version(
+            server_id,
+            action,
+            (action == "publish").then_some("version-1"),
+        )
+    }
+
     fn lifecycle_host_input() -> Vec<u8> {
         lifecycle_host_input_for("eec", "publish")
+    }
+
+    fn lifecycle_envelope_for_version(
+        server_id: &str,
+        action: &str,
+        version_id: Option<&str>,
+    ) -> HostRunOnceEnvelope {
+        let operation =
+            HostRunOnceOperation::parse("n8n.workflows.lifecycle").expect("lifecycle operation");
+        let input = parse_host_run_once_input(&lifecycle_host_input_for_version(
+            server_id, action, version_id,
+        ))
+        .expect("lifecycle input");
+        build_host_run_once_envelope(operation, input).expect("lifecycle envelope")
+    }
+
+    fn lifecycle_response(result: Value) -> Value {
+        json!({"status": "ok", "result": result})
     }
 
     #[test]
@@ -3449,16 +3463,18 @@ mod tests {
 
     #[test]
     fn host_run_once_lifecycle_covers_eec_and_hetzner_without_duplicate_writes() {
-        for (server_id, action) in [
-            ("eec", "publish"),
-            ("eec", "unpublish"),
-            ("hetzner", "publish"),
-            ("hetzner", "unpublish"),
+        for (server_id, action, version_id) in [
+            ("eec", "publish", Some("version-1")),
+            ("eec", "publish", None),
+            ("eec", "unpublish", None),
+            ("hetzner", "publish", Some("version-1")),
+            ("hetzner", "publish", None),
+            ("hetzner", "unpublish", None),
         ] {
             let mut bridge = LifecycleBridgeProbe::default();
             let value = run_once_from_bytes_at(
                 "n8n.workflows.lifecycle",
-                &lifecycle_host_input_for(server_id, action),
+                &lifecycle_host_input_for_version(server_id, action, version_id),
                 Instant::now(),
                 |envelope, deadline| bridge.dispatch(envelope, deadline),
             )
@@ -3512,6 +3528,162 @@ mod tests {
         );
     }
 
+    #[test]
+    fn official_mcp_lifecycle_boundary_uses_readback_for_opaque_provider_results() {
+        let provider_results = [
+            json!({}),
+            Value::Null,
+            Value::String("accepted by provider".to_owned()),
+            json!({"isError": false}),
+            json!({"isError": true, "message": "provider-specific"}),
+            json!({"success": false, "error": "provider-specific"}),
+            json!({"structuredContent": {"newField": "version-specific"}}),
+            json!({"content": [{"type": "text", "text": "accepted"}]}),
+            json!({"content": []}),
+        ];
+        for provider_result in provider_results {
+            let envelope = lifecycle_envelope_for_version("eec", "publish", Some("version-1"));
+            let mut bridge = LifecycleSequenceProbe::new([
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    false,
+                ))),
+                Ok(lifecycle_response(provider_result)),
+                Ok(lifecycle_response(lifecycle_state(
+                    true,
+                    json!("version-1"),
+                    false,
+                ))),
+            ]);
+            let result = execute_workflow_lifecycle_with_bridge(
+                envelope,
+                Instant::now() + Duration::from_secs(5),
+                |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+            )
+            .expect("exact readback should prove the lifecycle transition");
+            assert_eq!(result["status"], "verified");
+            assert_eq!(bridge.calls.len(), 3);
+            assert_eq!(bridge.calls[0], "rest:fwc-n8n://eec/workflows/1001");
+            assert_eq!(
+                bridge.calls[1],
+                "official_mcp:fwc-mcp-bridge://eec/tools/publish%5Fworkflow"
+            );
+            assert_eq!(bridge.calls[2], bridge.calls[0]);
+        }
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_boundary_reconciles_ambiguous_provider_error_once() {
+        let envelope = lifecycle_envelope_for_version("hetzner", "publish", None);
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("unknown_outcome")),
+            Ok(lifecycle_response(lifecycle_state(
+                true,
+                json!("version-1"),
+                false,
+            ))),
+        ]);
+        let result = execute_workflow_lifecycle_with_bridge(
+            envelope.clone(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect("readback may prove an ambiguous provider attempt");
+        assert_eq!(result["status"], "verified");
+        assert_eq!(bridge.calls.len(), 3);
+        assert_eq!(
+            bridge
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("official_mcp:"))
+                .count(),
+            1
+        );
+
+        let mut unchanged = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("unknown_outcome")),
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+        ]);
+        let error = execute_workflow_lifecycle_with_bridge(
+            envelope.clone(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| unchanged.dispatch(request, purpose, deadline),
+        )
+        .expect_err("unchanged reconciliation must remain unknown");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(unchanged.calls.len(), 3);
+        assert_eq!(
+            unchanged
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("official_mcp:"))
+                .count(),
+            1
+        );
+
+        let mut preflight = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("official_mcp_plan_failed")),
+        ]);
+        let error = execute_workflow_lifecycle_with_bridge(
+            envelope,
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| preflight.dispatch(request, purpose, deadline),
+        )
+        .expect_err("known pre-provider failure must remain immediate");
+        assert_eq!(error.code, "official_mcp_plan_failed");
+        assert_eq!(preflight.calls.len(), 2);
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_boundary_rejects_readback_uncertainty_without_retry() {
+        let envelope = lifecycle_envelope_for_version("eec", "unpublish", None);
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                true,
+                json!("version-1"),
+                false,
+            ))),
+            Ok(lifecycle_response(json!({"success": false}))),
+            Ok(lifecycle_response(json!({}))),
+        ]);
+        let error = execute_workflow_lifecycle_with_bridge(
+            envelope,
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect_err("malformed readback must fail closed");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(bridge.calls.len(), 3);
+        assert_eq!(
+            bridge
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("official_mcp:"))
+                .count(),
+            1
+        );
+    }
+
     fn lifecycle_state(active: bool, active_version_id: Value, is_archived: bool) -> Value {
         json!({
             "id": "1001",
@@ -3536,68 +3708,45 @@ mod tests {
     #[test]
     fn official_mcp_lifecycle_diagnostics_are_fixed_and_redacted() {
         let private = "private-token-workflow-error";
-        let success = json!({"success": true, "workflowId": "1001", "activeVersionId": "v1"});
         for result in [
-            success.clone(),
-            json!({"structuredContent": success}),
-            json!({"content": [{"type": "text", "text": success.to_string()}]}),
-            json!({"structuredContent": {"providerSpecificSuccess": "accepted"}}),
+            json!({}),
+            Value::Null,
+            Value::String(private.to_owned()),
+            json!({"success": true, "workflowId": private, "activeVersionId": 7}),
+            json!({"structuredContent": [private]}),
+            json!({"content": [{"type": "text", "text": private}]}),
+            json!({"content": []}),
+            json!({"isError": false}),
         ] {
-            assert!(
-                decode_official_mcp_lifecycle_result(
-                    json!({"status": "ok", "result": result}),
-                    "publish",
-                    "1001"
-                )
-                .is_ok()
-            );
+            let safe = decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": result}),
+                "publish",
+                "1001",
+            )
+            .expect("provider formatting must remain advisory");
+            assert_eq!(safe, json!({"delivered": true}));
         }
         for (response, diagnostic) in [
             (
-                json!({"status": "ok", "result": {"structuredContent": {
-                    "success": false, "workflowId": "1001", "activeVersionId": null, "error": private
-                }}}),
+                json!({"status": "ok", "result": {"success": false, "error": private}}),
                 "lifecycle_provider_rejected",
             ),
             (
-                json!({"status": "ok", "result": {"isError": true, "content": private}}),
+                json!({"status": "ok", "result": {"isError": true, "message": private}}),
                 "lifecycle_provider_rejected",
             ),
             (
                 json!({"status": private, "error": private}),
+                "lifecycle_provider_rejected",
+            ),
+            (
+                json!({"status": "ok", "error": private, "result": {}}),
+                "lifecycle_provider_rejected",
+            ),
+            (json!({"status": "ok"}), "lifecycle_response_shape"),
+            (
+                json!({"result": {"private": private}}),
                 "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"structuredContent": [private]}}),
-                "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"content": [{"type": "text", "text": private}]}}),
-                "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"content": []}}),
-                "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"isError": private}}),
-                "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"unsupported": private}}),
-                "lifecycle_response_shape",
-            ),
-            (
-                json!({"status": "ok", "result": {"success": true, "workflowId": private, "activeVersionId": "v1"}}),
-                "lifecycle_provider_field_mismatch",
-            ),
-            (
-                json!({"status": "ok", "result": {"success": private, "workflowId": "1001", "activeVersionId": "v1"}}),
-                "lifecycle_provider_field_mismatch",
-            ),
-            (
-                json!({"status": "ok", "result": {"success": true, "workflowId": "1001", "activeVersionId": {"private": private}}}),
-                "lifecycle_provider_field_mismatch",
             ),
         ] {
             let error = decode_official_mcp_lifecycle_result(response, "publish", "1001")
@@ -3649,7 +3798,7 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_result_is_strictly_decoded_and_redacted() {
+    fn official_mcp_lifecycle_provider_advisory_is_bounded_and_redacted() {
         let provider = json!({
             "success": true,
             "workflowId": "1001",
@@ -3667,24 +3816,18 @@ mod tests {
             }
         });
         let safe = decode_official_mcp_lifecycle_result(response, "publish", "1001")
-            .expect("official lifecycle response");
-        assert_eq!(
-            safe,
-            json!({
-                "action": "publish",
-                "success": true,
-                "workflowId": "1001",
-                "activeVersionId": "version-1"
-            })
-        );
-        assert!(
-            decode_official_mcp_lifecycle_result(
-                json!({"status": "ok", "result": {"success": true, "workflowId": "other"}}),
-                "publish",
-                "1001"
-            )
-            .is_err()
-        );
+            .expect("provider response is advisory");
+        assert_eq!(safe, json!({"delivered": true}));
+        assert!(!format!("{safe:?}").contains("private provider explanation"));
+        let error = decode_official_mcp_lifecycle_result(
+            json!({"status": "ok", "result": {"isError": true, "message": "private provider error"}}),
+            "publish",
+            "1001",
+        )
+        .expect_err("provider rejection remains a fixed advisory diagnostic");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
+        assert!(!format!("{error:?}").contains("private provider error"));
     }
 
     #[test]
@@ -3699,11 +3842,7 @@ mod tests {
         assert_eq!(
             decode_official_mcp_lifecycle_result(response, "unpublish", "1001")
                 .expect("minimal official unpublish response"),
-            json!({
-                "action": "unpublish",
-                "success": true,
-                "workflowId": "1001"
-            })
+            json!({"delivered": true})
         );
 
         let response_with_null_version = json!({
@@ -3721,48 +3860,38 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_decoder_enforces_reviewed_schema_fields() {
-        let valid = json!({"success": true, "workflowId": "1001", "activeVersionId": null});
-        assert!(
-            decode_official_mcp_lifecycle_result(
-                json!({"status": "ok", "result": {"structuredContent": valid}}),
-                "publish",
-                "1001",
-            )
-            .is_ok()
-        );
-        for invalid in [
+    fn official_mcp_lifecycle_provider_fields_are_advisory() {
+        for result in [
+            json!({"success": true, "workflowId": "1001", "activeVersionId": null}),
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "reason": null}),
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": ""}),
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": 1}),
-            json!({"success": true, "workflowId": "1001", "activeVersionId": null, "error": "provider failure"}),
-            json!({"success": false, "workflowId": "1001", "activeVersionId": null}),
+            json!({"success": true, "workflowId": "other", "activeVersionId": 7, "secret": "ignored"}),
+            json!({"structuredContent": ["version-specific"]}),
+            json!({"content": [{"type": "text", "text": "plain provider acknowledgement"}]}),
+        ] {
+            let safe = decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": result}),
+                "publish",
+                "1001",
+            )
+            .expect("provider fields must not gate readback");
+            assert_eq!(safe, json!({"delivered": true}));
+        }
+        for result in [
+            json!({"success": false, "workflowId": "1001"}),
+            json!({"isError": true, "structuredContent": {"success": true}}),
+            json!({"error": "provider failure"}),
         ] {
             let error = decode_official_mcp_lifecycle_result(
-                json!({"status": "ok", "result": {"structuredContent": invalid}}),
+                json!({"status": "ok", "result": result}),
                 "publish",
                 "1001",
             )
-            .expect_err("unexpected provider shape must fail closed");
+            .expect_err("explicit provider rejection should remain advisory");
             assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
         }
-        assert!(
-            decode_official_mcp_lifecycle_result(
-                json!({"status": "ok", "result": {"isError": true, "structuredContent": valid}}),
-                "publish",
-                "1001",
-            )
-            .is_err()
-        );
-        assert!(decode_official_mcp_lifecycle_result(
-            json!({
-                "status": "ok",
-                "result": {"success": true, "workflowId": "1001", "activeVersionId": null, "secret": "ignored"}
-            }),
-            "publish",
-            "1001",
-        )
-        .is_ok());
     }
 
     #[test]
@@ -3793,6 +3922,30 @@ mod tests {
                 .expect("readback proves the transition"),
             "version-1"
         );
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_publish_without_version_requires_unambiguous_readback() {
+        let input = json!({"id": "1001", "action": "publish"});
+        let baseline = lifecycle_state(false, Value::Null, false);
+        let provider = json!({
+            "action": "publish",
+            "success": true,
+            "workflowId": "1001"
+        });
+        let mut after = lifecycle_state(true, json!("provider-version"), false);
+        after["published"]["versionId"] = json!("provider-version");
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect("independent readback selects the provider version"),
+            "provider-version"
+        );
+
+        let mut contradictory = after;
+        contradictory["published"]["versionId"] = json!("different-version");
+        let error = verify_lifecycle_readback(&input, &baseline, &provider, &contradictory)
+            .expect_err("contradictory active and published versions must remain unknown");
+        assert_eq!(error.code, "readback_mismatch");
     }
 
     #[test]
@@ -3871,41 +4024,28 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_decoder_rejects_action_and_result_shape_mismatch() {
-        let wrong_action = json!({
-            "status": "ok",
-            "result": {
-                "action": "unpublish",
-                "success": true,
-                "workflowId": "1001"
-            }
-        });
-        assert!(decode_official_mcp_lifecycle_result(wrong_action, "publish", "1001").is_err());
-
-        let wrong_version_type = json!({
-            "status": "ok",
-            "result": {
-                "success": true,
-                "workflowId": "1001",
-                "activeVersionId": 7
-            }
-        });
-        assert!(
-            decode_official_mcp_lifecycle_result(wrong_version_type, "publish", "1001").is_err()
-        );
-
-        let non_null_unpublish_version = json!({
-            "status": "ok",
-            "result": {
-                "success": true,
-                "workflowId": "1001",
-                "activeVersionId": "version-1"
-            }
-        });
-        assert!(
-            decode_official_mcp_lifecycle_result(non_null_unpublish_version, "unpublish", "1001")
-                .is_err()
-        );
+    fn official_mcp_lifecycle_provider_shape_mismatch_does_not_gate_readback() {
+        for result in [
+            json!({"action": "unpublish", "success": true, "workflowId": "1001"}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": 7}),
+            json!({"success": true, "workflowId": "1001", "activeVersionId": "version-1"}),
+        ] {
+            let safe = decode_official_mcp_lifecycle_result(
+                json!({"status": "ok", "result": result}),
+                "publish",
+                "1001",
+            )
+            .expect("provider shape mismatch must remain advisory");
+            assert_eq!(safe, json!({"delivered": true}));
+        }
+        let error = decode_official_mcp_lifecycle_result(
+            json!({"status": "malformed", "error": "private"}),
+            "publish",
+            "1001",
+        )
+        .expect_err("outer rejection must retain a bounded advisory error");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
     }
 
     #[test]
@@ -3988,7 +4128,7 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_rejects_provider_version_drift() {
+    fn official_mcp_lifecycle_provider_fields_do_not_override_exact_readback() {
         let input = json!({"id": "1001", "action": "publish", "versionId": "version-1"});
         let baseline = lifecycle_state(false, Value::Null, false);
         let provider = json!({
@@ -4007,19 +4147,20 @@ mod tests {
             },
             "stateDigest": "blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
         });
-        let mut after = lifecycle_state(true, json!("version-2"), false);
+        let mut after = lifecycle_state(true, json!("version-1"), false);
         after["stateDigest"] = provider["stateDigest"].clone();
-        let error = verify_lifecycle_readback(&input, &baseline, &provider, &after)
-            .expect_err("provider version drift must be unknown");
-        assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(error.diagnostic, Some("lifecycle_provider_field_mismatch"));
+        assert_eq!(
+            verify_lifecycle_readback(&input, &baseline, &provider, &after)
+                .expect("exact independent readback must win over provider fields"),
+            "version-1"
+        );
     }
 
     #[test]
-    fn official_mcp_lifecycle_rejects_unpublish_provider_still_active() {
+    fn official_mcp_lifecycle_unpublish_provider_fields_do_not_override_readback() {
         let input = json!({"id": "1001", "action": "unpublish"});
         let baseline = lifecycle_state(true, json!("version-1"), false);
-        let mut provider = json!({
+        let provider = json!({
             "success": true,
             "workflowId": "1001",
             "active": true,
@@ -4037,17 +4178,9 @@ mod tests {
         });
         let mut after = lifecycle_state(false, Value::Null, false);
         after["stateDigest"] = provider["stateDigest"].clone();
-        let error = verify_lifecycle_readback(&input, &baseline, &provider, &after)
-            .expect_err("provider active state must be unknown");
-        assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(error.diagnostic, Some("lifecycle_provider_field_mismatch"));
-
-        provider["active"] = json!(false);
-        provider["activeVersionId"] = Value::Null;
-        provider["published"] = Value::Null;
         assert_eq!(
             verify_lifecycle_readback(&input, &baseline, &provider, &after)
-                .expect("normalized unpublish provider"),
+                .expect("exact independent readback must win over provider fields"),
             ""
         );
     }
@@ -4760,7 +4893,7 @@ mod tests {
                 lifecycle_operation,
                 host_input(HostRunOnceServerId::Eec, missing_version)
             )
-            .is_err()
+            .is_ok()
         );
         let mut missing_pointer = lifecycle;
         missing_pointer["guard"]["precondition"]

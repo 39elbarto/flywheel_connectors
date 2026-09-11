@@ -955,6 +955,23 @@ exactly one reconciliation readback; known pre-provider failures remain
 deterministic, while readback uncertainty or mismatch remains non-success and
 is never retried.
 
+Current RC12 live-acceptance checkpoint (2026-09-11; installed release
+`release-20260911-fb407a9af-rc12`): the fresh EEC-first run stopped bounded
+NO-GO immediately after its baseline GET because the local evidence wrapper
+hit the zsh error `read-only variable: status`. Exactly one permitted EEC
+reconciliation GET then proved the known target unchanged: inactive,
+unarchived, unpublished (`active=false`, `activeVersionId=null`,
+`published=null`), with the supplied draft/version and graph/state digest
+categories intact. The run made no approval-issuer, lifecycle-wrapper, or
+provider write attempt; Hetzner was not selected under the EEC-first rule.
+EEC GETs were `2` (initial baseline plus reconciliation), Hetzner GETs were
+`0`, and no matching runtime processes remained. The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc12-20260911/report.md` (SHA-256
+`e76e6b6829bd8f36aa9eee9514e513b5ccdfdccac365e702eee80d5a07c9a3f7`). This
+local harness failure is not provider lifecycle acceptance; the required
+two-server sequence remains `in_progress`/NO-GO and this bounded run is not
+replayed.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

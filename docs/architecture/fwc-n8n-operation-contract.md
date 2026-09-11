@@ -14,7 +14,39 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Latest live acceptance checkpoint (2026-09-10 15:32 UTC; RC7):**
+**Latest release/acceptance checkpoint (2026-09-11 00:21 UTC; RC8 bounded stop):**
+The fresh SSD candidate `release-20260910-fcee1784b-rc8`, built from main
+revision `fcee1784b1f51aba6c3dd49db9de5162d8116ae3`, assembled successfully;
+the static owned-network smoke passed (`1 passed`). Independent unsigned-tree
+and request checks passed, the single owner-signing operation produced a valid
+redaction-safe `fwc.n8n.provision.v1` receipt, and the single provision
+preflight returned `status=preflight_ok` with `currentChanged=false`.
+
+The release was then stopped fail-closed before issuer installation because
+the staged external approval issuer SHA-256 did not equal the approved value
+for the installed issuer. The issuer was not executed or installed, apply and
+promotion were not attempted, and no provider/API/workflow/systemd action was
+performed. `current` remains
+`release-20260910-e30ca9f09-rc1`, `fwc-n8n status` reports
+`bundleAvailable=true`, and the prior issuer remains unchanged. Post-stop
+checks confirmed the candidate was not installed, the prior release was
+retained, no matching processes remained, and the source checkout was still
+tracked-clean at the RC8 revision.
+
+Redaction-safe evidence is retained at
+`/srv/dev-ssd/fcp/nqm81.30/release-20260910-fcee1784b-rc8/report.md` (SHA-256
+`8c0702d693571a780da5c3b3a94922c4cc93ce33aa525d3cd4870e38fa057e33`) and the
+append-only hash manifest at
+`/srv/dev-ssd/fcp/nqm81.30/release-20260910-fcee1784b-rc8/sha256sums.txt`
+(SHA-256
+`0721106769e5c4ad2db4a26d718f6a04612d5ec1fd8b16496a5d2d457388ec18`). Both
+redaction scans passed. Live acceptance remains **NO-GO**: EEC and Hetzner
+publish/readback/unpublish/final-readback were not attempted in this packet.
+Do not install the mismatching issuer or replay a provider attempt; a future
+run requires reconciling the approved issuer digest, then a fresh signed
+release and new bounded EEC-first acceptance.
+
+**Previous live acceptance checkpoint (2026-09-10 15:32 UTC; RC7):**
 `current` resolves to `release-20260910-e30ca9f09-rc1`, built from revision
 `e30ca9f0921d8e0db3f3b3ff173427c6a53758a7`, and `fwc-n8n status` reports
 `bundleAvailable=true`. The release includes the verified dry-run ledger-bypass

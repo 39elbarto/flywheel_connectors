@@ -14,6 +14,36 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+**RC11 privileged promotion / external issuer gate checkpoint (2026-09-11;
+bounded NO-GO):**
+The fresh owner-signed candidate `release-20260911-fcee1784b-rc11` was
+validated and promoted using root-shell input redirection. Exactly one
+preflight returned `status=preflight_ok` with `currentChanged=false`, followed
+by exactly one apply returning `status=promoted` with `currentChanged=true`.
+`current` now resolves to
+`release-20260911-fcee1784b-rc11`; its signed `fwc.n8n.provision.v1` receipt,
+`fwc.n8n.provenance.v1`, bundle status, retained predecessor, and zero matching
+build/sign/provision processes all pass independent checks. The former
+permission failure was therefore corrected without a source or runtime-binary
+change.
+
+The external approval issuer is intentionally separate from the runtime
+bundle. The RC11 candidate issuer at the SSD target has SHA-256
+`ce4bc4e44a159645b45ff2641786b7703c52342ff3f06a977e6c067e03b25e8b`, but the
+fixed installed target `/usr/local/sbin/fcp-n8n-approval-issue` still has the
+previous SHA-256
+`b556d3311b812aa554c25db2dae4386ed2a7b7a2f192031b356cc0cf5c86d5ca`.
+Consequently the promotion gate is **bounded NO-GO** until the separately
+approved issuer installation and digest readback are complete. No provider,
+API, workflow, credential, or lifecycle operation was attempted.
+
+Redaction-safe evidence is retained at
+`/srv/dev-ssd/fcp/nqm81.30/install-rc11-20260911/report.md` (SHA-256
+`d9d3903f600d6aa91b0ee3afe8334222569dd1fc51ce663336f23df78b110d4a`). A
+future supervised step may replace only the fixed issuer target from the
+approved SSD candidate, verify root ownership/mode and both digests, and then
+start a new EEC-first acceptance; this packet must not be replayed.
+
 **RC11 release-packet checkpoint (2026-09-11; bounded NO-GO):**
 The fresh SSD candidate `release-20260911-fcee1784b-rc11`, built from main
 revision `1a12c5449cf4b0be487ee6aad78a065239378e51`, completed one assembler

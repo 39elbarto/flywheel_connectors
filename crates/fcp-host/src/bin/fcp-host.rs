@@ -10467,16 +10467,25 @@ fn validate_n8n_workflow_lifecycle_input(input: &Value) -> HostResult<()> {
             "n8n workflow lifecycle action is invalid".to_string(),
         ));
     }
-    if let Some(version_id) = object.get("versionId") {
-        if action == "unpublish"
-            || version_id
-                .as_str()
+    match action {
+        "publish" => {
+            if object
+                .get("versionId")
+                .and_then(Value::as_str)
                 .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
-        {
+            {
+                return Err(HostError::InvalidFilter(
+                    "n8n workflow lifecycle versionId is invalid".to_string(),
+                ));
+            }
+        }
+        "unpublish" if object.contains_key("versionId") => {
             return Err(HostError::InvalidFilter(
                 "n8n workflow lifecycle versionId is invalid".to_string(),
             ));
         }
+        "unpublish" => {}
+        _ => unreachable!("lifecycle action was validated above"),
     }
     let guard = object
         .get("guard")
@@ -36036,6 +36045,14 @@ done"#;
         }
         assert!(material.get("workflow_id_digest").is_some());
         assert!(material.get("idempotency_key_hash").is_some());
+
+        let mut missing_version = input.clone();
+        missing_version
+            .input
+            .as_object_mut()
+            .expect("lifecycle input object")
+            .remove("versionId");
+        assert!(build_n8n_read_only_run_once_plan(missing_version, &config).is_err());
 
         let mut unsupported_action = input.clone();
         unsupported_action.input["action"] = json!("activate");

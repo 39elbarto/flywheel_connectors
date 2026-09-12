@@ -1226,6 +1226,35 @@ and expiry classification before the single issuer invocation; it must keep
 the EEC-first, one-reconciliation, no-retry policy. RC24 is not replayed and
 the required two-server lifecycle remains `in_progress`/NO-GO.
 
+Current RC25 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh supervised worker first passed
+the offline direct-`InvokeResponse` request/response gate. Six in-memory
+`jq -cn` fixtures were checked: omitted and explicit-null success `error`
+fields plus a sequential repeat were accepted, while non-null top-level error,
+nested `response.result`, and concatenated JSON were rejected. No provider,
+credential, or issuer access occurred before that gate. The formal EEC baseline
+through `/usr/local/bin/fwc-n8n run-once n8n.workflows.get` matched workflow
+`oD8zytCtv5PiSYzc`'s expected inactive, unarchived, unpublished state and exact
+version, graph, and state digests. One EEC `n8n.mcp_access.reconcile` dry-run
+then planned exactly one enablement for that workflow, with zero durable
+changes and the expected safe readback.
+
+The worker stopped before approval preparation, issuer invocation, credential
+access, or any provider write because the local approval-preparation command
+was blocked. EEC therefore had one baseline GET and one dry-run; MCP-access
+apply, publish, unpublish, reconciliation, all Hetzner operations, and all
+provider/issuer/credential counts were `0`. No workflow state changed and no
+provider write is claimed. The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc25-20260912/report.json`
+(SHA-256
+`392ed345f689a2d57e70e82a9b5c499246a99260b55e65455af7458312ff8c11`); its
+`SHA256SUMS` manifest (`180ea5e305c8bb626af017795c5cb3bf152831a3c99e6e4da7ad7ca10c8b5762`), restrictive modes, redaction scan, and no-process check passed.
+RC25 is a local preparation-boundary NO-GO, not provider lifecycle acceptance,
+and is not replayed. A future fresh gate must use a short command path without
+the blocked heredoc-style preparation, retain the same complete approval-shape
+projection, EEC-first ordering, one-reconciliation rule, and no-retry policy.
+The required two-server lifecycle remains `in_progress`/NO-GO.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

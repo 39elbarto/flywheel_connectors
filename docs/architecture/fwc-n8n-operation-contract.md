@@ -1005,6 +1005,27 @@ report is
 with a verified sidecar. The required two-server lifecycle remains
 `in_progress`/NO-GO; RC13 is not replayed.
 
+Current RC17 live-acceptance checkpoint (2026-09-12; installed release
+`release-20260912-cddd9f168-rc14`): the fresh EEC-first run corrected its local
+InvokeResponse parser to accept the optional success `error` field being
+omitted and the direct top-level `result` object. The exact EEC baseline and
+one reconciliation GET matched the inactive, unarchived, unpublished target
+for workflow `oD8zytCtv5PiSYzc`, including the supplied version and complete
+graph/state digests. One MCP-access dry-run planned exactly that workflow. The
+single fresh approval request and issuer attempt then failed closed with
+`issuer_invalid_request` because the locally supplied expiry had 19 digits
+instead of the required 13-digit Unix-millisecond value. No token was issued;
+MCP-access apply writes, lifecycle writes, and provider writes were all `0`,
+and Hetzner was not started under the EEC-first gate. The current RC14 pointer
+and `bundleAvailable=true` status remained unchanged, the final matching
+process count was zero, and the redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/rc17-20260912-CoralMountain/report.json` (SHA-256
+`c800dbf25791fef3d4c4b408187f05f652cbca8945e5b4a28032b0b97c1901fc`); its
+`SHA256SUMS` verification, redaction scan, and mode-600 evidence checks
+passed. The required two-server lifecycle remains `in_progress`/NO-GO; do not
+replay this bounded stop. A future attempt requires correcting the local
+expiry representation and a fresh explicitly bounded EEC-first run.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

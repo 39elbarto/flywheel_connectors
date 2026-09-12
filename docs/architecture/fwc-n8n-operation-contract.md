@@ -989,6 +989,22 @@ and the redacted report is
 The report is redaction-clean; the required two-server lifecycle remains
 `in_progress`/NO-GO, and this bounded run is not replayed.
 
+Current RC14 diagnosis checkpoint (2026-09-12; installed release remains
+`release-20260911-fb407a9af-rc12`): a read-only review of the RC13 evidence and
+the host/bridge/connector lifecycle path narrowed the proven boundary to one
+EEC publish-wrapper attempt that exited with a redacted advisory error and one
+independent REST readback that failed exact active-publication verification.
+The retained evidence does not identify a provider rejection, host/bridge/
+transport failure, or the specific readback field mismatch, and it does not
+prove either a provider write or its absence. No provider, approval, issuer,
+workflow, release, or repository action was performed during diagnosis; no
+unpublish or Hetzner phase is authorized by this result. The redacted diagnosis
+report is
+`/srv/dev-ssd/fcp/nqm81.30/diagnose-rc13-publish-error-20260912/report.md`
+(SHA-256 `3a7e2e6ca96e4c78614e2599cd7b38afd098d56cb1be3a5ff74ee26011437faf`)
+with a verified sidecar. The required two-server lifecycle remains
+`in_progress`/NO-GO; RC13 is not replayed.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

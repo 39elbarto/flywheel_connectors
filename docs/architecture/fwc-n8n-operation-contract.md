@@ -1174,6 +1174,40 @@ next gate must canonicalize the report root once, assert literal artifact
 paths, and project only the direct `.result` before entering the same
 EEC-first lifecycle sequence.
 
+Current RC24 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh worker first passed the offline
+direct-`InvokeResponse` fixture gate. The gate validated five fixtures, accepted
+both omitted and explicit-null success `error` fields, rejected top-level error,
+nested-result, and concatenated-JSON shapes, and persisted no raw fixture,
+stdout, or stderr. The formal EEC baseline through
+`/usr/local/bin/fwc-n8n run-once n8n.workflows.get` proved workflow
+`oD8zytCtv5PiSYzc` inactive, unarchived, and unpublished with the expected
+version, graph, and state digests. One EEC MCP-access dry-run then planned
+exactly one desired enablement with no change and the expected readback digest.
+
+The single EEC MCP-access apply attempt created one fresh approval request,
+used one parent-binding helper invocation, one 13-digit millisecond expiry, and
+one in-memory 32-byte seed decode. The approval issuer was invoked exactly once
+and exited `1` with no stdout, classified as `invalid_request`; no token or
+completed provider write was observed. Because the apply result was therefore
+unknown, the worker performed exactly one same-server reconciliation GET and
+proved the original inactive, unarchived, unpublished EEC state and exact
+digests unchanged. Publish, unpublish, and the complete Hetzner phase were not
+started under the EEC-first gate. EEC counts were baseline GET `1`, dry-run
+`1`, apply attempt `1`, and reconciliation GET `1`; completed MCP-access and
+verified provider writes were `0`.
+
+The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc24-20260912/report.json`
+(SHA-256
+`8f9385550e3219174eaaee6a83027aa2ca195ba859ab13c7475d8bd4932b6ada`). Its
+`SHA256SUMS` verification, restrictive modes, redaction checks, and
+matching-process check passed. RC24 is a bounded local/issuer NO-GO, not
+provider lifecycle acceptance, and is not replayed. The two-server lifecycle
+remains `in_progress`/NO-GO; a future attempt needs a separately justified
+diagnosis or correction of the issuer `invalid_request` boundary and a fresh
+EEC-first run with the same one-reconciliation/no-retry policy.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

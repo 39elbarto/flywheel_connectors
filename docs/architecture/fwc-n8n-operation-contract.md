@@ -972,6 +972,23 @@ local harness failure is not provider lifecycle acceptance; the required
 two-server sequence remains `in_progress`/NO-GO and this bounded run is not
 replayed.
 
+Current RC13 live-acceptance checkpoint (2026-09-12; installed release
+`release-20260911-fb407a9af-rc12`): the fresh EEC-first run passed the exact
+inactive, unarchived, unpublished baseline for workflow
+`oD8zytCtv5PiSYzc` and version `85f41fbd-96e2-42d0-9022-98592eb35011`.
+Two local timestamp/length assertions failed before provider I/O and were
+corrected in-memory; no provider action occurred during those diagnostics.
+The single authorized EEC publish attempt then issued one owner approval and
+returned an advisory error. Its one independent REST readback/reconciliation
+GET did not prove exact active publication, so unpublish was not attempted and
+Hetzner was not selected under the EEC-first gate. The current RC12 pointer and
+bundle status remained unchanged, the final matching-process count was zero,
+and the redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc13-20260912/report.md` (SHA-256
+`930bd94ce464f1e7f56a347cf73587ba278b4309ac73ef8ce605ccdb3646a078`).
+The report is redaction-clean; the required two-server lifecycle remains
+`in_progress`/NO-GO, and this bounded run is not replayed.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

@@ -12,18 +12,40 @@ readonly SCHEMA="fwc.n8n.acceptance-preflight.v1"
 readonly MAX_INPUT_BYTES=262144
 readonly APPROVAL_ROOT="/var/lib/fwc-n8n/approval-requests"
 readonly WRAPPER="/usr/local/bin/fwc-n8n"
+readonly JQ_BIN="/usr/bin/jq"
+readonly WC_BIN="/usr/bin/wc"
+readonly STAT_BIN="/usr/bin/stat"
 readonly EEC_WORKFLOW_ID="oD8zytCtv5PiSYzc"
 readonly EEC_VERSION_ID="85f41fbd-96e2-42d0-9022-98592eb35011"
 readonly EEC_GRAPH_DIGEST="blake3-256:9a1dcf488e8b929a22a847f38aee6601dbf4000d13325b05236cf8c018be8b3a"
 readonly EEC_STATE_DIGEST="blake3-256:1b431688626cba116259425ed22acb74fed2bbe423330a7b7f039b1d2908f91c"
-readonly PLAN_DIGEST="blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-readonly PARENT_BINDING="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-readonly ARTIFACT_DIGEST="sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-readonly SELFTEST_REVISION="1111111111111111111111111111111111111111"
+readonly PLAN_DIGEST="blake3-256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+readonly PARENT_BINDING="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+readonly ARTIFACT_DIGEST="sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+readonly SELFTEST_REVISION="0123456789abcdef0123456789abcdef01234567"
 
 PLAN=""
 SELF_TEST=0
 NOW_MS=""
+
+jq() {
+  "$JQ_BIN" "$@"
+}
+
+wc() {
+  "$WC_BIN" "$@"
+}
+
+stat() {
+  "$STAT_BIN" "$@"
+}
+
+require_dependencies() {
+  if [[ ! -x "$JQ_BIN" || ! -x "$WC_BIN" || ! -x "$STAT_BIN" ]]; then
+    emit_failure "checker_dependency_missing"
+    return 1
+  fi
+}
 
 emit_failure() {
   printf '{"schema":"%s","verdict":"fail","abort_code":"%s"}\n' "$SCHEMA" "$1"
@@ -34,7 +56,7 @@ emit_success() {
 }
 
 emit_self_test_success() {
-  printf '{"schema":"%s","verdict":"pass","mode":"self-test","cases":12}\n' "$SCHEMA"
+  printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":15}\n' "$SCHEMA"
 }
 
 emit_self_test_failure() {
@@ -61,23 +83,17 @@ load_plan() {
       emit_failure "input_document_invalid"
       return 1
     fi
-    byte_count="$(wc -c <"$source")"
-    if ! [[ "$byte_count" =~ ^[0-9]+$ ]] || (( byte_count == 0 || byte_count > MAX_INPUT_BYTES )); then
+    if LC_ALL=C IFS= read -r -N "$((MAX_INPUT_BYTES + 1))" raw <"$source"; then
       emit_failure "input_bounds_invalid"
       return 1
     fi
-    if ! PLAN="$(jq -c -s 'if length == 1 and (.[0] | type) == "object" then .[0] else error("one object required") end' "$source" 2>/dev/null)"; then
-      emit_failure "input_document_invalid"
+  else
+    if LC_ALL=C IFS= read -r -N "$((MAX_INPUT_BYTES + 1))" raw; then
+      emit_failure "input_bounds_invalid"
       return 1
     fi
-    return 0
   fi
 
-  raw=""
-  if LC_ALL=C IFS= read -r -N "$((MAX_INPUT_BYTES + 1))" raw; then
-    emit_failure "input_bounds_invalid"
-    return 1
-  fi
   byte_count="$(LC_ALL=C printf '%s' "$raw" | wc -c)"
   if ! [[ "$byte_count" =~ ^[0-9]+$ ]] || (( byte_count == 0 || byte_count > MAX_INPUT_BYTES )); then
     emit_failure "input_bounds_invalid"
@@ -231,8 +247,12 @@ gate_target() {
 
 gate_dry_run() {
   jq_gate "dry_run_invalid" \
-    --arg workflow "$EEC_WORKFLOW_ID" \
-    --arg plan "$PLAN_DIGEST" '
+    --arg workflow "$EEC_WORKFLOW_ID" '
+      def blake3_digest_ok:
+        if type != "string" then false
+        else (test("^blake3-256:[0-9a-f]{64}$") and ((split(":")[1] | explode | unique | length) > 1))
+        end;
+
       ((.dry_run | type) == "object")
       and ((.dry_run | keys_unsorted | sort) ==
         ["changed", "classification", "desired", "dry_run", "exceptions", "guard_keys",
@@ -249,17 +269,20 @@ gate_dry_run() {
       and (.dry_run.matching_target == true)
       and (.dry_run.workflow_id == $workflow)
       and (.dry_run.workflow_ids_count == 1)
-      and (.dry_run.plan_digest == $plan)
-      and (.dry_run.readback_digest == $plan)
-      and (.dry_run.plan_digest | test("^blake3-256:[0-9a-f]{64}$"))
+      and (.dry_run.plan_digest == .dry_run.readback_digest)
+      and (.dry_run.plan_digest | blake3_digest_ok)
     '
 }
 
 gate_apply_guard() {
   jq_gate "dry_run_digest_mismatch" \
     --arg approval_ref "$(jq -er '.correlations.approval_ref' <<<"$PLAN")" \
-    --arg idempotency_key "$(jq -er '.correlations.idempotency_key' <<<"$PLAN")" \
-    --arg plan "$PLAN_DIGEST" '
+    --arg idempotency_key "$(jq -er '.correlations.idempotency_key' <<<"$PLAN")" '
+      def blake3_digest_ok:
+        if type != "string" then false
+        else (test("^blake3-256:[0-9a-f]{64}$") and ((split(":")[1] | explode | unique | length) > 1))
+        end;
+
       ((.apply_guard | type) == "object")
       and ((.apply_guard | keys_unsorted | sort) ==
         ["approval_ref", "dry_run", "dry_run_digest", "idempotency_key", "keys",
@@ -267,7 +290,8 @@ gate_apply_guard() {
       and (.apply_guard.dry_run == false)
       and (.apply_guard.keys | sort == ["approvalRef", "dryRunDigest", "idempotencyKey"])
       and (.apply_guard.approval_ref == $approval_ref)
-      and (.apply_guard.dry_run_digest == $plan)
+      and (.apply_guard.dry_run_digest == .dry_run.plan_digest)
+      and (.apply_guard.dry_run_digest | blake3_digest_ok)
       and (.apply_guard.idempotency_key == $idempotency_key)
       and (.apply_guard.matches_dry_run == true)
       and (.apply_guard.matches_target == true)
@@ -291,9 +315,13 @@ gate_uri() {
 }
 
 gate_approval() {
-  jq_gate "approval_envelope_invalid" \
-    --arg parent "$PARENT_BINDING" \
+  if ! jq_gate "approval_envelope_invalid" \
     --arg workflow "$EEC_WORKFLOW_ID" '
+      def sha256_binding_ok:
+        if type != "string" then false
+        else (test("^[0-9a-f]{64}$") and ((explode | unique | length) > 1))
+        end;
+
       ((.approval | type) == "object")
       and ((.approval | keys_unsorted | sort) ==
         ["expires_at_ms", "input_projection", "official_mcp_payload_digest",
@@ -308,8 +336,7 @@ gate_approval() {
       and (.approval.official_mcp_tool == "")
       and (.approval.official_mcp_resource_uri == "")
       and (.approval.official_mcp_payload_digest == "")
-      and (.approval.parent_binding_sha256 == $parent)
-      and (.approval.parent_binding_sha256 | test("^[0-9a-f]{64}$"))
+      and (.approval.parent_binding_sha256 | sha256_binding_ok)
       and (.approval.parent_binding_verified == true)
       and (.approval.parent_binding_inputs == ["server_id", "resource_uri", "operation", "input"])
       and (.approval.raw_token_present == false)
@@ -331,7 +358,9 @@ gate_approval() {
       and (.approval.input_projection.workflow_ids_match_target == true)
       and ((.approval.expires_at_ms | type) == "number")
       and ((.approval.expires_at_ms | floor) == .approval.expires_at_ms)
-    '
+    '; then
+    return 1
+  fi
 
   if ! jq -e '(.approval.expires_at_ms | tostring | test("^[0-9]{13}$"))' <<<"$PLAN" >/dev/null 2>&1; then
     emit_failure "expiry_not_13_digits"
@@ -533,6 +562,15 @@ gate_approval_file() {
 
 gate_provenance() {
   if ! jq -e '
+    def hex_digest_ok($pattern):
+      if type != "string" then false
+      else (test($pattern) and ((explode | unique | length) > 1))
+      end;
+    def prefixed_digest_ok($pattern):
+      if type != "string" then false
+      else (test($pattern) and ((split(":")[1] | explode | unique | length) > 1))
+      end;
+
     ((.provenance | type) == "object")
     and ((.provenance | keys_unsorted | sort) ==
       ["artifact_digest_installed", "artifact_digest_matches", "artifact_digest_source",
@@ -550,13 +588,13 @@ gate_provenance() {
     and (.provenance.release_id | test("^release-[A-Za-z0-9._-]+$"))
     and (.provenance.provenance_path | test("^/usr/local/lib/fwc-n8n/(current|releases/[A-Za-z0-9._-]+)/provenance\\.json$"))
     and (.provenance.receipt_path | test("^/usr/local/lib/fwc-n8n/(current|releases/[A-Za-z0-9._-]+)/provision-receipt\\.json$"))
-    and (.provenance.source_revision | test("^[0-9a-f]{40}$"))
-    and (.provenance.installed_revision | test("^[0-9a-f]{40}$"))
+    and (.provenance.source_revision | hex_digest_ok("^[0-9a-f]{40}$"))
+    and (.provenance.installed_revision | hex_digest_ok("^[0-9a-f]{40}$"))
     and (.provenance.source_revision == .provenance.installed_revision)
     and (.provenance.source_revision_matches == true)
     and (.provenance.installed_revision_matches == true)
-    and (.provenance.artifact_digest_source | test("^sha256:[0-9a-f]{64}$"))
-    and (.provenance.artifact_digest_installed | test("^sha256:[0-9a-f]{64}$"))
+    and (.provenance.artifact_digest_source | prefixed_digest_ok("^sha256:[0-9a-f]{64}$"))
+    and (.provenance.artifact_digest_installed | prefixed_digest_ok("^sha256:[0-9a-f]{64}$"))
     and (.provenance.artifact_digest_source == .provenance.artifact_digest_installed)
     and (.provenance.artifact_digest_matches == true)
     and (.provenance.artifact_digest_verified == true)
@@ -809,6 +847,15 @@ run_self_test() {
   fixture="$(jq -c '.command.fallbacks.route = true' <<<"$base")"
   if ! expect_failure "literal_run_once_required" "$fixture"; then emit_self_test_failure; return 1; fi
 
+  fixture="$(jq -c '.dry_run.plan_digest = ("blake3-256:" + ("b" * 64))' <<<"$base")"
+  if ! expect_failure "dry_run_invalid" "$fixture"; then emit_self_test_failure; return 1; fi
+
+  fixture="$(jq -c '.apply_guard.dry_run_digest = ("blake3-256:" + ("c" * 64))' <<<"$base")"
+  if ! expect_failure "dry_run_digest_mismatch" "$fixture"; then emit_self_test_failure; return 1; fi
+
+  fixture="$(jq -c '.approval.parent_binding_sha256 = ("a" * 64)' <<<"$base")"
+  if ! expect_failure "approval_envelope_invalid" "$fixture"; then emit_self_test_failure; return 1; fi
+
   fixture="$(jq -c '.approval.expires_at_ms = 123456789012' <<<"$base")"
   if ! expect_failure "expiry_not_13_digits" "$fixture"; then emit_self_test_failure; return 1; fi
 
@@ -847,9 +894,11 @@ usage() {
 }
 
 main() {
+  require_dependencies || return 1
   if [[ "${1:-}" == "--help" ]]; then
     usage
-    return 0
+    emit_failure "input_arguments_invalid"
+    return 1
   fi
   if [[ "${1:-}" == "--self-test" ]]; then
     if [[ "$#" -ne 1 ]]; then

@@ -1825,9 +1825,18 @@ The checker accepts exactly one bounded JSON object with schema
 `fwc.n8n.acceptance-preflight.v1`. It is a read-only gate: it may inspect only
 the supplied metadata projection and, when `approval_file` is explicitly
 provided, `stat` the fixed `/var/lib/fwc-n8n/approval-requests` directory and
-one direct child. It never reads or prints request/response bodies, tokens,
+one direct child. A positional plan is read through one bounded descriptor;
+stdin and file input are both capped before JSON parsing. The checker uses
+fixed absolute paths for its `jq`, `wc`, and `stat` helpers rather than resolving
+them through `PATH`. It never reads or prints request/response bodies, tokens,
 seeds, credentials, provider output, stdout, or stderr; it never invokes
 `fwc-n8n`, an issuer, KeePass, a provider, or a cleanup/write operation.
+
+`--self-test` is a separate health-check mode: its successful output carries
+`mode: "self-test"` and `acceptance: false`, so it is never an acceptance
+verdict. `--help` is rejected with a non-zero argument error; only a normal
+plan invocation may emit the acceptance result `verdict: "pass"` without a
+mode field.
 
 The gate rejects unknown keys and returns one redaction-safe JSON line with a
 stable `abort_code`; any failure exits non-zero. Its required checks include:
@@ -1839,8 +1848,8 @@ stable `abort_code`; any failure exits non-zero. Its required checks include:
   projection, fresh distinct UUID correlations, and matching idempotency,
   approval, dry-run, and target metadata;
 - the exact EEC inactive/unarchived/unpublished baseline, its version/graph/state
-  digests, the desired MCP-access dry-run (`planned=1`, `changed=0`), and the
-  canonical encoded bridge URI (`%5F` for underscores);
+  digests, the desired MCP-access dry-run (`planned=1`, `changed=0`), matching
+  apply digest, and the canonical encoded bridge URI (`%5F` for underscores);
 - owner-approval envelope and parent-binding metadata, decimal 13-digit expiry
   with `now < expires_at_ms <= now+60000`, root-owned `0600` request-file
   metadata or a verified post-issuer absence assertion, and cleanup failure;
@@ -1849,11 +1858,14 @@ stable `abort_code`; any failure exits non-zero. Its required checks include:
   redaction/checksum evidence, and absence of leaked runtime/issuer processes.
 
 A passing preflight means only that the submitted redacted metadata projection
-matches this local policy. It does not authorize a write, prove approval-file
-atomicity or cleanup chronology, prove signer behavior, or prove a provider
-result. The live worker must still execute the prescribed single sequence,
-perform typed readbacks, reconcile at most once after uncertainty, and stop
-without retry on any mismatch or unknown outcome.
+matches this local policy. Digest fields must be correctly formatted, unlike
+the synthetic self-test fixtures, and the checker verifies their cross-field
+bindings; it deliberately does not recompute cryptographic digests from raw
+bodies because those bodies are forbidden at this boundary. It does not
+authorize a write, prove approval-file atomicity or cleanup chronology, prove
+signer behavior, or prove a provider result. The live worker must still execute
+the prescribed single sequence, perform typed readbacks, reconcile at most once
+after uncertainty, and stop without retry on any mismatch or unknown outcome.
 
 ## 13. Future-only gates
 

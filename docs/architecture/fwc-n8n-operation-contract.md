@@ -1059,6 +1059,44 @@ lifecycle remains `in_progress`/NO-GO. Do not replay RC19. A future attempt
 requires resolving the actual typed `run-once` state/result contract and a new
 explicitly bounded EEC-first run.
 
+Current RC20 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh EEC-first worker used the required
+`/usr/local/bin/fwc-n8n run-once` boundary and completed one formal EEC baseline
+GET, but the local response collector lost its parent-side PID state before it
+could retain the safe projection. Exactly one independent EEC reconciliation GET
+through the same launcher parsed as the expected inactive, unarchived,
+unpublished typed state. No approval, issuer, MCP-access apply, lifecycle write,
+or provider write was attempted; Hetzner was not started. The redacted report
+is `/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc20-20260912/report.json`
+(SHA-256 `63c867c4fe3e617ebfe7441a618ac6d83a8da675371b5c596ac4c42d82c6a828`);
+its checksum, redaction, restrictive-mode, and no-process checks passed. The
+independent harness diagnosis is
+`/srv/dev-ssd/fcp/reports/nqm81.10-rc20-local-acceptance-harness-diagnosis-20260912.md`
+(SHA-256 `03678a550af90bffac8bc21c5fe6e95930c4a60411b1fc5ebcf6358ac92ae1f2`).
+RC20 is a valid local bounded NO-GO, not provider lifecycle acceptance, and is
+not replayed; the next gate must use ordinary parent-shell PID capture with
+fixed redirects/FIFO and an offline fixture regression.
+
+Current RC21 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh worker ran the required offline
+collector fixture before any provider, API, credential, or issuer access. The
+collector itself passed `bash -n`, ordinary `$!`/parent `wait`, direct-result
+projection, and rejection checks, but the hand-written direct-success fixture
+was malformed (one closing brace was missing). Both sequential absent-`error`
+runs therefore returned parser exit 5 instead of `accepted`; the `error:null`
+fixture was accepted and top-level-error, nested-result, and concatenated-JSON
+fixtures were rejected. The worker stopped fail-closed before the provider
+boundary: EEC and Hetzner GETs, MCP-access, approvals, issuer attempts,
+lifecycle calls, and provider writes were all `0`. The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc21-20260912/report.json`
+(SHA-256 `547a6a73901b36b3ee7bcbbc8130f0c012aac050daa96baea18095f1e6061940`);
+the 36-entry checksum manifest, redaction scan, restrictive modes, and
+matching-process check passed. RC21 is a local fixture-gate NO-GO, not provider
+diagnosis, and is not replayed. A subsequent fresh gate must generate fixtures
+with a structured JSON encoder such as `jq -cn`, validate each fixture before
+the collector, then preserve the same no-retry/EEC-first/one-reconciliation
+policy.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

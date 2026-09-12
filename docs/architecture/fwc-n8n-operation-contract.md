@@ -1040,6 +1040,25 @@ required two-server lifecycle remains `in_progress`/NO-GO. Do not replay RC18;
 the next fresh attempt must use only the exact `run-once` envelopes and stop
 before provider access if the formal boundary cannot be reached.
 
+Current RC19 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh supervised worker VioletBear used
+the required `fwc-n8n run-once` launcher for the first formal EEC baseline. The
+redaction-safe typed-state check classified that baseline as
+`typed_state_shape_error`; one permitted EEC reconciliation through the same
+launcher classified as `reconciliation_unknown` and retained no safe state.
+The bounded run therefore stopped before approval issuance, MCP-access apply,
+or lifecycle/provider writes: EEC GETs were `1` baseline plus `1`
+reconciliation, all EEC write/issuer counts were `0`, Hetzner was not started,
+and the provider sequence was not attempted. The report is
+`/srv/dev-ssd/fcp/nqm81.30/rc19-20260912-CoralCove2/report.json` (SHA-256
+`4856aa1369d45d3e173fd20cc457629f9bd5f35f5543b3e9344a95f9130c8f77`); its
+`SHA256SUMS` verification, redaction scan, mode-600 files, mode-700
+directories, and no-process check passed. This is a local typed-state
+non-acceptance and provides no provider diagnosis; the required two-server
+lifecycle remains `in_progress`/NO-GO. Do not replay RC19. A future attempt
+requires resolving the actual typed `run-once` state/result contract and a new
+explicitly bounded EEC-first run.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

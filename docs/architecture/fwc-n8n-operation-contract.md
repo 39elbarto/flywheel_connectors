@@ -1130,6 +1130,29 @@ gate must create the approval request and its bounded millisecond expiry
 immediately before the single issuer invocation, use integer millisecond time
 calculation, and retain the same fail-closed reconciliation/no-retry policy.
 
+Current RC23 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh worker first passed the offline
+collector/direct-result fixture gate, then made one formal EEC baseline request
+through `/usr/local/bin/fwc-n8n run-once n8n.workflows.get`. A local
+classification-path typo caused the typed projection to exit `5` with no safe
+state; the worker performed exactly one same-server reconciliation request
+through the same launcher, which also exited `5` and retained no safe state.
+The bounded run stopped before approval issuance, issuer access, MCP-access
+apply, lifecycle/provider writes, and the Hetzner phase. The report records
+EEC baseline GET `1`, reconciliation GET `1`, all write/issuer/credential
+counts `0`, and redaction-safe output only. This is a local harness
+non-acceptance, not provider diagnosis, and the run is not replayed.
+
+The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc23-20260912/report.json`
+(SHA-256
+`27bd2f6f408dda4298f3a405c2f72d0c82af29efbc01c6603fc161e86e99b08c`); its
+checksum manifest, restrictive modes, offline-gate assertions, redaction scan,
+and no-process check passed. The required two-server lifecycle remains
+`in_progress`/NO-GO. A future gate must correct the local classification path
+before the EEC write boundary, then retain the same EEC-first,
+one-reconciliation, no-retry policy.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

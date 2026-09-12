@@ -1208,6 +1208,24 @@ remains `in_progress`/NO-GO; a future attempt needs a separately justified
 diagnosis or correction of the issuer `invalid_request` boundary and a fresh
 EEC-first run with the same one-reconciliation/no-retry policy.
 
+Current RC24 issuer-diagnosis checkpoint (2026-09-12; read-only): the retained
+evidence proves one EEC MCP-access approval issuer invocation returned
+`invalid_request` before token issuance, but it does not identify the rejected
+field. The RC24 request body and a bounded shape projection were not retained,
+so neither a request-schema mismatch nor installed issuer/source drift is
+proven as the cause; the EEC reconciliation still matched the exact inactive,
+unarchived, unpublished baseline. The diagnosis report is
+`/srv/dev-ssd/fcp/nqm81.30/diagnose-rc24-issuer-invalid-20260912/report.md`
+(SHA-256
+`46f7418368d89e023f4813aad2e068c0e87dfc99134898fdfe9cd608c00b3bb3`), with a
+verified `SHA256SUMS` manifest, restrictive modes, and redaction-clean
+contents. A future supervised attempt must regenerate the request against the
+current contract, validate and retain only a redaction-safe projection of its
+outer/input key sets, JSON types, omitted filters, operation, binding format,
+and expiry classification before the single issuer invocation; it must keep
+the EEC-first, one-reconciliation, no-retry policy. RC24 is not replayed and
+the required two-server lifecycle remains `in_progress`/NO-GO.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

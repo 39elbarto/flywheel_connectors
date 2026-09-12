@@ -1026,6 +1026,20 @@ passed. The required two-server lifecycle remains `in_progress`/NO-GO; do not
 replay this bounded stop. A future attempt requires correcting the local
 expiry representation and a fresh explicitly bounded EEC-first run.
 
+Current RC18 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh supervised worker created a
+redaction-safe report, but its EEC baseline and reconciliation commands used
+the unsupported `fwc-n8n route` entry point instead of the required
+`fwc-n8n run-once` host boundary. Both returned a wrapper-level `status=error`
+with no retained operation result. No MCP-access approval/apply, lifecycle
+write, provider write, or Hetzner phase was attempted. The report directory is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc18-20260912-CoralCove/`; its
+checksum manifest, mode-600 files, redaction scan, and no-process check passed.
+This is a local harness non-acceptance and provides no provider diagnosis; the
+required two-server lifecycle remains `in_progress`/NO-GO. Do not replay RC18;
+the next fresh attempt must use only the exact `run-once` envelopes and stop
+before provider access if the formal boundary cannot be reached.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

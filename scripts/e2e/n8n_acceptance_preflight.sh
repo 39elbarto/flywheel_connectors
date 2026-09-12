@@ -56,7 +56,7 @@ emit_success() {
 }
 
 emit_self_test_success() {
-  printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":15}\n' "$SCHEMA"
+  printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":16}\n' "$SCHEMA"
 }
 
 emit_self_test_failure() {
@@ -314,9 +314,11 @@ gate_uri() {
   '
 }
 
+# The authoritative fcp-host N8nApprovalIssueRequest contract leaves
+# workflow_id empty for mcp_access_reconcile; the target is carried by
+# input_projection.workflow_ids_match_target and workflow_ids_count below.
 gate_approval() {
-  if ! jq_gate "approval_envelope_invalid" \
-    --arg workflow "$EEC_WORKFLOW_ID" '
+  if ! jq_gate "approval_envelope_invalid" '
       def sha256_binding_ok:
         if type != "string" then false
         else (test("^[0-9a-f]{64}$") and ((explode | unique | length) > 1))
@@ -332,7 +334,7 @@ gate_approval() {
       and (.approval.schema == "fwc.n8n.owner-approval-request.v1")
       and (.approval.operation == "mcp_access_reconcile")
       and (.approval.server == "eec")
-      and (.approval.workflow_id == $workflow)
+      and (.approval.workflow_id == "")
       and (.approval.official_mcp_tool == "")
       and (.approval.official_mcp_resource_uri == "")
       and (.approval.official_mcp_payload_digest == "")
@@ -776,7 +778,7 @@ base_plan() {
         official_uri_encoded:true, matches_source_encoder:true
       },
       approval: {
-        schema:"fwc.n8n.owner-approval-request.v1", operation:"mcp_access_reconcile", server:"eec", workflow_id:$workflow,
+        schema:"fwc.n8n.owner-approval-request.v1", operation:"mcp_access_reconcile", server:"eec", workflow_id:"",
         official_mcp_tool:"", official_mcp_resource_uri:"", official_mcp_payload_digest:"",
         parent_binding_sha256:$parent, parent_binding_verified:true,
         parent_binding_inputs:["server_id","resource_uri","operation","input"],
@@ -843,6 +845,9 @@ run_self_test() {
     emit_self_test_failure
     return 1
   fi
+
+  fixture="$(jq -c --arg workflow "$EEC_WORKFLOW_ID" '.approval.workflow_id = $workflow' <<<"$base")"
+  if ! expect_failure "approval_envelope_invalid" "$fixture"; then emit_self_test_failure; return 1; fi
 
   fixture="$(jq -c '.command.fallbacks.route = true' <<<"$base")"
   if ! expect_failure "literal_run_once_required" "$fixture"; then emit_self_test_failure; return 1; fi

@@ -1832,6 +1832,17 @@ them through `PATH`. It never reads or prints request/response bodies, tokens,
 seeds, credentials, provider output, stdout, or stderr; it never invokes
 `fwc-n8n`, an issuer, KeePass, a provider, or a cleanup/write operation.
 
+The approval projection follows the authoritative host contract in
+`crates/fcp-host/src/n8n_approval.rs`: for an
+`N8nApprovalIssueRequest` whose operation is `mcp_access_reconcile`,
+`workflow_id` is exactly the empty string. `validate_issue_request` enforces
+that shape and takes the workflow target from `input.workflowIds`; the
+metadata-only checker therefore separately requires
+`input_projection.workflow_ids_count == 1` and
+`input_projection.workflow_ids_match_target == true`. The checker must keep
+this contract at the projection boundary and must never require or expose raw
+approval request bodies, tokens, or seeds.
+
 `--self-test` is a separate health-check mode: its successful output carries
 `mode: "self-test"` and `acceptance: false`, so it is never an acceptance
 verdict. `--help` is rejected with a non-zero argument error; only a normal

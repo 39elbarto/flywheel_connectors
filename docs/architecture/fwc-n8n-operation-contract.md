@@ -1811,6 +1811,50 @@ live acceptance remain separate gates. A failed
 exact precondition returns before the component lock is acquired; callers must
 not infer lock ownership from that error.
 
+### 12.2 Fail-closed acceptance preflight
+
+Every supervised provider-writing worker must run the repository checker before
+an issuer, credential helper, approval path, or provider operation:
+
+```text
+bash scripts/e2e/n8n_acceptance_preflight.sh <redacted-plan.json
+bash scripts/e2e/n8n_acceptance_preflight.sh --self-test
+```
+
+The checker accepts exactly one bounded JSON object with schema
+`fwc.n8n.acceptance-preflight.v1`. It is a read-only gate: it may inspect only
+the supplied metadata projection and, when `approval_file` is explicitly
+provided, `stat` the fixed `/var/lib/fwc-n8n/approval-requests` directory and
+one direct child. It never reads or prints request/response bodies, tokens,
+seeds, credentials, provider output, stdout, or stderr; it never invokes
+`fwc-n8n`, an issuer, KeePass, a provider, or a cleanup/write operation.
+
+The gate rejects unknown keys and returns one redaction-safe JSON line with a
+stable `abort_code`; any failure exits non-zero. Its required checks include:
+
+- literal `/usr/local/bin/fwc-n8n run-once <allowlisted-operation>` arguments,
+  one bounded document, no route/direct-host/direct-bridge/shell fallback, and
+  EEC-before-Hetzner ordering;
+- direct one-level `InvokeResponse` parsing with the normalized state
+  projection, fresh distinct UUID correlations, and matching idempotency,
+  approval, dry-run, and target metadata;
+- the exact EEC inactive/unarchived/unpublished baseline, its version/graph/state
+  digests, the desired MCP-access dry-run (`planned=1`, `changed=0`), and the
+  canonical encoded bridge URI (`%5F` for underscores);
+- owner-approval envelope and parent-binding metadata, decimal 13-digit expiry
+  with `now < expires_at_ms <= now+60000`, root-owned `0600` request-file
+  metadata or a verified post-issuer absence assertion, and cleanup failure;
+- immutable installed/source revision and artifact-digest provenance, `0700` /
+  `0600` evidence modes, bounded one-attempt counters, EEC no-go stop rules,
+  redaction/checksum evidence, and absence of leaked runtime/issuer processes.
+
+A passing preflight means only that the submitted redacted metadata projection
+matches this local policy. It does not authorize a write, prove approval-file
+atomicity or cleanup chronology, prove signer behavior, or prove a provider
+result. The live worker must still execute the prescribed single sequence,
+perform typed readbacks, reconcile at most once after uncertainty, and stop
+without retry on any mismatch or unknown outcome.
+
 ## 13. Future-only gates
 
 ### 13.1 Credential mutation

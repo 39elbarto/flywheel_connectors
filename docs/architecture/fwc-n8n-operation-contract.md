@@ -1153,6 +1153,27 @@ and no-process check passed. The required two-server lifecycle remains
 before the EEC write boundary, then retain the same EEC-first,
 one-reconciliation, no-retry policy.
 
+The follow-up read-only RC23 harness diagnosis proved the local cause: the
+collector already held the absolute report root
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc23-20260912/` and then prepended
+`/srv/dev-ssd` while reading the classification artifacts, producing
+`/srv/dev-ssd/dev-ssd/.../eec-baseline.classification`. The resulting exit `5`
+and empty projections were therefore collector misclassification, not n8n or
+provider evidence. The diagnosis also confirms the two-layer boundary: the
+public `fwc-n8n run-once` wrapper accepts minimal snake_case input and builds
+the closed `fwc.n8n.host-run-once.v1` envelope; the host returns one direct
+`InvokeResponse` with an object at `.result`.
+
+The redacted diagnosis is
+`/srv/dev-ssd/fcp/nqm81.30/diagnose-rc23-classification-20260912/report.md`
+(SHA-256
+`4dd6d1e475115dc39a50e719c9f73267aaf6afee9bff6630a50e5deab1711e5f`); its
+`SHA256SUMS` manifest, restrictive modes, checksum, and redaction checks
+passed. No provider or credential process was started by the diagnosis. The
+next gate must canonicalize the report root once, assert literal artifact
+paths, and project only the direct `.result` before entering the same
+EEC-first lifecycle sequence.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

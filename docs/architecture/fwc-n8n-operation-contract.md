@@ -1097,6 +1097,39 @@ with a structured JSON encoder such as `jq -cn`, validate each fixture before
 the collector, then preserve the same no-retry/EEC-first/one-reconciliation
 policy.
 
+Current RC22 live-acceptance checkpoint (2026-09-12; installed release remains
+`release-20260912-cddd9f168-rc14`): the fresh worker first passed the offline
+collector gate. The gate used ordinary Bash parent-shell PID capture and
+`wait`, accepted two direct-success fixtures (including an omitted optional
+`error` and an explicit `error:null`), and rejected top-level error, nested
+`response.result`, and concatenated-JSON fixtures. No provider/API,
+credential, or issuer access occurred before that gate. The formal EEC
+baseline through `/usr/local/bin/fwc-n8n run-once n8n.workflows.get` proved the
+expected inactive, unarchived, unpublished workflow and the MCP-access
+dry-run proved one planned enablement with no durable change. The single EEC
+MCP-access apply attempt then stopped at the issuer/response boundary
+(`issuer_exit=1`, wrapper `response_exit=1`, parser exit `5`; decoded seed
+length `32`); no completed MCP-access or provider write is claimed. One
+same-server reconciliation GET through the same launcher proved that the
+exact EEC baseline remained unchanged. EEC therefore had one baseline GET,
+one dry-run, one apply attempt, and one reconciliation GET; lifecycle writes
+and Hetzner were not started. No retry was performed.
+
+The redacted report is
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-rc22-20260912-c/report.json`
+(independently observed SHA-256
+`4c18fa04e9e8d4c7457a838cc3dd0c9ad5871463a55522f0e039f01235df1460`); its
+checksum manifest, mode-600 files, mode-700 directories, redaction scan, and
+no-process check passed. The retained approval request had a 13-digit expiry
+that was already past at a later inspection; the evidence does not establish
+the exact issuer-call timestamp, so this checkpoint makes no stronger cause
+claim. The current release and installed issuer were unchanged, and no raw
+provider body, request, seed, or token was retained. RC22 is a local bounded
+NO-GO, not provider lifecycle acceptance, and is not replayed. A future fresh
+gate must create the approval request and its bounded millisecond expiry
+immediately before the single issuer invocation, use integer millisecond time
+calculation, and retain the same fail-closed reconciliation/no-retry policy.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

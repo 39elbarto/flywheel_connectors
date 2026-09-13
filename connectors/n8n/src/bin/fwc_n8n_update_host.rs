@@ -1162,7 +1162,10 @@ fn scan_mcp_access_records(
         if count > MCP_ACCESS_LEDGER_MAX_RECORDS {
             return Err(McpAccessLedgerError::Unavailable);
         }
-        let _ = read_mcp_access_record(root, name, expected_owner)?;
+        match read_mcp_access_record(root, name, expected_owner) {
+            Ok(_) | Err(McpAccessLedgerError::Unknown) => {}
+            Err(error) => return Err(error),
+        }
     }
     Ok(count)
 }
@@ -1897,6 +1900,49 @@ mod tests {
         let mut ledger = ledger;
         assert_eq!(ledger.begin(&binding), Err(McpAccessLedgerError::Unknown));
         assert!(root.path().join(pending).is_file());
+    }
+
+    #[test]
+    fn mcp_access_ledger_expired_pending_does_not_block_fresh_claim() {
+        let root = ledger_root();
+        let owner = fs::metadata(root.path()).expect("metadata").uid();
+        let ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
+            .expect("ledger");
+        let root_fd = ledger.open_verified_root().expect("root fd");
+        let expired_binding = mcp_binding("00000000-0000-4000-8000-000000009995");
+        let now = now_unix_ms().expect("clock");
+        let created_at_ms = now.saturating_sub(MCP_ACCESS_LEDGER_RETENTION_MS + 1);
+        let expired_record = McpAccessLedgerRecord {
+            schema: MCP_ACCESS_LEDGER_SCHEMA.to_owned(),
+            key_digest: expired_binding.key_digest.clone(),
+            binding_digest: expired_binding.binding_digest.clone(),
+            state: "pending".to_owned(),
+            created_at_ms,
+            expires_at_ms: created_at_ms + MCP_ACCESS_LEDGER_RETENTION_MS,
+            receipt: None,
+        };
+        let expired_pending = pending_name(&expired_binding.key_digest).expect("pending name");
+        write_mcp_access_record(&root_fd, &expired_pending, &expired_record, owner)
+            .expect("expired pending fixture");
+        assert_eq!(scan_mcp_access_records(&root_fd, owner), Ok(1));
+        drop(root_fd);
+
+        let mut ledger = ledger;
+        let fresh_binding = mcp_binding("00000000-0000-4000-8000-000000009994");
+        assert_eq!(
+            ledger.begin(&fresh_binding),
+            Ok(McpAccessLedgerBegin::Claimed)
+        );
+        assert!(
+            root.path()
+                .join(pending_name(&fresh_binding.key_digest).expect("pending name"))
+                .is_file()
+        );
+        assert_eq!(
+            ledger.begin(&expired_binding),
+            Err(McpAccessLedgerError::Unknown)
+        );
+        assert!(root.path().join(expired_pending).is_file());
     }
 
     #[test]

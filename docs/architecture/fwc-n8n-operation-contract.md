@@ -705,10 +705,50 @@ seam and does not load or accept private key material. This module is not a
 second ledger and is not wired as an independent provider gate: the existing
 host run-once path remains authoritative for cryptographic verification, full
 resource/workflow/input/precondition/idempotency binding, one-use claim,
-provider-attempt receipts, `unknown` recovery, and no-retry behavior. A future
-trusted host/Keepass adapter must map a confirmed plan into that existing path
-before any lifecycle write is enabled. Fallback MCP profiles and release/systemd
-profiles are unchanged.
+provider-attempt receipts, `unknown` recovery, and no-retry behavior. Credential
+transport does not weaken or replace any of those gates.
+
+#### 4.3.1 Fixed keyring-only credential resolution
+
+The repository-side mandatory path no longer contacts the standalone n8n
+secret broker. `fwc-n8n` selects exactly one of four compile-time mappings:
+
+| Server | Purpose | `secret-get` service | Field |
+|---|---|---|---|
+| EEC | REST API | `n8n-eec` | `api_key` |
+| Hetzner | REST API | `n8n-hetzner` | `api_key` |
+| EEC | official MCP | `n8n-eec-mcp` | `access_token` |
+| Hetzner | official MCP | `n8n-hetzner-mcp` | `access_token` |
+
+The only production invocation is the absolute executable
+`/home/ubuntu/.local/bin/secret-get` with arguments `--keyring-only`, the fixed
+service, and the fixed field. The child receives null stdin and stderr, a
+private bounded stdout pipe, and an environment cleared except for fixed
+non-secret `HOME=/home/ubuntu` and `PATH=/usr/bin:/bin`. It inherits the
+request's absolute deadline. The wrapper accepts exactly one non-empty
+printable ASCII line followed by exactly one newline; nonzero exit, timeout,
+spawn/read/wait failure, oversized output, missing newline, CR, or an extra
+line fails closed. Timeout and I/O failure paths kill when needed and reap the
+child. Secret bytes move into `ZeroizingSecret` and are never copied into
+arguments, environment variables, files, wrapper stdout/stderr, diagnostics,
+or logs.
+
+The credential then uses the existing FCPK inherited-FD frame to the verified
+`fcp-host n8n-run-once` bridge. There is one lookup, one provider attempt, no
+fallback, and no retry. Approval signature, exact target, full precondition,
+one-use claim, provider-start receipt, and independent readback remain
+authoritative and unchanged.
+
+The supervised connector child's fixed Linux seccomp filter returns `EPERM`
+for `keyctl`, `add_key`, and `request_key`, in addition to its network syscall
+denials. Thus the child that handles untrusted provider-facing work cannot
+reach the kernel keyring; credential lookup happens only in the parent wrapper
+through the fixed helper contract before the bridge launch.
+
+The age/KDBX-backed standalone broker binary, protocol, systemd socket/service,
+and deployment templates are retired from this mandatory path but deliberately
+preserved for audit and rollback reference. They are not a fallback. Existing
+opt-in MCP profiles are likewise outside the mandatory path.
 
 ### 4.4 Response envelope
 

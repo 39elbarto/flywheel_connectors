@@ -1,12 +1,17 @@
 //! Compact, provider-neutral n8n entry point.
 //!
 //! The thin wrapper resolves and routes typed operations. Read-only provider
-//! execution uses a fixed one-shot credential broker and verified host bridge.
+//! execution uses a fixed keyring-only credential resolver and verified host bridge.
 
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fmt, io,
     io::Read,
+    path::PathBuf,
+    process::{Command as ProcessCommand, Stdio},
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -21,12 +26,13 @@ use fcp_n8n::router::{
     TargetResolution, TargetResolver,
 };
 use fcp_n8n::update::{ComponentSnapshot, detect_update};
-use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
+use fcp_n8n_broker_protocol::BrokerCredentialPurpose;
 use fcp_prelude::ApprovalToken;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 #[path = "fwc_n8n_bridge.rs"]
 #[allow(dead_code)]
@@ -50,6 +56,9 @@ const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
 const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
 const MAX_PROVISION_INPUT_BYTES: usize = 64 * 1024;
+const SECRET_GET_PATH: &str = "/home/ubuntu/.local/bin/secret-get";
+const SECRET_GET_MAX_STDOUT_BYTES: usize = 4097;
+const SECRET_GET_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -693,28 +702,255 @@ where
     dispatch(envelope, request_deadline_at)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedSecretMapping {
+    service: &'static str,
+    field: &'static str,
+}
+
+impl FixedSecretMapping {
+    const fn for_request(server_id: HostRunOnceServerId, purpose: BrokerCredentialPurpose) -> Self {
+        match (server_id, purpose) {
+            (HostRunOnceServerId::Eec, BrokerCredentialPurpose::RestApi) => Self {
+                service: "n8n-eec",
+                field: "api_key",
+            },
+            (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::RestApi) => Self {
+                service: "n8n-hetzner",
+                field: "api_key",
+            },
+            (HostRunOnceServerId::Eec, BrokerCredentialPurpose::OfficialMcp) => Self {
+                service: "n8n-eec-mcp",
+                field: "access_token",
+            },
+            (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::OfficialMcp) => Self {
+                service: "n8n-hetzner-mcp",
+                field: "access_token",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SecretGetProcessSpec {
+    executable: PathBuf,
+    args: Vec<OsString>,
+    environment: BTreeMap<OsString, OsString>,
+    max_stdout_bytes: usize,
+}
+
+impl SecretGetProcessSpec {
+    fn production(mapping: FixedSecretMapping) -> Self {
+        Self {
+            executable: PathBuf::from(SECRET_GET_PATH),
+            args: vec![
+                "--keyring-only".into(),
+                mapping.service.into(),
+                mapping.field.into(),
+            ],
+            environment: BTreeMap::from([
+                (OsString::from("HOME"), OsString::from("/home/ubuntu")),
+                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+            ]),
+            max_stdout_bytes: SECRET_GET_MAX_STDOUT_BYTES,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SecretGetProcessOutput {
+    success: bool,
+    stdout: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretGetProcessError {
+    Spawn,
+    Wait,
+    Output,
+    Timeout,
+}
+
+trait SecretGetProcess {
+    fn run(
+        &self,
+        spec: &SecretGetProcessSpec,
+        deadline: Instant,
+    ) -> Result<SecretGetProcessOutput, SecretGetProcessError>;
+}
+
+struct SystemSecretGetProcess;
+
+fn terminate_and_reap_secret_get_child(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Some(process_group) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl SecretGetProcess for SystemSecretGetProcess {
+    fn run(
+        &self,
+        spec: &SecretGetProcessSpec,
+        deadline: Instant,
+    ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+        if !spec.executable.is_absolute() || Instant::now() >= deadline {
+            return Err(if Instant::now() >= deadline {
+                SecretGetProcessError::Timeout
+            } else {
+                SecretGetProcessError::Spawn
+            });
+        }
+
+        let mut command = ProcessCommand::new(&spec.executable);
+        command
+            .args(&spec.args)
+            .env_clear()
+            .envs(&spec.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(|_| SecretGetProcessError::Spawn)?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_and_reap_secret_get_child(&mut child);
+            return Err(SecretGetProcessError::Output);
+        };
+        let limit = spec.max_stdout_bytes.saturating_add(1);
+        let reader = std::thread::Builder::new()
+            .name("fwc-n8n-secret-get".to_owned())
+            .spawn(move || {
+                let mut bytes = Vec::new();
+                stdout
+                    .take(limit as u64)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes)
+            })
+            .map_err(|_| {
+                terminate_and_reap_secret_get_child(&mut child);
+                SecretGetProcessError::Output
+            })?;
+
+        let status = loop {
+            if Instant::now() >= deadline {
+                terminate_and_reap_secret_get_child(&mut child);
+                let _ = reader.join();
+                return Err(SecretGetProcessError::Timeout);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    std::thread::sleep(remaining.min(SECRET_GET_POLL_INTERVAL));
+                }
+                Err(_) => {
+                    terminate_and_reap_secret_get_child(&mut child);
+                    let _ = reader.join();
+                    return Err(SecretGetProcessError::Wait);
+                }
+            }
+        };
+        let stdout = reader
+            .join()
+            .map_err(|_| SecretGetProcessError::Output)?
+            .map_err(|_| SecretGetProcessError::Output)?;
+        Ok(SecretGetProcessOutput {
+            success: status.success(),
+            stdout,
+        })
+    }
+}
+
+trait CredentialResolver {
+    fn resolve(
+        &self,
+        server_id: HostRunOnceServerId,
+        purpose: BrokerCredentialPurpose,
+        deadline: Instant,
+    ) -> Result<ZeroizingSecret, AppError>;
+}
+
+struct KeyringOnlyCredentialResolver<P> {
+    process: P,
+}
+
+impl<P: SecretGetProcess> CredentialResolver for KeyringOnlyCredentialResolver<P> {
+    fn resolve(
+        &self,
+        server_id: HostRunOnceServerId,
+        purpose: BrokerCredentialPurpose,
+        deadline: Instant,
+    ) -> Result<ZeroizingSecret, AppError> {
+        let mapping = FixedSecretMapping::for_request(server_id, purpose);
+        let spec = SecretGetProcessSpec::production(mapping);
+        let output = self.process.run(&spec, deadline).map_err(|error| {
+            AppError::new(match error {
+                SecretGetProcessError::Timeout => "deadline_exceeded",
+                SecretGetProcessError::Spawn => "credential_helper_unavailable",
+                SecretGetProcessError::Wait | SecretGetProcessError::Output => {
+                    "credential_helper_io_failed"
+                }
+            })
+        })?;
+        parse_secret_get_output(output, spec.max_stdout_bytes)
+    }
+}
+
+fn parse_secret_get_output(
+    mut output: SecretGetProcessOutput,
+    max_stdout_bytes: usize,
+) -> Result<ZeroizingSecret, AppError> {
+    if output.stdout.len() > max_stdout_bytes {
+        output.stdout.zeroize();
+        return Err(AppError::new("credential_oversized"));
+    }
+    if !output.success {
+        output.stdout.zeroize();
+        return Err(AppError::new("credential_backend_failed"));
+    }
+    if output.stdout.last() != Some(&b'\n') {
+        output.stdout.zeroize();
+        return Err(AppError::new("credential_invalid"));
+    }
+    output.stdout.pop();
+    if output.stdout.is_empty()
+        || output.stdout.contains(&b'\n')
+        || output.stdout.contains(&b'\r')
+        || output.stdout.iter().any(|byte| !byte.is_ascii_graphic())
+    {
+        output.stdout.zeroize();
+        return Err(AppError::new("credential_invalid"));
+    }
+    Ok(ZeroizingSecret::with_zeroize_drop(output.stdout))
+}
+
+fn credential_for_with_resolver<R: CredentialResolver>(
+    resolver: &R,
+    server_id: HostRunOnceServerId,
+    purpose: BrokerCredentialPurpose,
+    deadline: Instant,
+) -> Result<ZeroizingSecret, AppError> {
+    resolver.resolve(server_id, purpose, deadline)
+}
+
 fn broker_credential_for(
     server_id: HostRunOnceServerId,
     purpose: BrokerCredentialPurpose,
     deadline: Instant,
 ) -> Result<ZeroizingSecret, AppError> {
-    let server = match server_id {
-        HostRunOnceServerId::Eec => BrokerServer::Eec,
-        HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
-    };
-    let client = BrokerClient::fixed();
-    #[cfg(unix)]
-    {
-        let mut transport = client.connect(deadline).map_err(map_broker_error)?;
-        client
-            .request(&mut transport, BrokerRequest { server, purpose }, deadline)
-            .map_err(map_broker_error)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (client, server, purpose, deadline);
-        Err(AppError::new("credential_broker_unavailable"))
-    }
+    credential_for_with_resolver(
+        &KeyringOnlyCredentialResolver {
+            process: SystemSecretGetProcess,
+        },
+        server_id,
+        purpose,
+        deadline,
+    )
 }
 
 fn run_host_bridge_once(
@@ -1476,33 +1712,9 @@ fn execute_host_run_once(
         None
     };
     let mut dispatch_provider = || -> Result<Value, AppError> {
-        let server = match envelope.server_id {
-            HostRunOnceServerId::Eec => BrokerServer::Eec,
-            HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
-        };
         let credential_purpose = envelope.operation.credential_purpose();
-        let client = BrokerClient::fixed();
-        #[cfg(unix)]
-        let credential = {
-            let mut transport = client
-                .connect(request_deadline_at)
-                .map_err(map_broker_error)?;
-            client
-                .request(
-                    &mut transport,
-                    BrokerRequest {
-                        server,
-                        purpose: credential_purpose,
-                    },
-                    request_deadline_at,
-                )
-                .map_err(map_broker_error)?
-        };
-        #[cfg(not(unix))]
-        let credential = {
-            let _ = (client, server);
-            return Err(AppError::new("credential_broker_unavailable"));
-        };
+        let credential =
+            broker_credential_for(envelope.server_id, credential_purpose, request_deadline_at)?;
 
         envelope.deadline_ms = Some(remaining_deadline_ms(request_deadline_at)?);
         let response = fwc_n8n_bridge::run_verified_host_bridge(
@@ -1768,22 +1980,6 @@ fn remaining_deadline_ms(deadline: Instant) -> Result<u64, AppError> {
     .ok()
     .filter(|milliseconds| *milliseconds > 0)
     .ok_or_else(|| AppError::new("deadline_exceeded"))
-}
-
-fn map_broker_error(error: fcp_n8n_broker_protocol::BrokerError) -> AppError {
-    let code = match error.code() {
-        "deadline_exceeded" => "deadline_exceeded",
-        "socket_rejected" => "credential_broker_rejected",
-        "backend_unavailable" => "credential_broker_unavailable",
-        "backend_failed" => "credential_backend_failed",
-        "empty_secret" => "credential_empty",
-        "oversized_secret" => "credential_oversized",
-        "invalid_secret" => "credential_invalid",
-        "invalid_request" | "request_oversized" => "credential_broker_protocol_failed",
-        "response_invalid" | "response_oversized" => "credential_broker_response_invalid",
-        _ => "credential_broker_io_failed",
-    };
-    AppError::new(code)
 }
 
 fn parse_host_run_once_input(bytes: &[u8]) -> Result<HostRunOnceInput, AppError> {
@@ -4718,6 +4914,267 @@ mod tests {
         assert_eq!(
             HostRunOnceOperation::WorkflowsGet.credential_purpose(),
             BrokerCredentialPurpose::RestApi
+        );
+    }
+
+    struct FakeSecretGetProcess {
+        calls: Arc<std::sync::Mutex<Vec<SecretGetProcessSpec>>>,
+        result: std::sync::Mutex<Option<Result<SecretGetProcessOutput, SecretGetProcessError>>>,
+    }
+
+    impl SecretGetProcess for FakeSecretGetProcess {
+        fn run(
+            &self,
+            spec: &SecretGetProcessSpec,
+            _deadline: Instant,
+        ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+            self.calls.lock().expect("calls lock").push(spec.clone());
+            self.result
+                .lock()
+                .expect("result lock")
+                .take()
+                .expect("one fake process result")
+        }
+    }
+
+    fn resolve_with_fake_process(
+        server_id: HostRunOnceServerId,
+        purpose: BrokerCredentialPurpose,
+        result: Result<SecretGetProcessOutput, SecretGetProcessError>,
+    ) -> (
+        Result<ZeroizingSecret, AppError>,
+        Arc<std::sync::Mutex<Vec<SecretGetProcessSpec>>>,
+    ) {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resolver = KeyringOnlyCredentialResolver {
+            process: FakeSecretGetProcess {
+                calls: Arc::clone(&calls),
+                result: std::sync::Mutex::new(Some(result)),
+            },
+        };
+        (
+            credential_for_with_resolver(
+                &resolver,
+                server_id,
+                purpose,
+                Instant::now() + Duration::from_secs(1),
+            ),
+            calls,
+        )
+    }
+
+    #[test]
+    fn keyring_resolver_uses_only_four_fixed_noninteractive_mappings() {
+        let cases = [
+            (
+                HostRunOnceServerId::Eec,
+                BrokerCredentialPurpose::RestApi,
+                "n8n-eec",
+                "api_key",
+            ),
+            (
+                HostRunOnceServerId::Hetzner,
+                BrokerCredentialPurpose::RestApi,
+                "n8n-hetzner",
+                "api_key",
+            ),
+            (
+                HostRunOnceServerId::Eec,
+                BrokerCredentialPurpose::OfficialMcp,
+                "n8n-eec-mcp",
+                "access_token",
+            ),
+            (
+                HostRunOnceServerId::Hetzner,
+                BrokerCredentialPurpose::OfficialMcp,
+                "n8n-hetzner-mcp",
+                "access_token",
+            ),
+        ];
+
+        for (server, purpose, service, field) in cases {
+            let (secret, calls) = resolve_with_fake_process(
+                server,
+                purpose,
+                Ok(SecretGetProcessOutput {
+                    success: true,
+                    stdout: b"test-secret\n".to_vec(),
+                }),
+            );
+            assert!(secret.expect("fake secret").ct_eq_bytes(b"test-secret"));
+            let calls = calls.lock().expect("calls lock");
+            assert_eq!(calls.len(), 1);
+            let spec = &calls[0];
+            assert_eq!(spec.executable, PathBuf::from(SECRET_GET_PATH));
+            assert_eq!(
+                spec.args,
+                vec![
+                    OsString::from("--keyring-only"),
+                    OsString::from(service),
+                    OsString::from(field)
+                ]
+            );
+            assert_eq!(
+                spec.environment,
+                BTreeMap::from([
+                    (OsString::from("HOME"), OsString::from("/home/ubuntu")),
+                    (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                ])
+            );
+            assert_eq!(spec.max_stdout_bytes, SECRET_GET_MAX_STDOUT_BYTES);
+        }
+    }
+
+    #[test]
+    fn keyring_resolver_failures_are_closed_and_redaction_safe() {
+        let cases = [
+            (
+                Ok(SecretGetProcessOutput {
+                    success: false,
+                    stdout: b"provider detail\n".to_vec(),
+                }),
+                "credential_backend_failed",
+            ),
+            (
+                Ok(SecretGetProcessOutput {
+                    success: true,
+                    stdout: vec![b'x'; SECRET_GET_MAX_STDOUT_BYTES + 1],
+                }),
+                "credential_oversized",
+            ),
+            (
+                Ok(SecretGetProcessOutput {
+                    success: true,
+                    stdout: b"two\nlines\n".to_vec(),
+                }),
+                "credential_invalid",
+            ),
+            (Err(SecretGetProcessError::Timeout), "deadline_exceeded"),
+            (
+                Err(SecretGetProcessError::Spawn),
+                "credential_helper_unavailable",
+            ),
+            (
+                Err(SecretGetProcessError::Wait),
+                "credential_helper_io_failed",
+            ),
+            (
+                Err(SecretGetProcessError::Output),
+                "credential_helper_io_failed",
+            ),
+        ];
+
+        for (result, expected) in cases {
+            let (error, _) = resolve_with_fake_process(
+                HostRunOnceServerId::Eec,
+                BrokerCredentialPurpose::RestApi,
+                result,
+            );
+            assert_eq!(error.expect_err("must fail closed").code, expected);
+        }
+    }
+
+    fn injected_process_spec(
+        executable: &str,
+        args: &[&str],
+        max_stdout_bytes: usize,
+    ) -> SecretGetProcessSpec {
+        SecretGetProcessSpec {
+            executable: PathBuf::from(executable),
+            args: args.iter().map(OsString::from).collect(),
+            environment: BTreeMap::new(),
+            max_stdout_bytes,
+        }
+    }
+
+    #[test]
+    fn system_secret_process_reaps_injected_fake_specs_on_all_terminal_paths() {
+        let process = SystemSecretGetProcess;
+        let success = process
+            .run(
+                &injected_process_spec("/usr/bin/printf", &["test-secret\n"], 32),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("bounded fake process");
+        assert!(
+            parse_secret_get_output(success, 32)
+                .expect("single line")
+                .ct_eq_bytes(b"test-secret")
+        );
+
+        let nonzero = process
+            .run(
+                &injected_process_spec("/usr/bin/false", &[], 32),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("nonzero child is still reaped output");
+        assert_eq!(
+            parse_secret_get_output(nonzero, 32)
+                .expect_err("nonzero fails closed")
+                .code,
+            "credential_backend_failed"
+        );
+
+        let oversized = process
+            .run(
+                &injected_process_spec("/usr/bin/printf", &["0123456789"], 4),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .expect("oversized child is reaped");
+        assert_eq!(
+            parse_secret_get_output(oversized, 4)
+                .expect_err("oversized fails closed")
+                .code,
+            "credential_oversized"
+        );
+
+        assert!(matches!(
+            process.run(
+                &injected_process_spec("/usr/bin/bash", &["-c", "/usr/bin/sleep 10"], 32),
+                Instant::now() + Duration::from_millis(20),
+            ),
+            Err(SecretGetProcessError::Timeout)
+        ));
+    }
+
+    struct FakeCredentialResolver {
+        calls: Arc<std::sync::Mutex<Vec<(HostRunOnceServerId, BrokerCredentialPurpose)>>>,
+    }
+
+    impl CredentialResolver for FakeCredentialResolver {
+        fn resolve(
+            &self,
+            server_id: HostRunOnceServerId,
+            purpose: BrokerCredentialPurpose,
+            _deadline: Instant,
+        ) -> Result<ZeroizingSecret, AppError> {
+            self.calls
+                .lock()
+                .expect("resolver calls lock")
+                .push((server_id, purpose));
+            Ok(ZeroizingSecret::from("injected-secret"))
+        }
+    }
+
+    #[test]
+    fn shared_credential_entrypoint_accepts_an_injected_resolver() {
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let secret = credential_for_with_resolver(
+            &FakeCredentialResolver {
+                calls: Arc::clone(&calls),
+            },
+            HostRunOnceServerId::Hetzner,
+            BrokerCredentialPurpose::OfficialMcp,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("injected resolver");
+        assert!(secret.ct_eq_bytes(b"injected-secret"));
+        assert_eq!(
+            calls.lock().expect("resolver calls lock").as_slice(),
+            &[(
+                HostRunOnceServerId::Hetzner,
+                BrokerCredentialPurpose::OfficialMcp
+            )]
         );
     }
 

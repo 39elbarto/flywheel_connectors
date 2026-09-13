@@ -1365,6 +1365,9 @@ fn install_network_deny_filter(
         libc::SYS_io_uring_register as u32,
         libc::SYS_setsid as u32,
         libc::SYS_setpgid as u32,
+        libc::SYS_keyctl as u32,
+        libc::SYS_add_key as u32,
+        libc::SYS_request_key as u32,
     ];
     if allowed_connected_channel_fd.is_none() {
         denied.push(libc::SYS_sendto as u32);
@@ -1599,8 +1602,45 @@ mod tests {
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
             }
         };
+        let keyctl_errno = unsafe {
+            let result = libc::syscall(libc::SYS_keyctl, 0, 0, 0, 0, 0);
+            if result == -1 {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            }
+        };
+        let add_key_errno = unsafe {
+            let result = libc::syscall(
+                libc::SYS_add_key,
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_void>(),
+                0,
+                0,
+            );
+            if result == -1 {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            }
+        };
+        let request_key_errno = unsafe {
+            let result = libc::syscall(
+                libc::SYS_request_key,
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                std::ptr::null::<libc::c_char>(),
+                0,
+            );
+            if result == -1 {
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+            } else {
+                0
+            }
+        };
         let response = format!(
-            "{socket_errno}:{connect_errno}:{duplicated_send_errno}:{duplicated_recv_errno}:pong"
+            "{socket_errno}:{connect_errno}:{duplicated_send_errno}:{duplicated_recv_errno}:{keyctl_errno}:{add_key_errno}:{request_key_errno}:pong"
         );
         channel
             .write_all(response.as_bytes())
@@ -1835,7 +1875,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn host_egress_channel_is_inherited_at_actual_fd_and_network_is_denied() {
+    fn host_egress_channel_is_inherited_and_network_and_keyring_are_denied() {
         let (mut host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");
         let spec = test_process_spec(
             "host_egress_channel_child_probe",
@@ -1847,7 +1887,10 @@ mod tests {
             .write_all(b"ping")
             .expect("write channel request");
         let expected = format!(
-            "{}:{}:{}:{}:pong",
+            "{}:{}:{}:{}:{}:{}:{}:pong",
+            libc::EPERM,
+            libc::EPERM,
+            libc::EPERM,
             libc::EPERM,
             libc::EPERM,
             libc::EPERM,

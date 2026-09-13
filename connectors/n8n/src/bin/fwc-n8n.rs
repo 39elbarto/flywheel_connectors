@@ -757,10 +757,84 @@ impl SecretGetProcessSpec {
     }
 }
 
+struct SecretGetStdout {
+    bytes: Vec<u8>,
+    #[cfg(test)]
+    zeroized: Option<Arc<AtomicBool>>,
+}
+
+impl SecretGetStdout {
+    const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            #[cfg(test)]
+            zeroized: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_zeroize_observer(zeroized: Arc<AtomicBool>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            zeroized: Some(zeroized),
+        }
+    }
+}
+
+impl std::ops::Deref for SecretGetStdout {
+    type Target = Vec<u8>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl std::ops::DerefMut for SecretGetStdout {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
+    }
+}
+
+impl From<Vec<u8>> for SecretGetStdout {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            #[cfg(test)]
+            zeroized: None,
+        }
+    }
+}
+
+impl fmt::Debug for SecretGetStdout {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SecretGetStdout")
+            .field("bytes", &"<redacted>")
+            .field("len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl Zeroize for SecretGetStdout {
+    fn zeroize(&mut self) {
+        self.bytes.zeroize();
+        #[cfg(test)]
+        if let Some(zeroized) = &self.zeroized {
+            zeroized.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for SecretGetStdout {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 #[derive(Debug)]
 struct SecretGetProcessOutput {
     success: bool,
-    stdout: Vec<u8>,
+    stdout: SecretGetStdout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -783,11 +857,21 @@ struct SystemSecretGetProcess;
 
 fn terminate_and_reap_secret_get_child(child: &mut std::process::Child) {
     #[cfg(unix)]
-    if let Some(process_group) = rustix::process::Pid::from_raw(child.id() as i32) {
+    if let Ok(raw_pid) = i32::try_from(child.id())
+        && let Some(process_group) = rustix::process::Pid::from_raw(raw_pid)
+    {
         let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
     }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+fn fail_secret_get_process(
+    mut stdout: SecretGetStdout,
+    error: SecretGetProcessError,
+) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+    stdout.zeroize();
+    Err(error)
 }
 
 impl SecretGetProcess for SystemSecretGetProcess {
@@ -796,73 +880,106 @@ impl SecretGetProcess for SystemSecretGetProcess {
         spec: &SecretGetProcessSpec,
         deadline: Instant,
     ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
-        if !spec.executable.is_absolute() || Instant::now() >= deadline {
-            return Err(if Instant::now() >= deadline {
-                SecretGetProcessError::Timeout
-            } else {
-                SecretGetProcessError::Spawn
+        run_system_secret_get_process(spec, deadline)
+    }
+}
+
+#[cfg(not(unix))]
+fn run_system_secret_get_process(
+    _spec: &SecretGetProcessSpec,
+    _deadline: Instant,
+) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+    Err(SecretGetProcessError::Spawn)
+}
+
+#[cfg(unix)]
+fn run_system_secret_get_process(
+    spec: &SecretGetProcessSpec,
+    deadline: Instant,
+) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+    if !spec.executable.is_absolute() || Instant::now() >= deadline {
+        return Err(if Instant::now() >= deadline {
+            SecretGetProcessError::Timeout
+        } else {
+            SecretGetProcessError::Spawn
+        });
+    }
+
+    let mut command = ProcessCommand::new(&spec.executable);
+    command
+        .args(&spec.args)
+        .env_clear()
+        .envs(&spec.environment)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command.process_group(0);
+    let mut child = command.spawn().map_err(|_| SecretGetProcessError::Spawn)?;
+    let Some(mut stdout_pipe) = child.stdout.take() else {
+        terminate_and_reap_secret_get_child(&mut child);
+        return Err(SecretGetProcessError::Output);
+    };
+    let flags = rustix::fs::fcntl_getfl(&stdout_pipe).map_err(|_| {
+        terminate_and_reap_secret_get_child(&mut child);
+        SecretGetProcessError::Output
+    })?;
+    rustix::fs::fcntl_setfl(&stdout_pipe, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| {
+        terminate_and_reap_secret_get_child(&mut child);
+        SecretGetProcessError::Output
+    })?;
+    let limit = spec.max_stdout_bytes.saturating_add(1);
+    let mut stdout = SecretGetStdout::new();
+    let mut read_buffer = zeroize::Zeroizing::new([0_u8; 1024]);
+    let mut status = None;
+    let mut stdout_open = true;
+    loop {
+        if Instant::now() >= deadline {
+            terminate_and_reap_secret_get_child(&mut child);
+            return fail_secret_get_process(stdout, SecretGetProcessError::Timeout);
+        }
+
+        if stdout_open {
+            let remaining = limit.saturating_sub(stdout.len());
+            if remaining == 0 {
+                terminate_and_reap_secret_get_child(&mut child);
+                return Ok(SecretGetProcessOutput {
+                    success: false,
+                    stdout,
+                });
+            }
+            let read_len = remaining.min(read_buffer.len());
+            match stdout_pipe.read(&mut read_buffer[..read_len]) {
+                Ok(0) => stdout_open = false,
+                Ok(bytes_read) => stdout.extend_from_slice(&read_buffer[..bytes_read]),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    terminate_and_reap_secret_get_child(&mut child);
+                    return fail_secret_get_process(stdout, SecretGetProcessError::Output);
+                }
+            }
+        }
+
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(Some(child_status)) => status = Some(child_status),
+                Ok(None) => {}
+                Err(_) => {
+                    terminate_and_reap_secret_get_child(&mut child);
+                    return fail_secret_get_process(stdout, SecretGetProcessError::Wait);
+                }
+            }
+        }
+
+        if let Some(status) = status.filter(|_| !stdout_open) {
+            return Ok(SecretGetProcessOutput {
+                success: status.success(),
+                stdout,
             });
         }
 
-        let mut command = ProcessCommand::new(&spec.executable);
-        command
-            .args(&spec.args)
-            .env_clear()
-            .envs(&spec.environment)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
-        let mut child = command.spawn().map_err(|_| SecretGetProcessError::Spawn)?;
-        let Some(stdout) = child.stdout.take() else {
-            terminate_and_reap_secret_get_child(&mut child);
-            return Err(SecretGetProcessError::Output);
-        };
-        let limit = spec.max_stdout_bytes.saturating_add(1);
-        let reader = std::thread::Builder::new()
-            .name("fwc-n8n-secret-get".to_owned())
-            .spawn(move || {
-                let mut bytes = Vec::new();
-                stdout
-                    .take(limit as u64)
-                    .read_to_end(&mut bytes)
-                    .map(|_| bytes)
-            })
-            .map_err(|_| {
-                terminate_and_reap_secret_get_child(&mut child);
-                SecretGetProcessError::Output
-            })?;
-
-        let status = loop {
-            if Instant::now() >= deadline {
-                terminate_and_reap_secret_get_child(&mut child);
-                let _ = reader.join();
-                return Err(SecretGetProcessError::Timeout);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    std::thread::sleep(remaining.min(SECRET_GET_POLL_INTERVAL));
-                }
-                Err(_) => {
-                    terminate_and_reap_secret_get_child(&mut child);
-                    let _ = reader.join();
-                    return Err(SecretGetProcessError::Wait);
-                }
-            }
-        };
-        let stdout = reader
-            .join()
-            .map_err(|_| SecretGetProcessError::Output)?
-            .map_err(|_| SecretGetProcessError::Output)?;
-        Ok(SecretGetProcessOutput {
-            success: status.success(),
-            stdout,
-        })
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        std::thread::sleep(remaining.min(SECRET_GET_POLL_INTERVAL));
     }
 }
 
@@ -917,16 +1034,18 @@ fn parse_secret_get_output(
         output.stdout.zeroize();
         return Err(AppError::new("credential_invalid"));
     }
-    output.stdout.pop();
-    if output.stdout.is_empty()
-        || output.stdout.contains(&b'\n')
-        || output.stdout.contains(&b'\r')
-        || output.stdout.iter().any(|byte| !byte.is_ascii_graphic())
+    let secret_len = output.stdout.len() - 1;
+    if secret_len == 0
+        || output.stdout[..secret_len].contains(&b'\n')
+        || output.stdout[..secret_len].contains(&b'\r')
+        || output.stdout[..secret_len]
+            .iter()
+            .any(|byte| !byte.is_ascii_graphic())
     {
         output.stdout.zeroize();
         return Err(AppError::new("credential_invalid"));
     }
-    Ok(ZeroizingSecret::with_zeroize_drop(output.stdout))
+    Ok(ZeroizingSecret::from(&output.stdout[..secret_len]))
 }
 
 fn credential_for_with_resolver<R: CredentialResolver>(
@@ -4998,7 +5117,7 @@ mod tests {
                 purpose,
                 Ok(SecretGetProcessOutput {
                     success: true,
-                    stdout: b"test-secret\n".to_vec(),
+                    stdout: b"test-secret\n".to_vec().into(),
                 }),
             );
             assert!(secret.expect("fake secret").ct_eq_bytes(b"test-secret"));
@@ -5031,21 +5150,21 @@ mod tests {
             (
                 Ok(SecretGetProcessOutput {
                     success: false,
-                    stdout: b"provider detail\n".to_vec(),
+                    stdout: b"provider detail\n".to_vec().into(),
                 }),
                 "credential_backend_failed",
             ),
             (
                 Ok(SecretGetProcessOutput {
                     success: true,
-                    stdout: vec![b'x'; SECRET_GET_MAX_STDOUT_BYTES + 1],
+                    stdout: vec![b'x'; SECRET_GET_MAX_STDOUT_BYTES + 1].into(),
                 }),
                 "credential_oversized",
             ),
             (
                 Ok(SecretGetProcessOutput {
                     success: true,
-                    stdout: b"two\nlines\n".to_vec(),
+                    stdout: b"two\nlines\n".to_vec().into(),
                 }),
                 "credential_invalid",
             ),
@@ -5135,6 +5254,75 @@ mod tests {
             ),
             Err(SecretGetProcessError::Timeout)
         ));
+    }
+
+    #[test]
+    fn terminal_process_errors_zeroize_partial_stdout() {
+        for error in [
+            SecretGetProcessError::Wait,
+            SecretGetProcessError::Output,
+            SecretGetProcessError::Timeout,
+        ] {
+            let zeroized = Arc::new(AtomicBool::new(false));
+            let mut stdout = SecretGetStdout::with_zeroize_observer(Arc::clone(&zeroized));
+            stdout.extend_from_slice(b"partial-secret");
+
+            assert_eq!(
+                fail_secret_get_process(stdout, error).expect_err("terminal error"),
+                error
+            );
+            assert!(zeroized.load(std::sync::atomic::Ordering::SeqCst));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_secret_process_kills_descendant_holding_stdout_after_child_exit() {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let mut spec = injected_process_spec(
+            "/usr/bin/bash",
+            &[
+                "-c",
+                "printf 'partial-secret'; /usr/bin/sleep 10 & descendant=$!; printf '%s' \"$descendant\" > \"$PID_FILE\"",
+            ],
+            32,
+        );
+        spec.environment.insert(
+            OsString::from("PID_FILE"),
+            pid_file.path().as_os_str().to_owned(),
+        );
+        let started = Instant::now();
+
+        assert!(matches!(
+            SystemSecretGetProcess.run(&spec, Instant::now() + Duration::from_millis(150)),
+            Err(SecretGetProcessError::Timeout)
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "collection must remain bounded after the direct child exits"
+        );
+
+        let descendant_pid = std::fs::read_to_string(pid_file.path())
+            .expect("descendant pid")
+            .parse::<i32>()
+            .expect("numeric descendant pid");
+        let process_is_live = || {
+            std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+                .ok()
+                .and_then(|stat| stat.rsplit_once(") ").map(|(_, suffix)| suffix.to_owned()))
+                .and_then(|suffix| suffix.chars().next())
+                .is_some_and(|state| state != 'Z' && state != 'X')
+        };
+        let stopped_by = Instant::now() + Duration::from_millis(500);
+        while process_is_live() && Instant::now() < stopped_by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if process_is_live() {
+            if let Some(pid) = rustix::process::Pid::from_raw(descendant_pid) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+            panic!("descendant retaining stdout survived process-group teardown");
+        }
     }
 
     struct FakeCredentialResolver {

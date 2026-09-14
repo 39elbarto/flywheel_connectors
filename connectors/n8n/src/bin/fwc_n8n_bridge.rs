@@ -1828,8 +1828,8 @@ struct FwcN8nErrorEnvelope {
     code: String,
     #[serde(default)]
     diagnostic: Option<String>,
-    #[serde(alias = "correlation_id")]
-    correlation_id: String,
+    #[serde(default, alias = "correlation_id")]
+    correlation_id: Option<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1949,7 +1949,10 @@ fn parse_fwc_n8n_error_envelope(bytes: &[u8]) -> Option<BridgeError> {
     if envelope.schema != FWC_N8N_ERROR_SCHEMA || envelope.status != "error" {
         return None;
     }
-    let correlation_id = Uuid::parse_str(&envelope.correlation_id).ok();
+    let correlation_id = envelope
+        .correlation_id
+        .as_deref()
+        .and_then(|value| Uuid::parse_str(value).ok());
     let code = match envelope.code.as_str() {
         "host_n8n_plan_failed" => BridgeErrorCode::HostN8nPlanFailed,
         "host_n8n_input_failed" => BridgeErrorCode::HostN8nInputFailed,
@@ -2440,13 +2443,16 @@ mod tests {
     #[test]
     fn child_error_envelope_allows_absent_optional_context() {
         let error = child_failure(
-            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","correlationId":"00000000-0000-4000-8000-000000000001"}"#,
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome"}"#,
         );
         assert_eq!(error.diagnostic(), None);
-        assert_eq!(
-            error.correlation_id(),
-            Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok()
+        assert_eq!(error.correlation_id(), None);
+
+        let error = child_failure(
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"response_capability"}"#,
         );
+        assert_eq!(error.diagnostic(), Some("response_capability"));
+        assert_eq!(error.correlation_id(), None);
     }
 
     #[cfg(target_os = "linux")]

@@ -1295,6 +1295,33 @@ the blocked heredoc-style preparation, retain the same complete approval-shape
 projection, EEC-first ordering, one-reconciliation rule, and no-retry policy.
 The required two-server lifecycle remains `in_progress`/NO-GO.
 
+Current candidate live checkpoint (2026-09-14; installed release
+`release-20260914-2855e4545-rc1`): the fresh candidate was assembled from git
+revision `2855e4545efbec41ec5c662c7314fcc8561729eb`, passed the static smoke
+gate, was owner-signed, passed provision preflight, and was promoted through
+the temporary-symlink rename boundary. The installed bundle reports available,
+retains the previous immutable release for rollback, and pins the isolated
+network-disabled local `n8n-mcp` package to `2.84.4` with protocol
+`2024-11-05`.
+
+The fresh EEC-first run then read the exact disposable workflow baseline and
+performed one dry-run for `n8n.mcp_access.reconcile`. A single owner-issued
+apply restored the previously leaked MCP-access state to `availableInMCP=false`;
+the committed ledger receipt is `applied` with one changed-and-verified item.
+One independent same-server `n8n.workflows.get` confirmed the exact version and
+graph plus `active=false`, `activeVersionId=null`, `published=null`, and
+`isArchived=false`. No provider retry was made. This is current-release,
+bounded MCP-access evidence, not full lifecycle acceptance: publish/unpublish,
+execution, and the complete EEC-then-Hetzner sequence remain
+`in_progress`/NO-GO.
+
+Redaction-safe evidence is retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-acceptance-20260914-2855e4545-rc1/`, including
+the apply and independent reconciliation projections. The approval-request
+directory was corrected to mode `0700`, and the fixed owner public-key file was
+aligned with KeePass-backed public metadata before the successful apply; no
+private seed or token was persisted in the evidence.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.

@@ -1322,6 +1322,35 @@ directory was corrected to mode `0700`, and the fixed owner public-key file was
 aligned with KeePass-backed public metadata before the successful apply; no
 private seed or token was persisted in the evidence.
 
+**Current lifecycle-fixture diagnosis (2026-09-14; bounded NO-GO):** The target
+disposable draft `oD8zytCtv5PiSYzc` contains only
+`n8n-nodes-base.manualTrigger`. The deployed EEC n8n `2.38.4` activation
+validator explicitly excludes `manualTrigger` from its activation-eligible
+trigger set; publication requires at least one trigger, webhook, or polling
+node. The target therefore fails activation validation before the direct legacy
+activation update, which is consistent with the absence of a publish-history
+row, outbox row, published version, trigger-status row, or state mutation in
+EEC. The raw provider error body was not retained, so this record does not
+claim its exact response text; the cause is established by the deployed source,
+the exact draft graph, and the unchanged database state.
+
+For a future disposable publish/unpublish acceptance, the fixture MUST use a
+real activation-eligible trigger. The approved minimal shape is one
+credential-free `n8n-nodes-base.webhook` node at `typeVersion: 2.1`, with
+`httpMethod: POST`, a fresh non-empty path, `authentication: none`,
+`responseMode: onReceived`, `connections: {}`, and
+`settings.availableInMCP: false`. This makes the workflow publishable without
+introducing spontaneous timer executions. Local validation is necessary but is
+not by itself proof of server activation eligibility; a manual-trigger-only
+graph remains valid as a draft but is never an acceptable lifecycle fixture.
+
+The next live attempt is additionally blocked by the evidence-build contract:
+on 2026-09-14 the required `/srv/dev-ssd` filesystem was not mounted and its
+configured UUID was absent. Until that filesystem is restored, no Cargo proof
+lane or contract-compliant evidence packet may be claimed, and the
+`/srv/hdd500gb-internal` or root filesystem must not be substituted for the
+required SSD target. The prior `unknown_outcome` publish is not replayed.
+
 ### 5.1 Exact operation inputs and outputs
 
 All inputs reject additional properties and all outputs use the common envelope.
@@ -1405,6 +1434,13 @@ separate typed `n8n.workflows.archive` operation. Restore/unarchive,
 activation/deactivation, version operations, and execution cannot be
 represented as aliases here; each provider action is fixed by its typed enum
 and route.
+
+Lifecycle acceptance fixtures have a stricter provider-readiness requirement
+than draft creation: the graph must contain at least one activation-eligible
+trigger, webhook, or polling node on the target n8n deployment. A
+`manualTrigger`-only graph may be created and inspected as a draft, but it must
+not be used for publish/unpublish acceptance because n8n intentionally excludes
+it from activation eligibility.
 
 `workflows.execute.mode` is exactly `manual` or `production` in the bounded
 input contract. Both modes are Risky/High/BestEffort and require a current-chat

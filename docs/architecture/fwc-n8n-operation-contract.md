@@ -708,47 +708,46 @@ resource/workflow/input/precondition/idempotency binding, one-use claim,
 provider-attempt receipts, `unknown` recovery, and no-retry behavior. Credential
 transport does not weaken or replace any of those gates.
 
-#### 4.3.1 Fixed keyring-only credential resolution
+#### 4.3.1 Unattended age/KeePass credential broker
 
-The repository-side mandatory path no longer contacts the standalone n8n
-secret broker. `fwc-n8n` selects exactly one of four compile-time mappings:
+The repository-side mandatory path uses the standalone n8n secret broker.
+`fwc-n8n` selects exactly one of four closed server-and-purpose mappings:
 
-| Server | Purpose | `secret-get` service | Field |
+| Server | Purpose | KeePass service | Field |
 |---|---|---|---|
 | EEC | REST API | `n8n-eec` | `api_key` |
 | Hetzner | REST API | `n8n-hetzner` | `api_key` |
 | EEC | official MCP | `n8n-eec-mcp` | `access_token` |
 | Hetzner | official MCP | `n8n-hetzner-mcp` | `access_token` |
 
-The only production invocation is the absolute executable
-`/home/ubuntu/.local/bin/secret-get` with arguments `--keyring-only`, the fixed
-service, and the fixed field. The child receives null stdin and stderr, a
-private bounded stdout pipe, and an environment cleared except for fixed
-non-secret `HOME=/home/ubuntu` and `PATH=/usr/bin:/bin`. It inherits the
-request's absolute deadline. The wrapper accepts exactly one non-empty
-printable ASCII line followed by exactly one newline; nonzero exit, timeout,
-spawn/read/wait failure, oversized output, missing newline, CR, or an extra
-line fails closed. Timeout and I/O failure paths kill when needed and reap the
-child. Secret bytes move into `ZeroizingSecret` and are never copied into
-arguments, environment variables, files, wrapper stdout/stderr, diagnostics,
-or logs.
+The client connects only to the fixed root-owned
+`/run/fwc/fwc-n8n-secret-broker.sock` socket. Socket path, parent-directory
+ownership and modes, socket ownership and mode, and root peer UID are checked
+before a request. The root one-shot systemd service receives only the bounded
+closed request frame; it reads the root-owned age identity and encrypted master,
+decrypts the KeePass database in memory, and returns the selected protected
+entry. The operator's KeePass password is not requested during an ordinary FWC
+call, and no plaintext master password or API key is placed in an environment
+variable, argument, file, diagnostic, or log.
 
-The credential then uses the existing FCPK inherited-FD frame to the verified
-`fcp-host n8n-run-once` bridge. There is one lookup, one provider attempt, no
-fallback, and no retry. Approval signature, exact target, full precondition,
-one-use claim, provider-start receipt, and independent readback remain
-authoritative and unchanged.
+The broker returns the credential through a zeroizing buffer; the wrapper then
+uses the existing FCPK inherited-FD frame to the verified `fcp-host
+n8n-run-once` bridge. There is one lookup, one provider attempt, no fallback,
+and no retry. Approval signature, exact target, full precondition, one-use claim,
+provider-start receipt, and independent readback remain authoritative and
+unchanged.
 
 The supervised connector child's fixed Linux seccomp filter returns `EPERM`
 for `keyctl`, `add_key`, and `request_key`, in addition to its network syscall
 denials. Thus the child that handles untrusted provider-facing work cannot
-reach the kernel keyring; credential lookup happens only in the parent wrapper
-through the fixed helper contract before the bridge launch.
+reach the kernel keyring; credential lookup happens only through the fixed
+root-owned broker boundary before the bridge launch.
 
-The age/KDBX-backed standalone broker binary, protocol, systemd socket/service,
-and deployment templates are retired from this mandatory path but deliberately
-preserved for audit and rollback reference. They are not a fallback. Existing
-opt-in MCP profiles are likewise outside the mandatory path.
+The age identity is a machine-local decryption key for the already encrypted
+KeePass master, not a second operator password and not a per-request approval.
+It is what makes this host-managed path unattended without duplicating the
+provider credentials in plaintext. Existing opt-in MCP profiles are outside the
+mandatory path.
 
 ### 4.4 Response envelope
 

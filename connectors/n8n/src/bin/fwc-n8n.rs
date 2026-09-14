@@ -1,19 +1,23 @@
 //! Compact, provider-neutral n8n entry point.
 //!
 //! The thin wrapper resolves and routes typed operations. Read-only provider
-//! execution uses a fixed keyring-only credential resolver and verified host bridge.
+//! execution uses a fixed one-shot credential broker and verified host bridge.
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::process::CommandExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
     fmt, io,
     io::Read,
-    path::PathBuf,
-    process::{Command as ProcessCommand, Stdio},
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
+};
+
+#[cfg(test)]
+use std::{
+    ffi::OsString,
+    path::PathBuf,
+    process::{Command as ProcessCommand, Stdio},
 };
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -26,12 +30,13 @@ use fcp_n8n::router::{
     TargetResolution, TargetResolver,
 };
 use fcp_n8n::update::{ComponentSnapshot, detect_update};
-use fcp_n8n_broker_protocol::BrokerCredentialPurpose;
+use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use fcp_prelude::ApprovalToken;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+#[cfg(test)]
 use zeroize::Zeroize;
 
 #[path = "fwc_n8n_bridge.rs"]
@@ -56,8 +61,11 @@ const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
 const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
 const MAX_PROVISION_INPUT_BYTES: usize = 64 * 1024;
+#[cfg(test)]
 const SECRET_GET_PATH: &str = "/home/ubuntu/.local/bin/secret-get";
+#[cfg(test)]
 const SECRET_GET_MAX_STDOUT_BYTES: usize = 4097;
+#[cfg(test)]
 const SECRET_GET_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const ERROR_ENVELOPE_SCHEMA: &str = "fwc.n8n.error.v1";
 
@@ -729,374 +737,397 @@ where
         .map_err(|error| error.with_correlation_id(request_correlation_id))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FixedSecretMapping {
-    service: &'static str,
-    field: &'static str,
-}
+#[cfg(test)]
+mod keyring_test_support {
+    use super::*;
 
-impl FixedSecretMapping {
-    const fn for_request(server_id: HostRunOnceServerId, purpose: BrokerCredentialPurpose) -> Self {
-        match (server_id, purpose) {
-            (HostRunOnceServerId::Eec, BrokerCredentialPurpose::RestApi) => Self {
-                service: "n8n-eec",
-                field: "api_key",
-            },
-            (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::RestApi) => Self {
-                service: "n8n-hetzner",
-                field: "api_key",
-            },
-            (HostRunOnceServerId::Eec, BrokerCredentialPurpose::OfficialMcp) => Self {
-                service: "n8n-eec-mcp",
-                field: "access_token",
-            },
-            (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::OfficialMcp) => Self {
-                service: "n8n-hetzner-mcp",
-                field: "access_token",
-            },
-        }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct FixedSecretMapping {
+        service: &'static str,
+        field: &'static str,
     }
-}
 
-#[derive(Debug, Clone)]
-struct SecretGetProcessSpec {
-    executable: PathBuf,
-    args: Vec<OsString>,
-    environment: BTreeMap<OsString, OsString>,
-    max_stdout_bytes: usize,
-}
-
-impl SecretGetProcessSpec {
-    fn production(mapping: FixedSecretMapping) -> Self {
-        Self {
-            executable: PathBuf::from(SECRET_GET_PATH),
-            args: vec![
-                "--keyring-only".into(),
-                mapping.service.into(),
-                mapping.field.into(),
-            ],
-            environment: BTreeMap::from([
-                (OsString::from("HOME"), OsString::from("/home/ubuntu")),
-                (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
-            ]),
-            max_stdout_bytes: SECRET_GET_MAX_STDOUT_BYTES,
-        }
-    }
-}
-
-struct SecretGetStdout {
-    bytes: Vec<u8>,
-    #[cfg(test)]
-    zeroized: Option<Arc<AtomicBool>>,
-}
-
-impl SecretGetStdout {
-    const fn new() -> Self {
-        Self {
-            bytes: Vec::new(),
-            #[cfg(test)]
-            zeroized: None,
+    impl FixedSecretMapping {
+        const fn for_request(
+            server_id: HostRunOnceServerId,
+            purpose: BrokerCredentialPurpose,
+        ) -> Self {
+            match (server_id, purpose) {
+                (HostRunOnceServerId::Eec, BrokerCredentialPurpose::RestApi) => Self {
+                    service: "n8n-eec",
+                    field: "api_key",
+                },
+                (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::RestApi) => Self {
+                    service: "n8n-hetzner",
+                    field: "api_key",
+                },
+                (HostRunOnceServerId::Eec, BrokerCredentialPurpose::OfficialMcp) => Self {
+                    service: "n8n-eec-mcp",
+                    field: "access_token",
+                },
+                (HostRunOnceServerId::Hetzner, BrokerCredentialPurpose::OfficialMcp) => Self {
+                    service: "n8n-hetzner-mcp",
+                    field: "access_token",
+                },
+            }
         }
     }
 
-    #[cfg(test)]
-    fn with_zeroize_observer(zeroized: Arc<AtomicBool>) -> Self {
-        Self {
-            bytes: Vec::new(),
-            zeroized: Some(zeroized),
+    #[derive(Debug, Clone)]
+    pub(super) struct SecretGetProcessSpec {
+        pub(super) executable: PathBuf,
+        pub(super) args: Vec<OsString>,
+        pub(super) environment: BTreeMap<OsString, OsString>,
+        pub(super) max_stdout_bytes: usize,
+    }
+
+    impl SecretGetProcessSpec {
+        fn production(mapping: FixedSecretMapping) -> Self {
+            Self {
+                executable: PathBuf::from(SECRET_GET_PATH),
+                args: vec![
+                    "--keyring-only".into(),
+                    mapping.service.into(),
+                    mapping.field.into(),
+                ],
+                environment: BTreeMap::from([
+                    (OsString::from("HOME"), OsString::from("/home/ubuntu")),
+                    (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                ]),
+                max_stdout_bytes: SECRET_GET_MAX_STDOUT_BYTES,
+            }
         }
     }
-}
 
-impl std::ops::Deref for SecretGetStdout {
-    type Target = Vec<u8>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.bytes
-    }
-}
-
-impl std::ops::DerefMut for SecretGetStdout {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.bytes
-    }
-}
-
-impl From<Vec<u8>> for SecretGetStdout {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self {
-            bytes,
-            #[cfg(test)]
-            zeroized: None,
-        }
-    }
-}
-
-impl fmt::Debug for SecretGetStdout {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SecretGetStdout")
-            .field("bytes", &"<redacted>")
-            .field("len", &self.bytes.len())
-            .finish()
-    }
-}
-
-impl Zeroize for SecretGetStdout {
-    fn zeroize(&mut self) {
-        self.bytes.zeroize();
+    pub(super) struct SecretGetStdout {
+        pub(super) bytes: Vec<u8>,
         #[cfg(test)]
-        if let Some(zeroized) = &self.zeroized {
-            zeroized.store(true, std::sync::atomic::Ordering::SeqCst);
+        zeroized: Option<Arc<AtomicBool>>,
+    }
+
+    impl SecretGetStdout {
+        const fn new() -> Self {
+            Self {
+                bytes: Vec::new(),
+                #[cfg(test)]
+                zeroized: None,
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn with_zeroize_observer(zeroized: Arc<AtomicBool>) -> Self {
+            Self {
+                bytes: Vec::new(),
+                zeroized: Some(zeroized),
+            }
         }
     }
-}
 
-impl Drop for SecretGetStdout {
-    fn drop(&mut self) {
-        self.zeroize();
+    impl std::ops::Deref for SecretGetStdout {
+        type Target = Vec<u8>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.bytes
+        }
     }
-}
 
-#[derive(Debug)]
-struct SecretGetProcessOutput {
-    success: bool,
-    stdout: SecretGetStdout,
-}
+    impl std::ops::DerefMut for SecretGetStdout {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.bytes
+        }
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SecretGetProcessError {
-    Spawn,
-    Wait,
-    Output,
-    Timeout,
-}
+    impl From<Vec<u8>> for SecretGetStdout {
+        fn from(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                #[cfg(test)]
+                zeroized: None,
+            }
+        }
+    }
 
-trait SecretGetProcess {
-    fn run(
-        &self,
-        spec: &SecretGetProcessSpec,
-        deadline: Instant,
-    ) -> Result<SecretGetProcessOutput, SecretGetProcessError>;
-}
+    impl fmt::Debug for SecretGetStdout {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("SecretGetStdout")
+                .field("bytes", &"<redacted>")
+                .field("len", &self.bytes.len())
+                .finish()
+        }
+    }
 
-struct SystemSecretGetProcess;
+    impl Zeroize for SecretGetStdout {
+        fn zeroize(&mut self) {
+            self.bytes.zeroize();
+            #[cfg(test)]
+            if let Some(zeroized) = &self.zeroized {
+                zeroized.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
 
-fn terminate_and_reap_secret_get_child(child: &mut std::process::Child) {
+    impl Drop for SecretGetStdout {
+        fn drop(&mut self) {
+            self.zeroize();
+        }
+    }
+
+    #[derive(Debug)]
+    pub(super) struct SecretGetProcessOutput {
+        pub(super) success: bool,
+        pub(super) stdout: SecretGetStdout,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum SecretGetProcessError {
+        Spawn,
+        Wait,
+        Output,
+        Timeout,
+    }
+
+    pub(super) trait SecretGetProcess {
+        fn run(
+            &self,
+            spec: &SecretGetProcessSpec,
+            deadline: Instant,
+        ) -> Result<SecretGetProcessOutput, SecretGetProcessError>;
+    }
+
+    pub(super) struct SystemSecretGetProcess;
+
+    fn terminate_and_reap_secret_get_child(child: &mut std::process::Child) {
+        #[cfg(unix)]
+        if let Ok(raw_pid) = i32::try_from(child.id())
+            && let Some(process_group) = rustix::process::Pid::from_raw(raw_pid)
+        {
+            let _ =
+                rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    pub(super) fn fail_secret_get_process(
+        mut stdout: SecretGetStdout,
+        error: SecretGetProcessError,
+    ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+        stdout.zeroize();
+        Err(error)
+    }
+
+    impl SecretGetProcess for SystemSecretGetProcess {
+        fn run(
+            &self,
+            spec: &SecretGetProcessSpec,
+            deadline: Instant,
+        ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+            run_system_secret_get_process(spec, deadline)
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn run_system_secret_get_process(
+        _spec: &SecretGetProcessSpec,
+        _deadline: Instant,
+    ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
+        Err(SecretGetProcessError::Spawn)
+    }
+
     #[cfg(unix)]
-    if let Ok(raw_pid) = i32::try_from(child.id())
-        && let Some(process_group) = rustix::process::Pid::from_raw(raw_pid)
-    {
-        let _ = rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL);
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn fail_secret_get_process(
-    mut stdout: SecretGetStdout,
-    error: SecretGetProcessError,
-) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
-    stdout.zeroize();
-    Err(error)
-}
-
-impl SecretGetProcess for SystemSecretGetProcess {
-    fn run(
-        &self,
+    fn run_system_secret_get_process(
         spec: &SecretGetProcessSpec,
         deadline: Instant,
     ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
-        run_system_secret_get_process(spec, deadline)
-    }
-}
-
-#[cfg(not(unix))]
-fn run_system_secret_get_process(
-    _spec: &SecretGetProcessSpec,
-    _deadline: Instant,
-) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
-    Err(SecretGetProcessError::Spawn)
-}
-
-#[cfg(unix)]
-fn run_system_secret_get_process(
-    spec: &SecretGetProcessSpec,
-    deadline: Instant,
-) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
-    if !spec.executable.is_absolute() || Instant::now() >= deadline {
-        return Err(if Instant::now() >= deadline {
-            SecretGetProcessError::Timeout
-        } else {
-            SecretGetProcessError::Spawn
-        });
-    }
-
-    let mut command = ProcessCommand::new(&spec.executable);
-    command
-        .args(&spec.args)
-        .env_clear()
-        .envs(&spec.environment)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    command.process_group(0);
-    let mut child = command.spawn().map_err(|_| SecretGetProcessError::Spawn)?;
-    let Some(mut stdout_pipe) = child.stdout.take() else {
-        terminate_and_reap_secret_get_child(&mut child);
-        return Err(SecretGetProcessError::Output);
-    };
-    let flags = rustix::fs::fcntl_getfl(&stdout_pipe).map_err(|_| {
-        terminate_and_reap_secret_get_child(&mut child);
-        SecretGetProcessError::Output
-    })?;
-    rustix::fs::fcntl_setfl(&stdout_pipe, flags | rustix::fs::OFlags::NONBLOCK).map_err(|_| {
-        terminate_and_reap_secret_get_child(&mut child);
-        SecretGetProcessError::Output
-    })?;
-    let limit = spec.max_stdout_bytes.saturating_add(1);
-    let mut stdout = SecretGetStdout::new();
-    let mut read_buffer = zeroize::Zeroizing::new([0_u8; 1024]);
-    let mut status = None;
-    let mut stdout_open = true;
-    loop {
-        if Instant::now() >= deadline {
-            terminate_and_reap_secret_get_child(&mut child);
-            return fail_secret_get_process(stdout, SecretGetProcessError::Timeout);
-        }
-
-        if stdout_open {
-            let remaining = limit.saturating_sub(stdout.len());
-            if remaining == 0 {
-                terminate_and_reap_secret_get_child(&mut child);
-                return Ok(SecretGetProcessOutput {
-                    success: false,
-                    stdout,
-                });
-            }
-            let read_len = remaining.min(read_buffer.len());
-            match stdout_pipe.read(&mut read_buffer[..read_len]) {
-                Ok(0) => stdout_open = false,
-                Ok(bytes_read) => stdout.extend_from_slice(&read_buffer[..bytes_read]),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => {
-                    terminate_and_reap_secret_get_child(&mut child);
-                    return fail_secret_get_process(stdout, SecretGetProcessError::Output);
-                }
-            }
-        }
-
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(Some(child_status)) => status = Some(child_status),
-                Ok(None) => {}
-                Err(_) => {
-                    terminate_and_reap_secret_get_child(&mut child);
-                    return fail_secret_get_process(stdout, SecretGetProcessError::Wait);
-                }
-            }
-        }
-
-        if let Some(status) = status.filter(|_| !stdout_open) {
-            return Ok(SecretGetProcessOutput {
-                success: status.success(),
-                stdout,
+        if !spec.executable.is_absolute() || Instant::now() >= deadline {
+            return Err(if Instant::now() >= deadline {
+                SecretGetProcessError::Timeout
+            } else {
+                SecretGetProcessError::Spawn
             });
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        std::thread::sleep(remaining.min(SECRET_GET_POLL_INTERVAL));
+        let mut command = ProcessCommand::new(&spec.executable);
+        command
+            .args(&spec.args)
+            .env_clear()
+            .envs(&spec.environment)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command.process_group(0);
+        let mut child = command.spawn().map_err(|_| SecretGetProcessError::Spawn)?;
+        let Some(mut stdout_pipe) = child.stdout.take() else {
+            terminate_and_reap_secret_get_child(&mut child);
+            return Err(SecretGetProcessError::Output);
+        };
+        let flags = rustix::fs::fcntl_getfl(&stdout_pipe).map_err(|_| {
+            terminate_and_reap_secret_get_child(&mut child);
+            SecretGetProcessError::Output
+        })?;
+        rustix::fs::fcntl_setfl(&stdout_pipe, flags | rustix::fs::OFlags::NONBLOCK).map_err(
+            |_| {
+                terminate_and_reap_secret_get_child(&mut child);
+                SecretGetProcessError::Output
+            },
+        )?;
+        let limit = spec.max_stdout_bytes.saturating_add(1);
+        let mut stdout = SecretGetStdout::new();
+        let mut read_buffer = zeroize::Zeroizing::new([0_u8; 1024]);
+        let mut status = None;
+        let mut stdout_open = true;
+        loop {
+            if Instant::now() >= deadline {
+                terminate_and_reap_secret_get_child(&mut child);
+                return fail_secret_get_process(stdout, SecretGetProcessError::Timeout);
+            }
+
+            if stdout_open {
+                let remaining = limit.saturating_sub(stdout.len());
+                if remaining == 0 {
+                    terminate_and_reap_secret_get_child(&mut child);
+                    return Ok(SecretGetProcessOutput {
+                        success: false,
+                        stdout,
+                    });
+                }
+                let read_len = remaining.min(read_buffer.len());
+                match stdout_pipe.read(&mut read_buffer[..read_len]) {
+                    Ok(0) => stdout_open = false,
+                    Ok(bytes_read) => stdout.extend_from_slice(&read_buffer[..bytes_read]),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => {
+                        terminate_and_reap_secret_get_child(&mut child);
+                        return fail_secret_get_process(stdout, SecretGetProcessError::Output);
+                    }
+                }
+            }
+
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(Some(child_status)) => status = Some(child_status),
+                    Ok(None) => {}
+                    Err(_) => {
+                        terminate_and_reap_secret_get_child(&mut child);
+                        return fail_secret_get_process(stdout, SecretGetProcessError::Wait);
+                    }
+                }
+            }
+
+            if let Some(status) = status.filter(|_| !stdout_open) {
+                return Ok(SecretGetProcessOutput {
+                    success: status.success(),
+                    stdout,
+                });
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(SECRET_GET_POLL_INTERVAL));
+        }
     }
-}
 
-trait CredentialResolver {
-    fn resolve(
-        &self,
-        server_id: HostRunOnceServerId,
-        purpose: BrokerCredentialPurpose,
-        deadline: Instant,
-    ) -> Result<ZeroizingSecret, AppError>;
-}
+    pub(super) trait CredentialResolver {
+        fn resolve(
+            &self,
+            server_id: HostRunOnceServerId,
+            purpose: BrokerCredentialPurpose,
+            deadline: Instant,
+        ) -> Result<ZeroizingSecret, AppError>;
+    }
 
-struct KeyringOnlyCredentialResolver<P> {
-    process: P,
-}
+    pub(super) struct KeyringOnlyCredentialResolver<P> {
+        pub(super) process: P,
+    }
 
-impl<P: SecretGetProcess> CredentialResolver for KeyringOnlyCredentialResolver<P> {
-    fn resolve(
-        &self,
+    impl<P: SecretGetProcess> CredentialResolver for KeyringOnlyCredentialResolver<P> {
+        fn resolve(
+            &self,
+            server_id: HostRunOnceServerId,
+            purpose: BrokerCredentialPurpose,
+            deadline: Instant,
+        ) -> Result<ZeroizingSecret, AppError> {
+            let mapping = FixedSecretMapping::for_request(server_id, purpose);
+            let spec = SecretGetProcessSpec::production(mapping);
+            let output = self.process.run(&spec, deadline).map_err(|error| {
+                AppError::new(match error {
+                    SecretGetProcessError::Timeout => "deadline_exceeded",
+                    SecretGetProcessError::Spawn => "credential_helper_unavailable",
+                    SecretGetProcessError::Wait | SecretGetProcessError::Output => {
+                        "credential_helper_io_failed"
+                    }
+                })
+            })?;
+            parse_secret_get_output(output, spec.max_stdout_bytes)
+        }
+    }
+
+    pub(super) fn parse_secret_get_output(
+        mut output: SecretGetProcessOutput,
+        max_stdout_bytes: usize,
+    ) -> Result<ZeroizingSecret, AppError> {
+        if output.stdout.len() > max_stdout_bytes {
+            output.stdout.zeroize();
+            return Err(AppError::new("credential_oversized"));
+        }
+        if !output.success {
+            output.stdout.zeroize();
+            return Err(AppError::new("credential_backend_failed"));
+        }
+        if output.stdout.last() != Some(&b'\n') {
+            output.stdout.zeroize();
+            return Err(AppError::new("credential_invalid"));
+        }
+        let secret_len = output.stdout.len() - 1;
+        if secret_len == 0
+            || output.stdout[..secret_len].contains(&b'\n')
+            || output.stdout[..secret_len].contains(&b'\r')
+            || output.stdout[..secret_len]
+                .iter()
+                .any(|byte| !byte.is_ascii_graphic())
+        {
+            output.stdout.zeroize();
+            return Err(AppError::new("credential_invalid"));
+        }
+        Ok(ZeroizingSecret::from(&output.stdout[..secret_len]))
+    }
+
+    pub(super) fn credential_for_with_resolver<R: CredentialResolver>(
+        resolver: &R,
         server_id: HostRunOnceServerId,
         purpose: BrokerCredentialPurpose,
         deadline: Instant,
     ) -> Result<ZeroizingSecret, AppError> {
-        let mapping = FixedSecretMapping::for_request(server_id, purpose);
-        let spec = SecretGetProcessSpec::production(mapping);
-        let output = self.process.run(&spec, deadline).map_err(|error| {
-            AppError::new(match error {
-                SecretGetProcessError::Timeout => "deadline_exceeded",
-                SecretGetProcessError::Spawn => "credential_helper_unavailable",
-                SecretGetProcessError::Wait | SecretGetProcessError::Output => {
-                    "credential_helper_io_failed"
-                }
-            })
-        })?;
-        parse_secret_get_output(output, spec.max_stdout_bytes)
+        resolver.resolve(server_id, purpose, deadline)
     }
 }
 
-fn parse_secret_get_output(
-    mut output: SecretGetProcessOutput,
-    max_stdout_bytes: usize,
-) -> Result<ZeroizingSecret, AppError> {
-    if output.stdout.len() > max_stdout_bytes {
-        output.stdout.zeroize();
-        return Err(AppError::new("credential_oversized"));
-    }
-    if !output.success {
-        output.stdout.zeroize();
-        return Err(AppError::new("credential_backend_failed"));
-    }
-    if output.stdout.last() != Some(&b'\n') {
-        output.stdout.zeroize();
-        return Err(AppError::new("credential_invalid"));
-    }
-    let secret_len = output.stdout.len() - 1;
-    if secret_len == 0
-        || output.stdout[..secret_len].contains(&b'\n')
-        || output.stdout[..secret_len].contains(&b'\r')
-        || output.stdout[..secret_len]
-            .iter()
-            .any(|byte| !byte.is_ascii_graphic())
-    {
-        output.stdout.zeroize();
-        return Err(AppError::new("credential_invalid"));
-    }
-    Ok(ZeroizingSecret::from(&output.stdout[..secret_len]))
-}
-
-fn credential_for_with_resolver<R: CredentialResolver>(
-    resolver: &R,
-    server_id: HostRunOnceServerId,
-    purpose: BrokerCredentialPurpose,
-    deadline: Instant,
-) -> Result<ZeroizingSecret, AppError> {
-    resolver.resolve(server_id, purpose, deadline)
-}
+#[cfg(test)]
+use keyring_test_support::*;
 
 fn broker_credential_for(
     server_id: HostRunOnceServerId,
     purpose: BrokerCredentialPurpose,
     deadline: Instant,
 ) -> Result<ZeroizingSecret, AppError> {
-    credential_for_with_resolver(
-        &KeyringOnlyCredentialResolver {
-            process: SystemSecretGetProcess,
-        },
-        server_id,
-        purpose,
-        deadline,
-    )
+    let server = match server_id {
+        HostRunOnceServerId::Eec => BrokerServer::Eec,
+        HostRunOnceServerId::Hetzner => BrokerServer::Hetzner,
+    };
+    let client = BrokerClient::fixed();
+    #[cfg(unix)]
+    {
+        let mut transport = client.connect(deadline).map_err(map_broker_error)?;
+        client
+            .request(&mut transport, BrokerRequest { server, purpose }, deadline)
+            .map_err(map_broker_error)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (client, server, purpose, deadline);
+        Err(AppError::new("credential_broker_unavailable"))
+    }
 }
 
 fn run_host_bridge_once(
@@ -2209,6 +2240,22 @@ fn remaining_deadline_ms(deadline: Instant) -> Result<u64, AppError> {
     .ok()
     .filter(|milliseconds| *milliseconds > 0)
     .ok_or_else(|| AppError::new("deadline_exceeded"))
+}
+
+fn map_broker_error(error: fcp_n8n_broker_protocol::BrokerError) -> AppError {
+    let code = match error.code() {
+        "deadline_exceeded" => "deadline_exceeded",
+        "socket_rejected" => "credential_broker_rejected",
+        "backend_unavailable" => "credential_broker_unavailable",
+        "backend_failed" => "credential_backend_failed",
+        "empty_secret" => "credential_empty",
+        "oversized_secret" => "credential_oversized",
+        "invalid_secret" => "credential_invalid",
+        "invalid_request" | "request_oversized" => "credential_broker_protocol_failed",
+        "response_invalid" | "response_oversized" => "credential_broker_response_invalid",
+        _ => "credential_broker_io_failed",
+    };
+    AppError::new(code)
 }
 
 fn parse_host_run_once_input(bytes: &[u8]) -> Result<HostRunOnceInput, AppError> {

@@ -231,14 +231,14 @@ Important runtime truths:
   CLI framing has a fixed five-second maximum, and the operation deadline is
   measured from before that read. It derives the fixed `z:work` host envelope
   and canonical resource URI, verifies the immutable release bundle, requests
-  one credential through the fixed keyring-only helper contract, and passes
-  only a `ZeroizingSecret` to the bridge without retry. The bridge runner can
+  one credential through the fixed age/KeePass-backed broker, and passes only a
+  `ZeroizingSecret` to the bridge without retry. The bridge runner can
   launch only a verified fixed `fcp-host` bundle
   with the selected EEC/Hetzner inventory, fixed zone policy, one-shot argument,
   bounded response/deadline, inherited credential frame, fixed release cwd, and
   in-memory lifecycle state. Stdin/stdout/stderr are nonblocking and share one
   cancellation/deadline budget; teardown errors take precedence over worker
-  errors. A missing helper, release, or credential entry fails
+  errors. A missing broker, release, or credential entry fails
   closed before provider access.
   Per-operation input keys and scalar bounds mirror the manifest, so arbitrary
   headers, credentials, tokens, URLs, commands, paths, or nested payloads
@@ -408,7 +408,7 @@ Important runtime truths:
   calls are admitted only for owner-reviewed `publish_workflow` or
   `unpublish_workflow` policy entries with input/output schema digests; a
   missing or drifted policy fails closed before MCP provider I/O.
-- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed keyring-only credential resolver. Missing release, helper, credential, or delegated-cgroup prerequisites fail closed.
+- The bridge launch fixes `FCP_HOST_LIFECYCLE_STATE_FILE` to the empty value, so a one-shot host cannot persist lifecycle state into a caller-controlled cwd. The code path has synchronous bundle/hash checks, whole-CLI stdin/deadline enforcement, nested process-group teardown proof, and the reviewed fixed age/KeePass-backed credential broker. Missing release, broker, credential, or delegated-cgroup prerequisites fail closed.
 - A historical 2026-08-17 official-MCP acceptance record used only
   `n8n.capabilities.inspect` and did not call any discovered tool. EEC
   completed in 1,448 ms with sampled aggregate peaks of 35,048 KiB RSS,
@@ -431,38 +431,40 @@ Important runtime truths:
 - Reconfigure and shutdown clear client, verifier, zone, session, configured, and handshaken state.
 - `self_check()` performs its read-only probe only on the loopback test path; production direct egress fails before provider traffic.
 
-## Mandatory keyring-only credential path
+## Unattended standalone secret broker
 
 `fwc-n8n run-once` resolves exactly one credential before launching the existing
-FCPK inherited-FD bridge. The resolver has only these mappings:
+FCPK inherited-FD bridge. It contacts the fixed, zero-idle systemd broker and
+does not ask the operator to unlock KeePass during an ordinary request. The
+broker has only these mappings:
 
 - EEC REST: `n8n-eec api_key`
 - Hetzner REST: `n8n-hetzner api_key`
 - EEC official MCP: `n8n-eec-mcp access_token`
 - Hetzner official MCP: `n8n-hetzner-mcp access_token`
 
-It invokes only the absolute `/home/ubuntu/.local/bin/secret-get` executable
-with `--keyring-only <service> <field>`, with stdin and stderr disconnected,
-stdout captured into a bounded private buffer, the environment cleared except
-for fixed non-secret `HOME` and `PATH`, and the original absolute request
-deadline. Exactly one non-empty printable ASCII line terminated by one newline
-is accepted. Spawn, nonzero exit, timeout, read failure, oversized output,
-missing newline, or extra line fails closed; the child is killed when necessary
-and always reaped. The secret is moved directly into `ZeroizingSecret`, is
-never placed in the wrapper's arguments, environment, files, stdout, stderr,
-or logs, and is delivered only as the existing FCPK credential frame. There is
-no fallback and no retry.
+The broker is a root-owned, one-shot systemd service reached only through the
+fixed `/run/fwc/fwc-n8n-secret-broker.sock` socket. The socket is limited to the
+owner-provisioned `fwc-n8n-broker` group, and the client and broker verify fixed
+ownership, mode, peer, and path metadata. The broker reads the root-owned age
+identity, decrypts the KeePass master in memory, and returns only the selected
+protected entry. No password prompt, plaintext master password, API key,
+caller-selected path, or environment secret is involved in a normal request.
+
+The credential is delivered only as the existing FCPK frame to the verified
+bridge. There is one lookup, one provider attempt, no fallback, and no retry;
+all credential bytes are held in zeroizing buffers and never appear in wrapper
+arguments, environment variables, files, stdout, stderr, or logs.
 
 The supervised connector child is additionally denied `keyctl`, `add_key`, and
 `request_key` by the fixed seccomp filter with `EPERM`; only the parent wrapper
-may invoke the fixed helper before the child is launched.
+may connect to the fixed broker before the child is launched.
 
-## Retired standalone secret broker (preserved)
+## Broker implementation and installation
 
-The repository still carries the former age/KDBX-backed, zero-idle systemd
-socket-activation path for audit and rollback reference. It is retired from the
-mandatory invocation path and is not contacted by `fwc-n8n`; its binary,
-protocol crate, unit templates, and deployment artifacts remain preserved:
+The repository carries the age/KDBX-backed, zero-idle systemd socket-activation
+path used by `fwc-n8n`. Its binary, protocol crate, unit templates, and
+deployment artifacts are kept together as one reviewed boundary:
 
 - [`fwc-n8n-secret-broker.socket`](../../deploy/systemd/fwc-n8n-secret-broker.socket)
   listens only on the fixed `/run/fwc/fwc-n8n-secret-broker.sock` path with
@@ -489,10 +491,11 @@ protocol crate, unit templates, and deployment artifacts remain preserved:
   the established one-byte REST request for rollout compatibility. Official
   MCP uses a separate versioned three-byte frame with a fixed prefix, server,
   and purpose, so a legacy REST frame plus trailing bytes cannot be reinterpreted
-  as another credential class. The official MCP entries are not provisioned by
-  this repository and remain fail-closed until owner-gated installation. The
-  legacy mapping is excluded; secret values and source paths are never placed
-  in unit files or environment variables.
+ as another credential class. The official MCP entries are not provisioned by
+ this repository; on a host where owner-gated installation has not provisioned
+ them, requests remain fail-closed. The legacy mapping is excluded; secret
+ values and source paths are never placed in unit files or environment
+ variables.
 - The fixed KDBX trust assumption is mode `0600` with owner UID equal to the
   connecting peer UID. Only the age identity and encrypted master files are
   root-owned mode `0600`. With keepass `0.13.20`, parsed entry fields are a map,
@@ -503,19 +506,17 @@ protocol crate, unit templates, and deployment artifacts remain preserved:
   generated KDBX files are unsupported; this contract must not be read as raw
   duplicate-field detection.
 
-The tracked unit files remain retired installation templates, not current
-mandatory-path instructions. A historical owner-host snapshot recorded that
-the exact broker binary and units were installed, the socket was enabled and
-listening at zero idle service processes, `/run/fwc` was
+The tracked unit files are installation templates. On the current owner host,
+the exact broker binary and units are installed, the socket is enabled and
+listening at zero idle service processes, `/run/fwc` is
 `root:fwc-n8n-broker 0750`, the socket is `root:fwc-n8n-broker 0660`, and the
 owner user is a member of that group. The distinct EEC and Hetzner official-MCP
-entries were provisioned and passed broker-backed read-only discovery acceptance
+entries are provisioned and passed broker-backed read-only discovery acceptance
 without exposing their values. Existing opt-in Codex MCP profiles remain the
 fallback until the owner separately accepts the capability policy and any
 future write surface.
 
-Historical reference installation commands (preserved; not the mandatory
-path):
+Reference installation commands for another host:
 
 The binary source below is a placeholder for a previously built and verified
 standalone live-backend artifact. This runbook does not prescribe an ambiguous
@@ -542,8 +543,9 @@ systemctl disable --now fwc-n8n-secret-broker.socket
 systemctl daemon-reload
 ```
 
-The rollback commands are likewise owner-approved and not executed; until that
-gate is explicitly accepted, use the existing MCP fallback profiles.
+The rollback commands deliberately disable the unattended path and are not part
+of ordinary operation. A normal FWC request does not require a manual KeePass
+unlock.
 
 ## Declarative Versus Mechanical Enforcement
 

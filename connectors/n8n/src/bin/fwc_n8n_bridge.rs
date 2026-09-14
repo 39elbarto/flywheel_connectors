@@ -13,6 +13,7 @@ use fcp_crypto::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::fwc_n8n_bundle::VerifiedBundle;
 use super::{HostRunOnceEnvelope, HostRunOnceServerId};
@@ -202,6 +203,7 @@ impl fmt::Debug for BridgeErrorCode {
 pub struct BridgeError {
     code: BridgeErrorCode,
     diagnostic: Option<&'static str>,
+    correlation_id: Option<Uuid>,
 }
 
 impl BridgeError {
@@ -209,6 +211,7 @@ impl BridgeError {
         Self {
             code,
             diagnostic: None,
+            correlation_id: None,
         }
     }
 
@@ -224,6 +227,15 @@ impl BridgeError {
     pub const fn diagnostic(self) -> Option<&'static str> {
         self.diagnostic
     }
+
+    pub const fn correlation_id(self) -> Option<Uuid> {
+        self.correlation_id
+    }
+
+    const fn with_correlation_id(mut self, correlation_id: Option<Uuid>) -> Self {
+        self.correlation_id = correlation_id;
+        self
+    }
 }
 
 impl fmt::Debug for BridgeError {
@@ -232,6 +244,10 @@ impl fmt::Debug for BridgeError {
             .debug_struct("BridgeError")
             .field("code", &self.code)
             .field("diagnostic", &self.diagnostic)
+            .field(
+                "correlation_id",
+                &self.correlation_id.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -1068,7 +1084,8 @@ pub fn run_process(
     if !status.success() {
         let diagnostic = diagnostic.or_else(|| child_primary_diagnostic(&stderr));
         emit_child_invoke_diagnostic(&stderr);
-        return Err(BridgeError::new(child_failure_code(&stdout)).with_diagnostic(diagnostic));
+        let child_error = child_failure(&stdout);
+        return Err(child_error.with_diagnostic(child_error.diagnostic().or(diagnostic)));
     }
     Ok(ProcessOutput {
         stdout,
@@ -1800,6 +1817,158 @@ fn parse_response_with_stderr(stdout: &[u8], stderr: &[u8]) -> Result<Value, Bri
 }
 
 #[cfg(target_os = "linux")]
+const FWC_N8N_ERROR_SCHEMA: &str = "fwc.n8n.error.v1";
+
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FwcN8nErrorEnvelope {
+    schema: String,
+    status: String,
+    code: String,
+    #[serde(default)]
+    diagnostic: Option<String>,
+    #[serde(alias = "correlation_id")]
+    correlation_id: String,
+}
+
+#[cfg(target_os = "linux")]
+const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
+    "lifecycle_provider_rejected",
+    "lifecycle_response_shape",
+    "lifecycle_provider_field_mismatch",
+    "lifecycle_readback_precondition_mismatch",
+    "response_protocol",
+    "response_auth",
+    "response_rate_limited",
+    "response_capability",
+    "response_zone",
+    "response_connector",
+    "response_resource",
+    "response_external_4xx",
+    "response_external_5xx",
+    "response_external_other",
+    "response_external_unknown",
+    "response_upstream_timeout",
+    "response_dependency_unavailable",
+    "response_internal",
+    "plan.build",
+    "plan.typed_approval",
+    "plan.approval_ref",
+    "plan.approval_key",
+    "plan.payload",
+    "plan.constraints",
+    "plan.approval_validation",
+    "plan.claim_plan",
+    "plan.claim",
+    "plan.claim.runtime",
+    "plan.claim.lock_open",
+    "plan.claim.lock_metadata",
+    "plan.claim.lock_identity",
+    "plan.claim.lock",
+    "plan.claim.disposable_receipt",
+    "plan.claim.approval_ref",
+    "plan.claim.existing",
+    "plan.claim.token_marker",
+    "plan.claim.token_marker_write",
+    "plan.claim.marker",
+    "plan.claim.marker_write",
+    "external.provider_5xx",
+    "external.host_proxy_rejected",
+    "external.connector_egress_transport",
+    "local.capability_denied",
+    "local.validation",
+    "local.policy_denied",
+    "transport.host_connector",
+    "transport.frame_limit",
+    "internal.registry",
+    "internal.cache",
+    "internal.runtime",
+    "policy.approval",
+    "policy.capability",
+    "policy.deployment",
+    "policy.network",
+    "policy.lease",
+    "policy.binding",
+    "policy.decision",
+    "policy.other",
+    "host.other",
+    "owned.setup",
+    "owned.launch.unsupported_platform",
+    "owned.launch.invalid_spec",
+    "owned.launch.io",
+    "owned.launch.digest_mismatch",
+    "owned.launch.identity_mismatch",
+    "owned.launch.teardown",
+    "owned.rpc_transport",
+    "owned.rpc_protocol",
+    "owned.rpc_child_error",
+    "owned.response_protocol",
+    "owned.egress_codec.read_error",
+    "owned.egress_codec.read_eof",
+    "owned.egress_codec.write_error",
+    "owned.egress_codec.truncated",
+    "owned.egress_codec.oversized",
+    "owned.egress_codec.empty_frame",
+    "owned.egress_codec.invalid_utf8",
+    "owned.egress_codec.invalid_json",
+    "owned.egress_codec.wrong_schema",
+    "owned.egress_codec.wrong_auth",
+    "owned.egress_codec.wrong_route_payload",
+    "owned.egress_codec.wrong_request_id",
+    "owned.egress_codec.invalid_response",
+    "owned.egress_codec.invalid_auth_token",
+    "owned.egress_codec.missing_request",
+    "owned.teardown",
+    "child.protocol",
+    "child.auth",
+    "child.capability",
+    "child.zone",
+    "child.connector",
+    "child.resource",
+    "child.external",
+    "child.internal",
+    "child.unknown",
+];
+
+#[cfg(target_os = "linux")]
+fn safe_error_diagnostic(value: Option<&str>) -> Option<&'static str> {
+    value.and_then(|value| {
+        SAFE_ERROR_DIAGNOSTICS
+            .iter()
+            .copied()
+            .find(|allowed| *allowed == value)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_fwc_n8n_error_envelope(bytes: &[u8]) -> Option<BridgeError> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let envelope = FwcN8nErrorEnvelope::deserialize(&mut deserializer).ok()?;
+    deserializer.end().ok()?;
+    if envelope.schema != FWC_N8N_ERROR_SCHEMA || envelope.status != "error" {
+        return None;
+    }
+    let correlation_id = Uuid::parse_str(&envelope.correlation_id).ok();
+    let code = match envelope.code.as_str() {
+        "host_n8n_plan_failed" => BridgeErrorCode::HostN8nPlanFailed,
+        "host_n8n_input_failed" => BridgeErrorCode::HostN8nInputFailed,
+        "host_n8n_config_failed" => BridgeErrorCode::HostN8nConfigFailed,
+        "host_n8n_credential_failed" => BridgeErrorCode::HostN8nCredentialFailed,
+        "host_n8n_policy_failed" => BridgeErrorCode::HostN8nPolicyFailed,
+        "host_n8n_runtime_state_failed" => BridgeErrorCode::HostN8nRuntimeStateFailed,
+        "host_n8n_manifest_failed" => BridgeErrorCode::HostN8nManifestFailed,
+        "host_n8n_capability_failed" => BridgeErrorCode::HostN8nCapabilityFailed,
+        _ => BridgeErrorCode::ChildFailed,
+    };
+    Some(
+        BridgeError::new(code)
+            .with_diagnostic(safe_error_diagnostic(envelope.diagnostic.as_deref()))
+            .with_correlation_id(correlation_id),
+    )
+}
+
+#[cfg(target_os = "linux")]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChildFailureEnvelope {
@@ -1842,6 +2011,12 @@ fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
         "n8n_invoke_failed" => BridgeErrorCode::HostN8nInvokeFailed,
         _ => BridgeErrorCode::ChildFailed,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn child_failure(bytes: &[u8]) -> BridgeError {
+    parse_fwc_n8n_error_envelope(bytes)
+        .unwrap_or_else(|| BridgeError::new(child_failure_code(bytes)))
 }
 
 #[cfg(test)]
@@ -2236,6 +2411,42 @@ mod tests {
         assert_eq!(error.code(), "output_invalid");
         assert_eq!(error.diagnostic(), Some("external.provider_5xx"));
         assert!(!format!("{error:?}").contains(private));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_error_envelope_keeps_only_safe_context() {
+        let correlation_id = "00000000-0000-4000-8000-000000000001";
+        let encoded = format!(
+            r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"response_capability","correlationId":"{correlation_id}"}}"#
+        );
+        let error = child_failure(encoded.as_bytes());
+        assert_eq!(error.code(), "child_failed");
+        assert_eq!(error.diagnostic(), Some("response_capability"));
+        assert_eq!(error.correlation_id(), Uuid::parse_str(correlation_id).ok());
+
+        let private = "PRIVATE-PROVIDER-DETAIL";
+        let encoded = format!(
+            r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"{private}","correlationId":"{private}"}}"#
+        );
+        let error = child_failure(encoded.as_bytes());
+        assert_eq!(error.code(), "child_failed");
+        assert_eq!(error.diagnostic(), None);
+        assert_eq!(error.correlation_id(), None);
+        assert!(!format!("{error:?}").contains(private));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_error_envelope_allows_absent_optional_context() {
+        let error = child_failure(
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","correlationId":"00000000-0000-4000-8000-000000000001"}"#,
+        );
+        assert_eq!(error.diagnostic(), None);
+        assert_eq!(
+            error.correlation_id(),
+            Uuid::parse_str("00000000-0000-4000-8000-000000000001").ok()
+        );
     }
 
     #[cfg(target_os = "linux")]

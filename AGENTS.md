@@ -658,6 +658,14 @@ A mail-like layer that lets coding agents coordinate asynchronously via MCP tool
 - `"FILE_RESERVATION_CONFLICT"`: Adjust patterns, wait for expiry, or use non-exclusive reservation
 - **Auth errors:** If JWT+JWKS enabled, include bearer token with matching `kid`
 
+### Supervised worker lifecycle
+
+After a supervised worker sends `worker_done`, the coordinator must process the
+delivery and then immediately reuse that exact worker for an authorized
+follow-up, retain it only on explicit user request, or release it; settled
+workers must never be left idle. Timeouts and heartbeats are liveness signals,
+not completion, and must not trigger a premature stop.
+
 ---
 
 ## Beads (br) — Dependency-Aware Issue Tracking

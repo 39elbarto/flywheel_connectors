@@ -59,6 +59,7 @@ const MAX_PROVISION_INPUT_BYTES: usize = 64 * 1024;
 const SECRET_GET_PATH: &str = "/home/ubuntu/.local/bin/secret-get";
 const SECRET_GET_MAX_STDOUT_BYTES: usize = 4097;
 const SECRET_GET_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const ERROR_ENVELOPE_SCHEMA: &str = "fwc.n8n.error.v1";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -365,6 +366,7 @@ struct ErrorEnvelope {
 struct AppError {
     code: &'static str,
     diagnostic: Option<&'static str>,
+    correlation_id: Option<String>,
 }
 
 impl AppError {
@@ -372,11 +374,23 @@ impl AppError {
         Self {
             code,
             diagnostic: None,
+            correlation_id: None,
         }
     }
 
     const fn with_diagnostic(code: &'static str, diagnostic: Option<&'static str>) -> Self {
-        Self { code, diagnostic }
+        Self {
+            code,
+            diagnostic,
+            correlation_id: None,
+        }
+    }
+
+    fn with_correlation_id(mut self, correlation_id: Option<String>) -> Self {
+        if self.correlation_id.is_none() {
+            self.correlation_id = correlation_id;
+        }
+        self
     }
 }
 
@@ -396,7 +410,14 @@ fn main() {
             }
         }
         Err(error) => {
-            print_error(error.code, error.diagnostic, &correlation_id);
+            print_error(
+                error.code,
+                error.diagnostic,
+                error
+                    .correlation_id
+                    .as_deref()
+                    .unwrap_or(correlation_id.as_str()),
+            );
             std::process::exit(1);
         }
     }
@@ -611,12 +632,16 @@ where
         return Err(AppError::new("invalid_correlation_id"));
     }
     operation_input.insert("correlation_id".into(), Value::String(correlation_id));
+    let request_correlation_id = operation_input
+        .get("correlation_id")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     let request = serde_json::from_value(json!({
         "operation": operation,
         "input": Value::Object(operation_input),
     }))
     .map_err(|_| AppError::new("invalid_operation_input"))?;
-    dispatch(request)
+    dispatch(request).map_err(|error| error.with_correlation_id(request_correlation_id))
 }
 
 fn execute_local_run_once(request: LocalN8nDispatchRequest) -> Result<Value, AppError> {
@@ -699,7 +724,9 @@ where
         .checked_add(std::time::Duration::from_millis(deadline_ms))
         .ok_or_else(|| AppError::new("deadline_exceeded"))?;
     ensure_request_deadline(request_deadline_at)?;
+    let request_correlation_id = envelope.correlation_id.clone();
     dispatch(envelope, request_deadline_at)
+        .map_err(|error| error.with_correlation_id(request_correlation_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1099,7 +1126,11 @@ fn run_host_bridge_once(
                 && matches!(code, "unknown_outcome" | "official_mcp_plan_failed"))
             .then(|| error.diagnostic())
             .flatten();
-            AppError::with_diagnostic(code, diagnostic)
+            AppError::with_diagnostic(code, diagnostic).with_correlation_id(
+                error
+                    .correlation_id()
+                    .map(|correlation_id| correlation_id.to_string()),
+            )
         },
     )
 }
@@ -1143,7 +1174,71 @@ fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceE
     Ok(get)
 }
 
+const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
+    "lifecycle_provider_rejected",
+    "lifecycle_response_shape",
+    "lifecycle_provider_field_mismatch",
+    "lifecycle_readback_precondition_mismatch",
+    "response_protocol",
+    "response_auth",
+    "response_rate_limited",
+    "response_capability",
+    "response_zone",
+    "response_connector",
+    "response_resource",
+    "response_external_4xx",
+    "response_external_5xx",
+    "response_external_other",
+    "response_external_unknown",
+    "response_upstream_timeout",
+    "response_dependency_unavailable",
+    "response_internal",
+    "child.protocol",
+    "child.auth",
+    "child.capability",
+    "child.zone",
+    "child.connector",
+    "child.resource",
+    "child.external",
+    "child.internal",
+    "child.unknown",
+];
+
+fn error_envelope_diagnostic(value: Option<&str>) -> Option<&'static str> {
+    value.and_then(|value| {
+        SAFE_ERROR_DIAGNOSTICS
+            .iter()
+            .copied()
+            .find(|allowed| *allowed == value)
+    })
+}
+
+fn normalize_error_envelope(response: &Value, fallback_code: &'static str) -> Option<AppError> {
+    let object = response.as_object()?;
+    if object.get("schema").and_then(Value::as_str) != Some(ERROR_ENVELOPE_SCHEMA)
+        || object.get("status").and_then(Value::as_str) != Some("error")
+    {
+        return None;
+    }
+    let code = match object.get("code").and_then(Value::as_str) {
+        Some("unknown_outcome") => "unknown_outcome",
+        Some("official_mcp_plan_failed") => "official_mcp_plan_failed",
+        _ => fallback_code,
+    };
+    let diagnostic = error_envelope_diagnostic(object.get("diagnostic").and_then(Value::as_str));
+    let correlation_id = object
+        .get("correlationId")
+        .or_else(|| object.get("correlation_id"))
+        .and_then(Value::as_str)
+        .filter(|value| Uuid::parse_str(value).is_ok())
+        .map(ToOwned::to_owned);
+    Some(AppError::with_diagnostic(code, diagnostic).with_correlation_id(correlation_id))
+}
+
 fn response_result(response: Value, unknown_code: &'static str) -> Result<Value, AppError> {
+    if let Some(error) = normalize_error_envelope(&response, unknown_code) {
+        return Err(error);
+    }
     if response.get("status").and_then(Value::as_str) != Some("ok")
         || response.get("error").is_some_and(|error| !error.is_null())
     {
@@ -1179,8 +1274,13 @@ fn verify_lifecycle_baseline(input: &Value, state: &Value) -> Result<(), AppErro
 }
 
 fn lifecycle_response_result(response: Value) -> Result<Value, AppError> {
-    response_result(response, "unknown_outcome")
-        .map_err(|_| AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape")))
+    response_result(response, "unknown_outcome").map_err(|error| {
+        AppError::with_diagnostic(
+            "unknown_outcome",
+            error.diagnostic.or(Some("lifecycle_response_shape")),
+        )
+        .with_correlation_id(error.correlation_id)
+    })
 }
 
 fn decode_official_mcp_lifecycle_result(
@@ -1421,6 +1521,7 @@ fn lifecycle_state_error(error: AppError) -> AppError {
         "unknown_outcome",
         Some("lifecycle_readback_precondition_mismatch"),
     )
+    .with_correlation_id(error.correlation_id)
 }
 
 fn lifecycle_error_after_provider_advisory(
@@ -1704,7 +1805,10 @@ fn verify_execution_readback(
 }
 
 fn terminal_execute_readback<T>(result: Result<T, AppError>) -> Result<T, AppError> {
-    result.map_err(|_| AppError::new("unknown_outcome"))
+    result.map_err(|error| {
+        AppError::with_diagnostic("unknown_outcome", error.diagnostic)
+            .with_correlation_id(error.correlation_id)
+    })
 }
 
 fn execute_workflow_execute_official_mcp(
@@ -1842,7 +1946,13 @@ fn execute_host_run_once(
             credential,
             request_deadline_at,
         )
-        .map_err(|error| AppError::new(error.code()))?;
+        .map_err(|error| {
+            AppError::with_diagnostic(error.code(), error.diagnostic()).with_correlation_id(
+                error
+                    .correlation_id()
+                    .map(|correlation_id| correlation_id.to_string()),
+            )
+        })?;
         normalize_host_run_once_response(operation, server_id, response)
     };
 
@@ -4110,6 +4220,69 @@ mod tests {
             Some("lifecycle_readback_precondition_mismatch")
         );
         assert!(!format!("{error:?}").contains("private-workflow"));
+    }
+
+    #[test]
+    fn error_envelope_normalization_preserves_safe_context() {
+        let correlation_id = "00000000-0000-4000-8000-000000000001";
+        let error = response_result(
+            json!({
+                "schema": ERROR_ENVELOPE_SCHEMA,
+                "status": "error",
+                "code": "unknown_outcome",
+                "diagnostic": "response_capability",
+                "correlationId": correlation_id
+            }),
+            "unknown_outcome",
+        )
+        .expect_err("error envelope must remain an error");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("response_capability"));
+        assert_eq!(error.correlation_id.as_deref(), Some(correlation_id));
+    }
+
+    #[test]
+    fn error_envelope_normalization_accepts_absent_optional_context() {
+        let error = response_result(
+            json!({
+                "schema": ERROR_ENVELOPE_SCHEMA,
+                "status": "error",
+                "code": "unknown_outcome"
+            }),
+            "unknown_outcome",
+        )
+        .expect_err("error envelope must remain an error");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, None);
+        assert_eq!(error.correlation_id, None);
+    }
+
+    #[test]
+    fn error_envelope_normalization_discards_untrusted_context() {
+        let private = "PRIVATE-PROVIDER-DETAIL";
+        let error = response_result(
+            json!({
+                "schema": ERROR_ENVELOPE_SCHEMA,
+                "status": "error",
+                "code": "unknown_outcome",
+                "diagnostic": private,
+                "correlationId": private,
+                "provider": private
+            }),
+            "unknown_outcome",
+        )
+        .expect_err("error envelope must remain an error");
+        assert_eq!(error.diagnostic, None);
+        assert_eq!(error.correlation_id, None);
+        let encoded = serde_json::to_string(&ErrorEnvelope {
+            schema: ERROR_ENVELOPE_SCHEMA,
+            status: "error",
+            code: error.code.to_owned(),
+            diagnostic: error.diagnostic,
+            correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+        })
+        .expect("safe error envelope");
+        assert!(!encoded.contains(private));
     }
 
     #[test]

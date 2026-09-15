@@ -303,9 +303,10 @@ acceptance; no such live/API invocation is claimed here. No release switch was
 performed by this documentation update.
 The source `main` is newer (`2a908c742`); the committed redacted host-error-detail
 propagation is not yet installed in `current`.
-The fixed runtime policy records local `n8n-mcp` package version `2.69.2`;
-the source update fixtures pin the same version. This is version evidence only,
-not a live provider check.
+The historical fixed runtime policy recorded local `n8n-mcp` package version
+`2.69.2`; the source update fixtures also pin that exact version for their
+historical/update-path tests. This is historical version evidence only, not the
+current installed runtime policy and not a live provider check.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
 `run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
@@ -1633,9 +1634,11 @@ Official instance-level MCP:
 | `create_data_table`, `add_data_table_column`, `rename_data_table_column`, `rename_data_table`, `add_data_table_rows` | `data_tables.mutate` |
 | `delete_data_table_column` | future-only data-table destructive gate |
 
-The current fixed runtime policy records local `n8n-mcp` package version
-`2.69.2`, and the source update fixtures pin the same version. The earlier
-observed catalog count is historical evidence, not a current tool-count claim;
+The current installed fixed runtime policy records local `n8n-mcp` package
+version `2.84.4`. The source update fixtures in `update_local_mcp.rs` retain
+`2.69.2` as an exact historical/update-path fixture; it is not the installed
+runtime policy. The earlier observed catalog count is historical evidence, not
+a current tool-count claim;
 catalog names and schema digests, not a human-maintained count, are
 authoritative:
 

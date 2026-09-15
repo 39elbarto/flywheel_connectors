@@ -16,8 +16,8 @@ profile change is authorized by this contract.
 
 **Current installed release/read-only smoke boundary (2026-09-15):**
 `/usr/local/lib/fwc-n8n/current` resolves to
-`release-20260915-221dc2837-unattended` (git revision
-`221dc28375b9d2dc52e47dd9f3629cebe058484f`), and
+`release-20260915-15e6d63e3-invoke-unknown` (git revision
+`15e6d63e3316b1764442fee022a23e8a4b19cb34`), and
 `/usr/local/bin/fwc-n8n status` reports `{"bundleAvailable":true}`. The fixed
 zero-idle systemd broker is installed and listening on
 `/run/fwc/fwc-n8n-secret-broker.sock`; the documented read-only smoke boundary
@@ -27,6 +27,30 @@ network-disabled execution. These checks establish installed bundle/broker
 readiness only; they do not establish lifecycle-write acceptance. Publish,
 unpublish, execution, and the complete EEC-then-Hetzner lifecycle remain
 `NO-GO`.
+
+**Current source/main static evidence (2026-09-15; separate from installed-release evidence):**
+Current `main` at `5136bff862bd3bfedae6232702c939bf2caa3550` contains the
+merged source commits `cf1f6b8de84c14df39bc6f3445046ffe1d392dfa` and
+`57a4457457aa5acd7601de5b469d2271fc43af38`. After the baseline read, a
+possible Official MCP `archive_workflow` attempt is followed by at most one
+independent REST readback. Readback transport, decode, invalid-state, and
+mismatch errors are terminal `unknown_outcome`; the provider attempt's
+redaction-safe diagnostic and correlation ID take precedence field-by-field,
+with the readback diagnostic and correlation ID as fallback. The boundary
+allows exactly one MCP attempt and at most one independent REST readback, with
+no retry. A failure known to precede provider dispatch returns immediately and
+skips readback and makes no provider attempt. Publish/unpublish behavior is
+unchanged: the exact Official MCP call is followed by authoritative independent
+REST readback; uncertain or mismatched results are not retried automatically.
+
+Current-main source verification passed `176` tests with `1` ignored; the
+focused archive filter passed `9` tests; `cargo fmt --check` and the focused
+`cargo check -p fcp-n8n --bin fwc-n8n` were clean. This is static source
+evidence only and does not establish that the installed release contains these
+changes or that any provider lifecycle write is accepted. Because the installed
+release above is stale relative to this current-main source evidence, live EEC
+acceptance remains `NO-GO`; publish, unpublish, execution, and the complete
+EEC-then-Hetzner lifecycle remain `NO-GO`.
 
 **RC11 privileged promotion / external issuer gate checkpoint (2026-09-11;
 bounded NO-GO):**

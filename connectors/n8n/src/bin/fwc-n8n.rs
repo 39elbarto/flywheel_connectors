@@ -1855,36 +1855,83 @@ fn execute_workflow_archive_official_mcp(
     envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
 ) -> Result<Value, AppError> {
-    let get = lifecycle_get_envelope(&envelope)?;
-    let baseline_response = run_host_bridge_once(
-        bundle,
-        &get,
-        BrokerCredentialPurpose::RestApi,
+    execute_workflow_archive_with_bridge(
+        envelope,
         request_deadline_at,
-    )?;
+        |request, purpose, deadline| run_host_bridge_once(bundle, request, purpose, deadline),
+    )
+}
+
+fn archive_error_after_provider_advisory(
+    provider_advisory: Option<AppError>,
+    readback_error: AppError,
+) -> AppError {
+    provider_advisory
+        .filter(|error| error.diagnostic.is_some())
+        .unwrap_or(readback_error)
+}
+
+fn execute_workflow_archive_with_bridge<F>(
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+    mut bridge: F,
+) -> Result<Value, AppError>
+where
+    F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
+{
+    let get = lifecycle_get_envelope(&envelope)?;
+    let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = response_result(baseline_response, "unknown_outcome")?;
     verify_lifecycle_baseline(&envelope.input, &baseline)?;
 
-    let provider_response = run_host_bridge_once(
-        bundle,
-        &envelope,
-        BrokerCredentialPurpose::OfficialMcp,
-        request_deadline_at,
-    )?;
     let workflow_id = envelope
         .input
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    let provider = decode_official_mcp_archive_result(provider_response, workflow_id)?;
-    let readback_response = run_host_bridge_once(
-        bundle,
-        &get,
-        BrokerCredentialPurpose::RestApi,
-        request_deadline_at,
-    )?;
-    let readback = response_result(readback_response, "unknown_outcome")?;
-    validate_lifecycle_state_summary(&readback)?;
+    let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)?;
+    ensure_request_deadline(write_deadline_at)?;
+    let (provider, provider_advisory) = match bridge(
+        &envelope,
+        BrokerCredentialPurpose::OfficialMcp,
+        write_deadline_at,
+    ) {
+        Ok(response) => match decode_official_mcp_archive_result(response, workflow_id) {
+            Ok(provider) => (Some(provider), None),
+            Err(error) => (None, Some(error)),
+        },
+        // The mediated provider attempt may have reached n8n even when the
+        // bridge only reports a bounded unknown outcome. Reconcile exactly
+        // once; only explicit pre-provider categories return immediately.
+        Err(error) if error.code == "unknown_outcome" => (None, Some(error)),
+        Err(error) => return Err(error),
+    };
+
+    let readback_response =
+        match bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at) {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(archive_error_after_provider_advisory(
+                    provider_advisory,
+                    error,
+                ));
+            }
+        };
+    let readback = match response_result(readback_response, "unknown_outcome") {
+        Ok(readback) => readback,
+        Err(error) => {
+            return Err(archive_error_after_provider_advisory(
+                provider_advisory,
+                error,
+            ));
+        }
+    };
+    if let Err(error) = validate_lifecycle_state_summary(&readback) {
+        return Err(archive_error_after_provider_advisory(
+            provider_advisory,
+            error,
+        ));
+    }
     if baseline.get("id") != readback.get("id")
         || baseline.get("versionId") != readback.get("versionId")
         || baseline.get("draft") != readback.get("draft")
@@ -1893,8 +1940,20 @@ fn execute_workflow_archive_official_mcp(
         || !readback.get("activeVersionId").is_some_and(Value::is_null)
         || readback.get("isArchived") != Some(&Value::Bool(true))
     {
-        return Err(AppError::new("readback_mismatch"));
+        return Err(archive_error_after_provider_advisory(
+            provider_advisory,
+            AppError::new("readback_mismatch"),
+        ));
     }
+    // The provider response is advisory and may be opaque. Keep the output
+    // schema stable while exposing only the normalized, redaction-safe result
+    // that the authoritative REST readback proved.
+    let provider = provider.unwrap_or_else(|| {
+        json!({
+            "archived": true,
+            "workflowId": workflow_id,
+        })
+    });
     Ok(json!({
         "status": "verified",
         "operation": "n8n.workflows.archive",
@@ -4083,6 +4142,34 @@ mod tests {
         lifecycle_host_input_for("eec", "publish")
     }
 
+    fn archive_envelope() -> HostRunOnceEnvelope {
+        let input = json!({
+            "id": "1001",
+            "guard": {
+                "approvalRef": "chat-approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000004",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        build_host_run_once_envelope(
+            HostRunOnceOperation::WorkflowsArchive,
+            HostRunOnceInput {
+                server_id: HostRunOnceServerId::Eec,
+                input,
+                approval_token: None,
+                deadline_ms: Some(1_000),
+                correlation_id: None,
+            },
+        )
+        .expect("archive envelope")
+    }
+
     fn lifecycle_envelope_for_version(
         server_id: &str,
         action: &str,
@@ -4331,6 +4418,194 @@ mod tests {
         assert_eq!(error.code, "deadline_exceeded");
         assert_eq!(bridge.calls.len(), 1);
         assert!(bridge.calls[0].starts_with("rest:"));
+    }
+
+    #[test]
+    fn official_mcp_archive_reconciles_unknown_provider_error_once() {
+        let envelope = archive_envelope();
+        let request_deadline_at = lifecycle_test_deadline();
+        let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)
+            .expect("request must leave a write budget");
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("unknown_outcome")),
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                true,
+            ))),
+        ]);
+        let mut deadlines = Vec::new();
+        let result = execute_workflow_archive_with_bridge(
+            envelope,
+            request_deadline_at,
+            |request, purpose, deadline| {
+                deadlines.push((purpose, deadline));
+                bridge.dispatch(request, purpose, deadline)
+            },
+        )
+        .expect("authoritative readback must prove archive after unknown provider error");
+        assert_eq!(result["status"], "verified");
+        assert_eq!(
+            bridge.calls,
+            vec![
+                "rest:fwc-n8n://eec/workflows/1001",
+                "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                "rest:fwc-n8n://eec/workflows/1001",
+            ]
+        );
+        assert_eq!(
+            deadlines[0],
+            (BrokerCredentialPurpose::RestApi, request_deadline_at)
+        );
+        assert_eq!(
+            deadlines[1],
+            (BrokerCredentialPurpose::OfficialMcp, write_deadline_at)
+        );
+        assert_eq!(
+            deadlines[2],
+            (BrokerCredentialPurpose::RestApi, request_deadline_at)
+        );
+        assert_eq!(
+            result["providerResult"],
+            json!({
+                "archived": true,
+                "workflowId": "1001",
+            })
+        );
+    }
+
+    #[test]
+    fn official_mcp_archive_advisory_provider_result_still_reads_back_once() {
+        let private = "private-provider-archive-detail";
+        for provider_result in [
+            json!({
+                "content": [{"type": "text", "text": private}],
+            }),
+            json!({"isError": true, "message": private}),
+        ] {
+            let mut bridge = LifecycleSequenceProbe::new([
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    false,
+                ))),
+                Ok(lifecycle_response(provider_result)),
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    true,
+                ))),
+            ]);
+            let result = execute_workflow_archive_with_bridge(
+                archive_envelope(),
+                lifecycle_test_deadline(),
+                |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+            )
+            .expect("authoritative readback must prove archive after advisory provider result");
+            assert_eq!(result["status"], "verified");
+            assert_eq!(bridge.calls.len(), 3);
+            assert_eq!(
+                bridge
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("official_mcp:"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                bridge
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("rest:"))
+                    .count(),
+                2
+            );
+            assert!(
+                !serde_json::to_string(&result)
+                    .expect("safe archive output")
+                    .contains(private)
+            );
+            assert_eq!(
+                result["providerResult"],
+                json!({
+                    "archived": true,
+                    "workflowId": "1001",
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn official_mcp_archive_readback_mismatch_and_uncertainty_are_terminal_once() {
+        for readback in [
+            lifecycle_response(lifecycle_state(false, Value::Null, false)),
+            lifecycle_response(json!({})),
+        ] {
+            let mut bridge = LifecycleSequenceProbe::new([
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    false,
+                ))),
+                Err(AppError::new("unknown_outcome")),
+                Ok(readback),
+            ]);
+            let error = execute_workflow_archive_with_bridge(
+                archive_envelope(),
+                lifecycle_test_deadline(),
+                |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+            )
+            .expect_err("archive readback must fail closed");
+            assert_eq!(error.code, "readback_mismatch");
+            assert_eq!(bridge.calls.len(), 3);
+            assert_eq!(
+                bridge
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("official_mcp:"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                bridge
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("rest:"))
+                    .count(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn official_mcp_archive_known_pre_provider_failure_skips_readback() {
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("official_mcp_plan_failed")),
+        ]);
+        let error = execute_workflow_archive_with_bridge(
+            archive_envelope(),
+            lifecycle_test_deadline(),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect_err("known pre-provider archive failure must remain immediate");
+        assert_eq!(error.code, "official_mcp_plan_failed");
+        assert_eq!(
+            bridge.calls,
+            vec![
+                "rest:fwc-n8n://eec/workflows/1001",
+                "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+            ]
+        );
     }
 
     #[test]

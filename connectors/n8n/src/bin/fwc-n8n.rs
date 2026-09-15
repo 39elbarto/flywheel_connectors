@@ -4677,6 +4677,79 @@ mod tests {
     }
 
     #[test]
+    fn official_mcp_archive_invalid_readback_state_preserves_provider_context_once() {
+        let provider_correlation = "00000000-0000-4000-8000-000000000010";
+        for readback in [
+            lifecycle_response(json!({})),
+            lifecycle_response(lifecycle_state(false, Value::Null, false)),
+        ] {
+            let mut bridge = LifecycleSequenceProbe::new([
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    false,
+                ))),
+                Err(
+                    AppError::with_diagnostic("unknown_outcome", Some("provider_unavailable"))
+                        .with_correlation_id(Some(provider_correlation.to_owned())),
+                ),
+                Ok(readback),
+            ]);
+            let error = execute_workflow_archive_with_bridge(
+                archive_envelope(),
+                lifecycle_test_deadline(),
+                |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+            )
+            .expect_err("invalid archive readback state must remain terminal");
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some("provider_unavailable"));
+            assert_eq!(error.correlation_id.as_deref(), Some(provider_correlation));
+            assert_eq!(
+                bridge.calls,
+                vec![
+                    "rest:fwc-n8n://eec/workflows/1001",
+                    "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                    "rest:fwc-n8n://eec/workflows/1001",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn official_mcp_archive_malformed_readback_outer_response_does_not_retry_provider() {
+        let provider_correlation = "00000000-0000-4000-8000-000000000011";
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(
+                AppError::with_diagnostic("unknown_outcome", Some("provider_unavailable"))
+                    .with_correlation_id(Some(provider_correlation.to_owned())),
+            ),
+            Ok(json!({"status": "ok", "result": []})),
+        ]);
+        let error = execute_workflow_archive_with_bridge(
+            archive_envelope(),
+            lifecycle_test_deadline(),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect_err("malformed archive readback response must remain terminal");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("provider_unavailable"));
+        assert_eq!(error.correlation_id.as_deref(), Some(provider_correlation));
+        assert_eq!(
+            bridge.calls,
+            vec![
+                "rest:fwc-n8n://eec/workflows/1001",
+                "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                "rest:fwc-n8n://eec/workflows/1001",
+            ]
+        );
+    }
+
+    #[test]
     fn official_mcp_archive_known_pre_provider_failure_skips_readback() {
         let mut bridge = LifecycleSequenceProbe::new([
             Ok(lifecycle_response(lifecycle_state(

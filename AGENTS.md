@@ -666,6 +666,14 @@ follow-up, retain it only on explicit user request, or release it; settled
 workers must never be left idle. Timeouts and heartbeats are liveness signals,
 not completion, and must not trigger a premature stop.
 
+Agent Mail is an archive and coordination channel; it does not wake or trigger
+an idle worker. Whenever a worker must take action, duplicate the instruction
+in that worker's direct Orca terminal chat and submit it with `--enter`. Use
+Agent Mail for the durable context, delivery, and audit trail, but do not treat
+mail delivery alone as evidence that the worker started. After the worker
+settles, process the delivery and immediately reuse, explicitly retain, or
+release that exact worker.
+
 ---
 
 ## Beads (br) — Dependency-Aware Issue Tracking

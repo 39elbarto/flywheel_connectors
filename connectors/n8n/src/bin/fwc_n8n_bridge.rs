@@ -1835,6 +1835,13 @@ struct FwcN8nErrorEnvelope {
 #[cfg(target_os = "linux")]
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "lifecycle_provider_rejected",
+    "provider_unauthorized",
+    "provider_forbidden",
+    "provider_not_found",
+    "provider_conflict",
+    "provider_rate_limited",
+    "provider_unavailable",
+    "validation_failed",
     "lifecycle_response_shape",
     "lifecycle_provider_field_mismatch",
     "lifecycle_readback_precondition_mismatch",

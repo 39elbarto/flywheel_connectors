@@ -1207,6 +1207,13 @@ fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceE
 
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "lifecycle_provider_rejected",
+    "provider_unauthorized",
+    "provider_forbidden",
+    "provider_not_found",
+    "provider_conflict",
+    "provider_rate_limited",
+    "provider_unavailable",
+    "validation_failed",
     "lifecycle_response_shape",
     "lifecycle_provider_field_mismatch",
     "lifecycle_readback_precondition_mismatch",
@@ -1321,15 +1328,16 @@ fn decode_official_mcp_lifecycle_result(
 ) -> Result<Value, AppError> {
     let shape_error =
         || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape"));
-    let rejection_error =
-        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_provider_rejected"));
+    let rejection_error = |diagnostic| AppError::with_diagnostic("unknown_outcome", diagnostic);
     if response.get("status").and_then(Value::as_str).is_none() {
         return Err(shape_error());
     }
     if response.get("status").and_then(Value::as_str) != Some("ok")
         || response.get("error").is_some_and(|value| !value.is_null())
     {
-        return Err(rejection_error());
+        return Err(rejection_error(Some(
+            lifecycle_provider_error_diagnostic(&response).unwrap_or("lifecycle_provider_rejected"),
+        )));
     }
     let Some(result) = response.get("result") else {
         return Err(shape_error());
@@ -1340,22 +1348,199 @@ fn decode_official_mcp_lifecycle_result(
     // empty acknowledgements are all valid provider-level envelopes).  It is
     // an advisory signal only; the independent REST readback below is the
     // sole authority for lifecycle state.
-    if lifecycle_provider_result_is_rejected(result) {
-        return Err(rejection_error());
+    if let Some(diagnostic) = lifecycle_provider_result_rejection_diagnostic(result) {
+        return Err(rejection_error(Some(diagnostic)));
     }
     Ok(json!({"delivered": true}))
 }
 
-fn lifecycle_provider_result_is_rejected(result: &Value) -> bool {
-    let Some(object) = result.as_object() else {
-        return false;
+const MAX_LIFECYCLE_PROVIDER_ERROR_DEPTH: usize = 8;
+const MAX_LIFECYCLE_PROVIDER_ERROR_ITEMS: usize = 32;
+const MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES: usize = 4096;
+
+fn lifecycle_provider_result_rejection_diagnostic(result: &Value) -> Option<&'static str> {
+    match result {
+        Value::Object(object) => {
+            let rejected = object.get("isError").and_then(Value::as_bool) == Some(true)
+                || object.get("success").and_then(Value::as_bool) == Some(false)
+                || object.get("error").is_some_and(|value| !value.is_null());
+            if rejected {
+                return Some(
+                    lifecycle_provider_error_diagnostic(result)
+                        .unwrap_or("lifecycle_provider_rejected"),
+                );
+            }
+            object
+                .get("structuredContent")
+                .and_then(lifecycle_provider_result_rejection_diagnostic)
+        }
+        _ => None,
+    }
+}
+
+fn lifecycle_provider_error_diagnostic(value: &Value) -> Option<&'static str> {
+    fn visit(value: &Value, depth: usize) -> Option<&'static str> {
+        if depth > MAX_LIFECYCLE_PROVIDER_ERROR_DEPTH {
+            return None;
+        }
+        match value {
+            Value::String(text) => lifecycle_provider_text_diagnostic(text),
+            Value::Number(number) => match number.as_u64() {
+                Some(401) => Some("provider_unauthorized"),
+                Some(403) => Some("provider_forbidden"),
+                Some(404) => Some("provider_not_found"),
+                Some(409) => Some("provider_conflict"),
+                Some(429) => Some("provider_rate_limited"),
+                Some(400 | 422) => Some("validation_failed"),
+                Some(500..=599) => Some("provider_unavailable"),
+                _ => None,
+            },
+            Value::Object(object) => {
+                for key in [
+                    "statusCode",
+                    "status_code",
+                    "httpStatus",
+                    "http_status",
+                    "status",
+                    "code",
+                ] {
+                    if let Some(diagnostic) =
+                        object.get(key).and_then(|value| visit(value, depth + 1))
+                    {
+                        return Some(diagnostic);
+                    }
+                }
+                for key in [
+                    "error", "message", "reason", "detail", "title", "content", "text",
+                ] {
+                    if let Some(diagnostic) =
+                        object.get(key).and_then(|value| visit(value, depth + 1))
+                    {
+                        return Some(diagnostic);
+                    }
+                }
+                None
+            }
+            Value::Array(items) => items
+                .iter()
+                .take(MAX_LIFECYCLE_PROVIDER_ERROR_ITEMS)
+                .find_map(|value| visit(value, depth + 1)),
+            Value::Null | Value::Bool(_) => None,
+        }
+    }
+
+    visit(value, 0)
+}
+
+fn lifecycle_provider_text_diagnostic(text: &str) -> Option<&'static str> {
+    let has = |needles: &[&str]| {
+        needles.iter().any(|needle| {
+            text.as_bytes()
+                .get(..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES))
+                .is_some_and(|bounded| {
+                    bounded
+                        .windows(needle.len())
+                        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+                })
+        })
     };
-    object.get("isError").and_then(Value::as_bool) == Some(true)
-        || object.get("success").and_then(Value::as_bool) == Some(false)
-        || object.get("error").is_some_and(|value| !value.is_null())
-        || object
-            .get("structuredContent")
-            .is_some_and(lifecycle_provider_result_is_rejected)
+    let has_status = |code: &str| {
+        text.as_bytes()
+            .get(..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES))
+            .is_some_and(|bounded| {
+                bounded
+                    .windows(code.len())
+                    .enumerate()
+                    .any(|(index, window)| {
+                        let before_is_digit = index > 0 && bounded[index - 1].is_ascii_digit();
+                        let after_index = index + code.len();
+                        let after_is_digit =
+                            after_index < bounded.len() && bounded[after_index].is_ascii_digit();
+                        window == code.as_bytes() && !before_is_digit && !after_is_digit
+                    })
+            })
+    };
+
+    if has(&[
+        "unauthorized",
+        "authentication failed",
+        "invalid api key",
+        "invalid token",
+        "token expired",
+        "credential rejected",
+    ]) || has_status("401")
+    {
+        return Some("provider_unauthorized");
+    }
+    if has(&[
+        "forbidden",
+        "authorization failed",
+        "permission denied",
+        "access denied",
+        "insufficient permission",
+        "not allowed",
+    ]) || has_status("403")
+    {
+        return Some("provider_forbidden");
+    }
+    if has(&["rate limit", "too many requests", "throttl"]) || has_status("429") {
+        return Some("provider_rate_limited");
+    }
+    if has(&[
+        "not found",
+        "does not exist",
+        "doesn't exist",
+        "unknown workflow",
+    ]) || has_status("404")
+    {
+        return Some("provider_not_found");
+    }
+    if has(&[
+        "conflict",
+        "already published",
+        "already active",
+        "concurrent",
+        "optimistic concurrency",
+    ]) || has_status("409")
+    {
+        return Some("provider_conflict");
+    }
+    if has(&[
+        "validation",
+        "invalid request",
+        "invalid input",
+        "invalid workflow",
+        "bad request",
+        "missing required",
+        "required field",
+        "must have",
+        "no trigger",
+        "trigger node",
+        "unprocessable",
+    ]) || has_status("400")
+        || has_status("422")
+    {
+        return Some("validation_failed");
+    }
+    if has(&[
+        "timeout",
+        "timed out",
+        "unavailable",
+        "connection refused",
+        "connection reset",
+        "network error",
+        "bad gateway",
+        "gateway timeout",
+        "internal server error",
+        "temporarily",
+    ]) || has_status("500")
+        || has_status("502")
+        || has_status("503")
+        || has_status("504")
+    {
+        return Some("provider_unavailable");
+    }
+    None
 }
 
 fn decode_official_mcp_archive_result(
@@ -4363,6 +4548,78 @@ mod tests {
         assert_eq!(error.code, "unknown_outcome");
         assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
         assert!(!format!("{error:?}").contains("private provider error"));
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_provider_rejections_get_fixed_categories() {
+        let cases = [
+            ("401 Unauthorized: private-auth", "provider_unauthorized"),
+            ("403 Forbidden: private-forbidden", "provider_forbidden"),
+            (
+                "404 workflow not found: private-not-found",
+                "provider_not_found",
+            ),
+            ("409 conflict: private-conflict", "provider_conflict"),
+            (
+                "429 too many requests: private-rate-limit",
+                "provider_rate_limited",
+            ),
+            (
+                "400 invalid workflow: private-validation",
+                "validation_failed",
+            ),
+            (
+                "503 service unavailable: private-unavailable",
+                "provider_unavailable",
+            ),
+            (
+                "provider rejected for an undisclosed reason: private-unknown",
+                "lifecycle_provider_rejected",
+            ),
+        ];
+        for (message, diagnostic) in cases {
+            let error = decode_official_mcp_lifecycle_result(
+                json!({
+                    "status": "ok",
+                    "result": {"success": false, "error": message}
+                }),
+                "publish",
+                "1001",
+            )
+            .expect_err("provider rejection");
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some(diagnostic));
+            assert!(!format!("{error:?}").contains(message));
+        }
+
+        let nested = decode_official_mcp_lifecycle_result(
+            json!({
+                "status": "ok",
+                "result": {
+                    "structuredContent": {
+                        "isError": true,
+                        "error": {"statusCode": 403, "message": "private-nested"}
+                    }
+                }
+            }),
+            "publish",
+            "1001",
+        )
+        .expect_err("nested provider rejection");
+        assert_eq!(nested.diagnostic, Some("provider_forbidden"));
+        assert!(!format!("{nested:?}").contains("private-nested"));
+
+        let outer = decode_official_mcp_lifecycle_result(
+            json!({
+                "status": "error",
+                "error": {"code": "E503", "message": "private-outer"}
+            }),
+            "publish",
+            "1001",
+        )
+        .expect_err("outer provider rejection");
+        assert_eq!(outer.diagnostic, Some("provider_unavailable"));
+        assert!(!format!("{outer:?}").contains("private-outer"));
     }
 
     #[test]

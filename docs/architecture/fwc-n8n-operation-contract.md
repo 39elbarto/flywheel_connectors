@@ -14,6 +14,20 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+**Current installed release/read-only smoke boundary (2026-09-15):**
+`/usr/local/lib/fwc-n8n/current` resolves to
+`release-20260915-221dc2837-unattended` (git revision
+`221dc28375b9d2dc52e47dd9f3629cebe058484f`), and
+`/usr/local/bin/fwc-n8n status` reports `{"bundleAvailable":true}`. The fixed
+zero-idle systemd broker is installed and listening on
+`/run/fwc/fwc-n8n-secret-broker.sock`; the documented read-only smoke boundary
+is `crates/fcp-host/tests/n8n_owned_static_smoke.rs`. The installed local MCP
+policy remains pinned to `n8n-mcp` `2.84.4`, protocol `2024-11-05`, and
+network-disabled execution. These checks establish installed bundle/broker
+readiness only; they do not establish lifecycle-write acceptance. Publish,
+unpublish, execution, and the complete EEC-then-Hetzner lifecycle remain
+`NO-GO`.
+
 **RC11 privileged promotion / external issuer gate checkpoint (2026-09-11;
 bounded NO-GO):**
 The fresh owner-signed candidate `release-20260911-fcee1784b-rc11` was
@@ -1294,7 +1308,7 @@ the blocked heredoc-style preparation, retain the same complete approval-shape
 projection, EEC-first ordering, one-reconciliation rule, and no-retry policy.
 The required two-server lifecycle remains `in_progress`/NO-GO.
 
-Current candidate live checkpoint (2026-09-14; installed release
+Historical candidate live checkpoint (2026-09-14; installed release
 `release-20260914-2855e4545-rc1`): the fresh candidate was assembled from git
 revision `2855e4545efbec41ec5c662c7314fcc8561729eb`, passed the static smoke
 gate, was owner-signed, passed provision preflight, and was promoted through
@@ -1321,7 +1335,7 @@ directory was corrected to mode `0700`, and the fixed owner public-key file was
 aligned with KeePass-backed public metadata before the successful apply; no
 private seed or token was persisted in the evidence.
 
-**Current lifecycle-fixture diagnosis (2026-09-14; bounded NO-GO):** The target
+**Historical lifecycle-fixture diagnosis (2026-09-14; bounded NO-GO):** The target
 disposable draft `oD8zytCtv5PiSYzc` contains only
 `n8n-nodes-base.manualTrigger`. The deployed EEC n8n `2.38.4` activation
 validator explicitly excludes `manualTrigger` from its activation-eligible

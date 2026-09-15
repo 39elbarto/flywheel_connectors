@@ -1214,6 +1214,7 @@ const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "provider_rate_limited",
     "provider_unavailable",
     "validation_failed",
+    "invoke_unknown",
     "lifecycle_response_shape",
     "lifecycle_provider_field_mismatch",
     "lifecycle_readback_precondition_mismatch",

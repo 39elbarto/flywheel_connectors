@@ -1842,6 +1842,7 @@ const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "provider_rate_limited",
     "provider_unavailable",
     "validation_failed",
+    "invoke_unknown",
     "lifecycle_response_shape",
     "lifecycle_provider_field_mismatch",
     "lifecycle_readback_precondition_mismatch",
@@ -1969,6 +1970,7 @@ fn parse_fwc_n8n_error_envelope(bytes: &[u8]) -> Option<BridgeError> {
         "host_n8n_runtime_state_failed" => BridgeErrorCode::HostN8nRuntimeStateFailed,
         "host_n8n_manifest_failed" => BridgeErrorCode::HostN8nManifestFailed,
         "host_n8n_capability_failed" => BridgeErrorCode::HostN8nCapabilityFailed,
+        "host_n8n_invoke_failed" => BridgeErrorCode::HostN8nInvokeFailed,
         _ => BridgeErrorCode::ChildFailed,
     };
     Some(
@@ -2025,8 +2027,16 @@ fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
 
 #[cfg(target_os = "linux")]
 fn child_failure(bytes: &[u8]) -> BridgeError {
-    parse_fwc_n8n_error_envelope(bytes)
-        .unwrap_or_else(|| BridgeError::new(child_failure_code(bytes)))
+    let error = parse_fwc_n8n_error_envelope(bytes)
+        .unwrap_or_else(|| BridgeError::new(child_failure_code(bytes)));
+    if error.code == BridgeErrorCode::HostN8nInvokeFailed && error.diagnostic.is_none() {
+        // The host deliberately redacts provider details.  If it reaches the
+        // invoke stage without a fixed stderr marker, preserve that fact as a
+        // bounded ambiguity label instead of inventing a provider category.
+        error.with_diagnostic(Some("invoke_unknown"))
+    } else {
+        error
+    }
 }
 
 #[cfg(test)]
@@ -2460,6 +2470,25 @@ mod tests {
         );
         assert_eq!(error.diagnostic(), Some("response_capability"));
         assert_eq!(error.correlation_id(), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn invoke_failure_without_marker_gets_only_a_bounded_ambiguity_label() {
+        let error = child_failure(br#"{"type":"error","error":{"code":"n8n_invoke_failed"}}"#);
+        assert_eq!(error.code(), "host_n8n_invoke_failed");
+        assert_eq!(error.diagnostic(), Some("invoke_unknown"));
+
+        let error = child_failure(
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed"}"#,
+        );
+        assert_eq!(error.code(), "host_n8n_invoke_failed");
+        assert_eq!(error.diagnostic(), Some("invoke_unknown"));
+
+        let error = child_failure(
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"response_external_unknown"}"#,
+        );
+        assert_eq!(error.diagnostic(), Some("response_external_unknown"));
     }
 
     #[cfg(target_os = "linux")]

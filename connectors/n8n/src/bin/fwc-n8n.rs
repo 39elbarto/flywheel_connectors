@@ -57,6 +57,10 @@ const HOST_RUN_ONCE_SCHEMA: &str = "fwc.n8n.host-run-once.v1";
 const HOST_RUN_ONCE_ZONE: &str = "z:work";
 const HOST_RUN_ONCE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const HOST_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
+// The lifecycle bridge's REST readback is a complete bounded host operation:
+// reserve the operation's 15-second network budget plus 2*PROCESS_GRACE
+// (100 ms each) before starting the side-effecting official-MCP attempt.
+const LIFECYCLE_READBACK_RESERVE: Duration = Duration::from_millis(15_200);
 const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
 const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
@@ -1750,6 +1754,12 @@ fn lifecycle_error_after_provider_advisory(
         .unwrap_or_else(|| lifecycle_state_error(readback_error))
 }
 
+fn lifecycle_write_deadline_at(request_deadline_at: Instant) -> Result<Instant, AppError> {
+    request_deadline_at
+        .checked_sub(LIFECYCLE_READBACK_RESERVE)
+        .ok_or_else(|| AppError::new("deadline_exceeded"))
+}
+
 fn execute_workflow_lifecycle_with_bridge<F>(
     envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
@@ -1773,10 +1783,12 @@ where
         .get("action")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)?;
+    ensure_request_deadline(write_deadline_at)?;
     let provider_advisory = match bridge(
         &envelope,
         BrokerCredentialPurpose::OfficialMcp,
-        request_deadline_at,
+        write_deadline_at,
     ) {
         Ok(response) => decode_official_mcp_lifecycle_result(response, action, workflow_id).err(),
         // Once the official-MCP dispatch may have started, an unknown bridge
@@ -4089,6 +4101,10 @@ mod tests {
         json!({"status": "ok", "result": result})
     }
 
+    fn lifecycle_test_deadline() -> Instant {
+        Instant::now() + LIFECYCLE_READBACK_RESERVE + Duration::from_secs(5)
+    }
+
     #[test]
     fn host_run_once_lifecycle_publish_bridges_exact_write_and_readback_once() {
         let mut bridge = LifecycleBridgeProbe::default();
@@ -4216,7 +4232,7 @@ mod tests {
             ]);
             let result = execute_workflow_lifecycle_with_bridge(
                 envelope,
-                Instant::now() + Duration::from_secs(5),
+                lifecycle_test_deadline(),
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
             .expect("exact readback should prove the lifecycle transition");
@@ -4229,6 +4245,92 @@ mod tests {
             );
             assert_eq!(bridge.calls[2], bridge.calls[0]);
         }
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_readback_runs_after_write_budget_is_consumed() {
+        let envelope = lifecycle_envelope_for_version("eec", "publish", Some("version-1"));
+        let request_deadline_at =
+            Instant::now() + LIFECYCLE_READBACK_RESERVE + Duration::from_secs(1);
+        let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)
+            .expect("request must leave a write budget");
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(AppError::new("unknown_outcome")),
+            Ok(lifecycle_response(lifecycle_state(
+                true,
+                json!("version-1"),
+                false,
+            ))),
+        ]);
+        let mut deadlines = Vec::new();
+        let result = execute_workflow_lifecycle_with_bridge(
+            envelope,
+            request_deadline_at,
+            |request, purpose, deadline| {
+                deadlines.push((purpose, deadline));
+                if purpose == BrokerCredentialPurpose::OfficialMcp {
+                    std::thread::sleep(
+                        deadline.saturating_duration_since(Instant::now())
+                            + Duration::from_millis(1),
+                    );
+                }
+                bridge.dispatch(request, purpose, deadline)
+            },
+        )
+        .expect("readback must still verify after the write budget expires");
+        assert_eq!(result["status"], "verified");
+        assert_eq!(bridge.calls.len(), 3);
+        assert_eq!(
+            bridge
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("official_mcp:"))
+                .count(),
+            1
+        );
+        assert_eq!(deadlines[1].0, BrokerCredentialPurpose::OfficialMcp);
+        assert_eq!(deadlines[1].1, write_deadline_at);
+        assert!(Instant::now() >= deadlines[1].1);
+        assert_eq!(
+            deadlines[2],
+            (BrokerCredentialPurpose::RestApi, request_deadline_at)
+        );
+        assert!(Instant::now() < deadlines[2].1);
+    }
+
+    #[test]
+    fn official_mcp_lifecycle_does_not_start_provider_after_baseline_consumes_write_budget() {
+        let envelope = lifecycle_envelope_for_version("eec", "publish", Some("version-1"));
+        let request_deadline_at =
+            Instant::now() + LIFECYCLE_READBACK_RESERVE + Duration::from_millis(50);
+        let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)
+            .expect("request must leave a write budget");
+        let mut bridge = LifecycleSequenceProbe::new([Ok(lifecycle_response(lifecycle_state(
+            false,
+            Value::Null,
+            false,
+        )))]);
+        let error = execute_workflow_lifecycle_with_bridge(
+            envelope,
+            request_deadline_at,
+            |request, purpose, deadline| {
+                assert_eq!(purpose, BrokerCredentialPurpose::RestApi);
+                std::thread::sleep(
+                    write_deadline_at.saturating_duration_since(Instant::now())
+                        + Duration::from_millis(1),
+                );
+                bridge.dispatch(request, purpose, deadline)
+            },
+        )
+        .expect_err("an exhausted write budget must fail before provider access");
+        assert_eq!(error.code, "deadline_exceeded");
+        assert_eq!(bridge.calls.len(), 1);
+        assert!(bridge.calls[0].starts_with("rest:"));
     }
 
     #[test]
@@ -4249,7 +4351,7 @@ mod tests {
         ]);
         let result = execute_workflow_lifecycle_with_bridge(
             envelope.clone(),
-            Instant::now() + Duration::from_secs(5),
+            lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
         .expect("readback may prove an ambiguous provider attempt");
@@ -4279,7 +4381,7 @@ mod tests {
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
             envelope.clone(),
-            Instant::now() + Duration::from_secs(5),
+            lifecycle_test_deadline(),
             |request, purpose, deadline| unchanged.dispatch(request, purpose, deadline),
         )
         .expect_err("unchanged reconciliation must remain unknown");
@@ -4304,7 +4406,7 @@ mod tests {
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
             envelope,
-            Instant::now() + Duration::from_secs(5),
+            lifecycle_test_deadline(),
             |request, purpose, deadline| preflight.dispatch(request, purpose, deadline),
         )
         .expect_err("known pre-provider failure must remain immediate");
@@ -4326,7 +4428,7 @@ mod tests {
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
             envelope,
-            Instant::now() + Duration::from_secs(5),
+            lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
         .expect_err("malformed readback must fail closed");

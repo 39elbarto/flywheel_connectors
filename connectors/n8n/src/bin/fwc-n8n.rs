@@ -1866,9 +1866,15 @@ fn archive_error_after_provider_advisory(
     provider_advisory: Option<AppError>,
     readback_error: AppError,
 ) -> AppError {
-    provider_advisory
-        .filter(|error| error.diagnostic.is_some())
-        .unwrap_or(readback_error)
+    let diagnostic = provider_advisory
+        .as_ref()
+        .and_then(|error| error.diagnostic)
+        .or(readback_error.diagnostic);
+    let correlation_id = provider_advisory
+        .as_ref()
+        .and_then(|error| error.correlation_id.clone())
+        .or(readback_error.correlation_id);
+    AppError::with_diagnostic("unknown_outcome", diagnostic).with_correlation_id(correlation_id)
 }
 
 fn execute_workflow_archive_with_bridge<F>(
@@ -4541,10 +4547,26 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_archive_readback_mismatch_and_uncertainty_are_terminal_once() {
-        for readback in [
-            lifecycle_response(lifecycle_state(false, Value::Null, false)),
-            lifecycle_response(json!({})),
+    fn official_mcp_archive_readback_failures_are_terminal_with_provider_correlation() {
+        let provider_correlation = "00000000-0000-4000-8000-000000000005";
+        let readback_correlation = "00000000-0000-4000-8000-000000000006";
+        for (readback, expected_diagnostic) in [
+            (
+                Ok(lifecycle_response(lifecycle_state(
+                    false,
+                    Value::Null,
+                    false,
+                ))),
+                None,
+            ),
+            (
+                Err(AppError::with_diagnostic(
+                    "response_upstream_timeout",
+                    Some("response_upstream_timeout"),
+                )
+                .with_correlation_id(Some(readback_correlation.to_owned()))),
+                Some("response_upstream_timeout"),
+            ),
         ] {
             let mut bridge = LifecycleSequenceProbe::new([
                 Ok(lifecycle_response(lifecycle_state(
@@ -4552,8 +4574,9 @@ mod tests {
                     Value::Null,
                     false,
                 ))),
-                Err(AppError::new("unknown_outcome")),
-                Ok(readback),
+                Err(AppError::new("unknown_outcome")
+                    .with_correlation_id(Some(provider_correlation.to_owned()))),
+                readback,
             ]);
             let error = execute_workflow_archive_with_bridge(
                 archive_envelope(),
@@ -4561,25 +4584,96 @@ mod tests {
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
             .expect_err("archive readback must fail closed");
-            assert_eq!(error.code, "readback_mismatch");
-            assert_eq!(bridge.calls.len(), 3);
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, expected_diagnostic);
+            assert_eq!(error.correlation_id.as_deref(), Some(provider_correlation));
             assert_eq!(
-                bridge
-                    .calls
-                    .iter()
-                    .filter(|call| call.starts_with("official_mcp:"))
-                    .count(),
-                1
-            );
-            assert_eq!(
-                bridge
-                    .calls
-                    .iter()
-                    .filter(|call| call.starts_with("rest:"))
-                    .count(),
-                2
+                bridge.calls,
+                vec![
+                    "rest:fwc-n8n://eec/workflows/1001",
+                    "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                    "rest:fwc-n8n://eec/workflows/1001",
+                ]
             );
         }
+    }
+
+    #[test]
+    fn official_mcp_archive_provider_advisory_readback_error_preserves_context() {
+        let provider_correlation = "00000000-0000-4000-8000-000000000007";
+        let readback_correlation = "00000000-0000-4000-8000-000000000008";
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Err(
+                AppError::with_diagnostic("unknown_outcome", Some("provider_unavailable"))
+                    .with_correlation_id(Some(provider_correlation.to_owned())),
+            ),
+            Err(AppError::with_diagnostic(
+                "response_upstream_timeout",
+                Some("response_upstream_timeout"),
+            )
+            .with_correlation_id(Some(readback_correlation.to_owned()))),
+        ]);
+        let error = execute_workflow_archive_with_bridge(
+            archive_envelope(),
+            lifecycle_test_deadline(),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect_err("archive readback transport must fail closed");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("provider_unavailable"));
+        assert_eq!(error.correlation_id.as_deref(), Some(provider_correlation));
+        assert_eq!(
+            bridge.calls,
+            vec![
+                "rest:fwc-n8n://eec/workflows/1001",
+                "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                "rest:fwc-n8n://eec/workflows/1001",
+            ]
+        );
+    }
+
+    #[test]
+    fn official_mcp_archive_valid_provider_readback_error_uses_readback_context() {
+        let readback_correlation = "00000000-0000-4000-8000-000000000009";
+        let mut bridge = LifecycleSequenceProbe::new([
+            Ok(lifecycle_response(lifecycle_state(
+                false,
+                Value::Null,
+                false,
+            ))),
+            Ok(lifecycle_response(json!({
+                "archived": true,
+                "workflowId": "1001",
+                "name": "workflow",
+            }))),
+            Err(AppError::with_diagnostic(
+                "response_dependency_unavailable",
+                Some("response_dependency_unavailable"),
+            )
+            .with_correlation_id(Some(readback_correlation.to_owned()))),
+        ]);
+        let error = execute_workflow_archive_with_bridge(
+            archive_envelope(),
+            lifecycle_test_deadline(),
+            |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
+        )
+        .expect_err("archive readback transport must fail closed");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("response_dependency_unavailable"));
+        assert_eq!(error.correlation_id.as_deref(), Some(readback_correlation));
+        assert_eq!(
+            bridge.calls,
+            vec![
+                "rest:fwc-n8n://eec/workflows/1001",
+                "official_mcp:fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                "rest:fwc-n8n://eec/workflows/1001",
+            ]
+        );
     }
 
     #[test]

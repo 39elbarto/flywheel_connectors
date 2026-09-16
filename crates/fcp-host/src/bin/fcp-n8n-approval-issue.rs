@@ -17,6 +17,7 @@ use fcp_host::{
     N8nApprovalIssueRequest, build_unsigned_n8n_approval_token, canonical_approval_token_bytes,
     n8n_runtime_approval_verifying_key,
 };
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -43,12 +44,16 @@ fn emit_error(code: &'static str) -> ExitCode {
 }
 
 fn run() -> Result<Vec<u8>, &'static str> {
-    let request_path = parse_request_path(std::env::args_os())?;
+    let (request_path, expected_request_sha256) = parse_request_path(std::env::args_os())?;
     validate_request_root().map_err(|_| "invalid_request")?;
     let request_bytes = Zeroizing::new(
         read_bounded_nofollow_file(&request_path, MAX_REQUEST_BYTES)
             .map_err(|_| "invalid_request")?,
     );
+    let actual_request_sha256 = request_sha256(request_bytes.as_slice());
+    if actual_request_sha256 != expected_request_sha256 {
+        return Err("request_changed");
+    }
     let request: N8nApprovalIssueRequest =
         serde_json::from_slice(&request_bytes).map_err(|_| "invalid_request")?;
     let now_ms = SystemTime::now()
@@ -77,7 +82,7 @@ fn run() -> Result<Vec<u8>, &'static str> {
     serde_json::to_vec(&token).map_err(|_| "output_failed")
 }
 
-fn parse_request_path<I>(mut args: I) -> Result<PathBuf, &'static str>
+fn parse_request_path<I>(mut args: I) -> Result<(PathBuf, String), &'static str>
 where
     I: Iterator<Item = OsString>,
 {
@@ -86,6 +91,13 @@ where
         return Err("invalid_arguments");
     }
     let relative = args.next().map(PathBuf::from).ok_or("invalid_arguments")?;
+    if args.next().as_deref() != Some(std::ffi::OsStr::new("--expected-request-sha256")) {
+        return Err("invalid_arguments");
+    }
+    let expected_request_sha256 = args
+        .next()
+        .and_then(|value| value.into_string().ok())
+        .ok_or("invalid_arguments")?;
     if args.next().is_some()
         || relative.is_absolute()
         || relative.components().count() != 1
@@ -95,7 +107,24 @@ where
     {
         return Err("invalid_arguments");
     }
-    Ok(Path::new(REQUEST_ROOT).join(relative))
+    if !is_lower_hex_sha256(&expected_request_sha256) {
+        return Err("invalid_arguments");
+    }
+    Ok((
+        Path::new(REQUEST_ROOT).join(relative),
+        expected_request_sha256,
+    ))
+}
+
+fn is_lower_hex_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn request_sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
 
 #[cfg(unix)]
@@ -187,18 +216,32 @@ mod tests {
     }
 
     #[test]
+    fn request_digest_covers_exact_bytes() {
+        let request = br#"{"expires_at_ms":1700000001000}"#;
+        let request_with_lf = [request.as_slice(), b"\n"].concat();
+        assert_eq!(request_sha256(request), request_sha256(request));
+        assert_ne!(request_sha256(request), request_sha256(&request_with_lf));
+    }
+
+    #[test]
     fn request_path_is_one_component_under_fixed_owner_root() {
+        let expected_digest = "0".repeat(64);
         assert_eq!(
             parse_request_path(
                 [
                     OsString::from("issuer"),
                     OsString::from("--request-file"),
                     OsString::from("request.json"),
+                    OsString::from("--expected-request-sha256"),
+                    OsString::from(&expected_digest),
                 ]
                 .into_iter()
             )
             .expect("valid request path"),
-            Path::new(REQUEST_ROOT).join("request.json")
+            (
+                Path::new(REQUEST_ROOT).join("request.json"),
+                expected_digest,
+            )
         );
         for name in [
             "/tmp/request.json",
@@ -211,6 +254,28 @@ mod tests {
                         OsString::from("issuer"),
                         OsString::from("--request-file"),
                         OsString::from(name),
+                        OsString::from("--expected-request-sha256"),
+                        OsString::from("0".repeat(64)),
+                    ]
+                    .into_iter()
+                )
+                .is_err()
+            );
+        }
+        for digest in [
+            "",
+            "0",
+            "G00000000000000000000000000000000000000000000000000000000000000",
+            "000000000000000000000000000000000000000000000000000000000000000A",
+        ] {
+            assert!(
+                parse_request_path(
+                    [
+                        OsString::from("issuer"),
+                        OsString::from("--request-file"),
+                        OsString::from("request.json"),
+                        OsString::from("--expected-request-sha256"),
+                        OsString::from(digest),
                     ]
                     .into_iter()
                 )
@@ -231,6 +296,7 @@ mod tests {
         for code in [
             "invalid_arguments",
             "invalid_request",
+            "request_changed",
             "invalid_seed",
             "trusted_key_unavailable",
             "untrusted_seed",

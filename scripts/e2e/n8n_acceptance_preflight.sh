@@ -56,7 +56,7 @@ emit_success() {
 }
 
 emit_self_test_success() {
-  printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":16}\n' "$SCHEMA"
+  printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":18}\n' "$SCHEMA"
 }
 
 emit_self_test_failure() {
@@ -835,13 +835,19 @@ expect_failure() {
   [[ "$output" == *"\"abort_code\":\"$expected\""* ]]
 }
 
+expect_success() {
+  local fixture="$1"
+  PLAN="$fixture"
+  validate_plan >/dev/null
+}
+
 run_self_test() {
   SELF_TEST=1
   local base=""
   local fixture=""
   base="$(base_plan)"
-  PLAN="$base"
-  if ! validate_plan >/dev/null; then
+  # fresh_integer_13_digit_unix_millisecond
+  if ! expect_success "$base"; then
     emit_self_test_failure
     return 1
   fi
@@ -861,8 +867,17 @@ run_self_test() {
   fixture="$(jq -c '.approval.parent_binding_sha256 = ("a" * 64)' <<<"$base")"
   if ! expect_failure "approval_envelope_invalid" "$fixture"; then emit_self_test_failure; return 1; fi
 
-  fixture="$(jq -c '.approval.expires_at_ms = 123456789012' <<<"$base")"
+  # reject_19_digit_unix_nanoseconds
+  fixture="$(jq -c '.approval.expires_at_ms = 1234567890123456789' <<<"$base")"
   if ! expect_failure "expiry_not_13_digits" "$fixture"; then emit_self_test_failure; return 1; fi
+
+  # reject_10_digit_unix_seconds
+  fixture="$(jq -c '.approval.expires_at_ms = 1234567890' <<<"$base")"
+  if ! expect_failure "expiry_not_13_digits" "$fixture"; then emit_self_test_failure; return 1; fi
+
+  # reject_expired_13_digit_unix_millisecond
+  fixture="$(jq -c 'now as $n | .approval.expires_at_ms = ((($n * 1000) | floor) - 1)' <<<"$base")"
+  if ! expect_failure "expiry_stale" "$fixture"; then emit_self_test_failure; return 1; fi
 
   fixture="$(jq -c 'now as $n | .approval.expires_at_ms = (($n * 1000) | floor) + 61001' <<<"$base")"
   if ! expect_failure "expiry_over_60s" "$fixture"; then emit_self_test_failure; return 1; fi

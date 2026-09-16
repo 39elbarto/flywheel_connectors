@@ -5,9 +5,9 @@ set -euo pipefail
 #
 # Production mode intentionally has no issuer/helper arguments.  It accepts
 # only a basename below the fixed approval root, validates the bytes of that
-# final request immediately before the fixed issuer call, then obtains the
-# signing seed through the existing protected stdin handoff.  The script never
-# prints request data, seed bytes, tokens, or provider output.
+# final request immediately before the fixed issuer call, and passes the
+# exact-request digest to the issuer.  The script never prints request data,
+# seed bytes, tokens, or provider output.
 
 readonly REQUEST_ROOT="/var/lib/fwc-n8n/approval-requests"
 readonly ISSUER_PATH="/usr/local/sbin/fcp-n8n-approval-issue"
@@ -23,8 +23,11 @@ readonly STAT_PATH="/usr/bin/stat"
 readonly FLOCK_PATH="/usr/bin/flock"
 readonly AWK_PATH="/usr/bin/awk"
 readonly BASE64_PATH="/usr/bin/base64"
+readonly HEAD_PATH="/usr/bin/head"
+readonly WC_PATH="/usr/bin/wc"
 readonly MAX_REQUEST_BYTES=65536
 readonly MAX_APPROVAL_TTL_MS=60000
+readonly MAX_SEED_B64_BYTES=45
 
 export LC_ALL=C
 
@@ -40,7 +43,11 @@ FAKE_SECRET_CALLS=0
 FAKE_TOKEN_CONSUMER_CALLS=0
 FAKE_TOKEN_CAPTURE=""
 REQUEST_LOCK_FD=""
+REQUEST_DIGEST=""
+FAKE_PIPE_TOKEN=""
 readonly TEST_SEED_B64="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+readonly TEST_ZERO_SEED_B64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+readonly TEST_TRAILING_LF_SEED_B64="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAo="
 
 fail() {
   LAST_ERROR="$1"
@@ -84,7 +91,8 @@ read_request_json() {
   local size
 
   if (( SELF_TEST_MODE == 1 )); then
-    printf '%s' "$TEST_REQUEST_JSON"
+    # The sentinel preserves trailing LF bytes across command substitution.
+    printf '%s\001' "$TEST_REQUEST_JSON"
     return 0
   fi
 
@@ -93,6 +101,15 @@ read_request_json() {
   size="$($STAT_PATH -c '%s' "$request_path" 2>/dev/null)" || return 1
   (( size <= MAX_REQUEST_BYTES )) || return 1
   "$CAT_PATH" -- "$request_path" 2>/dev/null
+  printf '\001'
+}
+
+read_request_snapshot() {
+  local framed
+
+  framed="$(read_request_json "$1")" || return 1
+  [[ "$framed" == *$'\001' ]] || return 1
+  printf '%s' "$framed"
 }
 
 lock_request_for_one_shot() {
@@ -112,12 +129,17 @@ canonical_digest() {
   "$SHA256_PATH" <<<"$canonical" 2>/dev/null | "$CUT_PATH" -d' ' -f1
 }
 
+sha256_bytes() {
+  local bytes="$1"
+  printf '%s' "$bytes" | "$SHA256_PATH" 2>/dev/null | "$CUT_PATH" -d' ' -f1
+}
+
 strict_decode_seed() {
   # The KeePass field is a single standard-base64 line for exactly 32 bytes,
-  # optionally terminated by one LF.  awk buffers only this bounded encoded
-  # field and emits it only after the complete framing check; the raw seed is
-  # then streamed directly to the issuer and never enters a shell variable.
-  "$AWK_PATH" '
+  # optionally terminated by one LF.  head bounds the encoded input before
+  # awk examines its framing; the raw seed is streamed directly to the issuer
+  # and never enters a shell variable.
+  "$HEAD_PATH" -c "$((MAX_SEED_B64_BYTES + 1))" | "$AWK_PATH" '
     BEGIN { valid = 1 }
     {
       if (NR == 1) {
@@ -133,20 +155,6 @@ strict_decode_seed() {
       printf "%s", encoded
     }
   ' | "$BASE64_PATH" --decode 2>/dev/null
-}
-
-strict_decode_fixture() {
-  local encoded="$1"
-  local payload="$encoded"
-  local decoded
-
-  if [[ "$payload" == *$'\n' ]]; then
-    payload="${payload%$'\n'}"
-    [[ "$payload" != *$'\n' ]] || return 1
-  fi
-  [[ "$payload" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
-  decoded="$($BASE64_PATH --decode <<<"$payload" 2>/dev/null)" || return 1
-  [[ "${#decoded}" == 32 ]]
 }
 
 validate_now_ms() {
@@ -181,9 +189,12 @@ request_guard() {
   local request_basename="$1"
   local expected_plan_digest="${2:-}"
   local now_ms="$3"
+  local framed_request
   local request_json
   local request_digest
+  local plan_digest
   local final_request_json
+  local final_request_digest
   local final_now_ms
   local initial_fingerprint=""
   local final_fingerprint=""
@@ -202,22 +213,31 @@ request_guard() {
     }
   fi
 
-  request_json="$(read_request_json "$request_basename" 2>/dev/null)" || {
+  framed_request="$(read_request_snapshot "$request_basename" 2>/dev/null)" || {
     fail request_unreadable
     return 1
   }
+  request_json="${framed_request%$'\001'}"
   "$JQ_PATH" -e . <<<"$request_json" >/dev/null 2>&1 || {
     fail invalid_request_json
     return 1
   }
   validate_expiry "$request_json" "$now_ms" || return 1
+  request_digest="$(sha256_bytes "$request_json" 2>/dev/null)" || {
+    fail request_digest_failed
+    return 1
+  }
+  [[ "$request_digest" =~ ^[0-9a-f]{64}$ ]] || {
+    fail request_digest_failed
+    return 1
+  }
 
   if [[ -n "$expected_plan_digest" ]]; then
-    request_digest="$(canonical_digest "$request_json" 2>/dev/null)" || {
+    plan_digest="$(canonical_digest "$request_json" 2>/dev/null)" || {
       fail request_digest_failed
       return 1
     }
-    [[ "$request_digest" == "$expected_plan_digest" ]] || {
+    [[ "$plan_digest" == "$expected_plan_digest" ]] || {
       fail safe_plan_mismatch
       return 1
     }
@@ -227,14 +247,24 @@ request_guard() {
   # issuer boundary.  The issuer receives this same basename; no safe-plan
   # expiry is copied into or substituted for the request.
   if (( SELF_TEST_MODE == 1 )) && [[ -n "$TEST_FINAL_REQUEST_JSON" ]]; then
-    final_request_json="$TEST_FINAL_REQUEST_JSON"
+    framed_request="${TEST_FINAL_REQUEST_JSON}"$'\001'
+    final_request_json="${framed_request%$'\001'}"
   else
-    final_request_json="$(read_request_json "$request_basename" 2>/dev/null)" || {
+    framed_request="$(read_request_snapshot "$request_basename" 2>/dev/null)" || {
       fail request_changed
       return 1
     }
+    final_request_json="${framed_request%$'\001'}"
   fi
   [[ "$final_request_json" == "$request_json" ]] || {
+    fail request_changed
+    return 1
+  }
+  final_request_digest="$(sha256_bytes "$final_request_json" 2>/dev/null)" || {
+    fail request_digest_failed
+    return 1
+  }
+  [[ "$final_request_digest" == "$request_digest" ]] || {
     fail request_changed
     return 1
   }
@@ -252,6 +282,7 @@ request_guard() {
     final_now_ms="$(current_now_ms)" || fail clock_failed || return 1
   fi
   validate_expiry "$final_request_json" "$final_now_ms" || return 1
+  REQUEST_DIGEST="$final_request_digest"
 }
 
 fake_secret_reader() {
@@ -260,15 +291,27 @@ fake_secret_reader() {
 
 fake_decode_seed() {
   local encoded
+  local decoded_size
   encoded="$($CAT_PATH)"
-  strict_decode_fixture "$encoded" || return 1
+  decoded_size="$(printf '%s' "$encoded" | strict_decode_seed | "$WC_PATH" -c)" || return 1
+  [[ "$decoded_size" =~ ^32[[:space:]]*$ ]] || return 1
   printf '%s' raw-seed-marker
 }
 
 fake_issuer() {
   local request_basename="$1"
-  local raw_seed="$2"
+  local expected_request_digest="$2"
+  local raw_seed="$3"
+  local framed_request
+  local request_json
+  local actual_request_digest
+
   [[ -n "$request_basename" && "$raw_seed" == raw-seed-marker ]] || return 1
+  framed_request="$(read_request_snapshot "$request_basename")" || return 1
+  request_json="${framed_request%$'\001'}"
+  actual_request_digest="$(sha256_bytes "$request_json")" || return 1
+  [[ "$expected_request_digest" == "$actual_request_digest" ]] || return 1
+  token_consumer_is_safe || return 1
   FAKE_ISSUER_CALLS=$((FAKE_ISSUER_CALLS + 1))
   if (( FAKE_ISSUER_FAILURE != 0 )); then
     return 1
@@ -278,21 +321,24 @@ fake_issuer() {
 
 fake_token_consumer() {
   [[ "$1" == fake-token ]] || return 1
+  printf '%s\n' "$1" >&3 || return 1
   FAKE_TOKEN_CONSUMER_CALLS=$((FAKE_TOKEN_CONSUMER_CALLS + 1))
   FAKE_TOKEN_CAPTURE="$1"
 }
 
 issue_once() {
   local request_basename="$1"
+  local request_digest="$2"
 
   if (( SELF_TEST_MODE == 1 )); then
     local encoded_seed
     local raw_seed
+    token_consumer_is_safe || return 1
     encoded_seed="$(fake_secret_reader)" || return 1
     FAKE_SECRET_CALLS=$((FAKE_SECRET_CALLS + 1))
     raw_seed="$(fake_decode_seed <<<"$encoded_seed")" || return 1
     FAKE_SEED_CALLS=$((FAKE_SEED_CALLS + 1))
-    fake_issuer "$request_basename" "$raw_seed"
+    fake_issuer "$request_basename" "$request_digest" "$raw_seed"
     return $?
   fi
 
@@ -305,7 +351,8 @@ issue_once() {
   "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
     | strict_decode_seed \
     | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
-        --request-file "$request_basename" >&3 2>/dev/null
+        --request-file "$request_basename" \
+        --expected-request-sha256 "$request_digest" >&3 2>/dev/null
 }
 
 token_consumer_is_safe() {
@@ -322,7 +369,7 @@ run_once() {
 
   LAST_ERROR=""
   request_guard "$request_basename" "$expected_plan_digest" "$now_ms" || return 1
-  issue_once "$request_basename" || {
+  issue_once "$request_basename" "$REQUEST_DIGEST" || {
     fail issuer_failed
     return 1
   }
@@ -335,6 +382,8 @@ reset_fake_state() {
   FAKE_SECRET_CALLS=0
   FAKE_TOKEN_CONSUMER_CALLS=0
   FAKE_TOKEN_CAPTURE=""
+  FAKE_PIPE_TOKEN=""
+  REQUEST_DIGEST=""
   TEST_FINAL_REQUEST_JSON=""
   TEST_FINAL_NOW_MS=""
 }
@@ -369,6 +418,42 @@ expect_stop_without_calls() {
   [[ -n "$label" ]]
 }
 
+run_with_fake_token_pipe() {
+  local reader_fd
+  local writer_fd
+  local reader_pid
+  local callback_status
+  local token_output
+
+  coproc FCP_TOKEN_READER { "$CAT_PATH"; }
+  reader_fd="${FCP_TOKEN_READER[0]}"
+  writer_fd="${FCP_TOKEN_READER[1]}"
+  reader_pid="$FCP_TOKEN_READER_PID"
+  exec 3>&"$writer_fd"
+  exec {writer_fd}>&-
+
+  if "$@"; then
+    callback_status=0
+  else
+    callback_status=$?
+  fi
+  exec 3>&-
+
+  if IFS= read -r token_output <&"$reader_fd"; then
+    :
+  else
+    token_output=""
+  fi
+  exec {reader_fd}<&-
+  if wait "$reader_pid"; then
+    :
+  else
+    callback_status=1
+  fi
+  FAKE_PIPE_TOKEN="$token_output"
+  return "$callback_status"
+}
+
 expect_issued_once() {
   local request_json="$1"
   local now_ms="$2"
@@ -376,12 +461,13 @@ expect_issued_once() {
 
   reset_fake_state
   TEST_REQUEST_JSON="$request_json"
-  run_once self-test.json "$expected_plan_digest" "$now_ms" || return 1
+  run_with_fake_token_pipe run_once self-test.json "$expected_plan_digest" "$now_ms" || return 1
   [[ "$FAKE_SECRET_CALLS" == 1 \
     && "$FAKE_SEED_CALLS" == 1 \
     && "$FAKE_ISSUER_CALLS" == 1 \
     && "$FAKE_TOKEN_CONSUMER_CALLS" == 1 \
-    && "$FAKE_TOKEN_CAPTURE" == fake-token ]]
+    && "$FAKE_TOKEN_CAPTURE" == fake-token \
+    && "$FAKE_PIPE_TOKEN" == fake-token ]]
 }
 
 expect_request_replacement_stop() {
@@ -401,6 +487,14 @@ expect_request_replacement_stop() {
     && "$FAKE_ISSUER_CALLS" == 0 ]]
 }
 
+expect_decoded_seed_size() {
+  local encoded="$1"
+  local decoded_size
+
+  decoded_size="$(printf '%s' "$encoded" | strict_decode_seed | "$WC_PATH" -c)" || return 1
+  [[ "$decoded_size" =~ ^32[[:space:]]*$ ]]
+}
+
 expect_lock_conflict_is_redacted() {
   local held_fd
   local error_record
@@ -416,10 +510,65 @@ expect_lock_conflict_is_redacted() {
 
 expect_protected_fd_is_a_pipe() {
   exec 3> >("$CAT_PATH" >/dev/null)
-  token_consumer_is_safe
-  local result=$?
+  local result
+  if token_consumer_is_safe; then
+    result=0
+  else
+    result=$?
+  fi
   exec 3>&-
   return "$result"
+}
+
+expect_missing_fd3_stops() {
+  local request_json="$1"
+  local now_ms="$2"
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  exec 3>&-
+  if run_once self-test.json "" "$now_ms"; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == issuer_failed \
+    && "$FAKE_SECRET_CALLS" == 0 \
+    && "$FAKE_ISSUER_CALLS" == 0 \
+    && "$FAKE_PIPE_TOKEN" == "" ]]
+}
+
+expect_non_pipe_fd3_stops() {
+  local request_json="$1"
+  local now_ms="$2"
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  exec 3>/dev/null
+  if run_once self-test.json "" "$now_ms"; then
+    exec 3>&-
+    return 1
+  fi
+  exec 3>&-
+  [[ "$LAST_ERROR" == issuer_failed \
+    && "$FAKE_SECRET_CALLS" == 0 \
+    && "$FAKE_ISSUER_CALLS" == 0 ]]
+}
+
+expect_issuer_error_is_single_attempt() {
+  local request_json="$1"
+  local now_ms="$2"
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  FAKE_ISSUER_FAILURE=1
+  if run_with_fake_token_pipe run_once self-test.json "" "$now_ms"; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == issuer_failed \
+    && "$FAKE_SECRET_CALLS" == 1 \
+    && "$FAKE_SEED_CALLS" == 1 \
+    && "$FAKE_ISSUER_CALLS" == 1 \
+    && "$FAKE_TOKEN_CONSUMER_CALLS" == 0 \
+    && "$FAKE_PIPE_TOKEN" == "" ]]
 }
 
 run_self_test() {
@@ -450,30 +599,31 @@ run_self_test() {
   expect_request_replacement_stop "$valid" "$safe_plan" "$now_ms" || return 1
   expect_issued_once "$valid" "$now_ms" || return 1
 
-  strict_decode_fixture "$TEST_SEED_B64" || return 1
-  strict_decode_fixture "$TEST_SEED_B64"$'\n' || return 1
-  if strict_decode_fixture "$TEST_SEED_B64"$'\n\n'; then
+  expect_decoded_seed_size "$TEST_ZERO_SEED_B64" || return 1
+  expect_decoded_seed_size "$TEST_ZERO_SEED_B64"$'\n' || return 1
+  expect_decoded_seed_size "$TEST_SEED_B64" || return 1
+  expect_decoded_seed_size "$TEST_SEED_B64"$'\n' || return 1
+  expect_decoded_seed_size "$TEST_TRAILING_LF_SEED_B64" || return 1
+  if printf '%s' "$TEST_SEED_B64"$'\n\n' | strict_decode_seed >/dev/null; then
     return 1
   fi
-  if strict_decode_fixture "${TEST_SEED_B64%?}"; then
+  if printf '%s' "$TEST_SEED_B64"$'\r\n' | strict_decode_seed >/dev/null; then
+    return 1
+  fi
+  if printf '%s' "${TEST_SEED_B64%?}" | strict_decode_seed >/dev/null; then
+    return 1
+  fi
+  if printf '%s' "${TEST_SEED_B64}AAAA" | strict_decode_seed >/dev/null; then
     return 1
   fi
   expect_lock_conflict_is_redacted || return 1
   expect_protected_fd_is_a_pipe || return 1
 
-  reset_fake_state
-  TEST_REQUEST_JSON="$valid"
-  FAKE_ISSUER_FAILURE=1
-  if run_once self-test.json "" "$now_ms"; then
-    return 1
-  fi
-  [[ "$LAST_ERROR" == issuer_failed ]] || return 1
-  [[ "$FAKE_SECRET_CALLS" == 1 \
-    && "$FAKE_SEED_CALLS" == 1 \
-    && "$FAKE_ISSUER_CALLS" == 1 \
-    && "$FAKE_TOKEN_CONSUMER_CALLS" == 0 ]] || return 1
+  expect_missing_fd3_stops "$valid" "$now_ms" || return 1
+  expect_non_pipe_fd3_stops "$valid" "$now_ms" || return 1
+  expect_issuer_error_is_single_attempt "$valid" "$now_ms" || return 1
 
-  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":16}'
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":22}'
 }
 
 main() {

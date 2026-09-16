@@ -354,7 +354,7 @@ issue_once() {
   # attempt.  The base64 field and decoded seed are streamed through fixed
   # processes; neither enters a shell variable, argv, environment, file, or
   # report.  The signed token is handed to the already-open protected FD 3.
-  "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
+  HOME=/home/ubuntu "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
     | strict_decode_seed \
     | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
         --request-file "$request_basename" \

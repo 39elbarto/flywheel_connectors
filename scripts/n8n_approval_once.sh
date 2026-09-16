@@ -169,7 +169,7 @@ validate_now_ms() {
 
 current_now_ms() {
   local now_ms
-  now_ms="$($DATE_PATH +%s%3N 2>/dev/null)" || return 1
+  now_ms="$("$DATE_PATH" +%s%N 2>/dev/null | "$CUT_PATH" -c1-13)" || return 1
   [[ "$now_ms" =~ ^[0-9]{13}$ ]] || return 1
   printf '%s' "$now_ms"
 }

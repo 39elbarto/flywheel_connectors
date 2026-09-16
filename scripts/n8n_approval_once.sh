@@ -79,8 +79,14 @@ request_metadata_is_safe() {
   [[ -f "$request_path" ]] || return 1
   [[ "$($READLINK_PATH -f "$request_path" 2>/dev/null)" == "$request_path" ]] || return 1
   metadata="$($STAT_PATH -c '%u:%g:%a:%h:%F:%s' "$request_path" 2>/dev/null)" || return 1
-  [[ "$metadata" == 0:0:600:1:regular\ file:* ]] || return 1
+  metadata_value_is_safe "$metadata"
+}
+
+metadata_value_is_safe() {
+  local metadata="$1"
   local size="${metadata##*:}"
+
+  [[ "$metadata" == 0:0:600:1:regular\ file:* ]] || return 1
   [[ "$size" =~ ^[0-9]+$ ]] || return 1
   (( size <= MAX_REQUEST_BYTES )) || return 1
 }
@@ -100,7 +106,7 @@ read_request_json() {
   request_metadata_is_safe "$request_path" || return 1
   size="$($STAT_PATH -c '%s' "$request_path" 2>/dev/null)" || return 1
   (( size <= MAX_REQUEST_BYTES )) || return 1
-  "$CAT_PATH" -- "$request_path" 2>/dev/null
+  "$CAT_PATH" -- "$request_path" 2>/dev/null || return 1
   printf '\001'
 }
 
@@ -495,6 +501,21 @@ expect_decoded_seed_size() {
   [[ "$decoded_size" =~ ^32[[:space:]]*$ ]]
 }
 
+expect_metadata_predicate() {
+  metadata_value_is_safe "0:0:600:1:regular file:100" || return 1
+  for metadata in \
+    "0:0:640:1:regular file:100" \
+    "0:0:600:2:regular file:100" \
+    "0:0:600:1:regular:100" \
+    "0:0:600:1:symbolic link:100" \
+    "0:0:600:1:regular file:65537" \
+    "1:0:600:1:regular file:100"; do
+    if metadata_value_is_safe "$metadata"; then
+      return 1
+    fi
+  done
+}
+
 expect_lock_conflict_is_redacted() {
   local held_fd
   local error_record
@@ -616,6 +637,7 @@ run_self_test() {
   if printf '%s' "${TEST_SEED_B64}AAAA" | strict_decode_seed >/dev/null; then
     return 1
   fi
+  expect_metadata_predicate || return 1
   expect_lock_conflict_is_redacted || return 1
   expect_protected_fd_is_a_pipe || return 1
 
@@ -623,7 +645,7 @@ run_self_test() {
   expect_non_pipe_fd3_stops "$valid" "$now_ms" || return 1
   expect_issuer_error_is_single_attempt "$valid" "$now_ms" || return 1
 
-  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":22}'
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":24}'
 }
 
 main() {

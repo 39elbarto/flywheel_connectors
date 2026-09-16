@@ -1956,8 +1956,11 @@ not infer lock ownership from that error.
 
 ### 12.2 Fail-closed acceptance preflight
 
-Every supervised provider-writing worker must run the repository checker before
-an issuer, credential helper, approval path, or provider operation:
+Every supervised provider-writing worker must run the repository checker and
+obtain `verdict: "pass"` before creating an approval-request file. Approval
+request creation is a subsequent step, followed by the single issuer
+invocation; a failed preflight permits none of those steps, nor any credential
+helper or provider operation:
 
 ```text
 bash scripts/e2e/n8n_acceptance_preflight.sh <redacted-plan.json
@@ -1985,6 +1988,12 @@ metadata-only checker therefore separately requires
 `input_projection.workflow_ids_match_target == true`. The checker must keep
 this contract at the projection boundary and must never require or expose raw
 approval request bodies, tokens, or seeds.
+
+The initial acceptance preflight is therefore ordered as
+`preflight → approval-request creation → issuer → provider`. A later checker
+invocation may inspect an explicitly supplied request-file projection for the
+post-issuer absence assertion, but it does not replace the mandatory initial
+gate or authorize another issuer attempt.
 
 `--self-test` is a separate health-check mode: its successful output carries
 `mode: "self-test"` and `acceptance: false`, so it is never an acceptance

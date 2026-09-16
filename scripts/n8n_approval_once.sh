@@ -79,7 +79,7 @@ request_metadata_is_safe() {
   [[ -f "$request_path" ]] || return 1
   [[ "$($READLINK_PATH -f "$request_path" 2>/dev/null)" == "$request_path" ]] || return 1
   metadata="$($STAT_PATH -c '%u:%g:%a:%h:%F:%s' "$request_path" 2>/dev/null)" || return 1
-  [[ "$metadata" == 0:0:600:1:regular:* ]] || return 1
+  [[ "$metadata" == 0:0:600:1:regular\ file:* ]] || return 1
   local size="${metadata##*:}"
   [[ "$size" =~ ^[0-9]+$ ]] || return 1
   (( size <= MAX_REQUEST_BYTES )) || return 1

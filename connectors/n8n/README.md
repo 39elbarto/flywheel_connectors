@@ -993,7 +993,17 @@ installs that exact binary, the install target is
 unit contract. The issuer's fixed request root remains
 `/var/lib/fwc-n8n/approval-requests`; its one-component request-file,
 descriptor-safe read, exact seed-on-stdin, and immutable trust-root checks are
-unchanged. A source-only build preflight is:
+unchanged. The only approved request-to-issuer handoff is the tracked
+`scripts/n8n_approval_once.sh --request-file <one-component-basename>` entrypoint.
+It validates the root-owned `0600` request and fresh 13-digit millisecond
+expiry, preserves the exact final request bytes, and passes their raw SHA-256
+to the fixed issuer. The issuer requires that digest as
+`--expected-request-sha256`, verifies it against one bounded no-follow read
+before parsing or reading the seed, and uses that same buffer for signing. The
+helper makes exactly one issuer attempt, sends the token only through its
+protected FD3 pipe, and has no safe-plan override or retry path. Its offline
+self-test covers 24 cases; this does not replace installation/hash
+verification or live EEC-first/readback gates. A source-only build preflight is:
 
 ```bash
 scripts/fcp_ssd.sh \

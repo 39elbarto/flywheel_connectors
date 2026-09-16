@@ -2021,6 +2021,42 @@ signer behavior, or prove a provider result. The live worker must still execute
 the prescribed single sequence, perform typed readbacks, reconcile at most once
 after uncertainty, and stop without retry on any mismatch or unknown outcome.
 
+### 12.2.1 One-shot owner-approval issuer handoff
+
+The approval-request-to-issuer boundary is the tracked
+`scripts/n8n_approval_once.sh` entrypoint. In production it accepts only
+`--request-file <one-component-basename>` and resolves that basename below the
+fixed `/var/lib/fwc-n8n/approval-requests` root; it does not accept a caller-
+supplied issuer, helper, path, or safe-plan override. The request must be a
+root-owned `0600` regular file with one link and a size at most 64 KiB. On the
+Linux deployment target, GNU `stat` reports this type as `regular file` under
+`LC_ALL=C`.
+
+Immediately before the issuer boundary, the helper retains the exact request
+bytes (including a permitted final LF), validates the JSON and integer
+13-digit Unix-millisecond expiry (`now < expiry <= now+60000`), reads and
+validates the same final snapshot again, and computes its raw-byte SHA-256.
+It passes only that digest and the basename to the fixed
+`/usr/local/sbin/fcp-n8n-approval-issue` binary. The issuer performs one
+bounded no-follow read into one in-memory buffer, compares its SHA-256 with the
+helper's digest before JSON parsing, token construction, seed reading, or
+signing, and uses that same buffer for the remainder of issuance. A replacement
+or mutation between the helper and issuer therefore fails closed as
+`request_changed`; the advisory inode lock is cooperative and is not the
+authority for request identity.
+
+The signing seed remains a 32-byte raw stdin stream from the fixed secret
+reader. Its Base64 framing permits at most one final LF and is bounded before
+decoding; raw seed bytes never enter shell variables, argv, environment, or
+reports. The issued token is written only to the already-open protected FD3
+pipe. The helper performs exactly one issuer attempt and has no retry path.
+`bash scripts/n8n_approval_once.sh --self-test` exercises this control path
+offline (24 cases, including metadata admission, exact-byte replacement,
+Base64 framing, FD3 transport, missing/non-pipe FD3, and issuer failure) and
+does not authorize or simulate a provider write. The helper and issuer must be
+installed and hash-verified as one contract before any live run; source review
+and the self-test do not establish installation or provider acceptance.
+
 ## 13. Future-only gates
 
 ### 13.1 Credential mutation

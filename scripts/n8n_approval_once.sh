@@ -21,16 +21,26 @@ readonly SHA256_PATH="/usr/bin/sha256sum"
 readonly CUT_PATH="/usr/bin/cut"
 readonly STAT_PATH="/usr/bin/stat"
 readonly FLOCK_PATH="/usr/bin/flock"
+readonly AWK_PATH="/usr/bin/awk"
+readonly BASE64_PATH="/usr/bin/base64"
 readonly MAX_REQUEST_BYTES=65536
 readonly MAX_APPROVAL_TTL_MS=60000
+
+export LC_ALL=C
 
 LAST_ERROR=""
 SELF_TEST_MODE=0
 TEST_REQUEST_JSON=""
+TEST_FINAL_REQUEST_JSON=""
+TEST_FINAL_NOW_MS=""
 FAKE_SEED_CALLS=0
 FAKE_ISSUER_CALLS=0
 FAKE_ISSUER_FAILURE=0
+FAKE_SECRET_CALLS=0
+FAKE_TOKEN_CONSUMER_CALLS=0
+FAKE_TOKEN_CAPTURE=""
 REQUEST_LOCK_FD=""
+readonly TEST_SEED_B64="BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
 
 fail() {
   LAST_ERROR="$1"
@@ -88,10 +98,10 @@ read_request_json() {
 lock_request_for_one_shot() {
   local request_path="$1"
 
-  # The producer and this entrypoint use an advisory lock on the exact
-  # request inode.  Keep the descriptor open through the issuer call so a
-  # cooperative writer cannot replace the checked request in the boundary.
-  exec {REQUEST_LOCK_FD}<"$request_path" 2>/dev/null || return 1
+  # Keep an advisory lock on the exact request inode through the issuer call.
+  # The producer must honor this cooperative lock; the final re-read below
+  # separately rejects a replacement observed before the issuer boundary.
+  exec {REQUEST_LOCK_FD}<"$request_path" || return 1
   "$FLOCK_PATH" -n "$REQUEST_LOCK_FD" 2>/dev/null
 }
 
@@ -102,22 +112,68 @@ canonical_digest() {
   "$SHA256_PATH" <<<"$canonical" 2>/dev/null | "$CUT_PATH" -d' ' -f1
 }
 
+strict_decode_seed() {
+  # The KeePass field is a single standard-base64 line for exactly 32 bytes,
+  # optionally terminated by one LF.  awk buffers only this bounded encoded
+  # field and emits it only after the complete framing check; the raw seed is
+  # then streamed directly to the issuer and never enters a shell variable.
+  "$AWK_PATH" '
+    BEGIN { valid = 1 }
+    {
+      if (NR == 1) {
+        encoded = $0
+      } else {
+        valid = 0
+      }
+    }
+    END {
+      if (!valid || length(encoded) != 44 || encoded !~ /^[[:alnum:]+\/]+=$/) {
+        exit 1
+      }
+      printf "%s", encoded
+    }
+  ' | "$BASE64_PATH" --decode 2>/dev/null
+}
+
+strict_decode_fixture() {
+  local encoded="$1"
+  local payload="$encoded"
+  local decoded
+
+  if [[ "$payload" == *$'\n' ]]; then
+    payload="${payload%$'\n'}"
+    [[ "$payload" != *$'\n' ]] || return 1
+  fi
+  [[ "$payload" =~ ^[A-Za-z0-9+/]{43}=$ ]] || return 1
+  decoded="$($BASE64_PATH --decode <<<"$payload" 2>/dev/null)" || return 1
+  [[ "${#decoded}" == 32 ]]
+}
+
 validate_now_ms() {
   [[ "$1" =~ ^[0-9]{13}$ ]] || fail clock_invalid
+}
+
+current_now_ms() {
+  local now_ms
+  now_ms="$($DATE_PATH +%s%3N 2>/dev/null)" || return 1
+  [[ "$now_ms" =~ ^[0-9]{13}$ ]] || return 1
+  printf '%s' "$now_ms"
 }
 
 validate_expiry() {
   local request_json="$1"
   local now_ms="$2"
+  local max_now_ms
 
   validate_now_ms "$now_ms" || return 1
+  max_now_ms="$((now_ms + MAX_APPROVAL_TTL_MS))"
   "$JQ_PATH" -e '.expires_at_ms != null and (.expires_at_ms | type) == "number" and ((.expires_at_ms | floor) == .expires_at_ms)' \
     <<<"$request_json" >/dev/null 2>&1 || fail expiry_not_integer || return 1
   "$JQ_PATH" -e '.expires_at_ms | tostring | test("^[0-9]{13}$")' \
     <<<"$request_json" >/dev/null 2>&1 || fail expiry_not_13_digits || return 1
   "$JQ_PATH" -e --argjson now "$now_ms" '.expires_at_ms > $now' \
     <<<"$request_json" >/dev/null 2>&1 || fail expiry_stale || return 1
-  "$JQ_PATH" -e --argjson now "$now_ms" '.expires_at_ms <= ($now + 60000)' \
+  "$JQ_PATH" -e --argjson max_now "$max_now_ms" '.expires_at_ms <= $max_now' \
     <<<"$request_json" >/dev/null 2>&1 || fail expiry_over_60s || return 1
 }
 
@@ -127,6 +183,10 @@ request_guard() {
   local now_ms="$3"
   local request_json
   local request_digest
+  local final_request_json
+  local final_now_ms
+  local initial_fingerprint=""
+  local final_fingerprint=""
 
   if (( SELF_TEST_MODE == 0 )); then
     is_safe_basename "$request_basename" || fail invalid_request_file || return 1
@@ -135,6 +195,11 @@ request_guard() {
     [[ -f "$PUBLIC_KEY_FILE" ]] || fail public_key_unavailable || return 1
     request_metadata_is_safe "$REQUEST_ROOT/$request_basename" || fail request_unreadable || return 1
     lock_request_for_one_shot "$REQUEST_ROOT/$request_basename" || fail request_busy || return 1
+    now_ms="$(current_now_ms)" || fail clock_failed || return 1
+    initial_fingerprint="$($STAT_PATH -c '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' "$REQUEST_ROOT/$request_basename")" || {
+      fail request_unreadable
+      return 1
+    }
   fi
 
   request_json="$(read_request_json "$request_basename" 2>/dev/null)" || {
@@ -161,44 +226,93 @@ request_guard() {
   # Re-read and re-validate the exact final request immediately before the
   # issuer boundary.  The issuer receives this same basename; no safe-plan
   # expiry is copied into or substituted for the request.
-  local final_request_json
-  final_request_json="$(read_request_json "$request_basename" 2>/dev/null)" || {
-    fail request_changed
-    return 1
-  }
+  if (( SELF_TEST_MODE == 1 )) && [[ -n "$TEST_FINAL_REQUEST_JSON" ]]; then
+    final_request_json="$TEST_FINAL_REQUEST_JSON"
+  else
+    final_request_json="$(read_request_json "$request_basename" 2>/dev/null)" || {
+      fail request_changed
+      return 1
+    }
+  fi
   [[ "$final_request_json" == "$request_json" ]] || {
     fail request_changed
     return 1
   }
-  validate_expiry "$final_request_json" "$now_ms" || return 1
+  if (( SELF_TEST_MODE == 1 )); then
+    final_now_ms="${TEST_FINAL_NOW_MS:-$now_ms}"
+  else
+    final_fingerprint="$($STAT_PATH -c '%d:%i:%s:%Y:%Z:%u:%g:%a:%h' "$REQUEST_ROOT/$request_basename")" || {
+      fail request_changed
+      return 1
+    }
+    [[ "$final_fingerprint" == "$initial_fingerprint" ]] || {
+      fail request_changed
+      return 1
+    }
+    final_now_ms="$(current_now_ms)" || fail clock_failed || return 1
+  fi
+  validate_expiry "$final_request_json" "$final_now_ms" || return 1
 }
 
-fake_seed_reader() {
-  FAKE_SEED_CALLS=$((FAKE_SEED_CALLS + 1))
+fake_secret_reader() {
+  printf '%s\n' "$TEST_SEED_B64"
+}
+
+fake_decode_seed() {
+  local encoded
+  encoded="$($CAT_PATH)"
+  strict_decode_fixture "$encoded" || return 1
+  printf '%s' raw-seed-marker
 }
 
 fake_issuer() {
   local request_basename="$1"
-  [[ -n "$request_basename" ]] || return 1
+  local raw_seed="$2"
+  [[ -n "$request_basename" && "$raw_seed" == raw-seed-marker ]] || return 1
   FAKE_ISSUER_CALLS=$((FAKE_ISSUER_CALLS + 1))
-  (( FAKE_ISSUER_FAILURE == 0 ))
+  if (( FAKE_ISSUER_FAILURE != 0 )); then
+    return 1
+  fi
+  fake_token_consumer fake-token
+}
+
+fake_token_consumer() {
+  [[ "$1" == fake-token ]] || return 1
+  FAKE_TOKEN_CONSUMER_CALLS=$((FAKE_TOKEN_CONSUMER_CALLS + 1))
+  FAKE_TOKEN_CAPTURE="$1"
 }
 
 issue_once() {
   local request_basename="$1"
 
   if (( SELF_TEST_MODE == 1 )); then
-    fake_seed_reader || return 1
-    fake_issuer "$request_basename"
+    local encoded_seed
+    local raw_seed
+    encoded_seed="$(fake_secret_reader)" || return 1
+    FAKE_SECRET_CALLS=$((FAKE_SECRET_CALLS + 1))
+    raw_seed="$(fake_decode_seed <<<"$encoded_seed")" || return 1
+    FAKE_SEED_CALLS=$((FAKE_SEED_CALLS + 1))
+    fake_issuer "$request_basename" "$raw_seed"
     return $?
   fi
 
-  # pipefail makes a secret-reader failure fail the one issuer attempt.  The
-  # seed is never assigned to a shell variable, argv, environment, file, or
-  # report; issuer output is intentionally discarded.
+  token_consumer_is_safe || return 1
+
+  # pipefail makes a secret-reader/decoder failure fail the one issuer
+  # attempt.  The base64 field and decoded seed are streamed through fixed
+  # processes; neither enters a shell variable, argv, environment, file, or
+  # report.  The signed token is handed to the already-open protected FD 3.
   "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
+    | strict_decode_seed \
     | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
-        --request-file "$request_basename" >/dev/null 2>/dev/null
+        --request-file "$request_basename" >&3 2>/dev/null
+}
+
+token_consumer_is_safe() {
+  local fd_type
+  [[ -e /proc/$$/fd/3 && ! -t 3 ]] || return 1
+  fd_type="$($STAT_PATH -Lc '%F' /proc/$$/fd/3 2>/dev/null)" || return 1
+  [[ "$fd_type" == fifo || "$fd_type" == pipe ]]
 }
 
 run_once() {
@@ -218,6 +332,11 @@ reset_fake_state() {
   FAKE_SEED_CALLS=0
   FAKE_ISSUER_CALLS=0
   FAKE_ISSUER_FAILURE=0
+  FAKE_SECRET_CALLS=0
+  FAKE_TOKEN_CONSUMER_CALLS=0
+  FAKE_TOKEN_CAPTURE=""
+  TEST_FINAL_REQUEST_JSON=""
+  TEST_FINAL_NOW_MS=""
 }
 
 json_with_expiry() {
@@ -231,10 +350,14 @@ expect_stop_without_calls() {
   local now_ms="$3"
   local expected_code="$4"
   local expected_plan_digest="${5:-}"
+  local final_now_ms="${6:-}"
   local status
 
   reset_fake_state
   TEST_REQUEST_JSON="$request_json"
+  if [[ -n "$final_now_ms" ]]; then
+    TEST_FINAL_NOW_MS="$final_now_ms"
+  fi
   if run_once self-test.json "$expected_plan_digest" "$now_ms"; then
     return 1
   else
@@ -254,7 +377,49 @@ expect_issued_once() {
   reset_fake_state
   TEST_REQUEST_JSON="$request_json"
   run_once self-test.json "$expected_plan_digest" "$now_ms" || return 1
-  [[ "$FAKE_SEED_CALLS" == 1 && "$FAKE_ISSUER_CALLS" == 1 ]]
+  [[ "$FAKE_SECRET_CALLS" == 1 \
+    && "$FAKE_SEED_CALLS" == 1 \
+    && "$FAKE_ISSUER_CALLS" == 1 \
+    && "$FAKE_TOKEN_CONSUMER_CALLS" == 1 \
+    && "$FAKE_TOKEN_CAPTURE" == fake-token ]]
+}
+
+expect_request_replacement_stop() {
+  local request_json="$1"
+  local replacement_json="$2"
+  local now_ms="$3"
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  TEST_FINAL_REQUEST_JSON="$replacement_json"
+  if run_once self-test.json "" "$now_ms"; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == request_changed \
+    && "$FAKE_SECRET_CALLS" == 0 \
+    && "$FAKE_SEED_CALLS" == 0 \
+    && "$FAKE_ISSUER_CALLS" == 0 ]]
+}
+
+expect_lock_conflict_is_redacted() {
+  local held_fd
+  local error_record
+
+  exec {held_fd}</dev/null
+  "$FLOCK_PATH" -n "$held_fd" 2>/dev/null || return 1
+  if lock_request_for_one_shot /dev/null; then
+    return 1
+  fi
+  error_record="$(emit_error request_busy 2>&1 >/dev/null)"
+  [[ "$error_record" == '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"request_busy"}' ]]
+}
+
+expect_protected_fd_is_a_pipe() {
+  exec 3> >("$CAT_PATH" >/dev/null)
+  token_consumer_is_safe
+  local result=$?
+  exec 3>&-
+  return "$result"
 }
 
 run_self_test() {
@@ -281,8 +446,20 @@ run_self_test() {
   expect_stop_without_calls over_limit \
     "$(json_with_expiry $((now_ms + 60001)))" "$now_ms" expiry_over_60s || return 1
   expect_stop_without_calls safe_plan_mismatch "$valid" "$now_ms" safe_plan_mismatch "$safe_plan_digest" || return 1
-  expect_stop_without_calls expiry_crossed "$crossing" "$((now_ms + 60001))" expiry_stale || return 1
+  expect_stop_without_calls expiry_crossed "$crossing" "$now_ms" expiry_stale "" "$((now_ms + 60001))" || return 1
+  expect_request_replacement_stop "$valid" "$safe_plan" "$now_ms" || return 1
   expect_issued_once "$valid" "$now_ms" || return 1
+
+  strict_decode_fixture "$TEST_SEED_B64" || return 1
+  strict_decode_fixture "$TEST_SEED_B64"$'\n' || return 1
+  if strict_decode_fixture "$TEST_SEED_B64"$'\n\n'; then
+    return 1
+  fi
+  if strict_decode_fixture "${TEST_SEED_B64%?}"; then
+    return 1
+  fi
+  expect_lock_conflict_is_redacted || return 1
+  expect_protected_fd_is_a_pipe || return 1
 
   reset_fake_state
   TEST_REQUEST_JSON="$valid"
@@ -291,9 +468,12 @@ run_self_test() {
     return 1
   fi
   [[ "$LAST_ERROR" == issuer_failed ]] || return 1
-  [[ "$FAKE_SEED_CALLS" == 1 && "$FAKE_ISSUER_CALLS" == 1 ]] || return 1
+  [[ "$FAKE_SECRET_CALLS" == 1 \
+    && "$FAKE_SEED_CALLS" == 1 \
+    && "$FAKE_ISSUER_CALLS" == 1 \
+    && "$FAKE_TOKEN_CONSUMER_CALLS" == 0 ]] || return 1
 
-  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":9}'
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":16}'
 }
 
 main() {
@@ -316,15 +496,11 @@ main() {
     emit_error invalid_request_file
     return 1
   }
-  now_ms="$($DATE_PATH +%s%3N 2>/dev/null)" || {
-    emit_error clock_failed
-    return 1
-  }
-  if ! run_once "$request_basename" "" "$now_ms"; then
+  if ! run_once "$request_basename" "" ""; then
     emit_error "$LAST_ERROR"
     return 1
   fi
-  emit_success
+  emit_success >&2
 }
 
 main "$@"

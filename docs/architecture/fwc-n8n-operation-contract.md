@@ -14,22 +14,23 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current installed release/read-only smoke boundary (2026-09-15):**
+**Current installed release/read-only smoke boundary (2026-09-16):**
 `/usr/local/lib/fwc-n8n/current` resolves to
-`release-20260915-15e6d63e3-invoke-unknown` (git revision
-`15e6d63e3316b1764442fee022a23e8a4b19cb34`), and
+`release-20260916-5dfb5745-owner-rc2` (git revision
+`5dfb574531982e353d6dfcbcf2e51f7882cd4099`), and
 `/usr/local/bin/fwc-n8n status` reports `{"bundleAvailable":true}`. The fixed
 zero-idle systemd broker is installed and listening on
 `/run/fwc/fwc-n8n-secret-broker.sock`; the documented read-only smoke boundary
 is `crates/fcp-host/tests/n8n_owned_static_smoke.rs`. The installed local MCP
 policy remains pinned to `n8n-mcp` `2.84.4`, protocol `2024-11-05`, and
 network-disabled execution. These checks establish installed bundle/broker
-readiness only; they do not establish lifecycle-write acceptance. Publish,
-unpublish, execution, and the complete EEC-then-Hetzner lifecycle remain
-`NO-GO`.
+readiness only; they do not establish complete lifecycle-write acceptance.
+Publish, unpublish, execution, and the complete EEC-then-Hetzner lifecycle
+remain `NO-GO`. The bounded Hetzner lifecycle half is separately recorded
+below; this does not waive the required EEC-first gate.
 
-**Current source/main static evidence (2026-09-15; separate from installed-release evidence):**
-Current `main` at `5136bff862bd3bfedae6232702c939bf2caa3550` contains the
+**Current source/main static evidence (2026-09-17; separate from installed-release evidence):**
+Current `main` at `f7dceb90d469a4fad9cf886aaa05602ed9c1f25e` contains the
 merged source commits `cf1f6b8de84c14df39bc6f3445046ffe1d392dfa` and
 `57a4457457aa5acd7601de5b469d2271fc43af38`. After the baseline read, a
 possible Official MCP `archive_workflow` attempt is followed by at most one
@@ -46,11 +47,30 @@ REST readback; uncertain or mismatched results are not retried automatically.
 Current-main source verification passed `176` tests with `1` ignored; the
 focused archive filter passed `9` tests; `cargo fmt --check` and the focused
 `cargo check -p fcp-n8n --bin fwc-n8n` were clean. This is static source
-evidence only and does not establish that the installed release contains these
-changes or that any provider lifecycle write is accepted. Because the installed
-release above is stale relative to this current-main source evidence, live EEC
-acceptance remains `NO-GO`; publish, unpublish, execution, and the complete
-EEC-then-Hetzner lifecycle remain `NO-GO`.
+evidence only and does not establish that any provider lifecycle write is
+accepted. The installed release above is the code ancestor of this current-main
+source; the complete EEC-then-Hetzner lifecycle remains `NO-GO` because the
+EEC-first cycle is still unproven. The bounded Hetzner lifecycle half is
+recorded below.
+
+**Latest bounded Hetzner lifecycle evidence (2026-09-17; partial GO):**
+Using the installed `release-20260916-5dfb5745-owner-rc2`, a fresh disposable
+webhook workflow `Cb7jfMXeDxyHytnY` / version
+`2dbce392-dcbd-4b8f-b2bf-da39e3c2b71c` passed the exact inactive, unpublished,
+and unarchived baseline. One owner-approved official-MCP `publish_workflow`
+attempt followed by an independent REST GET proved `active=true`, the matching
+active version, and matching draft/published graph. Only after that proof, one
+owner-approved `unpublish_workflow` attempt followed by an independent REST GET
+proved `active=false`, `activeVersionId=null`, `isArchived=false`,
+`published=null`, and the unchanged draft graph. The final state digest is
+`blake3-256:514bcd74e6a527e21212de8ff87d01f4d8e5a5ad769e3aefe8442d3131196122`.
+Redaction-safe evidence is retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-create-20260917/` and
+`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-publish-20260917/`; raw provider bodies,
+credentials, seeds, and tokens were not persisted. The remote Hetzner runtime
+reports `2.37.10` while the release policy remains pinned to `2.34.6`; this
+observed drift was not changed because it is not a lifecycle-equality gate.
+This proves only the Hetzner half; EEC-first acceptance remains `NO-GO`.
 
 **RC11 privileged promotion / external issuer gate checkpoint (2026-09-11;
 bounded NO-GO):**

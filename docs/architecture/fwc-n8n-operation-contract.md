@@ -30,7 +30,7 @@ remain `NO-GO`. The bounded Hetzner lifecycle half is separately recorded
 below; this does not waive the required EEC-first gate.
 
 **Current source/main static evidence (2026-09-17; separate from installed-release evidence):**
-Current `main` at `f7dceb90d469a4fad9cf886aaa05602ed9c1f25e` contains the
+The current `main` tree contains the
 merged source commits `cf1f6b8de84c14df39bc6f3445046ffe1d392dfa` and
 `57a4457457aa5acd7601de5b469d2271fc43af38`. After the baseline read, a
 possible Official MCP `archive_workflow` attempt is followed by at most one
@@ -58,15 +58,28 @@ Using the installed `release-20260916-5dfb5745-owner-rc2`, a fresh disposable
 webhook workflow `Cb7jfMXeDxyHytnY` / version
 `2dbce392-dcbd-4b8f-b2bf-da39e3c2b71c` passed the exact inactive, unpublished,
 and unarchived baseline. One owner-approved official-MCP `publish_workflow`
-attempt followed by an independent REST GET proved `active=true`, the matching
+wrapper invocation followed by an independent REST GET proved `active=true`, the matching
 active version, and matching draft/published graph. Only after that proof, one
-owner-approved `unpublish_workflow` attempt followed by an independent REST GET
+owner-approved `unpublish_workflow` wrapper invocation followed by an independent REST GET
 proved `active=false`, `activeVersionId=null`, `isArchived=false`,
-`published=null`, and the unchanged draft graph. The final state digest is
+`published=null`, and the unchanged draft graph. The retained request metadata
+binds the publish transition to approval ref
+`nqm81.10-hetzner-publish-89fb4d0b-5c9a-43ce-92d3-62e7861ba38c`, wrapper
+correlation `09e16ee0-8500-4b80-97d0-ca9d9cec5dee`, and independent GET
+correlation `4e7fbd86-1f5c-4f59-a22e-e96b90ef50ca`. It binds the unpublish
+transition to approval ref
+`nqm81.10-hetzner-unpublish-de91b7a4-6c32-4f85-9a17-2e5d8c3b704f`, wrapper
+correlation `0a5fd2c9-8e71-4b34-a6d3-1f7c90e528bd`, and independent GET
+correlation `7c1e9a52-4d68-4fb0-b327-8a6c1d5e904f`. The final state digest is
 `blake3-256:514bcd74e6a527e21212de8ff87d01f4d8e5a5ad769e3aefe8442d3131196122`.
 Redaction-safe evidence is retained under
 `/srv/dev-ssd/fcp/nqm81.30/live-hetzner-create-20260917/` and
-`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-publish-20260917/`; raw provider bodies,
+`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-publish-20260917/`; the publish safe
+projection has a reporting defect (`status=verified` with
+`response_class=error`), and its GET represented `isArchived=null`; neither is
+treated as a clean envelope or normalized to `false`. Exact provider-attempt
+counts must come from retained claim/receipt records, not from these safe
+projections or exit codes. Raw provider bodies,
 credentials, seeds, and tokens were not persisted. The remote Hetzner runtime
 reports `2.37.10` while the release policy remains pinned to `2.34.6`; this
 observed drift was not changed because it is not a lifecycle-equality gate.

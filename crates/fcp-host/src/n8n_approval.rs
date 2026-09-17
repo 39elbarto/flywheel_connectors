@@ -40,6 +40,7 @@ pub enum N8nLifecycleOperation {
     Unpublish,
     Archive,
     CreateDraft,
+    UpdateDraft,
     DeleteDisposable,
     #[serde(alias = "n8n.mcp_access.reconcile")]
     McpAccessReconcile,
@@ -51,6 +52,7 @@ impl N8nLifecycleOperation {
             Self::Publish | Self::Unpublish => "n8n.workflows.lifecycle",
             Self::Archive => "n8n.workflows.archive",
             Self::CreateDraft => "n8n.workflows.create_draft",
+            Self::UpdateDraft => "n8n.workflows.update_draft",
             Self::DeleteDisposable => "n8n.workflows.delete_disposable",
             Self::McpAccessReconcile => MCP_ACCESS_RECONCILE_OPERATION,
         }
@@ -62,6 +64,7 @@ impl N8nLifecycleOperation {
             Self::Unpublish => "unpublish",
             Self::Archive => "archive",
             Self::CreateDraft => "create_draft",
+            Self::UpdateDraft => "update_draft",
             Self::DeleteDisposable => "delete_disposable",
             Self::McpAccessReconcile => "mcp_access_reconcile",
         }
@@ -278,12 +281,14 @@ impl N8nApprovalPlan {
             N8nLifecycleOperation::Unpublish => "unpublish_workflow",
             N8nLifecycleOperation::Archive => "archive_workflow",
             N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile => "",
         };
         let direct_rest = matches!(
             operation,
             N8nLifecycleOperation::CreateDraft
+                | N8nLifecycleOperation::UpdateDraft
                 | N8nLifecycleOperation::DeleteDisposable
                 | N8nLifecycleOperation::McpAccessReconcile
         );
@@ -428,6 +433,7 @@ fn validate_issued_token_shape(
     let request_bound = matches!(
         plan.operation,
         N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile
     );
@@ -484,6 +490,7 @@ pub fn n8n_typed_approval_plan_digest(
         "unpublish" => N8nLifecycleOperation::Unpublish,
         "archive" => N8nLifecycleOperation::Archive,
         "create_draft" => N8nLifecycleOperation::CreateDraft,
+        "update_draft" => N8nLifecycleOperation::UpdateDraft,
         "delete_disposable" => N8nLifecycleOperation::DeleteDisposable,
         "mcp_access_reconcile" | MCP_ACCESS_RECONCILE_OPERATION => {
             N8nLifecycleOperation::McpAccessReconcile
@@ -699,6 +706,7 @@ pub fn build_unsigned_n8n_approval_token(
     let request_bound = matches!(
         request.operation,
         N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile
     );
@@ -780,6 +788,14 @@ fn validate_issue_request(
         N8nLifecycleOperation::CreateDraft => {
             &["name", "project_id", "parent_folder_id", "graph", "guard"]
         }
+        N8nLifecycleOperation::UpdateDraft => &[
+            "id",
+            "name",
+            "project_id",
+            "parent_folder_id",
+            "graph",
+            "guard",
+        ],
         N8nLifecycleOperation::DeleteDisposable => &["id", "creationReceipt", "guard"],
         N8nLifecycleOperation::McpAccessReconcile => &[
             "scope",
@@ -877,6 +893,57 @@ fn validate_issue_request(
                 {
                     return Err(N8nApprovalError::InvalidPlan(
                         "create_draft cannot enable MCP access",
+                    ));
+                }
+            }
+        }
+        N8nLifecycleOperation::UpdateDraft => {
+            if let Some(name) = object.get("name")
+                && name
+                    .as_str()
+                    .is_none_or(|value| value.trim().is_empty() || value.len() > 256)
+            {
+                return Err(N8nApprovalError::InvalidPlan(
+                    "update_draft name is invalid",
+                ));
+            }
+            for field in ["project_id", "parent_folder_id"] {
+                if let Some(value) = object.get(field) {
+                    validate_identifier(value, "update_draft target is invalid")?;
+                }
+            }
+            let graph = object.get("graph").and_then(Value::as_object).ok_or(
+                N8nApprovalError::InvalidPlan("update_draft graph is invalid"),
+            )?;
+            if graph.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "nodes" | "connections" | "settings" | "staticData" | "pinData"
+                )
+            }) || graph
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_none_or(|nodes| {
+                    nodes.len() > 10_000 || nodes.iter().any(|node| !node.is_object())
+                })
+                || graph
+                    .get("connections")
+                    .and_then(Value::as_object)
+                    .is_none()
+            {
+                return Err(N8nApprovalError::InvalidPlan(
+                    "update_draft graph is invalid",
+                ));
+            }
+            if let Some(settings) = graph.get("settings")
+                && !settings.is_null()
+            {
+                let settings = settings.as_object().ok_or(N8nApprovalError::InvalidPlan(
+                    "update_draft graph settings are invalid",
+                ))?;
+                if settings.contains_key("availableInMCP") {
+                    return Err(N8nApprovalError::InvalidPlan(
+                        "update_draft cannot change MCP access",
                     ));
                 }
             }
@@ -1825,6 +1892,32 @@ mod tests {
                     }
                 }),
             ),
+            N8nLifecycleOperation::UpdateDraft => (
+                "workflow-1".to_owned(),
+                json!({
+                    "id": "workflow-1",
+                    "name": "Updated draft",
+                    "project_id": "project-1",
+                    "parent_folder_id": "folder-1",
+                    "graph": {
+                        "nodes": [{"name": "node-1"}],
+                        "connections": {},
+                        "staticData": {"key": "value"},
+                        "pinData": {"node-1": {"json": {"value": 1}}}
+                    },
+                    "guard": {
+                        "approvalRef": "approval-update",
+                        "idempotencyKey": "00000000-0000-4000-8000-000000000005",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }),
+            ),
             N8nLifecycleOperation::DeleteDisposable => (
                 "workflow-1".to_owned(),
                 json!({
@@ -1877,6 +1970,25 @@ mod tests {
         Ok(request)
     }
 
+    fn recompute_direct_rest_parent_binding(request: &mut N8nApprovalIssueRequest) {
+        let resource_uri = if request.operation == N8nLifecycleOperation::CreateDraft {
+            "fwc-n8n://eec/projects/project%2D1".to_owned()
+        } else {
+            format!(
+                "fwc-n8n://{}/workflows/{}",
+                request.server.as_str(),
+                encode_resource_segment(&request.workflow_id)
+            )
+        };
+        request.parent_binding_sha256 = n8n_parent_binding_digest(
+            request.server,
+            &resource_uri,
+            request.operation.operation_id(),
+            &request.input,
+        )
+        .expect("recomputed direct REST binding");
+    }
+
     #[test]
     fn direct_rest_issuer_matches_host_binding_for_create_and_disposable_delete() {
         for operation in [
@@ -1903,6 +2015,97 @@ mod tests {
                 )
             );
         }
+    }
+
+    #[test]
+    fn direct_rest_update_draft_issuer_is_request_bound() {
+        let request =
+            direct_rest_issue_request(N8nLifecycleOperation::UpdateDraft).expect("update fixture");
+        let token =
+            build_unsigned_n8n_approval_token(&request, NOW).expect("update unsigned approval");
+        let ApprovalScope::Execution(scope) = &token.scope else {
+            panic!("update approval must use execution scope");
+        };
+        assert_eq!(scope.connector_id, "fcp.n8n");
+        assert_eq!(scope.method_pattern, "n8n.workflows.update_draft");
+        assert!(scope.request_object_id.is_none());
+        assert!(scope.input_constraints.is_empty());
+        assert_eq!(
+            scope.input_hash,
+            Some(
+                hex::decode(&request.parent_binding_sha256)
+                    .expect("raw update binding")
+                    .try_into()
+                    .expect("32-byte update binding"),
+            )
+        );
+        let precondition = request
+            .input
+            .pointer("/guard/precondition")
+            .expect("update precondition");
+        assert!(
+            n8n_typed_approval_plan_digest(
+                "eec",
+                &request.workflow_id,
+                "update_draft",
+                "",
+                "",
+                &request.input,
+                precondition,
+                "00000000-0000-4000-8000-000000000005",
+                request.expires_at_ms,
+                NOW,
+            )
+            .is_some()
+        );
+
+        let mut changed_operation = request.clone();
+        changed_operation.operation = N8nLifecycleOperation::CreateDraft;
+        assert!(build_unsigned_n8n_approval_token(&changed_operation, NOW).is_err());
+
+        let mut changed_input = request.clone();
+        changed_input.input["graph"]["nodes"][0]["name"] = json!("changed-node");
+        assert!(build_unsigned_n8n_approval_token(&changed_input, NOW).is_err());
+
+        let mut changed_server = request.clone();
+        changed_server.server = N8nApprovalServer::Hetzner;
+        assert!(build_unsigned_n8n_approval_token(&changed_server, NOW).is_err());
+
+        let mut changed_precondition = request.clone();
+        changed_precondition.input["guard"]["precondition"]["stateDigest"] =
+            json!("blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(build_unsigned_n8n_approval_token(&changed_precondition, NOW).is_err());
+
+        let mut omitted_settings = request.clone();
+        omitted_settings.input["graph"]
+            .as_object_mut()
+            .expect("update graph")
+            .remove("settings");
+        recompute_direct_rest_parent_binding(&mut omitted_settings);
+        assert!(build_unsigned_n8n_approval_token(&omitted_settings, NOW).is_ok());
+
+        let mut ordinary_settings = request.clone();
+        ordinary_settings.input["graph"]["settings"] = json!({"executionOrder": "v1"});
+        recompute_direct_rest_parent_binding(&mut ordinary_settings);
+        assert!(build_unsigned_n8n_approval_token(&ordinary_settings, NOW).is_ok());
+
+        for available_in_mcp in [json!(true), json!(false), Value::Null] {
+            let mut mcp_binding = request.clone();
+            mcp_binding.input["graph"]["settings"] = json!({"availableInMCP": available_in_mcp});
+            recompute_direct_rest_parent_binding(&mut mcp_binding);
+            assert!(build_unsigned_n8n_approval_token(&mcp_binding, NOW).is_err());
+        }
+
+        let mut active_version = request;
+        active_version.input["guard"]["precondition"]["activeVersionId"] = json!("version-active");
+        active_version.parent_binding_sha256 = n8n_parent_binding_digest(
+            active_version.server,
+            "fwc-n8n://eec/workflows/workflow%2D1",
+            active_version.operation.operation_id(),
+            &active_version.input,
+        )
+        .expect("active-version update binding");
+        assert!(build_unsigned_n8n_approval_token(&active_version, NOW).is_ok());
     }
 
     #[test]

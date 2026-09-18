@@ -61,6 +61,11 @@ const HOST_RUN_ONCE_MAX_DEADLINE_MS: u64 = 60_000;
 // reserve the operation's 15-second network budget plus 2*PROCESS_GRACE
 // (100 ms each) before starting the side-effecting official-MCP attempt.
 const LIFECYCLE_READBACK_RESERVE: Duration = Duration::from_millis(15_200);
+// The typed REST unarchive connector performs baseline GET, one POST, and
+// one independent GET in a single supervised invocation.  Bound each HTTP
+// request to one third of the pre-reserved budget so a stalled POST cannot
+// consume the reconciliation opportunity.
+const UNARCHIVE_READBACK_RESERVE: Duration = Duration::from_secs(5);
 const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
 const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
@@ -72,6 +77,14 @@ const SECRET_GET_MAX_STDOUT_BYTES: usize = 4097;
 #[cfg(test)]
 const SECRET_GET_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const ERROR_ENVELOPE_SCHEMA: &str = "fwc.n8n.error.v1";
+
+fn unarchive_request_timeout_ms(deadline_ms: u64) -> Option<u64> {
+    let reserve_ms = u64::try_from(UNARCHIVE_READBACK_RESERVE.as_millis()).ok()?;
+    deadline_ms
+        .checked_sub(reserve_ms)?
+        .checked_div(3)
+        .filter(|milliseconds| *milliseconds > 0)
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -4288,6 +4301,17 @@ mod tests {
 
     fn lifecycle_test_deadline() -> Instant {
         Instant::now() + LIFECYCLE_READBACK_RESERVE + Duration::from_secs(5)
+    }
+
+    #[test]
+    fn unarchive_request_budget_reserves_reconciliation_after_a_stalled_post() {
+        // The connector performs exactly three provider requests: baseline
+        // GET, one POST, and independent readback GET.  A 30-second run-once
+        // deadline therefore gives each request at most 8.333s and leaves a
+        // dedicated 5-second tail; a full-call timeout would not prove this.
+        assert_eq!(unarchive_request_timeout_ms(30_000), Some(8_333));
+        assert!(unarchive_request_timeout_ms(5_000).is_none());
+        assert!(unarchive_request_timeout_ms(4_999).is_none());
     }
 
     #[test]

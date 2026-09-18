@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use fcp_manifest::HostEgressContext;
@@ -22,6 +22,22 @@ use sha2::{Digest, Sha256};
 use tracing::{info, instrument};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
+
+fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
+    let Some(value) = std::env::var_os(HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+    let milliseconds = value
+        .parse::<u64>()
+        .ok()
+        .filter(|milliseconds| *milliseconds > 0)
+        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+    Ok(Some(Duration::from_millis(milliseconds)))
+}
 
 use crate::{
     client::{
@@ -458,12 +474,21 @@ impl N8nConnector {
     /// Returns one static redaction-safe error when host-launch transport
     /// variables are incomplete, conflicting, invalid, or unsupported.
     pub fn try_new() -> N8nResult<Self> {
-        let runtime_config = ConnectorRuntimeConfig::default()
-            .with_request_timeout(std::time::Duration::from_secs(30))
-            .with_host_egress_from_env()
-            .map_err(|_| {
-                N8nError::InvalidInput("invalid host egress launch configuration".into())
-            })?;
+        let unarchive_timeout = host_unarchive_request_timeout()?;
+        let mut runtime_config =
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30));
+        if let Some(timeout) = unarchive_timeout {
+            // The host bridge derives this per-request budget from the
+            // absolute run-once deadline and reserves a bounded tail for a
+            // mandatory readback. Applying it to both direct and mediated
+            // egress makes a stalled POST unable to consume that budget.
+            runtime_config = runtime_config
+                .with_request_timeout(timeout)
+                .with_host_egress_proxy_request_timeout(timeout);
+        }
+        let runtime_config = runtime_config.with_host_egress_from_env().map_err(|_| {
+            N8nError::InvalidInput("invalid host egress launch configuration".into())
+        })?;
         Ok(Self::new_with_runtime_config(runtime_config))
     }
 
@@ -1543,27 +1568,38 @@ impl N8nConnector {
             &baseline,
         )?;
 
-        let provider_workflow = client
-            .unarchive_workflow(&typed.id, context.clone())
-            .await
-            .map_err(classify_lifecycle_attempt_error)?;
-        if provider_workflow.id != typed.id {
-            return Err(N8nError::UnknownOutcome);
-        }
-        let provider_state =
-            normalize_workflow_state(provider_workflow).map_err(|_| N8nError::UnknownOutcome)?;
+        // Once the exact POST has been entered, every outcome is potentially
+        // ambiguous.  In particular, a timeout, HTTP error, malformed body,
+        // provider-id mismatch, or normalization failure may happen after n8n
+        // accepted the write.  Keep the provider result only as an advisory;
+        // the independent GET below is mandatory and is never a second POST.
+        let provider_state = match client.unarchive_workflow(&typed.id, context.clone()).await {
+            Ok(provider_workflow) if provider_workflow.id == typed.id => {
+                normalize_workflow_state(provider_workflow).ok()
+            }
+            Ok(_) => None,
+            Err(error @ N8nError::InvalidInput(_)) => {
+                // These errors are raised before the request is built (for
+                // example, a missing trusted egress configuration), so they
+                // remain deterministic zero-write failures.
+                return Err(error);
+            }
+            Err(error @ N8nError::PreconditionFailed(_))
+            | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+            Err(_) => None,
+        };
 
         let readback_workflow = client
             .get_workflow_typed(&typed.id, context)
             .await
             .map_err(|_| N8nError::UnknownOutcome)?;
         if readback_workflow.id != typed.id {
-            return Err(N8nError::ReadbackMismatch);
+            return Err(N8nError::UnknownOutcome);
         }
         let readback =
             normalize_workflow_state(readback_workflow).map_err(|_| N8nError::UnknownOutcome)?;
 
-        verify_workflow_unarchive_readback(&baseline, &provider_state, &readback)?;
+        verify_workflow_unarchive_readback(&baseline, provider_state.as_ref(), &readback)?;
 
         Ok(json!({
             "status": "verified",
@@ -3573,20 +3609,22 @@ fn verify_workflow_lifecycle_readback(
 
 fn verify_workflow_unarchive_readback(
     baseline: &WorkflowStateView,
-    provider: &WorkflowStateView,
+    provider: Option<&WorkflowStateView>,
     readback: &WorkflowStateView,
 ) -> N8nResult<()> {
-    let provider_preserved = provider.id == baseline.id
-        && provider.name == baseline.name
-        && provider.project_id == baseline.project_id
-        && provider.folder_id == baseline.folder_id
-        && provider.version_id == baseline.version_id
-        && provider.active == baseline.active
-        && provider.active_version_id == baseline.active_version_id
-        && provider.draft == baseline.draft
-        && provider.published == baseline.published;
-    if provider.is_archived || !provider_preserved {
-        return Err(N8nError::UnknownOutcome);
+    if let Some(provider) = provider {
+        let provider_preserved = provider.id == baseline.id
+            && provider.name == baseline.name
+            && provider.project_id == baseline.project_id
+            && provider.folder_id == baseline.folder_id
+            && provider.version_id == baseline.version_id
+            && provider.active == baseline.active
+            && provider.active_version_id == baseline.active_version_id
+            && provider.draft == baseline.draft
+            && provider.published == baseline.published;
+        if provider.is_archived || !provider_preserved {
+            return Err(N8nError::UnknownOutcome);
+        }
     }
 
     let readback_preserved = readback.id == baseline.id
@@ -3599,7 +3637,7 @@ fn verify_workflow_unarchive_readback(
         && readback.draft == baseline.draft
         && readback.published == baseline.published;
     if readback.is_archived || !readback_preserved {
-        return Err(N8nError::ReadbackMismatch);
+        return Err(N8nError::UnknownOutcome);
     }
     Ok(())
 }

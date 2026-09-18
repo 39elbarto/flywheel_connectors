@@ -1523,7 +1523,7 @@ max_response_bytes = 1048576
 [provides.operations."n8n.workflows.lifecycle".ai_hints]
 when_to_use = "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests."
 common_mistakes = [
-    "Restore, activate, deactivate, version, execution, and credential operations are not part of this packet; archive is a separate mediated official-MCP operation.",
+    "Version restore (restore_workflow_version), activate, deactivate, execution, and credential operations are not part of this packet; archive and unarchive are separate operations with their own provider contracts.",
     "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.",
     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.",
     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.",
@@ -1815,7 +1815,7 @@ common_mistakes = [
     "The archive path rejects active or already archived baselines to avoid incidental deactivation; it performs no REST archive fallback.",
     "The owner policy must carry an exact archive_workflow_schema input/output digest pair equal to the approved_tools entry; missing or mismatched binding fails before the side-effect call.",
     "One archive_workflow MCP call is followed by an independent REST GET; timeout, disconnect, conflict, malformed response, or readback mismatch is unknown and never retried automatically.",
-    "Restore/unarchive has no proven approved route and remains fail-closed/out of scope.",
+    "Unarchive is a separate typed REST operation with its own archived precondition and approval; it is not an archive REST fallback and never uses a generic REST or MCP fallback.",
 ]
 examples = ["{\"id\":\"1001\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000004\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
 related = ["n8n.workflows.get", "n8n.workflows.lifecycle"]
@@ -1932,8 +1932,9 @@ max_response_bytes = 1048576
 when_to_use = "Use only with an exact workflow ID, UUID idempotency key, full current archived precondition, current-chat approval, and upstream workflow:delete scope; preserve the draft, published, version, and active state."
 common_mistakes = [
     "The precondition must be fresh and isArchived=true; stale or non-archived state is rejected before the provider POST.",
-    "Only the exact no-body POST unarchive route and independent GET readback are used; publish, activate, archive, delete, MCP, generic REST fallback, and version restore remain out of scope.",
-    "Timeout, disconnect, conflict, server error, malformed response, or readback mismatch is unknown and is never retried automatically.",
+    "Only the exact no-body POST unarchive route and independent GET readback are used; publish, activate, archive, delete, MCP, generic REST fallback, and restore_workflow_version remain separate or out of scope.",
+    "The host run-once seam propagates a bounded per-request budget for baseline GET, one POST, and one independent GET, reserving reconciliation time so a stalled POST cannot consume the readback opportunity.",
+    "Any POST result that could have started the write (timeout, disconnect, HTTP error, malformed/advisory response, provider ID mismatch, or normalization error) gets exactly one GET; mismatch/readback failure is unknown and is never retried automatically.",
 ]
 examples = ['{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000007","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":true,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}']
 related = ["n8n.workflows.get", "n8n.workflows.archive", "n8n.workflows.lifecycle"]

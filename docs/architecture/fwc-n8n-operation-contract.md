@@ -583,8 +583,19 @@ redaction-safe diagnostic label in the error envelope; that label is
 classification only and never contains provider text, payload, headers,
 credentials, or a retry instruction. Uncertain or mismatched readback is never
 retried automatically.
+The typed REST `n8n.workflows.unarchive` path is separate from
+`restore_workflow_version`: it is the exact no-body
+`POST /api/v1/workflows/{workflowId}/unarchive` followed by one independent
+`GET /workflows/{id}`. Its host/run-once child receives a propagated
+per-request timeout derived from the absolute envelope deadline, reserving a
+bounded reconciliation tail across the baseline GET, one POST, and final GET.
+Every POST outcome that could have started the write (including timeout,
+disconnect, HTTP error, malformed/advisory response, provider identity or
+normalization failure) therefore reaches exactly one GET; readback drift or
+failure is terminal `unknown_outcome` with no retry.
+
 Activation,
-restore/unarchive, versions, execution, credential mutation, and permanent
+restore_workflow_version, versions, execution, credential mutation, and permanent
 deletion remain outside this packet; no legacy route is guessed. The bounded
 `n8n.workflows.archive` operation separately maps only to the documented
 official MCP `archive_workflow` tool, requires an inactive/unarchived baseline,
@@ -973,7 +984,7 @@ separate:
 - **Future/unimplemented execution paths:** `n8n.runtime.status`,
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
   without a corresponding host/connector dispatch remain future or
-  unimplemented execution paths. `restore/unarchive`, `versions`, credential
+  unimplemented execution paths. `restore_workflow_version`, `versions`, credential
   mutation, permanent/general deletion, and the provider activation path remain
   fail-closed/non-goals.
 
@@ -984,7 +995,7 @@ Hetzner, with disposable workflows removed after exact DELETE/404 readback.
 The typed official-MCP lifecycle path is not yet live-accepted: one exact EEC
 webhook publish attempt returned `unknown_outcome`, the independent REST
 readback remained inactive, and the contract correctly performed no retry.
-This does not authorize REST lifecycle/archive fallback, restore/unarchive, or
+This does not authorize REST lifecycle/archive fallback, restore_workflow_version, or
 activation/execution operations. Archive remains policy- and tools/list-gated;
 no live archive acceptance is claimed here.
 

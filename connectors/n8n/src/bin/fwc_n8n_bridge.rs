@@ -364,6 +364,16 @@ fn process_spec(
         OsString::from("FCP_HOST_LIFECYCLE_STATE_FILE"),
         OsString::new(),
     );
+    if envelope.operation == super::HostRunOnceOperation::WorkflowsUnarchive {
+        if let Some(deadline_ms) = envelope.deadline_ms {
+            let request_timeout_ms = super::unarchive_request_timeout_ms(deadline_ms)
+                .ok_or_else(|| BridgeError::new(BridgeErrorCode::Timeout))?;
+            fixed_env.insert(
+                OsString::from("FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS"),
+                OsString::from(request_timeout_ms.to_string()),
+            );
+        }
+    }
     if official_mcp {
         fixed_env.insert(
             OsString::from(SUPERVISED_OPERATION_ENV),
@@ -2234,6 +2244,29 @@ mod tests {
                 .fixed_env
                 .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE")),
             Some(&OsString::from("/etc/fwc-n8n/approval-public-key"))
+        );
+
+        let unarchive = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsUnarchive,
+                Value::Null,
+            ),
+        )
+        .expect("workflow unarchive write spec");
+        assert_eq!(
+            unarchive
+                .fixed_env
+                .get(&OsString::from("FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS")),
+            Some(&OsString::from("8333")),
+            "the child must receive a propagated per-request budget, not one full-call timeout"
+        );
+        assert_eq!(
+            unarchive
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(WORKFLOWS_UNARCHIVE_OWNER_ADMISSION))
         );
 
         let lifecycle = process_spec(

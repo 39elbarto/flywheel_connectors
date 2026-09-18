@@ -4805,7 +4805,95 @@ async fn workflows_unarchive_provider_conflict_is_unknown_without_retry() {
         .await
         .expect_err("provider conflict must be unknown");
     assert!(error.to_string().contains("unknown"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "baseline GET, one POST even on conflict, and one reconciliation GET"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_malformed_post_response_still_reconciles_once() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Malformed archived workflow", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"unexpected": true})))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-malformed",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000020",
+            "precondition": {
+                "versionId": "draft-v1", "activeVersionId": null,
+                "active": false, "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect_err("malformed POST response must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "malformed POST response still gets exactly one reconciliation GET"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_provider_id_mismatch_still_reconciles_once() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Mismatched archived workflow", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    let mut wrong_id = baseline.clone();
+    wrong_id["id"] = json!("9999");
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wrong_id))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-id-mismatch",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000021",
+            "precondition": {
+                "versionId": "draft-v1", "activeVersionId": null,
+                "active": false, "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect_err("provider ID mismatch must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[fcp_async_core::runtime::test]
@@ -4856,7 +4944,11 @@ async fn workflows_unarchive_timeout_is_unknown_without_retry() {
         .await
         .expect_err("timeout must be unknown");
     assert!(error.to_string().contains("unknown"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "a timed-out POST still leaves one independent reconciliation GET"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -4902,7 +4994,7 @@ async fn workflows_unarchive_readback_mismatch_does_not_repeat_write() {
     let error = invoke(&c, "n8n.workflows.unarchive", input)
         .await
         .expect_err("readback mismatch must fail");
-    assert!(error.to_string().contains("readback"));
+    assert!(error.to_string().contains("unknown"));
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 

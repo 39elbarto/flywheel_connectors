@@ -522,7 +522,6 @@ for server in ("eec", "hetzner"):
     unarchive_network["max_response_bytes"] = 1048576
     common["operation_network_constraints"][unarchive_operation] = dict(unarchive_network)
     for bounded_operation in (
-        "n8n.workflows.lifecycle",
         "n8n.workflows.delete_disposable",
         "n8n.workflows.unarchive",
     ):

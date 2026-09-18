@@ -2261,6 +2261,7 @@ fn validate_server_id(server_id: &str) -> FcpResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_prelude::ExecutionScope;
 
     fn strict_mcp_bridge_manifest() -> Result<ConnectorManifest, String> {
         ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
@@ -2296,6 +2297,82 @@ mod tests {
         ] {
             assert!(host_request_attribution(&value).is_err());
         }
+    }
+
+    #[test]
+    fn typed_approval_expiry_is_checked_at_bridge_time_boundaries() {
+        let target = ApprovalTarget {
+            resource_uri: "fwc-mcp-bridge://eec/tools/archive%5Fworkflow".to_owned(),
+            normalized_input: json!({
+                "server_id": "eec",
+                "resource_uri": "fwc-mcp-bridge://eec/tools/archive%5Fworkflow",
+                "operation": N8N_APPROVAL_WRAPPER_OPERATION,
+                "provider": "mcp",
+                "payload_sha256": "07".repeat(32),
+                "tool_name": "archive_workflow",
+                "parent_binding_sha256": "11".repeat(32),
+                "typed_plan_sha256": format!("blake3-256:{}", "22".repeat(32)),
+            }),
+            payload_digest: [7; 32],
+        };
+        let constraints = target
+            .normalized_input
+            .as_object()
+            .expect("normalized approval target")
+            .iter()
+            .map(|(field, expected)| InputConstraint {
+                pointer: format!("/{field}"),
+                expected: expected.clone(),
+            })
+            .collect();
+        let approval = ApprovalToken::approved(
+            "archive-approval",
+            1_000,
+            2_000,
+            "operator:test",
+            ApprovalScope::Execution(ExecutionScope {
+                connector_id: "fcp.mcp-bridge".to_owned(),
+                method_pattern: N8N_APPROVAL_WRAPPER_OPERATION.to_owned(),
+                request_object_id: None,
+                input_hash: Some([7; 32]),
+                input_constraints: constraints,
+            }),
+            ZoneId::work(),
+            Some(vec![1]),
+        );
+        for (now_ms, expected) in [
+            (999, false),
+            (1_000, true),
+            (1_999, true),
+            (2_000, false),
+            (2_001, false),
+        ] {
+            assert_eq!(
+                is_matching_execution_approval(
+                    &approval,
+                    N8N_APPROVAL_WRAPPER_OPERATION,
+                    Some(&ZoneId::work()),
+                    &target,
+                    now_ms,
+                ),
+                expected,
+                "unexpected approval result at {now_ms} ms",
+            );
+        }
+        assert!(is_matching_execution_approval(
+            &approval,
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            Some(&ZoneId::work()),
+            &target,
+            1_999,
+        ));
+        assert!(!is_matching_execution_approval(
+            &approval,
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            Some(&ZoneId::work()),
+            &target,
+            2_000,
+        ));
     }
 
     #[test]

@@ -976,7 +976,19 @@ fn decode_rpc_response(
             message: "MCP JSON-RPC provider error".into(),
         });
     }
-    Ok(parsed.result.unwrap_or(serde_json::Value::Null))
+    let result = parsed.result.unwrap_or(serde_json::Value::Null);
+    if result
+        .as_object()
+        .and_then(|object| object.get("isError"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(McpBridgeError::McpError {
+            code: -32000,
+            message: "MCP tool returned an error result".into(),
+        });
+    }
+    Ok(result)
 }
 
 fn normalize_content_type(value: &str) -> String {
@@ -1564,6 +1576,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sse["ok"], true);
+    }
+
+    #[test]
+    fn response_parser_rejects_mcp_tool_error_result() {
+        let error = decode_rpc_response(
+            "application/json",
+            br#"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[{"type":"text","text":"provider rejected the tool call"}]}}"#,
+            1,
+        )
+        .expect_err("an MCP tool error result must not be returned as success data");
+        assert!(matches!(
+            error,
+            McpBridgeError::McpError {
+                code: -32000,
+                message
+            } if message == "MCP tool returned an error result"
+        ));
     }
 
     #[test]

@@ -139,12 +139,22 @@ fn previous_hetzner_lifecycle_schema_digests(
 }
 const EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const EEC_EXECUTE_INPUT: &str =
-    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+    "sha256:5ed5467d3493c432303df97ce6503ef4193477dbe0e81d5b51cb6c8c85fc3b1b";
 const EEC_EXECUTE_OUTPUT: &str =
-    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+    "sha256:083570a3e4c98a332914f2c029244add6cfd77e01323385acc84455c7dc503a7";
 const HETZNER_EXECUTE_INPUT: &str =
-    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+    "sha256:5ed5467d3493c432303df97ce6503ef4193477dbe0e81d5b51cb6c8c85fc3b1b";
 const HETZNER_EXECUTE_OUTPUT: &str =
+    "sha256:083570a3e4c98a332914f2c029244add6cfd77e01323385acc84455c7dc503a7";
+// Exact execute pins from the signed predecessor. They are accepted only
+// while validating an already-installed rollback target, never for staging.
+const PREVIOUS_EEC_EXECUTE_INPUT: &str =
+    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+const PREVIOUS_EEC_EXECUTE_OUTPUT: &str =
+    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+const PREVIOUS_HETZNER_EXECUTE_INPUT: &str =
+    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+const PREVIOUS_HETZNER_EXECUTE_OUTPUT: &str =
     "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
@@ -584,6 +594,7 @@ pub enum Promotion {
 enum CurrentValidationMode {
     SignedProvisionReceipt,
     SignedProvisionReceiptCurrentLegacyLimits,
+    SignedProvisionReceiptPreviousExecute,
     SignedProvisionReceiptPreviousLifecycle,
     SignedProvisionReceiptPreviousCommonInventory,
     SignedProvisionReceiptLegacyCommonInventory,
@@ -1503,6 +1514,13 @@ fn validate_stage_root_binding(
 pub(crate) fn validate_binding_shape(
     bindings: &[OfficialMcpBinding],
 ) -> Result<(), ProvisionError> {
+    validate_binding_shape_with_predecessor(bindings, false)
+}
+
+fn validate_binding_shape_with_predecessor(
+    bindings: &[OfficialMcpBinding],
+    allow_predecessor_execute: bool,
+) -> Result<(), ProvisionError> {
     if bindings.len() != 2 {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
@@ -1515,10 +1533,21 @@ pub(crate) fn validate_binding_shape(
             ServerId::Eec => (EEC_EXECUTE_INPUT, EEC_EXECUTE_OUTPUT),
             ServerId::Hetzner => (HETZNER_EXECUTE_INPUT, HETZNER_EXECUTE_OUTPUT),
         };
+        let predecessor_execute = match binding.server {
+            ServerId::Eec => (PREVIOUS_EEC_EXECUTE_INPUT, PREVIOUS_EEC_EXECUTE_OUTPUT),
+            ServerId::Hetzner => (
+                PREVIOUS_HETZNER_EXECUTE_INPUT,
+                PREVIOUS_HETZNER_EXECUTE_OUTPUT,
+            ),
+        };
+        let execute_matches_current = binding.execute_input_schema_digest == expected_execute_input
+            && binding.execute_output_schema_digest == expected_execute_output;
+        let execute_matches_predecessor = allow_predecessor_execute
+            && binding.execute_input_schema_digest == predecessor_execute.0
+            && binding.execute_output_schema_digest == predecessor_execute.1;
         if !is_sha256_digest(&binding.archive_input_schema_digest)
             || !is_sha256_digest(&binding.archive_output_schema_digest)
-            || binding.execute_input_schema_digest != expected_execute_input
-            || binding.execute_output_schema_digest != expected_execute_output
+            || !execute_matches_current && !execute_matches_predecessor
         {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
@@ -1587,6 +1616,33 @@ fn validate_release_tree_with_schema_mode(
     lifecycle_schema_mode: LifecycleSchemaMode,
     common_inventory_schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
+    validate_release_tree_with_schema_mode_and_binding_mode(
+        root,
+        release_id,
+        git_revision,
+        bindings,
+        expected_owner,
+        inventory_release_root,
+        owner_verification,
+        lifecycle_schema_mode,
+        common_inventory_schema_mode,
+        false,
+    )
+}
+
+#[cfg(unix)]
+fn validate_release_tree_with_schema_mode_and_binding_mode(
+    root: &Path,
+    release_id: &str,
+    git_revision: &str,
+    bindings: &[OfficialMcpBinding],
+    expected_owner: u32,
+    inventory_release_root: &Path,
+    owner_verification: &OwnerVerificationConfig,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+    common_inventory_schema_mode: CommonInventorySchemaMode,
+    allow_predecessor_execute: bool,
+) -> Result<(), ProvisionError> {
     validate_unsigned_release_tree_with_schema_mode(
         root,
         release_id,
@@ -1603,7 +1659,13 @@ fn validate_release_tree_with_schema_mode(
         MAX_PROVISION_RECEIPT_BYTES,
         ProvisionErrorCode::Receipt,
     )?;
-    validate_provision_receipt(&provision_receipt, release_id, git_revision, bindings)?;
+    validate_provision_receipt_with_binding_mode(
+        &provision_receipt,
+        release_id,
+        git_revision,
+        bindings,
+        allow_predecessor_execute,
+    )?;
     for artifact in &provision_receipt.artifacts {
         let path = root.join(&artifact.path);
         validate_file(
@@ -1617,7 +1679,12 @@ fn validate_release_tree_with_schema_mode(
         }
     }
     let receipt_digest = hash_file(&root.join(RECEIPT_FILE))?;
-    verify_release_signature(&provision_receipt, &receipt_digest, owner_verification)?;
+    verify_release_signature_with_binding_mode(
+        &provision_receipt,
+        &receipt_digest,
+        owner_verification,
+        allow_predecessor_execute,
+    )?;
     Ok(())
 }
 
@@ -1844,7 +1911,16 @@ pub(crate) fn release_signing_payload(
     receipt_digest: &str,
     provision_digest: &str,
 ) -> Result<Vec<u8>, ProvisionError> {
-    validate_binding_shape(&receipt.bindings)?;
+    release_signing_payload_with_binding_mode(receipt, receipt_digest, provision_digest, false)
+}
+
+fn release_signing_payload_with_binding_mode(
+    receipt: &ProvisionReceipt,
+    receipt_digest: &str,
+    provision_digest: &str,
+    allow_predecessor_execute: bool,
+) -> Result<Vec<u8>, ProvisionError> {
+    validate_binding_shape_with_predecessor(&receipt.bindings, allow_predecessor_execute)?;
     let mut bindings = receipt.bindings.clone();
     bindings.sort_by_key(|binding| binding.server);
     let mut payload = Vec::from(b"FCP-N8N-RELEASE-SIGNING-V1\0".as_slice());
@@ -1890,6 +1966,15 @@ pub(crate) fn verify_release_signature(
     receipt_digest: &str,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
+    verify_release_signature_with_binding_mode(receipt, receipt_digest, owner_verification, false)
+}
+
+fn verify_release_signature_with_binding_mode(
+    receipt: &ProvisionReceipt,
+    receipt_digest: &str,
+    owner_verification: &OwnerVerificationConfig,
+    allow_predecessor_execute: bool,
+) -> Result<(), ProvisionError> {
     if receipt.signature.algorithm != "ed25519" {
         return Err(ProvisionError::new(ProvisionErrorCode::Signature));
     }
@@ -1910,7 +1995,12 @@ pub(crate) fn verify_release_signature(
     let signature_bytes = decode_hex::<SIGNATURE_SIZE>(&receipt.signature.signature)?;
     let unsigned = unsigned_provision_receipt_bytes(receipt)?;
     let provision_digest = blake3::hash(&unsigned).to_hex().to_string();
-    let payload = release_signing_payload(receipt, receipt_digest, &provision_digest)?;
+    let payload = release_signing_payload_with_binding_mode(
+        receipt,
+        receipt_digest,
+        &provision_digest,
+        allow_predecessor_execute,
+    )?;
     let signature = Ed25519Signature::from_bytes(&signature_bytes);
     verifying_key
         .verify_with_context(RELEASE_SIGNATURE_CONTEXT, &payload, &signature)
@@ -1945,6 +2035,16 @@ pub(crate) fn validate_provision_receipt(
     git_revision: &str,
     bindings: &[OfficialMcpBinding],
 ) -> Result<(), ProvisionError> {
+    validate_provision_receipt_with_binding_mode(receipt, release_id, git_revision, bindings, false)
+}
+
+fn validate_provision_receipt_with_binding_mode(
+    receipt: &ProvisionReceipt,
+    release_id: &str,
+    git_revision: &str,
+    bindings: &[OfficialMcpBinding],
+    allow_predecessor_execute: bool,
+) -> Result<(), ProvisionError> {
     if receipt.schema != PROVISION_RECEIPT_SCHEMA
         || receipt.release_id != release_id
         || receipt.git_revision != git_revision
@@ -1952,7 +2052,7 @@ pub(crate) fn validate_provision_receipt(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Receipt));
     }
-    if !same_bindings(&receipt.bindings, bindings)? {
+    if !same_bindings_with_binding_mode(&receipt.bindings, bindings, allow_predecessor_execute)? {
         return Err(ProvisionError::new(ProvisionErrorCode::Receipt));
     }
     let mut expected = ARTIFACTS
@@ -1977,8 +2077,16 @@ fn same_bindings(
     left: &[OfficialMcpBinding],
     right: &[OfficialMcpBinding],
 ) -> Result<bool, ProvisionError> {
-    validate_binding_shape(left)?;
-    validate_binding_shape(right)?;
+    same_bindings_with_binding_mode(left, right, false)
+}
+
+fn same_bindings_with_binding_mode(
+    left: &[OfficialMcpBinding],
+    right: &[OfficialMcpBinding],
+    allow_predecessor_execute: bool,
+) -> Result<bool, ProvisionError> {
+    validate_binding_shape_with_predecessor(left, allow_predecessor_execute)?;
+    validate_binding_shape_with_predecessor(right, allow_predecessor_execute)?;
     let canonical = |bindings: &[OfficialMcpBinding]| {
         bindings
             .iter()
@@ -2064,11 +2172,15 @@ fn validate_common_inventory(
     let expected_bounded_network =
         expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1048576);
     if expected_operations.iter().any(|operation| {
-        let expected = if matches!(schema_mode, CommonInventorySchemaMode::Current)
-            && matches!(
-                *operation,
-                "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive"
-            ) {
+        let expected = if matches!(
+            schema_mode,
+            CommonInventorySchemaMode::Current
+                | CommonInventorySchemaMode::Previous
+                | CommonInventorySchemaMode::LegacyDisposable
+        ) && matches!(
+            *operation,
+            "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive"
+        ) {
             &expected_bounded_network
         } else {
             &expected_network
@@ -2658,6 +2770,9 @@ where
             Some(CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits) => {
                 CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
             }
+            Some(CurrentValidationMode::SignedProvisionReceiptPreviousExecute) => {
+                CurrentValidationMode::SignedProvisionReceiptPreviousExecute
+            }
             Some(CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle) => {
                 CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
             }
@@ -2715,9 +2830,23 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
             let validate_signed_tree = |lifecycle_schema_mode, common_inventory_schema_mode| {
-                validate_release_tree_with_schema_mode(
+                let allow_predecessor_execute = !matches!(
+                    (lifecycle_schema_mode, common_inventory_schema_mode),
+                    (
+                        LifecycleSchemaMode::CurrentPerServer,
+                        CommonInventorySchemaMode::Current
+                            | CommonInventorySchemaMode::CurrentLegacyLimits
+                    )
+                );
+                if !allow_predecessor_execute
+                    && validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)
+                        .is_ok()
+                    && validate_binding_shape(&provision_receipt.bindings).is_err()
+                {
+                    return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+                }
+                validate_release_tree_with_schema_mode_and_binding_mode(
                     &current,
                     release_id,
                     &provenance.git_revision,
@@ -2727,6 +2856,7 @@ where
                     owner_verification,
                     lifecycle_schema_mode,
                     common_inventory_schema_mode,
+                    allow_predecessor_execute,
                 )
             };
             match validate_signed_tree(
@@ -2745,6 +2875,27 @@ where
                     return Ok((
                         current,
                         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
+                    ));
+                }
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_release_tree_with_schema_mode_and_binding_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Current,
+                true,
+            ) {
+                Ok(()) => {
+                    return Ok((
+                        current,
+                        CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
                     ));
                 }
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
@@ -2838,6 +2989,34 @@ where
                 CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
             ));
         }
+        CurrentValidationMode::SignedProvisionReceiptPreviousExecute => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Current,
+                true,
+            )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
+            ));
+        }
         CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => {
             let provenance = provenance
                 .as_ref()
@@ -2848,8 +3027,8 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2859,6 +3038,7 @@ where
                 owner_verification,
                 LifecycleSchemaMode::PreviousPerServer,
                 CommonInventorySchemaMode::Current,
+                true,
             )?;
             return Ok((
                 current,
@@ -2875,8 +3055,8 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2886,6 +3066,7 @@ where
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Previous,
+                true,
             )?;
             return Ok((
                 current,
@@ -2902,8 +3083,8 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2913,6 +3094,7 @@ where
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Legacy,
+                true,
             )?;
             return Ok((
                 current,
@@ -2929,8 +3111,8 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2940,6 +3122,7 @@ where
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::LegacyDisposable,
+                true,
             )?;
             return Ok((
                 current,
@@ -2956,8 +3139,8 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
+            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
+            validate_release_tree_with_schema_mode_and_binding_mode(
                 &current,
                 release_id,
                 &provenance.git_revision,
@@ -2967,6 +3150,7 @@ where
                 owner_verification,
                 LifecycleSchemaMode::LegacyCommon,
                 CommonInventorySchemaMode::Legacy,
+                true,
             )?;
             return Ok((
                 current,
@@ -3019,7 +3203,8 @@ fn validate_release_target(
         MAX_PROVISION_RECEIPT_BYTES,
         ProvisionErrorCode::Receipt,
     )?;
-    validate_binding_shape(&provision_receipt.bindings)?;
+    let current_binding_shape = validate_binding_shape(&provision_receipt.bindings).is_ok();
+    validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
     match validate_release_tree(
         target,
         release_id,
@@ -3030,8 +3215,27 @@ fn validate_release_target(
         owner_verification,
     ) {
         Ok(()) => Ok(()),
-        Err(error) if error.code == ProvisionErrorCode::Policy => {
-            match validate_release_tree_with_schema_mode(
+        Err(error)
+            if error.code == ProvisionErrorCode::Policy
+                || (!current_binding_shape && error.code == ProvisionErrorCode::Receipt) =>
+        {
+            match validate_release_tree_with_schema_mode_and_binding_mode(
+                target,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                target,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Current,
+                true,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_release_tree_with_schema_mode_and_binding_mode(
                 target,
                 release_id,
                 &provenance.git_revision,
@@ -3041,12 +3245,13 @@ fn validate_release_target(
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::CurrentLegacyLimits,
+                true,
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
                 Err(_) => {}
             }
-            match validate_release_tree_with_schema_mode(
+            match validate_release_tree_with_schema_mode_and_binding_mode(
                 target,
                 release_id,
                 &provenance.git_revision,
@@ -3056,12 +3261,13 @@ fn validate_release_target(
                 owner_verification,
                 LifecycleSchemaMode::PreviousPerServer,
                 CommonInventorySchemaMode::Current,
+                true,
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
                 Err(_) => {}
             }
-            match validate_release_tree_with_schema_mode(
+            match validate_release_tree_with_schema_mode_and_binding_mode(
                 target,
                 release_id,
                 &provenance.git_revision,
@@ -3071,12 +3277,13 @@ fn validate_release_target(
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Previous,
+                true,
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
                 Err(_) => {}
             }
-            match validate_release_tree_with_schema_mode(
+            match validate_release_tree_with_schema_mode_and_binding_mode(
                 target,
                 release_id,
                 &provenance.git_revision,
@@ -3086,10 +3293,11 @@ fn validate_release_target(
                 owner_verification,
                 LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Legacy,
+                true,
             ) {
                 Ok(()) => Ok(()),
                 Err(error) if error.code == ProvisionErrorCode::Policy => {
-                    match validate_release_tree_with_schema_mode(
+                    match validate_release_tree_with_schema_mode_and_binding_mode(
                         target,
                         release_id,
                         &provenance.git_revision,
@@ -3099,10 +3307,11 @@ fn validate_release_target(
                         owner_verification,
                         LifecycleSchemaMode::CurrentPerServer,
                         CommonInventorySchemaMode::LegacyDisposable,
+                        true,
                     ) {
                         Ok(()) => Ok(()),
                         Err(error) if error.code == ProvisionErrorCode::Policy => {
-                            validate_release_tree_with_schema_mode(
+                            validate_release_tree_with_schema_mode_and_binding_mode(
                                 target,
                                 release_id,
                                 &provenance.git_revision,
@@ -3112,6 +3321,7 @@ fn validate_release_target(
                                 owner_verification,
                                 LifecycleSchemaMode::LegacyCommon,
                                 CommonInventorySchemaMode::Legacy,
+                                true,
                             )
                         }
                         Err(error) => Err(error),
@@ -3835,6 +4045,19 @@ mod tests {
         }
 
         fn provision_receipt_for(&self, root: &Path, release_id: &str) -> Vec<u8> {
+            self.provision_receipt_for_with_execute(root, release_id, false)
+        }
+
+        fn predecessor_provision_receipt_for(&self, root: &Path, release_id: &str) -> Vec<u8> {
+            self.provision_receipt_for_with_execute(root, release_id, true)
+        }
+
+        fn provision_receipt_for_with_execute(
+            &self,
+            root: &Path,
+            release_id: &str,
+            predecessor_execute: bool,
+        ) -> Vec<u8> {
             let mut paths = ARTIFACTS.to_vec();
             paths.extend([RECEIPT_FILE, PROVENANCE_FILE]);
             let artifacts = paths
@@ -3853,6 +4076,19 @@ mod tests {
                 .as_str()
                 .expect("provenance revision")
                 .to_owned();
+            let (eec_execute_input, eec_execute_output) = if predecessor_execute {
+                (PREVIOUS_EEC_EXECUTE_INPUT, PREVIOUS_EEC_EXECUTE_OUTPUT)
+            } else {
+                (EEC_EXECUTE_INPUT, EEC_EXECUTE_OUTPUT)
+            };
+            let (hetzner_execute_input, hetzner_execute_output) = if predecessor_execute {
+                (
+                    PREVIOUS_HETZNER_EXECUTE_INPUT,
+                    PREVIOUS_HETZNER_EXECUTE_OUTPUT,
+                )
+            } else {
+                (HETZNER_EXECUTE_INPUT, HETZNER_EXECUTE_OUTPUT)
+            };
             let bindings = vec![
                 OfficialMcpBinding {
                     server: ServerId::Eec,
@@ -3862,8 +4098,8 @@ mod tests {
                     archive_output_schema_digest:
                         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                             .to_owned(),
-                    execute_input_schema_digest: EEC_EXECUTE_INPUT.to_owned(),
-                    execute_output_schema_digest: EEC_EXECUTE_OUTPUT.to_owned(),
+                    execute_input_schema_digest: eec_execute_input.to_owned(),
+                    execute_output_schema_digest: eec_execute_output.to_owned(),
                 },
                 OfficialMcpBinding {
                     server: ServerId::Hetzner,
@@ -3873,8 +4109,8 @@ mod tests {
                     archive_output_schema_digest:
                         "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                             .to_owned(),
-                    execute_input_schema_digest: HETZNER_EXECUTE_INPUT.to_owned(),
-                    execute_output_schema_digest: HETZNER_EXECUTE_OUTPUT.to_owned(),
+                    execute_input_schema_digest: hetzner_execute_input.to_owned(),
+                    execute_output_schema_digest: hetzner_execute_output.to_owned(),
                 },
             ];
             let artifacts = artifacts
@@ -3896,9 +4132,13 @@ mod tests {
             let receipt_digest = hash_file(&root.join(RECEIPT_FILE)).expect("receipt digest");
             let unsigned = unsigned_provision_receipt_bytes(&signing_receipt).expect("unsigned");
             let provision_digest = blake3::hash(&unsigned).to_hex().to_string();
-            let payload =
-                release_signing_payload(&signing_receipt, &receipt_digest, &provision_digest)
-                    .expect("signing payload");
+            let payload = release_signing_payload_with_binding_mode(
+                &signing_receipt,
+                &receipt_digest,
+                &provision_digest,
+                predecessor_execute,
+            )
+            .expect("signing payload");
             let signature = test_signing_key()
                 .sign_with_context(RELEASE_SIGNATURE_CONTEXT, &payload)
                 .to_hex();
@@ -3937,7 +4177,7 @@ mod tests {
                 .expect("previous EEC receipt");
             fs::write(
                 root.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(root, release_id),
+                self.predecessor_provision_receipt_for(root, release_id),
             )
             .expect("previous EEC signed receipt");
         }
@@ -3995,7 +4235,7 @@ mod tests {
                 .expect("previous receipt");
             fs::write(
                 root.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(root, release_id),
+                self.predecessor_provision_receipt_for(root, release_id),
             )
             .expect("previous signed receipt");
         }
@@ -4042,6 +4282,7 @@ mod tests {
                 )
                 .expect("previous artifact mode");
             }
+            self.set_predecessor_execute_policy(&previous);
             fs::write(
                 previous.join(PROVENANCE_FILE),
                 serde_json::json!({
@@ -4060,7 +4301,7 @@ mod tests {
             if include_provision_receipt {
                 fs::write(
                     previous.join(PROVISION_RECEIPT_FILE),
-                    self.provision_receipt_for(&previous, "previous"),
+                    self.predecessor_provision_receipt_for(&previous, "previous"),
                 )
                 .expect("previous provision receipt");
             }
@@ -4071,6 +4312,46 @@ mod tests {
             for name in metadata_files {
                 fs::set_permissions(previous.join(name), fs::Permissions::from_mode(0o644))
                     .expect("previous metadata mode");
+            }
+        }
+
+        fn set_predecessor_execute_policy(&self, root: &Path) {
+            for (server, input, output) in [
+                (
+                    "eec",
+                    PREVIOUS_EEC_EXECUTE_INPUT,
+                    PREVIOUS_EEC_EXECUTE_OUTPUT,
+                ),
+                (
+                    "hetzner",
+                    PREVIOUS_HETZNER_EXECUTE_INPUT,
+                    PREVIOUS_HETZNER_EXECUTE_OUTPUT,
+                ),
+            ] {
+                let path = root.join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(
+                    &fs::read(&path).expect("predecessor official MCP inventory"),
+                )
+                .expect("predecessor official MCP inventory JSON");
+                let policy = &mut value[0]["config"]["capability_policy"];
+                let execute = policy["approved_tools"]
+                    .as_array_mut()
+                    .expect("predecessor approved tools")
+                    .iter_mut()
+                    .find(|tool| {
+                        tool.get("name").and_then(Value::as_str) == Some("execute_workflow")
+                    })
+                    .expect("predecessor execute tool");
+                execute["input_schema_digest"] = json!(input);
+                execute["output_schema_digest"] = json!(output);
+                policy["execute_workflow_schema"]["status"] = json!(EXECUTE_POLICY_STATUS);
+                policy["execute_workflow_schema"]["input_schema_digest"] = json!(input);
+                policy["execute_workflow_schema"]["output_schema_digest"] = json!(output);
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&value).expect("predecessor inventory JSON"),
+                )
+                .expect("write predecessor execute policy");
             }
         }
 
@@ -4106,11 +4387,14 @@ mod tests {
             self.set_legacy_common_operations(root);
             fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
                 .expect("rewrite legacy fixture receipt");
-            fs::write(
-                root.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(root, release_id),
-            )
-            .expect("rewrite legacy fixture provision receipt");
+            let receipt = if root == self.releases.join("previous") {
+                self.set_predecessor_execute_policy(root);
+                self.predecessor_provision_receipt_for(root, release_id)
+            } else {
+                self.provision_receipt_for(root, release_id)
+            };
+            fs::write(root.join(PROVISION_RECEIPT_FILE), receipt)
+                .expect("rewrite legacy fixture provision receipt");
         }
 
         fn set_legacy_common_operations(&self, root: &Path) {
@@ -4160,7 +4444,7 @@ mod tests {
             .expect("rewrite mixed-schema fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(&previous, "previous"),
+                self.predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite mixed-schema fixture provision receipt");
         }
@@ -4175,7 +4459,7 @@ mod tests {
             .expect("rewrite pre-unarchive fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(&previous, "previous"),
+                self.predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-unarchive fixture provision receipt");
         }
@@ -4190,7 +4474,7 @@ mod tests {
             .expect("rewrite pre-diagnostics fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(&previous, "previous"),
+                self.predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-diagnostics fixture provision receipt");
         }
@@ -4214,7 +4498,7 @@ mod tests {
             .expect("previous provenance revision");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(&previous, "previous"),
+                self.predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("previous provision revision");
         }
@@ -4580,7 +4864,8 @@ mod tests {
         .expect("rewrite mixed schema receipt");
         fs::write(
             fixture.releases.join("previous/provision-receipt.json"),
-            fixture.provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+            fixture
+                .predecessor_provision_receipt_for(&fixture.releases.join("previous"), "previous"),
         )
         .expect("rewrite mixed schema provision receipt");
         assert!(fixture.request().validate().is_err());
@@ -4609,7 +4894,8 @@ mod tests {
         .expect("rewrite drifted receipt");
         fs::write(
             fixture.releases.join("previous/provision-receipt.json"),
-            fixture.provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+            fixture
+                .predecessor_provision_receipt_for(&fixture.releases.join("previous"), "previous"),
         )
         .expect("rewrite drifted provision receipt");
         assert_eq!(
@@ -4664,8 +4950,8 @@ mod tests {
                 archive_output_schema_digest:
                     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                         .to_owned(),
-                execute_input_schema_digest: EEC_EXECUTE_INPUT.to_owned(),
-                execute_output_schema_digest: EEC_EXECUTE_OUTPUT.to_owned(),
+                execute_input_schema_digest: PREVIOUS_EEC_EXECUTE_INPUT.to_owned(),
+                execute_output_schema_digest: PREVIOUS_EEC_EXECUTE_OUTPUT.to_owned(),
             },
             OfficialMcpBinding {
                 server: ServerId::Hetzner,
@@ -4675,8 +4961,8 @@ mod tests {
                 archive_output_schema_digest:
                     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                         .to_owned(),
-                execute_input_schema_digest: HETZNER_EXECUTE_INPUT.to_owned(),
-                execute_output_schema_digest: HETZNER_EXECUTE_OUTPUT.to_owned(),
+                execute_input_schema_digest: PREVIOUS_HETZNER_EXECUTE_INPUT.to_owned(),
+                execute_output_schema_digest: PREVIOUS_HETZNER_EXECUTE_OUTPUT.to_owned(),
             },
         ];
         validate_unsigned_release_tree(
@@ -4711,7 +4997,7 @@ mod tests {
             .expect("signed current");
         assert_eq!(
             plan.current_validation,
-            CurrentValidationMode::SignedProvisionReceipt
+            CurrentValidationMode::SignedProvisionReceiptPreviousExecute
         );
     }
 
@@ -4944,7 +5230,8 @@ mod tests {
     fn execute_schema_binding_is_signed_and_mismatch_fails_closed() {
         let fixture = Fixture::new();
         let mut request = fixture.request();
-        request.bindings[0].execute_output_schema_digest = HETZNER_EXECUTE_OUTPUT.to_owned();
+        request.bindings[0].execute_output_schema_digest =
+            PREVIOUS_HETZNER_EXECUTE_OUTPUT.to_owned();
         assert_eq!(
             request
                 .validate()

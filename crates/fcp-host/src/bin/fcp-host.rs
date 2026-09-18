@@ -35434,6 +35434,176 @@ done"#;
     }
 
     #[test]
+    fn n8n_official_mcp_archive_typed_approval_policy_contract() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let high_level = n8n_official_mcp_archive_test_input();
+        let high_level_input = high_level.input.clone();
+        let mut plan = build_n8n_official_mcp_run_once_plan(high_level, &config)
+            .expect("validated archive provider plan");
+        assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_ARCHIVE_TOOL);
+        assert_eq!(plan.input["arguments"], json!({"workflowId": "workflow-1"}));
+        assert_eq!(
+            plan.resource_uri,
+            "fwc-mcp-bridge://eec/tools/archive%5Fworkflow"
+        );
+
+        let key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let payload_hash = mcp_tools_call_payload_digest(&plan.input).expect("payload digest");
+        let now_ms = n8n_run_once_now_ms();
+        let parent_binding_hash = plan.parent_binding_hash.expect("archive parent binding");
+        let issue_request = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: high_level_input["id"]
+                .as_str()
+                .expect("workflow id")
+                .to_string(),
+            operation: N8nLifecycleOperation::Archive,
+            input: high_level_input.clone(),
+            official_mcp_tool: N8N_OFFICIAL_MCP_ARCHIVE_TOOL.to_string(),
+            official_mcp_resource_uri: plan.resource_uri.clone(),
+            official_mcp_payload_digest: format!("sha256:{}", hex::encode(payload_hash)),
+            parent_binding_sha256: hex::encode(parent_binding_hash),
+            expires_at_ms: now_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000),
+        };
+        let mut approval = build_unsigned_n8n_approval_token(&issue_request, now_ms)
+            .expect("production archive typed issuer token shape");
+        let typed = build_n8n_typed_approval_binding(
+            "n8n.workflows.archive",
+            &high_level_input,
+            &plan,
+            Some(&approval),
+        )
+        .expect("recomputed archive typed plan binding");
+        let constraints = official_mcp_approval_constraints_with_typed_plan(&plan, Some(&typed))
+            .expect("archive issuer contract constraints");
+        let pointers = constraints
+            .iter()
+            .map(|constraint| constraint.pointer.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(constraints.len(), 8);
+        assert_eq!(
+            pointers,
+            BTreeSet::from([
+                "/operation",
+                "/parent_binding_sha256",
+                "/payload_sha256",
+                "/provider",
+                "/resource_uri",
+                "/server_id",
+                "/tool_name",
+                "/typed_plan_sha256",
+            ])
+        );
+        let ApprovalScope::Execution(scope) = &approval.scope else {
+            panic!("archive issuer must produce execution approval");
+        };
+        assert_eq!(
+            serde_json::to_value(&scope.input_constraints).expect("issuer constraints JSON"),
+            serde_json::to_value(&constraints).expect("host constraints JSON")
+        );
+        approval.signature = Some(
+            key.sign(&approval_token_signing_bytes(&approval).expect("approval signing bytes"))
+                .to_bytes()
+                .to_vec(),
+        );
+        validate_external_n8n_approval(
+            Some(&approval),
+            "chat-archive-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &plan.zone_id,
+            payload_hash,
+            &constraints,
+            Some(&key.verifying_key()),
+        )
+        .expect("genuine signed archive approval");
+        let signed_approval = approval.clone();
+        plan.approval_token = Some(approval);
+        let (request, binding) = build_n8n_official_mcp_invoke_request(
+            plan,
+            test_capability_token(
+                &key,
+                "mcp.tools.write",
+                N8N_OFFICIAL_MCP_CALL_OPERATION,
+                ZoneId::work().as_str(),
+            ),
+            Some(&typed),
+        );
+        assert_eq!(request.approval_tokens.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&request.approval_tokens[0]).expect("request approval JSON"),
+            serde_json::to_value(&signed_approval).expect("issuer approval JSON")
+        );
+        let request_tags = &request
+            .context
+            .as_ref()
+            .expect("archive typed approval context")
+            .request_tags;
+        assert_eq!(
+            request_tags.get(N8N_TYPED_APPROVAL_PARENT_BINDING_TAG),
+            Some(&hex::encode(parent_binding_hash))
+        );
+        assert_eq!(
+            request_tags.get(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG),
+            Some(&typed.plan_digest)
+        );
+        let normalize = |request: &InvokeRequest, binding: &TrustedResourceBinding| {
+            n8n_official_mcp_policy_request(request, Some(binding), Some(&binding.resource_uri))
+        };
+        let evaluate = |request, input_hash| {
+            simulate_policy_decision(&PolicySimulationInput {
+                zone_policy: host_runtime_policy(ZoneId::work()),
+                invoke_request: request,
+                transport: TransportMode::Lan,
+                checkpoint_fresh: true,
+                revocation_fresh: true,
+                execution_approval_required: true,
+                sanitizer_receipts: Vec::new(),
+                related_object_ids: Vec::new(),
+                request_object_id: None,
+                request_input_hash: Some(input_hash),
+                safety_tier: SafetyTier::Risky,
+                principal: Some("agent:fwc-n8n".to_string()),
+                capability_id: Some("mcp.tools.write".to_string()),
+                provenance_record: None,
+                now_ms: Some(n8n_run_once_now_ms()),
+                posture_attestation: None,
+            })
+            .expect("offline archive policy evaluation")
+            .decision
+        };
+        let (policy_request, policy_hash) =
+            normalize(&request, &binding).expect("archive policy request");
+        assert_eq!(
+            evaluate(policy_request.clone(), policy_hash),
+            Decision::Allow
+        );
+        assert_eq!(policy_hash, payload_hash);
+        assert_eq!(
+            policy_request.operation.as_str(),
+            N8N_APPROVAL_WRAPPER_OPERATION
+        );
+        assert_eq!(
+            policy_request.input["tool_name"],
+            N8N_OFFICIAL_MCP_ARCHIVE_TOOL
+        );
+        assert_eq!(
+            policy_request.input["payload_sha256"],
+            hex::encode(payload_hash)
+        );
+
+        let mut changed_payload = request.clone();
+        changed_payload.input["arguments"]["workflowId"] = json!("another-workflow");
+        let (changed_policy_request, changed_hash) =
+            normalize(&changed_payload, &binding).expect("changed archive payload");
+        assert_eq!(
+            evaluate(changed_policy_request, changed_hash),
+            Decision::Deny
+        );
+    }
+
+    #[test]
     fn n8n_official_mcp_lifecycle_plan_is_fixed_tool_and_policy_bound() {
         let config = run_once_n8n_official_mcp_lifecycle_test_config();
         let plan = build_n8n_official_mcp_run_once_plan(

@@ -272,6 +272,7 @@ fn typed_n8n_approval_for(
     let (operation, tool_name) = match action {
         "publish" => (N8nLifecycleOperation::Publish, "publish_workflow"),
         "unpublish" => (N8nLifecycleOperation::Unpublish, "unpublish_workflow"),
+        "archive" => (N8nLifecycleOperation::Archive, "archive_workflow"),
         _ => panic!("unsupported lifecycle action"),
     };
     let workflow_id = "workflow-1";
@@ -292,7 +293,7 @@ fn typed_n8n_approval_for(
                 }
             }
         })
-    } else {
+    } else if action == "unpublish" {
         json!({
             "id": workflow_id,
             "action": action,
@@ -308,12 +309,32 @@ fn typed_n8n_approval_for(
                 }
             }
         })
+    } else {
+        json!({
+            "id": workflow_id,
+            "guard": {
+                "approvalRef": format!("typed-{server_id}-{action}"),
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        })
     };
     let resource_uri = format!("fwc-n8n://{server_id}/workflows/workflow%2D1");
+    let parent_operation = if action == "archive" {
+        "n8n.workflows.archive"
+    } else {
+        "n8n.workflows.lifecycle"
+    };
     let parent_binding = fcp_crypto::canonicalize::to_deterministic_cbor(&json!({
         "server_id": server_id,
         "resource_uri": resource_uri,
-        "operation": "n8n.workflows.lifecycle",
+        "operation": parent_operation,
         "input": high_level_input,
     }))
     .expect("canonical n8n parent binding");
@@ -549,7 +570,7 @@ fn policy_for_tool_server(
     };
     let (input_schema_digest, output_schema_digest) =
         schema_digests_for_server(parsed_server, input_schema, output_schema);
-    json!({
+    let mut params = json!({
         "server_id": server_id,
         "capability_policy": {
             "n8n_version": "1.0.0",
@@ -562,7 +583,18 @@ fn policy_for_tool_server(
                 "output_schema_digest": output_schema_digest,
             }],
         },
-    })
+    });
+    if name == "archive_workflow" {
+        params["capability_policy"]["archive_workflow_schema"] = json!({
+            "input_schema_digest": params["capability_policy"]["approved_tools"][0]
+                ["input_schema_digest"]
+                .clone(),
+            "output_schema_digest": params["capability_policy"]["approved_tools"][0]
+                ["output_schema_digest"]
+                .clone(),
+        });
+    }
+    params
 }
 
 #[fcp_async_core::runtime::test]
@@ -633,8 +665,10 @@ async fn typed_n8n_owner_approval_reaches_eec_and_hetzner_once() {
     for (server_id, action, tool_name) in [
         ("eec", "publish", "publish_workflow"),
         ("eec", "unpublish", "unpublish_workflow"),
+        ("eec", "archive", "archive_workflow"),
         ("hetzner", "publish", "publish_workflow"),
         ("hetzner", "unpublish", "unpublish_workflow"),
+        ("hetzner", "archive", "archive_workflow"),
     ] {
         let server = MockServer::start().await;
         let input_schema = json!({"type": "object"});
@@ -643,6 +677,11 @@ async fn typed_n8n_owner_approval_reaches_eec_and_hetzner_once() {
             json!({
                 "name": tool_name,
                 "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
+            })
+        } else if action == "unpublish" {
+            json!({
+                "name": tool_name,
+                "arguments": {"workflowId": "workflow-1"}
             })
         } else {
             json!({
@@ -817,6 +856,46 @@ async fn typed_n8n_owner_approval_mismatch_denies_before_provider_call() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn typed_n8n_archive_expired_approval_denies_before_provider_call() {
+    for server_id in ["eec", "hetzner"] {
+        let server = MockServer::start().await;
+        let input_schema = json!({"type": "object"});
+        let output_schema = Value::Null;
+        let provider_input = json!({
+            "name": "archive_workflow",
+            "arguments": {"workflowId": "workflow-1"}
+        });
+        let (connector, instance_id) = setup_connector_with_server_params(
+            &server.uri(),
+            server_id,
+            policy_for_tool_server(server_id, "archive_workflow", &input_schema, &output_schema),
+        )
+        .await;
+        let (mut approval, context) = typed_n8n_approval_for(server_id, "archive", &provider_input);
+        approval.expires_at_ms = 0;
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "mcp.tools.call",
+                "input": provider_input.clone(),
+                "capability_token": capability_token_for_server(
+                    server_id,
+                    &provider_input,
+                    &instance_id,
+                ),
+                "context": context,
+                "approval_tokens": [approval],
+            }))
+            .await
+            .expect_err("expired archive approval must deny before egress");
+        assert!(format!("{error:?}").contains("exactly one matching execution approval"));
+        assert_eq!(
+            server.received_requests().await.unwrap_or_default().len(),
+            0
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn tools_call_schema_drift_denies_before_second_provider_request() {
     let server = MockServer::start().await;
     let reviewed_input_schema = json!({"type": "object"});
@@ -865,8 +944,10 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
     for (server_id, action, tool_name) in [
         ("eec", "publish", "publish_workflow"),
         ("eec", "unpublish", "unpublish_workflow"),
+        ("eec", "archive", "archive_workflow"),
         ("hetzner", "publish", "publish_workflow"),
         ("hetzner", "unpublish", "unpublish_workflow"),
+        ("hetzner", "archive", "archive_workflow"),
     ] {
         let server = MockServer::start().await;
         let input_schema = json!({"type": "object"});
@@ -874,6 +955,11 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
             json!({
                 "name": tool_name,
                 "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
+            })
+        } else if action == "unpublish" {
+            json!({
+                "name": tool_name,
+                "arguments": {"workflowId": "workflow-1"}
             })
         } else {
             json!({

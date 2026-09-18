@@ -618,6 +618,7 @@ main() {
   need_cmd cargo; need_cmd git; need_cmd install; need_cmd python3; need_cmd rustc
   need_cmd stat; need_cmd readlink
   REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
+  cd "$REPO_ROOT"
   SSD_LAUNCHER="${REPO_ROOT}/scripts/fcp_ssd.sh"
   [[ -f "$SSD_LAUNCHER" && ! -L "$SSD_LAUNCHER" ]] \
     || die "SSD launcher is missing or symlinked: $SSD_LAUNCHER"

@@ -583,6 +583,7 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptCurrentLegacyLimits,
     SignedProvisionReceiptPreviousLifecycle,
     SignedProvisionReceiptPreviousCommonInventory,
     SignedProvisionReceiptLegacyCommonInventory,
@@ -601,6 +602,7 @@ enum LifecycleSchemaMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommonInventorySchemaMode {
     Current,
+    CurrentLegacyLimits,
     Previous,
     Legacy,
     LegacyDisposable,
@@ -2024,6 +2026,7 @@ fn validate_common_inventory(
     };
     let expected_operations = match schema_mode {
         CommonInventorySchemaMode::Current => &COMMON_ALLOWED_OPERATIONS[..],
+        CommonInventorySchemaMode::CurrentLegacyLimits => &COMMON_ALLOWED_OPERATIONS[..],
         CommonInventorySchemaMode::Previous => &PREVIOUS_COMMON_ALLOWED_OPERATIONS[..],
         CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
         CommonInventorySchemaMode::LegacyDisposable => {
@@ -2652,6 +2655,9 @@ where
     let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
     let mode = match fs::symlink_metadata(&provision_receipt_path) {
         Ok(_) => match expected_mode {
+            Some(CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits) => {
+                CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+            }
             Some(CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle) => {
                 CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
             }
@@ -2732,6 +2738,19 @@ where
                 Err(_) => {}
             }
             match validate_signed_tree(
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::CurrentLegacyLimits,
+            ) {
+                Ok(()) => {
+                    return Ok((
+                        current,
+                        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
+                    ));
+                }
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_signed_tree(
                 LifecycleSchemaMode::PreviousPerServer,
                 CommonInventorySchemaMode::Current,
             ) {
@@ -2790,6 +2809,33 @@ where
             return Ok((
                 current,
                 CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+            ));
+        }
+        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree_with_schema_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::CurrentLegacyLimits,
+            )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
             ));
         }
         CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => {
@@ -2985,6 +3031,21 @@ fn validate_release_target(
     ) {
         Ok(()) => Ok(()),
         Err(error) if error.code == ProvisionErrorCode::Policy => {
+            match validate_release_tree_with_schema_mode(
+                target,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                target,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::CurrentLegacyLimits,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
             match validate_release_tree_with_schema_mode(
                 target,
                 release_id,

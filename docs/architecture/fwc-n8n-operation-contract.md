@@ -14,25 +14,22 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
-**Current installed release/read-only smoke boundary (2026-09-16):**
+**Current installed release/read-only smoke boundary (2026-09-18):**
 `/usr/local/lib/fwc-n8n/current` resolves to
-`release-20260916-5dfb5745-owner-rc2` (git revision
-`5dfb574531982e353d6dfcbcf2e51f7882cd4099`), and
+`release-20260917-74b9b97c0-rc2` (git revision
+`74b9b97c0e63cf5c4336becd4a9c393ab4c82e14`), and
 `/usr/local/bin/fwc-n8n status` reports `{"bundleAvailable":true}`. The fixed
 zero-idle systemd broker is installed and listening on
 `/run/fwc/fwc-n8n-secret-broker.sock`; the documented read-only smoke boundary
 is `crates/fcp-host/tests/n8n_owned_static_smoke.rs`. The installed local MCP
 policy remains pinned to `n8n-mcp` `2.84.4`, protocol `2024-11-05`, and
 network-disabled execution. These checks establish installed bundle/broker
-readiness only; they do not establish complete lifecycle-write acceptance.
-Publish, unpublish, execution, and the complete EEC-then-Hetzner lifecycle
-remain `NO-GO`. The bounded Hetzner lifecycle half is separately recorded
-below; this does not waive the required EEC-first gate.
+readiness only; they do not by themselves authorize or establish lifecycle
+writes. The owner-approved `.10` live acceptance is recorded below.
 
-**Current source/main static evidence (2026-09-17; separate from installed-release evidence):**
-The current `main` tree contains the
-merged source commits `cf1f6b8de84c14df39bc6f3445046ffe1d392dfa` and
-`57a4457457aa5acd7601de5b469d2271fc43af38`. After the baseline read, a
+**Current source/main static evidence (2026-09-18; separate from live evidence):**
+The current `main` tree is at
+`74b9b97c0e63cf5c4336becd4a9c393ab4c82e14`. After the baseline read, a
 possible Official MCP `archive_workflow` attempt is followed by at most one
 independent REST readback. Readback transport, decode, invalid-state, and
 mismatch errors are terminal `unknown_outcome`; the provider attempt's
@@ -44,16 +41,42 @@ skips readback and makes no provider attempt. Publish/unpublish behavior is
 unchanged: the exact Official MCP call is followed by authoritative independent
 REST readback; uncertain or mismatched results are not retried automatically.
 
-Current-main source verification passed `176` tests with `1` ignored; the
-focused archive filter passed `9` tests; `cargo fmt --check` and the focused
-`cargo check -p fcp-n8n --bin fwc-n8n` were clean. This is static source
-evidence only and does not establish that any provider lifecycle write is
-accepted. The installed release above is the code ancestor of this current-main
-source; the complete EEC-then-Hetzner lifecycle remains `NO-GO` because the
-EEC-first cycle is still unproven. The bounded Hetzner lifecycle half is
-recorded below.
+The current focused verification passed `21` `official_mcp_lifecycle` tests,
+the targeted `fcp-host` filters exited successfully, and `cargo fmt --check`
+was clean. This is static source evidence only; it complements, but does not
+replace, the retained live evidence below.
 
-**Latest bounded Hetzner lifecycle evidence (2026-09-17; partial GO):**
+**Current `flywheel_connectors-nqm81.10` live acceptance (2026-09-18; PASS):**
+The Bead is closed for its bounded scope: one fresh disposable
+publish/readback/unpublish/readback cycle on EEC and one existing disposable
+cycle on Hetzner. Each cycle used the exact workflow and version target, the
+owner-approved official MCP operation, one provider write per transition, an
+independent typed REST GET, and no retry after an unknown outcome. Archive/restore,
+activation/deactivation, execution, credential mutation, permanent deletion,
+and changing `current` remain outside this acceptance.
+
+For EEC, workflow `2k83Mtem1wCvsqpJ`, version
+`64fa87fb-8dcf-4a8b-9bc8-4aa4d86677ea`, and draft graph
+`blake3-256:a3557027a8a642c2034a2f2ce19f34f4bf2d89c0e46f2aacd2ad1d6cb6b799f3`
+were bound before provider I/O. The MCP-access precondition was applied once
+under approval `7e96070b-df6e-49ff-8435-4865fb1e1008`. Publish attempt
+`23de91b7-0969-447f-9a65-4e078a08014b` and independent GET
+`67da6935-15c2-42c3-98f9-48f21f45f2b7` proved the matching active and
+published version/graph. Unpublish attempt
+`bb7c1500-d210-434e-adb6-a7ea77d19dac` and final independent GET
+`f7dc1471-224f-49e0-87b6-c2374a0d8f46` proved the matching inactive,
+unpublished, and unarchived final state. Redaction-safe evidence is retained
+under `/srv/dev-ssd/fcp/nqm81.30/live-mcp-access-20260918-corrected-7e96070b-df6e-49ff-8435-4865fb1e1008/`,
+`/srv/dev-ssd/fcp/nqm81.30/live-eec-publish-20260918-23de91b7-0969-447f-9a65-4e078a08014b/`,
+and `/srv/dev-ssd/fcp/nqm81.30/live-eec-unpublish-20260918-bb7c1500-d210-434e-adb6-a7ea77d19dac/`.
+
+The Hetzner cycle is retained under
+`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-create-20260917/` and
+`/srv/dev-ssd/fcp/nqm81.30/live-hetzner-publish-20260917/`; its exact
+publish/unpublish readbacks proved the matching active and final inactive
+states. Raw provider bodies, credentials, seeds, and tokens were not persisted.
+
+**Historical bounded Hetzner lifecycle evidence (2026-09-17; PASS):**
 Using the installed `release-20260916-5dfb5745-owner-rc2`, a fresh disposable
 webhook workflow `Cb7jfMXeDxyHytnY` / version
 `2dbce392-dcbd-4b8f-b2bf-da39e3c2b71c` passed the exact inactive, unpublished,
@@ -83,7 +106,8 @@ projections or exit codes. Raw provider bodies,
 credentials, seeds, and tokens were not persisted. The remote Hetzner runtime
 reports `2.37.10` while the release policy remains pinned to `2.34.6`; this
 observed drift was not changed because it is not a lifecycle-equality gate.
-This proves only the Hetzner half; EEC-first acceptance remains `NO-GO`.
+At the time of this packet it proved only the Hetzner half; the later EEC-first
+pass is recorded in the current acceptance block above.
 
 **RC11 privileged promotion / external issuer gate checkpoint (2026-09-11;
 bounded NO-GO):**

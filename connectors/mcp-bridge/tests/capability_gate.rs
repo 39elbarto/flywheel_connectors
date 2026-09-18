@@ -597,6 +597,54 @@ fn policy_for_tool_server(
     params
 }
 
+fn policy_for_archive_execute_server(
+    server_id: &str,
+    archive_input_schema: &Value,
+    execute_input_schema: &Value,
+) -> Value {
+    let parsed_server = match server_id {
+        "eec" => ServerId::Eec,
+        "hetzner" => ServerId::Hetzner,
+        _ => panic!("unknown test server"),
+    };
+    let output_schema = Value::Null;
+    let (archive_input_digest, archive_output_digest) =
+        schema_digests_for_server(parsed_server, archive_input_schema, &output_schema);
+    let (execute_input_digest, execute_output_digest) =
+        schema_digests_for_server(parsed_server, execute_input_schema, &output_schema);
+    json!({
+        "server_id": server_id,
+        "capability_policy": {
+            "n8n_version": "1.0.0",
+            "auth_mode": "access_token",
+            "api_scope_digest": "scope-digest",
+            "approved_tools": [
+                {
+                    "name": "archive_workflow",
+                    "class": "write",
+                    "input_schema_digest": archive_input_digest,
+                    "output_schema_digest": archive_output_digest,
+                },
+                {
+                    "name": "execute_workflow",
+                    "class": "write",
+                    "input_schema_digest": execute_input_digest,
+                    "output_schema_digest": execute_output_digest,
+                },
+            ],
+            "archive_workflow_schema": {
+                "input_schema_digest": archive_input_digest,
+                "output_schema_digest": archive_output_digest,
+            },
+            "execute_workflow_schema": {
+                "status": "owner_provisioned",
+                "input_schema_digest": execute_input_digest,
+                "output_schema_digest": execute_output_digest,
+            },
+        },
+    })
+}
+
 #[fcp_async_core::runtime::test]
 async fn tools_call_policy_gated_loopback_success() {
     let server = MockServer::start().await;
@@ -892,6 +940,97 @@ async fn typed_n8n_archive_expired_approval_denies_before_provider_call() {
             server.received_requests().await.unwrap_or_default().len(),
             0
         );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn typed_n8n_archive_isolated_from_execute_schema_drift() {
+    for (server_id, archive_drifted) in [("eec", false), ("hetzner", true)] {
+        let server = MockServer::start().await;
+        let reviewed_archive_schema = json!({"type": "object"});
+        let reviewed_execute_schema = json!({"type": "object"});
+        let drifted_archive_schema = json!({"type": "array"});
+        let drifted_execute_schema = json!({"type": "array"});
+        let archive_catalog_schema = if archive_drifted {
+            &drifted_archive_schema
+        } else {
+            &reviewed_archive_schema
+        };
+        let execute_catalog_schema = if archive_drifted {
+            &reviewed_execute_schema
+        } else {
+            &drifted_execute_schema
+        };
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(TestSequenceResponder::new(vec![
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "tools": [
+                            {"name": "archive_workflow", "inputSchema": archive_catalog_schema},
+                            {"name": "execute_workflow", "inputSchema": execute_catalog_schema},
+                        ]
+                    }
+                })),
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {"content": [{"type": "text", "text": "archive accepted"}]}
+                })),
+            ]))
+            .mount(&server)
+            .await;
+
+        let (connector, instance_id) = setup_connector_with_server_params(
+            &server.uri(),
+            server_id,
+            policy_for_archive_execute_server(
+                server_id,
+                &reviewed_archive_schema,
+                &reviewed_execute_schema,
+            ),
+        )
+        .await;
+        let provider_input = json!({
+            "name": "archive_workflow",
+            "arguments": {"workflowId": "workflow-1"}
+        });
+        let (approval, context) = typed_n8n_approval_for(server_id, "archive", &provider_input);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "mcp.tools.call",
+                "input": provider_input.clone(),
+                "capability_token": capability_token_for_server(
+                    server_id,
+                    &provider_input,
+                    &instance_id,
+                ),
+                "context": context,
+                "approval_tokens": [approval],
+            }))
+            .await;
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let methods: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                serde_json::from_slice::<Value>(&request.body).expect("JSON-RPC request")["method"]
+                    .as_str()
+                    .expect("JSON-RPC method")
+                    .to_owned()
+            })
+            .collect();
+        if archive_drifted {
+            let error = result.expect_err("archive schema drift must deny before provider call");
+            assert!(format!("{error:?}").contains("not exactly approved"));
+            assert_eq!(methods, vec!["tools/list"]);
+        } else {
+            let response = result.expect("archive remains usable when execute drifts");
+            assert_eq!(response["content"][0]["text"], "archive accepted");
+            assert_eq!(methods, vec!["tools/list", "tools/call"]);
+        }
     }
 }
 

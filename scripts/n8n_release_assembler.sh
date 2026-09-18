@@ -509,6 +509,8 @@ for server in ("eec", "hetzner"):
     delete_network = common["operation_network_constraints"].get("n8n.workflows.create_draft")
     if not isinstance(delete_network, dict):
         raise SystemExit(f"missing create_draft network constraint for {server}")
+    delete_network = dict(delete_network)
+    delete_network["max_response_bytes"] = 1048576
     common["operation_network_constraints"][delete_operation] = dict(delete_network)
     unarchive_operation = "n8n.workflows.unarchive"
     if unarchive_operation not in common["allowed_operations"]:
@@ -516,7 +518,19 @@ for server in ("eec", "hetzner"):
     unarchive_network = common["operation_network_constraints"].get("n8n.workflows.create_draft")
     if not isinstance(unarchive_network, dict):
         raise SystemExit(f"missing create_draft network constraint for {server}")
+    unarchive_network = dict(unarchive_network)
+    unarchive_network["max_response_bytes"] = 1048576
     common["operation_network_constraints"][unarchive_operation] = dict(unarchive_network)
+    for bounded_operation in (
+        "n8n.workflows.lifecycle",
+        "n8n.workflows.delete_disposable",
+        "n8n.workflows.unarchive",
+    ):
+        bounded_network = common["operation_network_constraints"].get(bounded_operation)
+        if not isinstance(bounded_network, dict) or bounded_network.get("max_response_bytes") != 1048576:
+            raise SystemExit(
+                f"{bounded_operation} network constraint is not the manifest-bounded 1 MiB limit for {server}"
+            )
     official["launch_binding"]["launcher_digest"] = bridge_digest
     official["launch_binding"]["runtime_executable_digest"] = bridge_digest
     lifecycle = {

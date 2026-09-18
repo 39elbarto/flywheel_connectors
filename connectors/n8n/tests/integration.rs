@@ -4770,16 +4770,24 @@ async fn workflows_unarchive_rejects_approval_mismatch_without_provider_call() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn workflows_unarchive_provider_conflict_is_unknown_without_retry() {
+async fn workflows_unarchive_provider_conflict_readback_proves_success_without_retry() {
     let server = MockServer::start().await;
     let baseline = json!({
         "id": "1001", "name": "Conflict archived workflow", "active": false,
         "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
         "nodes": [], "connections": {}, "activeVersion": null
     });
+    let unarchived = {
+        let mut value = baseline.clone();
+        value["isArchived"] = json!(false);
+        value
+    };
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/1001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            unarchived,
+        ]))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -4801,10 +4809,10 @@ async fn workflows_unarchive_provider_conflict_is_unknown_without_retry() {
             }
         }
     });
-    let error = invoke(&c, "n8n.workflows.unarchive", input)
+    let result = invoke(&c, "n8n.workflows.unarchive", input)
         .await
-        .expect_err("provider conflict must be unknown");
-    assert!(error.to_string().contains("unknown"));
+        .expect("readback proves the unarchive despite the provider conflict");
+    assert_eq!(result["status"], "verified");
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         3,
@@ -4820,9 +4828,17 @@ async fn workflows_unarchive_malformed_post_response_still_reconciles_once() {
         "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
         "nodes": [], "connections": {}, "activeVersion": null
     });
+    let unarchived = {
+        let mut value = baseline.clone();
+        value["isArchived"] = json!(false);
+        value
+    };
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/1001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            unarchived,
+        ]))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -4844,10 +4860,10 @@ async fn workflows_unarchive_malformed_post_response_still_reconciles_once() {
             }
         }
     });
-    let error = invoke(&c, "n8n.workflows.unarchive", input)
+    let result = invoke(&c, "n8n.workflows.unarchive", input)
         .await
-        .expect_err("malformed POST response must be unknown");
-    assert!(error.to_string().contains("unknown"));
+        .expect("readback proves the unarchive despite malformed provider data");
+    assert_eq!(result["status"], "verified");
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         3,
@@ -4865,9 +4881,17 @@ async fn workflows_unarchive_provider_id_mismatch_still_reconciles_once() {
     });
     let mut wrong_id = baseline.clone();
     wrong_id["id"] = json!("9999");
+    let unarchived = {
+        let mut value = baseline.clone();
+        value["isArchived"] = json!(false);
+        value
+    };
     Mock::given(method("GET"))
         .and(path("/api/v1/workflows/1001"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            unarchived,
+        ]))
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -4889,10 +4913,10 @@ async fn workflows_unarchive_provider_id_mismatch_still_reconciles_once() {
             }
         }
     });
-    let error = invoke(&c, "n8n.workflows.unarchive", input)
+    let result = invoke(&c, "n8n.workflows.unarchive", input)
         .await
-        .expect_err("provider ID mismatch must be unknown");
-    assert!(error.to_string().contains("unknown"));
+        .expect("readback proves the unarchive despite provider ID mismatch");
+    assert_eq!(result["status"], "verified");
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 

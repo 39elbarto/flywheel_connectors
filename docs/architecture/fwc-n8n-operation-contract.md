@@ -586,9 +586,12 @@ retried automatically.
 The typed REST `n8n.workflows.unarchive` path is separate from
 `restore_workflow_version`: it is the exact no-body
 `POST /api/v1/workflows/{workflowId}/unarchive` followed by one independent
-`GET /workflows/{id}`. Its host/run-once child receives a propagated
-per-request timeout derived from the absolute envelope deadline, reserving a
-bounded reconciliation tail across the baseline GET, one POST, and final GET.
+`GET /workflows/{id}`. The fwc-n8n envelope carries the host-approved
+deadline into fcp-host, whose per-invocation launch snapshot derives and
+injects the fixed `FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS` value into the actual
+owned connector `ProcessSpec` (managed configuration and operation input
+cannot set it), reserving a bounded reconciliation tail across the baseline
+GET, one POST, and final GET.
 Every POST outcome that could have started the write (including timeout,
 disconnect, HTTP error, malformed/advisory response, provider identity or
 normalization failure) therefore reaches exactly one GET; readback drift or

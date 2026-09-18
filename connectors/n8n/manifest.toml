@@ -1933,8 +1933,8 @@ when_to_use = "Use only with an exact workflow ID, UUID idempotency key, full cu
 common_mistakes = [
     "The precondition must be fresh and isArchived=true; stale or non-archived state is rejected before the provider POST.",
     "Only the exact no-body POST unarchive route and independent GET readback are used; publish, activate, archive, delete, MCP, generic REST fallback, and restore_workflow_version remain separate or out of scope.",
-    "The host run-once seam propagates a bounded per-request budget for baseline GET, one POST, and one independent GET, reserving reconciliation time so a stalled POST cannot consume the readback opportunity.",
-    "Any POST result that could have started the write (timeout, disconnect, HTTP error, malformed/advisory response, provider ID mismatch, or normalization error) gets exactly one GET; mismatch/readback failure is unknown and is never retried automatically.",
+    "The fwc-n8n deadline is carried into fcp-host, whose trusted owned launch snapshot injects the fixed FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS value into the connector ProcessSpec; caller input and managed env cannot override it. This bounds baseline GET, one POST, and one independent GET while reserving reconciliation time so a stalled POST cannot consume the readback opportunity.",
+    "Any POST result that could have started the write (timeout, disconnect, HTTP error, malformed/advisory response, provider ID mismatch, or normalization error) gets exactly one GET; a matching readback is authoritative even when provider data is contradictory, while mismatch/readback failure is unknown and is never retried automatically. Live provider acceptance remains unproven; restore_workflow_version is separate and out of scope.",
 ]
 examples = ['{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000007","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":true,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}']
 related = ["n8n.workflows.get", "n8n.workflows.archive", "n8n.workflows.lifecycle"]

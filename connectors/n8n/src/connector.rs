@@ -3609,24 +3609,14 @@ fn verify_workflow_lifecycle_readback(
 
 fn verify_workflow_unarchive_readback(
     baseline: &WorkflowStateView,
-    provider: Option<&WorkflowStateView>,
+    _provider: Option<&WorkflowStateView>,
     readback: &WorkflowStateView,
 ) -> N8nResult<()> {
-    if let Some(provider) = provider {
-        let provider_preserved = provider.id == baseline.id
-            && provider.name == baseline.name
-            && provider.project_id == baseline.project_id
-            && provider.folder_id == baseline.folder_id
-            && provider.version_id == baseline.version_id
-            && provider.active == baseline.active
-            && provider.active_version_id == baseline.active_version_id
-            && provider.draft == baseline.draft
-            && provider.published == baseline.published;
-        if provider.is_archived || !provider_preserved {
-            return Err(N8nError::UnknownOutcome);
-        }
-    }
-
+    // The POST body is advisory only. It can be stale, malformed, or
+    // contradictory after the provider has committed the write, so only the
+    // independent GET may establish the final state. Keep the provider value
+    // available to the caller for bounded diagnostics without letting it veto
+    // a matching readback.
     let readback_preserved = readback.id == baseline.id
         && readback.name == baseline.name
         && readback.project_id == baseline.project_id

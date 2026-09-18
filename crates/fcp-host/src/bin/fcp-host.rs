@@ -1961,6 +1961,67 @@ const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 7] = [
     RUN_ONCE_CREDENTIAL_TRANSPORT_ENV,
     RUN_ONCE_CREDENTIAL_FD_ENV,
 ];
+const N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
+const N8N_UNARCHIVE_DEFAULT_DEADLINE_MS: u64 = 30_000;
+const N8N_UNARCHIVE_MAX_DEADLINE_MS: u64 = 60_000;
+const N8N_UNARCHIVE_READBACK_RESERVE_MS: u64 = 5_000;
+
+fn n8n_unarchive_request_timeout_ms(
+    operation: &OperationId,
+    deadline_ms: Option<u64>,
+) -> HostResult<Option<u64>> {
+    if operation.as_str() != "n8n.workflows.unarchive" {
+        return Ok(None);
+    }
+    let deadline_ms = deadline_ms.unwrap_or(N8N_UNARCHIVE_DEFAULT_DEADLINE_MS);
+    if deadline_ms == 0 || deadline_ms > N8N_UNARCHIVE_MAX_DEADLINE_MS {
+        return Err(HostError::PreflightFailed(
+            "n8n workflow unarchive deadline is outside the host bound".to_string(),
+        ));
+    }
+    deadline_ms
+        .checked_sub(N8N_UNARCHIVE_READBACK_RESERVE_MS)
+        .and_then(|remaining| remaining.checked_div(3))
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n workflow unarchive deadline cannot reserve independent readback".to_string(),
+            )
+        })
+}
+
+fn launch_snapshot_for_request(
+    binding: &ValidatedConnectorLaunchBinding,
+    config: &ConnectorConfig,
+    request: &InvokeRequest,
+) -> HostResult<ValidatedConnectorLaunchSnapshot> {
+    let mut snapshot = binding.launch_snapshot(&config.args, &config.env, true);
+    if let Some(timeout_ms) =
+        n8n_unarchive_request_timeout_ms(&request.operation, request.deadline_ms)?
+    {
+        snapshot.fixed_env.insert(
+            OsString::from(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV),
+            OsString::from(timeout_ms.to_string()),
+        );
+    }
+    Ok(snapshot)
+}
+
+#[test]
+fn n8n_unarchive_budget_is_host_bounded_and_reserves_readback() {
+    let operation = OperationId::from_static("n8n.workflows.unarchive");
+    assert_eq!(
+        n8n_unarchive_request_timeout_ms(&operation, None).expect("default deadline"),
+        Some(8_333)
+    );
+    assert_eq!(
+        n8n_unarchive_request_timeout_ms(&operation, Some(30_000)).expect("bounded deadline"),
+        Some(8_333)
+    );
+    assert!(n8n_unarchive_request_timeout_ms(&operation, Some(5_000)).is_err());
+    assert!(n8n_unarchive_request_timeout_ms(&operation, Some(60_001)).is_err());
+}
 
 #[derive(Clone, Debug)]
 struct ValidatedConnectorLaunchBinding {
@@ -3149,6 +3210,16 @@ impl SubprocessRegistry {
                     "per-invocation launch env key `{key}` is reserved for host egress"
                 )));
             }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation launch env key for n8n unarchive timeout is host-derived"
+                        .to_string(),
+                ));
+            }
 
             if entry.manifest_constraints.source.is_none() {
                 return Err(HostError::PreflightFailed(
@@ -3224,7 +3295,7 @@ impl SubprocessRegistry {
                     )
                 })?;
             let launch_snapshot =
-                validated_binding.launch_snapshot(&entry.config.args, &entry.config.env, true);
+                launch_snapshot_for_request(&validated_binding, &entry.config, request)?;
             let requested_instance_id =
                 requested_instance_id_from_config(&entry.config).map_err(|_| {
                     HostError::PreflightFailed(format!(
@@ -3304,6 +3375,16 @@ impl SubprocessRegistry {
                     "per-invocation launch env contains a reserved host-egress key".to_string(),
                 ));
             }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation launch env key for n8n unarchive timeout proof changed"
+                        .to_string(),
+                ));
+            }
             if entry.manifest_constraints.source.is_none()
                 || !entry
                     .manifest_constraints
@@ -3378,7 +3459,7 @@ impl SubprocessRegistry {
                     )
                 })?;
             let launch_snapshot =
-                validated_binding.launch_snapshot(&entry.config.args, &entry.config.env, true);
+                launch_snapshot_for_request(&validated_binding, &entry.config, request)?;
             if launch_snapshot != plan.launch_snapshot
                 || plan.configure_payload != entry.config.config
                 || plan.capability_verifying_key != self.capability_verifying_key
@@ -26019,6 +26100,41 @@ deny_ptrace = true
 
     #[cfg(target_os = "linux")]
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn n8n_unarchive_host_budget_reaches_owned_connector_process_spec() {
+        let (config, catalog, mut request) = per_invocation_plan_test_fixture();
+        let registry = per_invocation_plan_test_registry(config.clone(), catalog);
+        let mut plan = registry
+            .per_invocation_execution_plan(&request)
+            .await
+            .expect("generic per-invocation plan")
+            .expect("per-invocation plan should exist");
+
+        request.connector_id = ConnectorId::from_static("fcp.n8n");
+        request.operation = OperationId::from_static("n8n.workflows.unarchive");
+        request.deadline_ms = Some(30_000);
+        plan.connector_id = request.connector_id.clone();
+        plan.operation = request.operation.clone();
+        plan.manifest_operation.id = request.operation.clone();
+        let binding = ValidatedConnectorLaunchBinding::from_config(&config)
+            .expect("fixture has a validated launch binding");
+        plan.launch_snapshot = launch_snapshot_for_request(&binding, &config, &request)
+            .expect("host derives the bounded unarchive request budget");
+
+        let spec = owned_process_spec(&plan, "test-auth-token")
+            .expect("owned connector launch should accept host-derived fixed env");
+        assert_eq!(
+            spec.fixed_env
+                .get(OsStr::new(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV)),
+            Some(&OsString::from("8333")),
+            "the actual owned connector ProcessSpec must carry the host-derived budget"
+        );
+        assert!(!spec.fixed_env.contains_key(OsStr::new(
+            "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS_FROM_CALLER"
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn per_invocation_execution_plan_stale_generation_is_denied_before_launch() {
         let (config, catalog, request) = per_invocation_plan_test_fixture();
         let registry = per_invocation_plan_test_registry(config, catalog);
@@ -26066,6 +26182,10 @@ deny_ptrace = true
                 .to_string();
         let script = r#"
 set -eu
+case "${FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS-}" in
+    ""|8333) ;;
+    *) exit 48 ;;
+esac
 sequence=0
 while IFS= read -r line; do
     case "$sequence" in
@@ -26150,6 +26270,39 @@ done
         assert_eq!(response.id, request.id);
         assert_eq!(response.result, Some(json!({"owned": true})));
         assert_eq!(NativeProxyOnlySandboxSupport::current(), support_before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn owned_per_invocation_e2e_unarchive_budget_reaches_connector_child() {
+        let (_, catalog, _) = per_invocation_plan_test_fixture();
+        let mut observed = catalog
+            .introspection
+            .clone()
+            .expect("fixture introspection");
+        observed.operations[0].id = OperationId::from_static("n8n.workflows.unarchive");
+        let (state, mut plan, mut request) = owned_per_invocation_e2e_fixture(observed).await;
+
+        request.connector_id = ConnectorId::from_static("fcp.n8n");
+        request.operation = OperationId::from_static("n8n.workflows.unarchive");
+        request.deadline_ms = Some(30_000);
+        plan.connector_id = request.connector_id.clone();
+        plan.operation = request.operation.clone();
+        plan.manifest_operation.id = request.operation.clone();
+        plan.launch_snapshot.fixed_env.insert(
+            OsString::from(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV),
+            OsString::from("8333"),
+        );
+
+        let response = fcp_async_core::time::timeout(
+            Duration::from_secs(5),
+            invoke_owned_per_invocation(&state, plan, request.clone()),
+        )
+        .await
+        .expect("owned unarchive seam must be bounded")
+        .expect("connector child must receive the fixed timeout and complete RPC");
+        assert_eq!(response.id, request.id);
+        assert_eq!(response.result, Some(json!({"owned": true})));
     }
 
     #[cfg(target_os = "linux")]

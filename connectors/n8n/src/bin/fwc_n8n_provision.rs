@@ -2058,8 +2058,19 @@ fn validate_common_inventory(
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
+    let expected_bounded_network =
+        expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1048576);
     if expected_operations.iter().any(|operation| {
-        entry.operation_network_constraints.get(*operation) != Some(&expected_network)
+        let expected = if matches!(schema_mode, CommonInventorySchemaMode::Current)
+            && matches!(
+                *operation,
+                "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive"
+            ) {
+            &expected_bounded_network
+        } else {
+            &expected_network
+        };
+        entry.operation_network_constraints.get(*operation) != Some(expected)
     }) {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
@@ -2067,6 +2078,14 @@ fn validate_common_inventory(
 }
 
 fn expected_n8n_network_constraint(host: &str, port: u64) -> Value {
+    expected_n8n_network_constraint_with_limit(host, port, 10485760)
+}
+
+fn expected_n8n_network_constraint_with_limit(
+    host: &str,
+    port: u64,
+    max_response_bytes: u64,
+) -> Value {
     serde_json::json!({
         "cidr_deny": [],
         "connect_timeout_ms": 5000,
@@ -2078,7 +2097,7 @@ fn expected_n8n_network_constraint(host: &str, port: u64) -> Value {
         "host_allow": [host],
         "ip_allow": [],
         "max_redirects": 0,
-        "max_response_bytes": 10485760,
+        "max_response_bytes": max_response_bytes,
         "port_allow": [port],
         "require_host_canonicalization": true,
         "require_sni": true,
@@ -3628,9 +3647,13 @@ mod tests {
             let operation_network_constraints = COMMON_ALLOWED_OPERATIONS
                 .into_iter()
                 .map(|operation| {
+                    let max_response_bytes = match operation {
+                        "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive" => 1048576,
+                        _ => 10485760,
+                    };
                     (
                         operation.to_owned(),
-                        expected_n8n_network_constraint(host, port),
+                        expected_n8n_network_constraint_with_limit(host, port, max_response_bytes),
                     )
                 })
                 .collect::<BTreeMap<_, _>>();

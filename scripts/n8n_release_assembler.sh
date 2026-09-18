@@ -30,13 +30,16 @@ readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad2456
 readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
 readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
 readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983"
-# Archive schemas are owner-provisioned from a fresh official-MCP tools/list
+# Lifecycle schemas are owner-provisioned from a fresh official-MCP tools/list
 # snapshot.  They are deliberately not guessed or copied from the current
 # release: a provider/database restore can change the live schema while the
-# installed bundle remains otherwise valid.  Requiring all four values makes
-# that drift an explicit release input instead of a silent stale policy.
+# installed bundle remains otherwise valid.  Requiring archive and execute
+# values makes that drift an explicit release input instead of a silent stale
+# policy that blocks every write-capability snapshot.
 readonly EEC_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_INPUT_SCHEMA_DIGEST:-}"
 readonly EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
+readonly EEC_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
+readonly EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly EEC_N8N_VERSION="2.38.4"
 readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
 readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
@@ -44,6 +47,8 @@ readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438d
 readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983"
 readonly HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
+readonly HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
+readonly HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
 readonly LOCAL_MCP_PACKAGE_VERSION="2.84.4"
 readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
@@ -80,8 +85,12 @@ usage: sudo FWC_N8N_OWNER_PUBLIC_KEY_HEX=<64 lowercase hex chars> \
   [FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX=<64 lowercase hex chars>] \
   FWC_N8N_EEC_ARCHIVE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
+  FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
+  FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
+  FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
+  FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   scripts/n8n_release_assembler.sh \
   --release-id <safe-release-id> \
   [--target-dir /srv/dev-ssd/fcp/targets/<name>]
@@ -466,9 +475,11 @@ write_inventory_and_request() {
     "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_ARCHIVE_INPUT_SCHEMA_DIGEST" "$EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_EXECUTE_INPUT_SCHEMA_DIGEST" "$EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST" \
     "$HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
-    "$HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST" "$HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST" <<'PY'
+    "$HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST" "$HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST" "$HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST" <<'PY'
 import json
 import pathlib
 import sys
@@ -489,12 +500,16 @@ import sys
     eec_unpublish_output,
     eec_archive_input,
     eec_archive_output,
+    eec_execute_input,
+    eec_execute_output,
     hetzner_publish_input,
     hetzner_publish_output,
     hetzner_unpublish_input,
     hetzner_unpublish_output,
     hetzner_archive_input,
     hetzner_archive_output,
+    hetzner_execute_input,
+    hetzner_execute_output,
 ) = sys.argv[1:]
 stage = pathlib.Path(stage)
 
@@ -556,11 +571,13 @@ for server in ("eec", "hetzner"):
             "publish_workflow": (eec_publish_input, eec_publish_output),
             "unpublish_workflow": (eec_unpublish_input, eec_unpublish_output),
             "archive_workflow": (eec_archive_input, eec_archive_output),
+            "execute_workflow": (eec_execute_input, eec_execute_output),
         },
         "hetzner": {
             "publish_workflow": (hetzner_publish_input, hetzner_publish_output),
             "unpublish_workflow": (hetzner_unpublish_input, hetzner_unpublish_output),
             "archive_workflow": (hetzner_archive_input, hetzner_archive_output),
+            "execute_workflow": (hetzner_execute_input, hetzner_execute_output),
         },
     }
     if server == "eec":
@@ -572,6 +589,12 @@ for server in ("eec", "hetzner"):
     archive_schema = official["config"]["capability_policy"]["archive_workflow_schema"]
     archive_schema["input_schema_digest"], archive_schema["output_schema_digest"] = lifecycle[server][
         "archive_workflow"
+    ]
+    execute_schema = official["config"]["capability_policy"]["execute_workflow_schema"]
+    if execute_schema.get("status") != "owner_provisioned":
+        raise SystemExit(f"execute_workflow_schema is not owner-provisioned for {server}")
+    execute_schema["input_schema_digest"], execute_schema["output_schema_digest"] = lifecycle[server][
+        "execute_workflow"
     ]
     save(f"{server}.json", common)
     save(f"{server}-official-mcp.json", official)
@@ -664,8 +687,12 @@ main() {
   for digest_name in \
     EEC_ARCHIVE_INPUT_SCHEMA_DIGEST \
     EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST \
+    EEC_EXECUTE_INPUT_SCHEMA_DIGEST \
+    EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST \
     HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST \
-    HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST; do
+    HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST \
+    HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST \
+    HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST; do
     digest="${!digest_name}"
     [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] \
       || die "$digest_name must be a fresh tools/list sha256 digest"

@@ -801,10 +801,10 @@ and marker fields are digests only and are checked against the reconstructed
 typed plan before replay is refused.
 
 The bounded owner-confirmation seam is typed to publish, unpublish, archive,
-`n8n.workflows.create_draft`, and `n8n.workflows.delete_disposable`. It computes
+unarchive, `n8n.workflows.create_draft`, and `n8n.workflows.delete_disposable`. It computes
 a redaction-safe plan digest over the exact EEC/Hetzner target, operation,
 canonical input and precondition digests, provider binding, UUID idempotency
-key, and expiry; confirmation must echo that digest. Lifecycle/archive retain
+key, and expiry; confirmation must echo that digest. Lifecycle/archive/unarchive retain
 their exact official-MCP tool and payload binding. Draft creation and
 disposable deletion use the direct REST `fcp.n8n` token shape with the exact
 canonical server/resource/input hash; disposable deletion also requires the
@@ -950,6 +950,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
+| `n8n.workflows.unarchive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | typed REST `POST /api/v1/workflows/{workflowId}/unarchive` with independent REST GET readback | unarchived state; draft/published/version/active unchanged | 256 KiB |
 | `n8n.workflows.delete_disposable` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST `DELETE /workflows/{id}` with independent REST GET requiring 404 | exact host-issued creation receipt; inactive/unarchived precondition | 256 KiB |
 | `n8n.workflows.versions` | `n8n.workflows.versions` | action-dependent | action-dependent | action-dependent | local MCP/API | version URI/state readback | 256 KiB |
 | `n8n.workflows.execute` | `n8n.executions.start` | Risky / High | Interactive | BestEffort | owner-gated official MCP `execute_workflow` with exact immutable EEC/Hetzner input/output schema bindings | bounded workflow/execution IDs and initial status plus independent typed execution GET readback; post-provider readback failures are terminal unknown/no-retry; live acceptance deferred | 256 KiB |

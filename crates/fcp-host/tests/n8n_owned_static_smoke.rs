@@ -63,6 +63,15 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
         response["result"]["operations"].as_array().map(Vec::len),
         Some(19)
     );
+    assert!(
+        response["result"]["operations"]
+            .as_array()
+            .is_some_and(|operations| {
+                operations
+                    .iter()
+                    .any(|operation| operation["id"] == json!("n8n.workflows.unarchive"))
+            })
+    );
 
     drop(host_endpoint);
     let report = run(handle.terminate()).expect("owned fcp-n8n teardown");

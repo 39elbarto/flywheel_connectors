@@ -198,7 +198,7 @@ The current crate exposes these operations:
 The list above is the manifest/runtime declaration surface, not a promise that
 every provider path is enabled. The documentation separates the layers:
 
-- **Manifest operations:** the 18 operations listed above are declared by
+- **Manifest operations:** the 19 operations listed above are declared by
   `connectors/n8n/manifest.toml`; activation remains fail-closed because its
   provider lifecycle path is deferred.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is not in the
@@ -227,10 +227,10 @@ Important runtime truths:
   `provision` defaults to read-only `preflight`; mutation requires the explicit
   owner-gated `provision --mode apply`. `run-once` accepts the ten Phase-1 host
   reads, guarded
-  `n8n.workflows.create_draft`, `n8n.workflows.update_draft`, and the typed
-  `n8n.workflows.delete_disposable` cleanup path, the typed
-  publish/unpublish lifecycle path (ambiguous outcomes reconcile once; unproven
-  outcomes fail closed), plus the closed
+  `n8n.workflows.create_draft`, `n8n.workflows.update_draft`, the typed
+  publish/unpublish/archive/unarchive lifecycle paths (ambiguous outcomes
+  reconcile once; unproven outcomes fail closed), and the typed
+  `n8n.workflows.delete_disposable` cleanup path, plus the closed
   `n8n.capabilities.inspect` operation, a strict
   EEC-or-Hetzner payload, bounded deadline, and optional UUID correlation ID.
   CLI framing has a fixed five-second maximum, and the operation deadline is

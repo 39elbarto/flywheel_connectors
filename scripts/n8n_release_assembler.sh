@@ -510,6 +510,13 @@ for server in ("eec", "hetzner"):
     if not isinstance(delete_network, dict):
         raise SystemExit(f"missing create_draft network constraint for {server}")
     common["operation_network_constraints"][delete_operation] = dict(delete_network)
+    unarchive_operation = "n8n.workflows.unarchive"
+    if unarchive_operation not in common["allowed_operations"]:
+        common["allowed_operations"].append(unarchive_operation)
+    unarchive_network = common["operation_network_constraints"].get("n8n.workflows.create_draft")
+    if not isinstance(unarchive_network, dict):
+        raise SystemExit(f"missing create_draft network constraint for {server}")
+    common["operation_network_constraints"][unarchive_operation] = dict(unarchive_network)
     official["launch_binding"]["launcher_digest"] = bridge_digest
     official["launch_binding"]["runtime_executable_digest"] = bridge_digest
     lifecycle = {

@@ -188,7 +188,7 @@ const LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
-const COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
+const COMMON_ALLOWED_OPERATIONS: [&str; 16] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -203,6 +203,7 @@ const COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
     "n8n.workflows.lifecycle",
+    "n8n.workflows.unarchive",
     "n8n.workflows.update_draft",
 ];
 
@@ -3952,10 +3953,12 @@ mod tests {
 
         fn set_legacy_common_operations(&self, root: &Path) {
             self.remove_common_operation(root, "n8n.workflows.delete_disposable");
+            self.remove_common_operation(root, "n8n.workflows.unarchive");
         }
 
         fn set_legacy_disposable_common_operations(&self, root: &Path) {
             self.remove_common_operation(root, "n8n.executions.diagnostics");
+            self.remove_common_operation(root, "n8n.workflows.unarchive");
         }
 
         fn remove_common_operation(&self, root: &Path, operation_name: &str) {

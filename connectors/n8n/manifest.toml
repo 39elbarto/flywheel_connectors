@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:5699a0f48ada42f42c1fd00ba757be32695363f2d9a84a003d75403095a07dba"
+interface_hash = "blake3-256:fcp.interface.v2:46b463dbef66e6e56919c1e0e9cfbf1701f081f90d0efe84663b2f4e0500fb1b"
 
 [connector]
 id = "fcp.n8n"

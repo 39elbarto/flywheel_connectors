@@ -188,6 +188,23 @@ const LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
+const PREVIOUS_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
+    "n8n.credentials.list",
+    "n8n.executions.diagnostics",
+    "n8n.executions.get",
+    "n8n.executions.list",
+    "n8n.folders.get",
+    "n8n.folders.list",
+    "n8n.mcp_access.reconcile",
+    "n8n.projects.list",
+    "n8n.tags.list",
+    "n8n.workflows.create_draft",
+    "n8n.workflows.delete_disposable",
+    "n8n.workflows.get",
+    "n8n.workflows.list",
+    "n8n.workflows.lifecycle",
+    "n8n.workflows.update_draft",
+];
 const COMMON_ALLOWED_OPERATIONS: [&str; 16] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
@@ -567,6 +584,7 @@ pub enum Promotion {
 enum CurrentValidationMode {
     SignedProvisionReceipt,
     SignedProvisionReceiptPreviousLifecycle,
+    SignedProvisionReceiptPreviousCommonInventory,
     SignedProvisionReceiptLegacyCommonInventory,
     SignedProvisionReceiptLegacyDisposableInventory,
     SignedProvisionReceiptLegacySchema,
@@ -583,6 +601,7 @@ enum LifecycleSchemaMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommonInventorySchemaMode {
     Current,
+    Previous,
     Legacy,
     LegacyDisposable,
 }
@@ -2005,6 +2024,7 @@ fn validate_common_inventory(
     };
     let expected_operations = match schema_mode {
         CommonInventorySchemaMode::Current => &COMMON_ALLOWED_OPERATIONS[..],
+        CommonInventorySchemaMode::Previous => &PREVIOUS_COMMON_ALLOWED_OPERATIONS[..],
         CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
         CommonInventorySchemaMode::LegacyDisposable => {
             &LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS[..]
@@ -2616,6 +2636,9 @@ where
             Some(CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle) => {
                 CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
             }
+            Some(CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory) => {
+                CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory
+            }
             Some(CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory) => {
                 CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
             }
@@ -2704,6 +2727,19 @@ where
             }
             match validate_signed_tree(
                 LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Previous,
+            ) {
+                Ok(()) => {
+                    return Ok((
+                        current,
+                        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
+                    ));
+                }
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_signed_tree(
+                LifecycleSchemaMode::CurrentPerServer,
                 CommonInventorySchemaMode::Legacy,
             ) {
                 Ok(()) => {
@@ -2762,6 +2798,33 @@ where
             return Ok((
                 current,
                 CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
+            ));
+        }
+        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            validate_binding_shape(&provision_receipt.bindings)?;
+            validate_release_tree_with_schema_mode(
+                &current,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                &current,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Previous,
+            )?;
+            return Ok((
+                current,
+                CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
             ));
         }
         CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => {
@@ -2913,6 +2976,21 @@ fn validate_release_target(
                 owner_verification,
                 LifecycleSchemaMode::PreviousPerServer,
                 CommonInventorySchemaMode::Current,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+                Err(_) => {}
+            }
+            match validate_release_tree_with_schema_mode(
+                target,
+                release_id,
+                &provenance.git_revision,
+                &provision_receipt.bindings,
+                expected_owner,
+                target,
+                owner_verification,
+                LifecycleSchemaMode::CurrentPerServer,
+                CommonInventorySchemaMode::Previous,
             ) {
                 Ok(()) => return Ok(()),
                 Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
@@ -4003,6 +4081,21 @@ mod tests {
             .expect("rewrite mixed-schema fixture provision receipt");
         }
 
+        fn set_previous_pre_unarchive_common_inventory(&self) {
+            let previous = self.releases.join("previous");
+            self.remove_common_operation(&previous, "n8n.workflows.unarchive");
+            fs::write(
+                previous.join(RECEIPT_FILE),
+                self.receipt_for(&previous, "previous"),
+            )
+            .expect("rewrite pre-unarchive fixture receipt");
+            fs::write(
+                previous.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(&previous, "previous"),
+            )
+            .expect("rewrite pre-unarchive fixture provision receipt");
+        }
+
         fn set_previous_legacy_disposable_common_inventory(&self) {
             let previous = self.releases.join("previous");
             self.set_legacy_disposable_common_operations(&previous);
@@ -4136,6 +4229,51 @@ mod tests {
                 .request()
                 .validate()
                 .expect_err("staged candidate must require current EEC policy")
+                .code(),
+            ProvisionErrorCode::Policy
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn signed_previous_common_inventory_is_accepted_only_as_compatibility_predecessor() {
+        let fixture = Fixture::new();
+        fixture.set_previous_pre_unarchive_common_inventory();
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("valid signed pre-unarchive predecessor");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory
+        );
+        plan.revalidate()
+            .expect("pre-unarchive mode survives owner revalidation");
+        validate_release_target(
+            &fixture.releases.join("previous"),
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("pre-unarchive rollback target remains valid");
+
+        let fixture = Fixture::new();
+        fixture.remove_common_operation(&fixture.stage, "n8n.workflows.unarchive");
+        fs::write(
+            fixture.stage.join(RECEIPT_FILE),
+            fixture.receipt_for(&fixture.stage, &fixture.release_id),
+        )
+        .expect("rewrite pre-unarchive stage receipt");
+        fs::write(
+            fixture.stage.join(PROVISION_RECEIPT_FILE),
+            fixture.provision_receipt_for(&fixture.stage, &fixture.release_id),
+        )
+        .expect("rewrite pre-unarchive stage provision receipt");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("staged candidate must require unarchive operation")
                 .code(),
             ProvisionErrorCode::Policy
         );

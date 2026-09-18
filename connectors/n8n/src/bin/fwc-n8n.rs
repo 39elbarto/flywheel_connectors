@@ -191,6 +191,8 @@ enum HostRunOnceOperation {
     WorkflowsLifecycle,
     #[serde(rename = "n8n.workflows.archive")]
     WorkflowsArchive,
+    #[serde(rename = "n8n.workflows.unarchive")]
+    WorkflowsUnarchive,
     #[serde(rename = "n8n.workflows.execute")]
     WorkflowsExecute,
     #[serde(rename = "n8n.workflows.delete_disposable")]
@@ -217,6 +219,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
             Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
             Self::WorkflowsArchive => "n8n.workflows.archive",
+            Self::WorkflowsUnarchive => "n8n.workflows.unarchive",
             Self::WorkflowsExecute => "n8n.workflows.execute",
             Self::WorkflowsDeleteDisposable => "n8n.workflows.delete_disposable",
             Self::McpAccessReconcile => "n8n.mcp_access.reconcile",
@@ -240,6 +243,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
             "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
             "n8n.workflows.archive" => Ok(Self::WorkflowsArchive),
+            "n8n.workflows.unarchive" => Ok(Self::WorkflowsUnarchive),
             "n8n.workflows.execute" => Ok(Self::WorkflowsExecute),
             "n8n.workflows.delete_disposable" => Ok(Self::WorkflowsDeleteDisposable),
             "n8n.mcp_access.reconcile" => Ok(Self::McpAccessReconcile),
@@ -266,7 +270,9 @@ impl HostRunOnceOperation {
             Self::WorkflowsLifecycle | Self::WorkflowsArchive | Self::WorkflowsExecute => {
                 BrokerCredentialPurpose::OfficialMcp
             }
-            Self::WorkflowsDeleteDisposable => BrokerCredentialPurpose::RestApi,
+            Self::WorkflowsUnarchive | Self::WorkflowsDeleteDisposable => {
+                BrokerCredentialPurpose::RestApi
+            }
         }
     }
 }
@@ -2621,6 +2627,7 @@ fn validate_host_run_once_input(
             &["id", "action", "guard"],
         ),
         HostRunOnceOperation::WorkflowsArchive => (&["id", "guard"], &["id", "guard"]),
+        HostRunOnceOperation::WorkflowsUnarchive => (&["id", "guard"], &["id", "guard"]),
         HostRunOnceOperation::WorkflowsExecute => (
             &["id", "mode", "versionId", "inputs", "guard"],
             &["id", "mode", "versionId", "guard"],
@@ -2682,6 +2689,7 @@ fn validate_host_run_once_input(
         }
         HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
         HostRunOnceOperation::WorkflowsArchive => validate_workflow_archive_input(object),
+        HostRunOnceOperation::WorkflowsUnarchive => validate_workflow_unarchive_input(object),
         HostRunOnceOperation::WorkflowsExecute => validate_workflow_execute_input(object),
         HostRunOnceOperation::WorkflowsDeleteDisposable => {
             validate_workflow_delete_disposable_input(object)
@@ -2846,6 +2854,89 @@ fn validate_workflow_archive_input(
         || !precondition
             .get("activeVersionId")
             .is_some_and(Value::is_null)
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    Ok(())
+}
+
+fn validate_workflow_unarchive_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "guard"))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    host_run_once_input_id(&json!({"id": id}), "id")?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition.get("isArchived") != Some(&Value::Bool(true))
+        || !(precondition
+            .get("activeVersionId")
+            .is_some_and(Value::is_null)
+            || precondition
+                .get("activeVersionId")
+                .and_then(Value::as_str)
+                .is_some_and(|value| {
+                    !value.is_empty() && value.len() <= 256 && value.trim() == value
+                }))
         || precondition
             .get("stateDigest")
             .and_then(Value::as_str)
@@ -3314,6 +3405,7 @@ fn expected_host_run_once_resource_uri(
         )),
         HostRunOnceOperation::WorkflowsGet
         | HostRunOnceOperation::WorkflowsUpdateDraft
+        | HostRunOnceOperation::WorkflowsUnarchive
         | HostRunOnceOperation::WorkflowsDeleteDisposable => Ok(format!(
             "{root}/workflows/{}",
             encode_host_resource_segment(host_run_once_input_id(input, "id")?)
@@ -3400,7 +3492,7 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             OperationIntent::WorkflowDraftWrite
         }
-        "n8n.workflows.lifecycle" => OperationIntent::Lifecycle,
+        "n8n.workflows.lifecycle" | "n8n.workflows.unarchive" => OperationIntent::Lifecycle,
         "n8n.workflows.execute" => OperationIntent::Execution,
         "n8n.credentials.list" => OperationIntent::CredentialMetadata,
         "n8n.data_tables.search" | "n8n.data_tables.mutate" => OperationIntent::DataTables,

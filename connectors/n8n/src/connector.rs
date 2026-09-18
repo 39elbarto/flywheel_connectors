@@ -34,7 +34,7 @@ use crate::{
         ListView, Workflow, WorkflowDeleteDisposableInput, WorkflowDetail,
         WorkflowDraftMutationInput, WorkflowExecuteInput, WorkflowExecuteMode,
         WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleInput, WorkflowStateView,
-        WorkflowVersion,
+        WorkflowUnarchiveInput, WorkflowVersion,
     },
 };
 
@@ -786,6 +786,18 @@ impl N8nConnector {
             )?;
         }
 
+        if operation == "n8n.workflows.unarchive" {
+            let unarchive =
+                parse_workflow_unarchive_input(&input).map_err(|error| error.to_fcp_error())?;
+            self.require_workflow_guard_approval(
+                "n8n.workflows.unarchive",
+                &unarchive.guard.approval_ref,
+                &input,
+                canonical_resource,
+                &params,
+            )?;
+        }
+
         if operation == "n8n.workflows.archive" {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.lifecycle".into(),
@@ -903,6 +915,10 @@ impl N8nConnector {
             }
             "n8n.workflows.lifecycle" => {
                 self.invoke_workflow_lifecycle(client, &input, Some(context))
+                    .await
+            }
+            "n8n.workflows.unarchive" => {
+                self.invoke_workflow_unarchive(client, &input, Some(context))
                     .await
             }
             "n8n.workflows.delete_disposable" => {
@@ -1507,6 +1523,59 @@ impl N8nConnector {
         .map_err(N8nError::from)
     }
 
+    async fn invoke_workflow_unarchive(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let typed = parse_workflow_unarchive_input(input)?;
+        let baseline_workflow = client
+            .get_workflow_typed(&typed.id, context.clone())
+            .await?;
+        if baseline_workflow.id != typed.id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let baseline = normalize_workflow_state(baseline_workflow.clone())?;
+        verify_workflow_lifecycle_precondition(
+            &typed.guard.precondition,
+            &baseline_workflow,
+            &baseline,
+        )?;
+
+        let provider_workflow = client
+            .unarchive_workflow(&typed.id, context.clone())
+            .await
+            .map_err(classify_lifecycle_attempt_error)?;
+        if provider_workflow.id != typed.id {
+            return Err(N8nError::UnknownOutcome);
+        }
+        let provider_state =
+            normalize_workflow_state(provider_workflow).map_err(|_| N8nError::UnknownOutcome)?;
+
+        let readback_workflow = client
+            .get_workflow_typed(&typed.id, context)
+            .await
+            .map_err(|_| N8nError::UnknownOutcome)?;
+        if readback_workflow.id != typed.id {
+            return Err(N8nError::ReadbackMismatch);
+        }
+        let readback =
+            normalize_workflow_state(readback_workflow).map_err(|_| N8nError::UnknownOutcome)?;
+
+        verify_workflow_unarchive_readback(&baseline, &provider_state, &readback)?;
+
+        Ok(json!({
+            "status": "verified",
+            "operation": "n8n.workflows.unarchive",
+            "provider": "rest",
+            "retry": "never_automatic",
+            "readback": "independent_get",
+            "before": baseline,
+            "after": readback,
+        }))
+    }
+
     async fn invoke_workflow_delete_disposable(
         &self,
         client: &N8nClient,
@@ -1866,6 +1935,23 @@ impl N8nConnector {
         canonical_resource: &str,
         params: &Value,
     ) -> FcpResult<()> {
+        self.require_workflow_guard_approval(
+            operation,
+            &input.guard.approval_ref,
+            raw_input,
+            canonical_resource,
+            params,
+        )
+    }
+
+    fn require_workflow_guard_approval(
+        &self,
+        operation: &str,
+        approval_ref: &str,
+        raw_input: &Value,
+        canonical_resource: &str,
+        params: &Value,
+    ) -> FcpResult<()> {
         let server_id = self
             .configured_server_id()
             .map_err(|error| error.to_fcp_error())?
@@ -1891,7 +1977,7 @@ impl N8nConnector {
                 is_matching_draft_approval(
                     approval,
                     operation,
-                    &input.guard.approval_ref,
+                    approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
                     &server_id,
@@ -1903,7 +1989,7 @@ impl N8nConnector {
         if matching != 1 {
             return Err(FcpError::CapabilityDenied {
                 capability: operation.into(),
-                reason: "workflow lifecycle requires exactly one matching approval bound to server, workflow, action, precondition, and expiry".into(),
+                reason: "workflow mutation requires exactly one matching approval bound to server, workflow, precondition, and expiry".into(),
             });
         }
         Ok(())
@@ -2011,6 +2097,7 @@ impl N8nConnector {
             | "n8n.workflows.update_draft"
             | "n8n.workflows.lifecycle"
             | "n8n.workflows.archive"
+            | "n8n.workflows.unarchive"
             | "n8n.workflows.delete_disposable" => {
                 let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
                 workflow_resource_uri(server_id, workflow_id)
@@ -2972,6 +3059,7 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
         "n8n.workflows.execute" => parse_workflow_execute_input(input).map(|_| ()),
         "n8n.workflows.archive" => parse_workflow_archive_input(input),
+        "n8n.workflows.unarchive" => parse_workflow_unarchive_input(input).map(|_| ()),
         "n8n.workflows.delete_disposable" => {
             parse_workflow_delete_disposable_input(input).map(|_| ())
         }
@@ -3358,6 +3446,45 @@ fn parse_workflow_archive_input(input: &Value) -> N8nResult<()> {
     Ok(())
 }
 
+fn parse_workflow_unarchive_input(input: &Value) -> N8nResult<WorkflowUnarchiveInput> {
+    let typed: WorkflowUnarchiveInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "workflow unarchive input requires id and exact guard precondition".into(),
+        )
+    })?;
+    sanitize_path_segment(&typed.id, "workflow id")?;
+    if typed.guard.approval_ref.is_empty()
+        || typed.guard.approval_ref.len() > 256
+        || typed.guard.approval_ref.trim() != typed.guard.approval_ref
+        || typed.guard.approval_ref.chars().any(char::is_control)
+        || uuid::Uuid::parse_str(&typed.guard.idempotency_key).is_err()
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow unarchive approvalRef and idempotencyKey are invalid".into(),
+        ));
+    }
+    let precondition = &typed.guard.precondition;
+    if precondition.version_id.is_empty()
+        || precondition.version_id.len() > 256
+        || precondition.version_id.trim() != precondition.version_id
+        || precondition.state_digest.len() > 256
+        || !is_blake3_digest(&precondition.state_digest)
+        || !precondition.is_archived
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow unarchive requires an archived current precondition".into(),
+        ));
+    }
+    if let crate::types::RequiredNullable::Value(value) = &precondition.active_version_id
+        && (value.is_empty() || value.len() > 256 || value.trim() != value)
+    {
+        return Err(N8nError::InvalidInput(
+            "workflow unarchive activeVersionId is invalid".into(),
+        ));
+    }
+    Ok(typed)
+}
+
 fn classify_lifecycle_attempt_error(error: N8nError) -> N8nError {
     match error {
         N8nError::Http(_)
@@ -3440,6 +3567,39 @@ fn verify_workflow_lifecycle_readback(
                 return Err(N8nError::ReadbackMismatch);
             }
         }
+    }
+    Ok(())
+}
+
+fn verify_workflow_unarchive_readback(
+    baseline: &WorkflowStateView,
+    provider: &WorkflowStateView,
+    readback: &WorkflowStateView,
+) -> N8nResult<()> {
+    let provider_preserved = provider.id == baseline.id
+        && provider.name == baseline.name
+        && provider.project_id == baseline.project_id
+        && provider.folder_id == baseline.folder_id
+        && provider.version_id == baseline.version_id
+        && provider.active == baseline.active
+        && provider.active_version_id == baseline.active_version_id
+        && provider.draft == baseline.draft
+        && provider.published == baseline.published;
+    if provider.is_archived || !provider_preserved {
+        return Err(N8nError::UnknownOutcome);
+    }
+
+    let readback_preserved = readback.id == baseline.id
+        && readback.name == baseline.name
+        && readback.project_id == baseline.project_id
+        && readback.folder_id == baseline.folder_id
+        && readback.version_id == baseline.version_id
+        && readback.active == baseline.active
+        && readback.active_version_id == baseline.active_version_id
+        && readback.draft == baseline.draft
+        && readback.published == baseline.published;
+    if readback.is_archived || !readback_preserved {
+        return Err(N8nError::ReadbackMismatch);
     }
     Ok(())
 }
@@ -3954,6 +4114,7 @@ fn op_info(
             "n8n.mcp_access.reconcile"
             | "n8n.workflows.lifecycle"
             | "n8n.workflows.archive"
+            | "n8n.workflows.unarchive"
             | "n8n.workflows.execute"
             | "n8n.workflows.delete_disposable" => ApprovalMode::Interactive,
             _ => ApprovalMode::None,
@@ -4475,6 +4636,28 @@ fn workflow_archive_input_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_unarchive_input_schema() -> serde_json::Value {
+    let mut schema = workflow_archive_input_schema();
+    let precondition_properties = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("guard"))
+        .and_then(Value::as_object_mut)
+        .and_then(|guard| guard.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("precondition"))
+        .and_then(Value::as_object_mut)
+        .and_then(|precondition| precondition.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .expect("workflow archive precondition schema must be an object");
+    precondition_properties.insert("active".to_owned(), json!({"type": "boolean"}));
+    precondition_properties.insert(
+        "isArchived".to_owned(),
+        json!({"type": "boolean", "const": true}),
+    );
+    schema
+}
+
 fn workflow_lifecycle_output_schema() -> serde_json::Value {
     let draft = workflow_lifecycle_graph_summary_schema(false);
     let published = workflow_lifecycle_graph_summary_schema(true);
@@ -4590,6 +4773,23 @@ fn workflow_archive_output_schema() -> serde_json::Value {
                     "workflowId": {"type": "string", "minLength": 1, "maxLength": 256},
                 },
             },
+        },
+    })
+}
+
+fn workflow_unarchive_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["status", "operation", "provider", "retry", "readback", "before", "after"],
+        "properties": {
+            "status": {"type": "string", "const": "verified"},
+            "operation": {"type": "string", "const": "n8n.workflows.unarchive"},
+            "provider": {"type": "string", "const": "rest"},
+            "retry": {"type": "string", "const": "never_automatic"},
+            "readback": {"type": "string", "const": "independent_get"},
+            "before": {"type": "object"},
+            "after": {"type": "object"},
         },
     })
 }
@@ -4974,6 +5174,30 @@ fn operations_info() -> Vec<OperationInfo> {
                 examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000004","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.lifecycle"),
+                ],
+            },
+        ),
+        op_info(
+            "n8n.workflows.unarchive",
+            "Unarchive an exact n8n workflow through POST /api/v1/workflows/{workflowId}/unarchive with no request body and independent GET readback",
+            workflow_unarchive_input_schema(),
+            workflow_unarchive_output_schema(),
+            "n8n.workflows.lifecycle",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use only with an exact workflow ID, UUID idempotency key, full current archived precondition, current-chat approval, and the upstream workflow:delete scope; the typed REST call preserves draft, published, version, and active state.".into(),
+                common_mistakes: vec![
+                    "The precondition must be a fresh full state snapshot with isArchived=true; stale or non-archived state is rejected before the POST.".into(),
+                    "This operation uses only the exact no-body unarchive route, then an independent GET; it never publishes, activates, archives, deletes, calls MCP, or restores a version.".into(),
+                    "A timeout, disconnect, conflict, server error, malformed response, or readback mismatch is unknown and never retried automatically.".into(),
+                ],
+                examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000007","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":true,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
+                related: vec![
+                    CapabilityId::from_static("n8n.workflows.get"),
+                    CapabilityId::from_static("n8n.workflows.archive"),
                     CapabilityId::from_static("n8n.workflows.lifecycle"),
                 ],
             },
@@ -5755,9 +5979,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_18_operations() {
+    fn operations_info_has_19_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 18);
+        assert_eq!(ops.len(), 19);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -5769,6 +5993,7 @@ mod tests {
         assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
         assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
         assert!(operation_ids.contains(&"n8n.workflows.archive"));
+        assert!(operation_ids.contains(&"n8n.workflows.unarchive"));
         assert!(operation_ids.contains(&"n8n.workflows.delete_disposable"));
         assert!(operation_ids.contains(&"n8n.workflows.execute"));
         assert!(operation_ids.contains(&"n8n.executions.diagnostics"));

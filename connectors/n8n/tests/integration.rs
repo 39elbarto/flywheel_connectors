@@ -61,6 +61,7 @@ fn resource_uri(operation: &str, input: &Value) -> String {
         "n8n.workflows.get"
         | "n8n.workflows.activate"
         | "n8n.workflows.lifecycle"
+        | "n8n.workflows.unarchive"
         | "n8n.workflows.delete_disposable" => {
             let id = input["id"].as_str().expect("workflow id for test token");
             let id = utf8_percent_encode(id, NON_ALPHANUMERIC);
@@ -129,7 +130,7 @@ fn capability_token_with_options(
         | "n8n.workflows.create_draft"
         | "n8n.workflows.update_draft"
         | "n8n.workflows.delete_disposable" => "n8n.workflows.write",
-        "n8n.workflows.lifecycle" => "n8n.workflows.lifecycle",
+        "n8n.workflows.lifecycle" | "n8n.workflows.unarchive" => "n8n.workflows.lifecycle",
         "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
         "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
         "n8n.executions.list" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
@@ -344,6 +345,7 @@ fn authorized_params(operation: &str, input: &Value) -> Value {
         "n8n.workflows.create_draft"
             | "n8n.workflows.update_draft"
             | "n8n.workflows.lifecycle"
+            | "n8n.workflows.unarchive"
             | "n8n.workflows.delete_disposable"
             | "n8n.mcp_access.reconcile"
     ) && (operation != "n8n.mcp_access.reconcile" || input["dryRun"] == json!(false))
@@ -4593,6 +4595,315 @@ async fn workflows_lifecycle_rejects_unsupported_action_without_provider_call() 
     });
     assert!(invoke(&c, "n8n.workflows.lifecycle", input).await.is_err());
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_posts_exact_route_without_body_and_preserves_state() {
+    let server = MockServer::start().await;
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let baseline = json!({
+        "id": "1001",
+        "name": "Archived workflow",
+        "projectId": "project-1",
+        "parentFolderId": "folder-1",
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": true,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": published.clone()
+    });
+    let unarchived = {
+        let mut value = baseline.clone();
+        value["isArchived"] = json!(false);
+        value
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            unarchived.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(unarchived))
+        .mount(&server)
+        .await;
+    let state_digest = workflow_state_digest_for_fixture(&baseline);
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000013",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": "published-v1",
+                "active": true,
+                "isArchived": true,
+                "stateDigest": state_digest
+            }
+        }
+    });
+    let result = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect("unarchive should verify");
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["operation"], "n8n.workflows.unarchive");
+    assert_eq!(result["provider"], "rest");
+    assert_eq!(result["readback"], "independent_get");
+    assert_eq!(result["after"]["id"], "1001");
+    assert_eq!(result["after"]["versionId"], "draft-v1");
+    assert_eq!(result["after"]["active"], true);
+    assert_eq!(result["after"]["activeVersionId"], "published-v1");
+    assert_eq!(result["after"]["isArchived"], false);
+    assert_eq!(result["after"]["draft"], result["before"]["draft"]);
+    assert_eq!(result["after"]["published"], result["before"]["published"]);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "baseline GET, one no-body POST, readback GET"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_rejects_non_archived_precondition_before_provider_call() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-precondition",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000014",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+            }
+        }
+    });
+    assert!(invoke(&c, "n8n.workflows.unarchive", input).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_stale_precondition_makes_no_write() {
+    let server = MockServer::start().await;
+    let current = json!({
+        "id": "1001",
+        "name": "Stale archived workflow",
+        "active": false,
+        "versionId": "draft-v2",
+        "activeVersionId": null,
+        "isArchived": true,
+        "nodes": [],
+        "connections": {},
+        "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(current.clone()))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-stale",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000015",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&current)
+            }
+        }
+    });
+    assert!(invoke(&c, "n8n.workflows.unarchive", input).await.is_err());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_rejects_approval_mismatch_without_provider_call() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-mismatch",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000016",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": true,
+                "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+            }
+        }
+    });
+    let mut mismatched_approval = draft_approval_token("n8n.workflows.unarchive", &input);
+    if let ApprovalScope::Execution(scope) = &mut mismatched_approval.scope {
+        scope.connector_id = "fcp.other".into();
+    }
+    let error = invoke_with_approval(
+        &c,
+        "n8n.workflows.unarchive",
+        input.clone(),
+        mismatched_approval,
+    )
+    .await
+    .expect_err("mismatched approval must fail closed");
+    assert!(matches!(error, FcpError::CapabilityDenied { .. }));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_provider_conflict_is_unknown_without_retry() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Conflict archived workflow", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(409))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-conflict",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000017",
+            "precondition": {
+                "versionId": "draft-v1", "activeVersionId": null,
+                "active": false, "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect_err("provider conflict must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_timeout_is_unknown_without_retry() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Timeout archived workflow", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(100))
+                .set_body_json(baseline.clone()),
+        )
+        .mount(&server)
+        .await;
+    let c = setup_connector_with_runtime_config(
+        json!({
+            "api_key": "test-n8n-api-key-123",
+            "server_id": TEST_SERVER_ID,
+            "base_url": format!("{}/api/v1", server.uri())
+        }),
+        ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_millis(20)),
+    )
+    .await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-timeout",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000018",
+            "precondition": {
+                "versionId": "draft-v1", "activeVersionId": null,
+                "active": false, "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect_err("timeout must be unknown");
+    assert!(error.to_string().contains("unknown"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_unarchive_readback_mismatch_does_not_repeat_write() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Readback archived workflow", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": true,
+        "nodes": [{"id": "draft"}], "connections": {}, "activeVersion": null
+    });
+    let unarchived = {
+        let mut value = baseline.clone();
+        value["isArchived"] = json!(false);
+        value
+    };
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            baseline.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/unarchive"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(unarchived))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = json!({
+        "id": "1001",
+        "guard": {
+            "approvalRef": "approval-unarchive-readback",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000019",
+            "precondition": {
+                "versionId": "draft-v1", "activeVersionId": null,
+                "active": false, "isArchived": true,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }
+        }
+    });
+    let error = invoke(&c, "n8n.workflows.unarchive", input)
+        .await
+        .expect_err("readback mismatch must fail");
+    assert!(error.to_string().contains("readback"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[fcp_async_core::runtime::test]

@@ -81,6 +81,8 @@ const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approve
 #[cfg(target_os = "linux")]
 const DELETE_DISPOSABLE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.delete_disposable"}"#;
 #[cfg(target_os = "linux")]
+const WORKFLOWS_UNARCHIVE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.unarchive"}"#;
+#[cfg(target_os = "linux")]
 // The supervised host performs the side effect as this nested request.  The
 // parent fcp.n8n lifecycle envelope is validated before this process is
 // spawned; the admission gate must bind the actual child request exactly.
@@ -328,6 +330,9 @@ fn process_spec(
         super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsDeleteDisposable => {
             Some(DELETE_DISPOSABLE_OWNER_ADMISSION)
+        }
+        super::HostRunOnceOperation::WorkflowsUnarchive => {
+            Some(WORKFLOWS_UNARCHIVE_OWNER_ADMISSION)
         }
         super::HostRunOnceOperation::WorkflowsLifecycle => {
             Some(WORKFLOWS_LIFECYCLE_OWNER_ADMISSION)

@@ -302,6 +302,16 @@ pub struct WorkflowLifecycleInput {
     pub guard: WorkflowLifecycleGuard,
 }
 
+/// Typed input for the separate REST `n8n.workflows.unarchive` operation.
+/// Unarchive has its own operation and guard so it cannot be coupled to
+/// publish/unpublish or version restoration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowUnarchiveInput {
+    pub id: String,
+    pub guard: WorkflowLifecycleGuard,
+}
+
 /// Typed deletion input for a workflow that was created through the bounded
 /// disposable-draft host path.  The receipt is an opaque host-issued digest;
 /// it is not a caller assertion and is checked by the host before dispatch.

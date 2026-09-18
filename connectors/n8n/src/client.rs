@@ -838,6 +838,23 @@ impl N8nClient {
         decode_typed(response)
     }
 
+    /// Unarchive one workflow through the exact REST route.  The provider
+    /// contract has no request body; the caller performs an independent GET
+    /// afterwards and treats ambiguity as unknown.
+    pub(crate) async fn unarchive_workflow(
+        &self,
+        id: &str,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowDetail> {
+        let url = self.resolve_path_segments(&[
+            ("path segment", "workflows"),
+            ("workflow id", id),
+            ("path segment", "unarchive"),
+        ])?;
+        let response = self.write_no_body(Method::POST, url, context, true).await?;
+        decode_typed(response)
+    }
+
     /// Delete one disposable workflow through the exact REST route.  The
     /// caller performs an independent GET afterwards; a transport error or
     /// malformed 2xx response is therefore an unknown outcome.

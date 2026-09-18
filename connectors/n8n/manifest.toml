@@ -1820,6 +1820,124 @@ common_mistakes = [
 examples = ["{\"id\":\"1001\",\"guard\":{\"approvalRef\":\"approval-1\",\"idempotencyKey\":\"00000000-0000-4000-8000-000000000004\",\"precondition\":{\"versionId\":\"draft-v1\",\"activeVersionId\":null,\"active\":false,\"isArchived\":false,\"stateDigest\":\"blake3-256:0000000000000000000000000000000000000000000000000000000000000000\"}}}"]
 related = ["n8n.workflows.get", "n8n.workflows.lifecycle"]
 
+[provides.operations."n8n.workflows.unarchive"]
+description = "Unarchive an exact n8n workflow through POST /api/v1/workflows/{workflowId}/unarchive with no request body and independent REST GET readback"
+capability = "n8n.workflows.lifecycle"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "interactive"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."n8n.workflows.unarchive".input_schema]
+additionalProperties = false
+required = ["id", "guard"]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.id]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard]
+additionalProperties = false
+required = ["approvalRef", "idempotencyKey", "precondition"]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.approvalRef]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.idempotencyKey]
+type = "string"
+format = "uuid"
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition]
+additionalProperties = false
+required = ["versionId", "activeVersionId", "active", "isArchived", "stateDigest"]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition.properties.versionId]
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition.properties.activeVersionId]
+type = ["string", "null"]
+maxLength = 256
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition.properties.active]
+type = "boolean"
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition.properties.isArchived]
+type = "boolean"
+const = true
+
+[provides.operations."n8n.workflows.unarchive".input_schema.properties.guard.properties.precondition.properties.stateDigest]
+type = "string"
+pattern = "^blake3-256:[0-9a-f]{64}$"
+maxLength = 75
+
+[provides.operations."n8n.workflows.unarchive".output_schema]
+additionalProperties = false
+required = ["status", "operation", "provider", "retry", "readback", "before", "after"]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.status]
+type = "string"
+const = "verified"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.operation]
+type = "string"
+const = "n8n.workflows.unarchive"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.provider]
+type = "string"
+const = "rest"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.retry]
+type = "string"
+const = "never_automatic"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.readback]
+type = "string"
+const = "independent_get"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.before]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".output_schema.properties.after]
+type = "object"
+
+[provides.operations."n8n.workflows.unarchive".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."n8n.workflows.unarchive".ai_hints]
+when_to_use = "Use only with an exact workflow ID, UUID idempotency key, full current archived precondition, current-chat approval, and upstream workflow:delete scope; preserve the draft, published, version, and active state."
+common_mistakes = [
+    "The precondition must be fresh and isArchived=true; stale or non-archived state is rejected before the provider POST.",
+    "Only the exact no-body POST unarchive route and independent GET readback are used; publish, activate, archive, delete, MCP, generic REST fallback, and version restore remain out of scope.",
+    "Timeout, disconnect, conflict, server error, malformed response, or readback mismatch is unknown and is never retried automatically.",
+]
+examples = ['{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000007","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":true,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}']
+related = ["n8n.workflows.get", "n8n.workflows.archive", "n8n.workflows.lifecycle"]
+
 [provides.operations."n8n.workflows.create_draft"]
 description = "Create an inactive n8n workflow draft and verify it by independent readback"
 capability = "n8n.workflows.write"
@@ -2763,6 +2881,7 @@ scope = "instance"
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.lifecycle" = ["n8n.workflows.lifecycle"]
 "n8n.workflows.archive" = ["n8n.workflows.lifecycle"]
+"n8n.workflows.unarchive" = ["n8n.workflows.lifecycle"]
 "n8n.workflows.delete_disposable" = ["n8n.workflows.write"]
 "n8n.workflows.execute" = ["n8n.workflows.execute"]
 "n8n.workflows.list" = ["n8n.workflows.read"]

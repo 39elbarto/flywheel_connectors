@@ -459,16 +459,17 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 10] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 7] = [
+const N8N_WRITE_OPERATIONS: [&str; 8] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
+    "n8n.workflows.unarchive",
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 17] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 18] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -484,6 +485,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 17] = [
     "n8n.workflows.update_draft",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
+    "n8n.workflows.unarchive",
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
@@ -10866,6 +10868,107 @@ fn validate_n8n_workflow_archive_input(input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_workflow_unarchive_input(input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n workflow unarchive input must be an object".to_string())
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "guard"))
+        || !object.contains_key("id")
+        || !object.contains_key("guard")
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow unarchive input contains unsupported or missing fields".to_string(),
+        ));
+    }
+    let workflow_id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow unarchive id is invalid".to_string())
+        })?;
+    n8n_read_only_input_id(&json!({"id": workflow_id}), "id")?;
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow unarchive guard is invalid".to_string())
+        })?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow unarchive guard contains unsupported fields".to_string(),
+        ));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow unarchive approvalRef is invalid".to_string())
+        })?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| Uuid::parse_str(value).is_err())
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow unarchive guard is invalid".to_string(),
+        ));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow unarchive precondition is invalid".to_string())
+        })?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED
+            .iter()
+            .any(|field| !precondition.contains_key(*field))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition.get("isArchived") != Some(&Value::Bool(true))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            value
+                .as_str()
+                .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
+                || !(value.is_null() || value.is_string())
+        })
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow unarchive precondition is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_n8n_workflow_delete_disposable_input(input: &Value) -> HostResult<()> {
     let object = input.as_object().ok_or_else(|| {
         HostError::InvalidFilter(
@@ -11104,6 +11207,10 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.unarchive" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.workflows.delete_disposable" => Ok(format!(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
@@ -11158,6 +11265,8 @@ fn build_n8n_read_only_run_once_plan(
         validate_n8n_workflow_lifecycle_input(&input.input)?;
     } else if input.operation == "n8n.workflows.archive" {
         validate_n8n_workflow_archive_input(&input.input)?;
+    } else if input.operation == "n8n.workflows.unarchive" {
+        validate_n8n_workflow_unarchive_input(&input.input)?;
     } else if input.operation == "n8n.workflows.delete_disposable" {
         validate_n8n_workflow_delete_disposable_input(&input.input)?;
     } else if input.operation == "n8n.workflows.execute" {
@@ -12068,6 +12177,68 @@ fn n8n_run_once_approval_material(
             "mutation_digest": mutation_digest.clone(),
             "provider": "rest",
             "side_effect": "workflow_delete_disposable",
+        });
+        return Ok((material, String::new(), mutation_digest));
+    }
+    if plan.operation.as_str() == "n8n.workflows.unarchive" {
+        let object = plan.input.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow unarchive input is invalid".to_string())
+        })?;
+        let guard = object
+            .get("guard")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("n8n workflow unarchive guard is invalid".to_string())
+            })?;
+        let precondition = guard
+            .get("precondition")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(
+                    "n8n workflow unarchive precondition is invalid".to_string(),
+                )
+            })?;
+        let resource_digest = n8n_run_once_digest(
+            b"fwc-n8n.resource.v1",
+            &Value::String(plan.resource_uri.clone()),
+        );
+        let workflow_id_digest = n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            object.get("id").unwrap_or(&Value::Null),
+        );
+        let idempotency_key_hash = n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            guard.get("idempotencyKey").unwrap_or(&Value::Null),
+        );
+        let approval_ref_hash = n8n_run_once_digest(
+            b"fwc-n8n.approval-ref.v1",
+            guard.get("approvalRef").unwrap_or(&Value::Null),
+        );
+        let mutation_digest = n8n_run_once_digest(
+            b"fwc-n8n.unarchive-mutation.v1",
+            &json!({
+                "server_id": plan.server_id.as_str(),
+                "resource_digest": resource_digest.clone(),
+                "workflow_id_digest": workflow_id_digest.clone(),
+                "precondition": precondition,
+            }),
+        );
+        let material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_digest": resource_digest,
+            "operation": plan.operation.as_str(),
+            "workflow_id_digest": workflow_id_digest,
+            "precondition_version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+            "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
+            "active_version_id_present": precondition.contains_key("activeVersionId"),
+            "active": precondition.get("active").cloned().unwrap_or(Value::Null),
+            "is_archived": precondition.get("isArchived").cloned().unwrap_or(Value::Null),
+            "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+            "approval_ref_hash": approval_ref_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest.clone(),
+            "provider": "rest",
+            "side_effect": "workflow_unarchive",
         });
         return Ok((material, String::new(), mutation_digest));
     }

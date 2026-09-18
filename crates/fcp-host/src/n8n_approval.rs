@@ -39,6 +39,7 @@ pub enum N8nLifecycleOperation {
     Publish,
     Unpublish,
     Archive,
+    Unarchive,
     CreateDraft,
     UpdateDraft,
     DeleteDisposable,
@@ -51,6 +52,7 @@ impl N8nLifecycleOperation {
         match self {
             Self::Publish | Self::Unpublish => "n8n.workflows.lifecycle",
             Self::Archive => "n8n.workflows.archive",
+            Self::Unarchive => "n8n.workflows.unarchive",
             Self::CreateDraft => "n8n.workflows.create_draft",
             Self::UpdateDraft => "n8n.workflows.update_draft",
             Self::DeleteDisposable => "n8n.workflows.delete_disposable",
@@ -63,6 +65,7 @@ impl N8nLifecycleOperation {
             Self::Publish => "publish",
             Self::Unpublish => "unpublish",
             Self::Archive => "archive",
+            Self::Unarchive => "unarchive",
             Self::CreateDraft => "create_draft",
             Self::UpdateDraft => "update_draft",
             Self::DeleteDisposable => "delete_disposable",
@@ -281,6 +284,7 @@ impl N8nApprovalPlan {
             N8nLifecycleOperation::Unpublish => "unpublish_workflow",
             N8nLifecycleOperation::Archive => "archive_workflow",
             N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile => "",
@@ -288,6 +292,7 @@ impl N8nApprovalPlan {
         let direct_rest = matches!(
             operation,
             N8nLifecycleOperation::CreateDraft
+                | N8nLifecycleOperation::Unarchive
                 | N8nLifecycleOperation::UpdateDraft
                 | N8nLifecycleOperation::DeleteDisposable
                 | N8nLifecycleOperation::McpAccessReconcile
@@ -433,6 +438,7 @@ fn validate_issued_token_shape(
     let request_bound = matches!(
         plan.operation,
         N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile
@@ -489,6 +495,7 @@ pub fn n8n_typed_approval_plan_digest(
         "publish" => N8nLifecycleOperation::Publish,
         "unpublish" => N8nLifecycleOperation::Unpublish,
         "archive" => N8nLifecycleOperation::Archive,
+        "unarchive" => N8nLifecycleOperation::Unarchive,
         "create_draft" => N8nLifecycleOperation::CreateDraft,
         "update_draft" => N8nLifecycleOperation::UpdateDraft,
         "delete_disposable" => N8nLifecycleOperation::DeleteDisposable,
@@ -706,6 +713,7 @@ pub fn build_unsigned_n8n_approval_token(
     let request_bound = matches!(
         request.operation,
         N8nLifecycleOperation::CreateDraft
+            | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
             | N8nLifecycleOperation::McpAccessReconcile
@@ -785,6 +793,7 @@ fn validate_issue_request(
         N8nLifecycleOperation::Publish => &["id", "action", "versionId", "guard"],
         N8nLifecycleOperation::Unpublish => &["id", "action", "guard"],
         N8nLifecycleOperation::Archive => &["id", "guard"],
+        N8nLifecycleOperation::Unarchive => &["id", "guard"],
         N8nLifecycleOperation::CreateDraft => {
             &["name", "project_id", "parent_folder_id", "graph", "guard"]
         }
@@ -843,6 +852,7 @@ fn validate_issue_request(
             }
         }
         N8nLifecycleOperation::Archive => {}
+        N8nLifecycleOperation::Unarchive => {}
         N8nLifecycleOperation::CreateDraft => {
             if object
                 .get("name")
@@ -1062,6 +1072,13 @@ fn validate_issue_request(
     {
         return Err(N8nApprovalError::InvalidPlan(
             "archive precondition is not inactive and unarchived",
+        ));
+    }
+    if request.operation == N8nLifecycleOperation::Unarchive
+        && precondition.get("isArchived") != Some(&Value::Bool(true))
+    {
+        return Err(N8nApprovalError::InvalidPlan(
+            "unarchive precondition is not archived",
         ));
     }
     Ok(())
@@ -1918,6 +1935,23 @@ mod tests {
                     }
                 }),
             ),
+            N8nLifecycleOperation::Unarchive => (
+                "workflow-1".to_owned(),
+                json!({
+                    "id": "workflow-1",
+                    "guard": {
+                        "approvalRef": "approval-unarchive",
+                        "idempotencyKey": "00000000-0000-4000-8000-000000000007",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": true,
+                            "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }),
+            ),
             N8nLifecycleOperation::DeleteDisposable => (
                 "workflow-1".to_owned(),
                 json!({
@@ -1993,6 +2027,7 @@ mod tests {
     fn direct_rest_issuer_matches_host_binding_for_create_and_disposable_delete() {
         for operation in [
             N8nLifecycleOperation::CreateDraft,
+            N8nLifecycleOperation::Unarchive,
             N8nLifecycleOperation::DeleteDisposable,
         ] {
             let request = direct_rest_issue_request(operation).expect("direct REST fixture");

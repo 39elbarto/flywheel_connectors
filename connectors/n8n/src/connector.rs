@@ -5171,7 +5171,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use only for publish or unpublish with an exact workflow target, UUID idempotency key, full current lifecycle precondition, current-chat approval, and an owner-provisioned policy entry matching fresh official MCP tools/list schema digests.".into(),
                 common_mistakes: vec![
-                    "Restore, activate, deactivate, version, execution, and credential operations are not part of this packet; archive is a separate mediated official-MCP operation.".into(),
+                    "Version restore (restore_workflow_version), activate, deactivate, execution, and credential operations are not part of this packet; archive and unarchive are separate operations with their own provider contracts.".into(),
                     "Publish and unpublish use only the exact approved official MCP tools publish_workflow and unpublish_workflow after fresh tools/list discovery; direct REST lifecycle routes remain an explicit fail-closed fallback and no legacy route is guessed.".into(),
                     "A timeout, disconnect, conflict, server error, or ambiguous response is unknown and is never retried automatically; success requires an independent GET readback preserving the draft.".into(),
                     "activeVersionId must be present explicitly, including JSON null, and stateDigest must match the approved baseline.".into(),
@@ -5199,7 +5199,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "The archive path rejects active or already archived baselines to avoid incidental deactivation; it performs no REST archive fallback.".into(),
                     "The owner policy must carry an exact archive_workflow_schema input/output digest pair equal to the approved_tools entry; missing or mismatched binding fails before the side-effect call.".into(),
                     "One archive_workflow MCP call is followed by an independent REST GET; timeout, disconnect, conflict, malformed response, or readback mismatch is unknown and never retried automatically.".into(),
-                    "Restore/unarchive has no proven approved route and remains fail-closed/out of scope.".into(),
+                    "Unarchive is a separate typed REST operation with its own archived precondition and approval; it is not an archive REST fallback and never uses a generic REST or MCP fallback.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000004","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
@@ -5210,7 +5210,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.unarchive",
-            "Unarchive an exact n8n workflow through POST /api/v1/workflows/{workflowId}/unarchive with no request body and independent GET readback",
+            "Unarchive an exact n8n workflow through POST /api/v1/workflows/{workflowId}/unarchive with no request body and independent REST GET readback",
             workflow_unarchive_input_schema(),
             workflow_unarchive_output_schema(),
             "n8n.workflows.lifecycle",
@@ -5218,11 +5218,12 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only with an exact workflow ID, UUID idempotency key, full current archived precondition, current-chat approval, and the upstream workflow:delete scope; the typed REST call preserves draft, published, version, and active state.".into(),
+                when_to_use: "Use only with an exact workflow ID, UUID idempotency key, full current archived precondition, current-chat approval, and upstream workflow:delete scope; preserve the draft, published, version, and active state.".into(),
                 common_mistakes: vec![
-                    "The precondition must be a fresh full state snapshot with isArchived=true; stale or non-archived state is rejected before the POST.".into(),
-                    "This operation uses only the exact no-body unarchive route, then an independent GET; it never publishes, activates, archives, deletes, calls MCP, or restores a version.".into(),
-                    "A timeout, disconnect, conflict, server error, malformed response, or readback mismatch is unknown and never retried automatically.".into(),
+                    "The precondition must be fresh and isArchived=true; stale or non-archived state is rejected before the provider POST.".into(),
+                    "Only the exact no-body POST unarchive route and independent GET readback are used; publish, activate, archive, delete, MCP, generic REST fallback, and restore_workflow_version remain separate or out of scope.".into(),
+                    "The fwc-n8n deadline is carried into fcp-host, whose trusted owned launch snapshot injects the fixed FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS value into the connector ProcessSpec; caller input and managed env cannot override it. This bounds baseline GET, one POST, and one independent GET while reserving reconciliation time so a stalled POST cannot consume the readback opportunity.".into(),
+                    "Any POST result that could have started the write (timeout, disconnect, HTTP error, malformed/advisory response, provider ID mismatch, or normalization error) gets exactly one GET; a matching readback is authoritative even when provider data is contradictory, while mismatch/readback failure is unknown and is never retried automatically. Live provider acceptance remains unproven; restore_workflow_version is separate and out of scope.".into(),
                 ],
                 examples: vec![r#"{"id":"1001","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000007","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":true,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![

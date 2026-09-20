@@ -4598,7 +4598,7 @@ async fn workflows_lifecycle_rejects_unsupported_action_without_provider_call() 
 }
 
 #[fcp_async_core::runtime::test]
-async fn workflows_unarchive_posts_exact_route_without_body_and_preserves_state() {
+async fn workflows_unarchive_posts_exact_route_allows_provider_draft_version_rotation() {
     let server = MockServer::start().await;
     let published = json!({
         "versionId": "published-v1",
@@ -4621,6 +4621,7 @@ async fn workflows_unarchive_posts_exact_route_without_body_and_preserves_state(
     let unarchived = {
         let mut value = baseline.clone();
         value["isArchived"] = json!(false);
+        value["versionId"] = json!("draft-v2");
         value
     };
     Mock::given(method("GET"))
@@ -4661,11 +4662,16 @@ async fn workflows_unarchive_posts_exact_route_without_body_and_preserves_state(
     assert_eq!(result["provider"], "rest");
     assert_eq!(result["readback"], "independent_get");
     assert_eq!(result["after"]["id"], "1001");
-    assert_eq!(result["after"]["versionId"], "draft-v1");
+    assert_eq!(result["after"]["versionId"], "draft-v2");
+    assert_ne!(result["after"]["versionId"], result["before"]["versionId"]);
     assert_eq!(result["after"]["active"], true);
     assert_eq!(result["after"]["activeVersionId"], "published-v1");
     assert_eq!(result["after"]["isArchived"], false);
-    assert_eq!(result["after"]["draft"], result["before"]["draft"]);
+    assert_eq!(result["after"]["draft"]["versionId"], "draft-v2");
+    assert_eq!(
+        result["after"]["draft"]["graphDigest"],
+        result["before"]["draft"]["graphDigest"]
+    );
     assert_eq!(result["after"]["published"], result["before"]["published"]);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(

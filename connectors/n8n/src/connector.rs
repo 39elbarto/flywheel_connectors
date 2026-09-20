@@ -3616,15 +3616,17 @@ fn verify_workflow_unarchive_readback(
     // contradictory after the provider has committed the write, so only the
     // independent GET may establish the final state. Keep the provider value
     // available to the caller for bounded diagnostics without letting it veto
-    // a matching readback.
+    // a matching readback. n8n may issue a fresh draft revision while
+    // unarchiving, so the draft version identifier and derived state digest
+    // are allowed to change. The graph and lifecycle state must remain
+    // unchanged.
     let readback_preserved = readback.id == baseline.id
         && readback.name == baseline.name
         && readback.project_id == baseline.project_id
         && readback.folder_id == baseline.folder_id
-        && readback.version_id == baseline.version_id
         && readback.active == baseline.active
         && readback.active_version_id == baseline.active_version_id
-        && readback.draft == baseline.draft
+        && readback.draft.graph_digest == baseline.draft.graph_digest
         && readback.published == baseline.published;
     if readback.is_archived || !readback_preserved {
         return Err(N8nError::UnknownOutcome);

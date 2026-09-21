@@ -35,7 +35,12 @@ mode `0600`, and contains the exact input/precondition. Request contents are
 transport-only and are never copied to evidence. Evidence, when requested,
 contains only the redacted baseline/invoke/final projections and a summary;
 raw provider responses, request bodies, tokens, seeds, and secrets are not
-persisted there.
+persisted there. If the bounded approval handoff fails before invocation, the
+summary is still written with `verdict: "stop"` and
+`abort_code: "approval_failed"`, alongside the existing numeric
+`approval_helper_status` and
+`approval_reader_status` fields; no helper output or other sensitive material
+is captured.
 
 The approval helper runs once through `sudo -n` and a 40-second `timeout`,
 inside the 45-second request TTL. Because sudo-rs closes inherited FD3, a

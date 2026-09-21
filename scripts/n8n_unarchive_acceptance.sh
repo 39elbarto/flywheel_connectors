@@ -820,6 +820,7 @@ main() {
   write_request_file "$request_json" || { emit_stop approval_request_write_failed; return 10; }
   read_request_metadata "$REQUEST_PATH" || { emit_stop approval_request_metadata_failed; return 10; }
   bounded_approval_and_invoke || {
+    persist_summary stop '"approval_failed"' || true
     emit_stop approval_failed
     return 10
   }

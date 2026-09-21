@@ -215,7 +215,7 @@ const PREVIOUS_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
-const COMMON_ALLOWED_OPERATIONS: [&str; 16] = [
+const COMMON_ALLOWED_OPERATIONS: [&str; 17] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -229,6 +229,7 @@ const COMMON_ALLOWED_OPERATIONS: [&str; 16] = [
     "n8n.workflows.delete_disposable",
     "n8n.workflows.get",
     "n8n.workflows.list",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.unarchive",
     "n8n.workflows.update_draft",
@@ -3919,7 +3920,9 @@ mod tests {
                 .into_iter()
                 .map(|operation| {
                     let max_response_bytes = match operation {
-                        "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive" => 1048576,
+                        "n8n.workflows.activate"
+                        | "n8n.workflows.delete_disposable"
+                        | "n8n.workflows.unarchive" => 1048576,
                         _ => 10485760,
                     };
                     (

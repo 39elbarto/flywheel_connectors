@@ -49,8 +49,8 @@ use crate::{
         ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
         ListView, Workflow, WorkflowDeleteDisposableInput, WorkflowDetail,
         WorkflowDraftMutationInput, WorkflowExecuteInput, WorkflowExecuteMode,
-        WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleInput, WorkflowStateView,
-        WorkflowUnarchiveInput, WorkflowVersion,
+        WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleGuard,
+        WorkflowLifecycleInput, WorkflowStateView, WorkflowUnarchiveInput, WorkflowVersion,
     },
 };
 
@@ -207,10 +207,21 @@ impl DoctorResult {
 
 const SERVER_IDS: [&str; 3] = ["eec", "hetzner", "legacy"];
 
-#[derive(Debug, Clone)]
-struct ActivationTarget {
-    resource_uri: String,
-    normalized_input: serde_json::Value,
+/// Strict input for the public activation/deactivation operation.
+///
+/// The provider does not expose an independent activation API: `active=true`
+/// maps to the canonical publish route and `active=false` maps to the
+/// canonical unpublish route.  Keeping the public shape separate prevents a
+/// caller from selecting a provider route or request body while retaining the
+/// full lifecycle precondition and one-use approval binding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkflowActivationInput {
+    id: String,
+    active: bool,
+    #[serde(rename = "versionId")]
+    version_id: Option<String>,
+    guard: WorkflowLifecycleGuard,
 }
 
 #[derive(Debug, Clone)]
@@ -779,13 +790,16 @@ impl N8nConnector {
             });
         };
 
-        let activation_target = if operation == "n8n.workflows.activate" {
-            Some(self.activation_target(&input, &resources)?)
-        } else {
-            None
-        };
-        if let Some(target) = &activation_target {
-            self.require_execution_approval(operation, target, &params)?;
+        if operation == "n8n.workflows.activate" {
+            let activation =
+                parse_workflow_activation_input(&input).map_err(|error| error.to_fcp_error())?;
+            self.require_workflow_guard_approval(
+                operation,
+                &activation.guard.approval_ref,
+                &input,
+                canonical_resource,
+                &params,
+            )?;
         }
 
         let draft_plan = if matches!(
@@ -853,14 +867,6 @@ impl N8nConnector {
             return Err(FcpError::CapabilityDenied {
                 capability: "n8n.workflows.execute".into(),
                 reason: "execution requires the mediated official MCP host path".into(),
-            });
-        }
-
-        if operation == "n8n.workflows.activate" {
-            return Err(FcpError::CapabilityDenied {
-                capability: "n8n.workflows.write".into(),
-                reason: "workflow activation lifecycle is deferred to the mediated n8n write path"
-                    .into(),
             });
         }
 
@@ -940,6 +946,10 @@ impl N8nConnector {
             }
             "n8n.workflows.lifecycle" => {
                 self.invoke_workflow_lifecycle(client, &input, Some(context))
+                    .await
+            }
+            "n8n.workflows.activate" => {
+                self.invoke_workflow_activation(client, &input, Some(context))
                     .await
             }
             "n8n.workflows.unarchive" => {
@@ -1107,7 +1117,7 @@ impl N8nConnector {
         let mut exceptions = plan.exceptions.clone();
         for item in &plan.planned {
             let lock_key = format!("{server_id}:{}", item.id);
-            let Some(_lock) = self.try_mcp_access_lock(lock_key)? else {
+            let Some(_lock) = self.try_resource_lock(lock_key)? else {
                 exceptions.push(McpAccessPlanItem {
                     id: item.id.clone(),
                     available_in_mcp: item.available_in_mcp,
@@ -1287,11 +1297,11 @@ impl N8nConnector {
         Ok(workflows)
     }
 
-    fn try_mcp_access_lock(&self, key: String) -> Result<Option<McpAccessLockGuard>, N8nError> {
+    fn try_resource_lock(&self, key: String) -> Result<Option<McpAccessLockGuard>, N8nError> {
         let mut locks = self
             .mcp_access_locks
             .lock()
-            .map_err(|_| N8nError::PreconditionFailed("mcp access lock is unavailable"))?;
+            .map_err(|_| N8nError::PreconditionFailed("workflow resource lock is unavailable"))?;
         if !locks.insert(key.clone()) {
             return Ok(None);
         }
@@ -1474,6 +1484,54 @@ impl N8nConnector {
             "published": state.published,
         }))
         .map_err(N8nError::from)
+    }
+
+    async fn invoke_workflow_activation(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> Result<Value, N8nError> {
+        let typed = parse_workflow_activation_input(input)?;
+        let server_id = self.configured_server_id()?;
+        let lock_key = format!("activation:{server_id}:{}", typed.id);
+        let Some(_lock) = self.try_resource_lock(lock_key)? else {
+            return Err(N8nError::PreconditionFailed(
+                "workflow activation is already in progress",
+            ));
+        };
+
+        // Reuse the lifecycle state machine so the public activation shape
+        // cannot bypass its exact baseline GET, one canonical POST, or
+        // independent GET readback.  The only translation is the closed
+        // active=true -> publish / active=false -> unpublish mapping.
+        let mut lifecycle_input = input.clone();
+        let object = lifecycle_input
+            .as_object_mut()
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        object.remove("active");
+        object.insert(
+            "action".into(),
+            Value::String(if typed.active {
+                WorkflowLifecycleAction::Publish.as_str().into()
+            } else {
+                WorkflowLifecycleAction::Unpublish.as_str().into()
+            }),
+        );
+
+        let mut result = self
+            .invoke_workflow_lifecycle(client, &lifecycle_input, context)
+            .await?;
+        let result_object = result
+            .as_object_mut()
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        result_object.remove("action");
+        result_object.insert(
+            "operation".into(),
+            Value::String("n8n.workflows.activate".into()),
+        );
+        result_object.insert("active".into(), Value::Bool(typed.active));
+        Ok(result)
     }
 
     async fn invoke_workflow_lifecycle(
@@ -2164,104 +2222,6 @@ impl N8nConnector {
         };
         Ok(vec![resource])
     }
-
-    fn activation_target(
-        &self,
-        input: &serde_json::Value,
-        resources: &[String],
-    ) -> FcpResult<ActivationTarget> {
-        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let workflow_id = require_str(input, "id").map_err(|error| error.to_fcp_error())?;
-        let active = input
-            .get("active")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1005,
-                message: "Invalid input: Missing required field: active (boolean)".into(),
-            })?;
-        let resource_uri = resources
-            .first()
-            .cloned()
-            .ok_or_else(|| FcpError::Internal {
-                message: "Activation resource URI was not constructed".into(),
-            })?;
-        Ok(ActivationTarget {
-            resource_uri: resource_uri.clone(),
-            normalized_input: json!({
-                "server_id": config.server_id,
-                "resource_uri": resource_uri,
-                "workflow_id": workflow_id,
-                "active": active,
-                "provider": "rest",
-            }),
-        })
-    }
-
-    fn require_execution_approval(
-        &self,
-        operation: &str,
-        target: &ActivationTarget,
-        params: &serde_json::Value,
-    ) -> FcpResult<()> {
-        let approval_values = params
-            .get("approval_tokens")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| FcpError::CapabilityDenied {
-                capability: "n8n.workflows.write".into(),
-                reason: "activation requires a non-empty approval_tokens collection".into(),
-            })?;
-        let approvals: Vec<ApprovalToken> = approval_values
-            .iter()
-            .map(|value| serde_json::from_value(value.clone()))
-            .collect::<Result<_, _>>()
-            .map_err(|error| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid approval token: {error}"),
-            })?;
-        let now_ms = current_time_ms();
-        let matching = approvals
-            .iter()
-            .filter(|approval| {
-                is_matching_execution_approval(
-                    approval,
-                    operation,
-                    self.zone_id.as_ref(),
-                    target,
-                    now_ms,
-                )
-            })
-            .count();
-        if matching != 1 {
-            return Err(FcpError::CapabilityDenied {
-                capability: "n8n.workflows.write".into(),
-                reason: "activation requires exactly one matching execution approval token".into(),
-            });
-        }
-        Ok(())
-    }
-}
-
-fn is_matching_execution_approval(
-    approval: &ApprovalToken,
-    operation: &str,
-    zone_id: Option<&ZoneId>,
-    target: &ActivationTarget,
-    now_ms: u64,
-) -> bool {
-    if approval.signature.as_ref().is_none_or(Vec::is_empty)
-        || !approval.is_valid(now_ms)
-        || zone_id != Some(&approval.zone_id)
-    {
-        return false;
-    }
-
-    let ApprovalScope::Execution(scope) = &approval.scope else {
-        return false;
-    };
-    scope.connector_id == "fcp.n8n"
-        && scope.method_pattern == operation
-        && scope.request_object_id.is_none()
-        && has_exact_activation_constraints(&scope.input_constraints, &target.normalized_input)
 }
 
 fn draft_settings_supplied(input: &Value) -> bool {
@@ -2668,26 +2628,6 @@ fn execution_resource_uri(
     ))
 }
 
-fn has_exact_activation_constraints(
-    constraints: &[fcp_prelude::InputConstraint],
-    normalized_input: &serde_json::Value,
-) -> bool {
-    const REQUIRED_POINTERS: [&str; 5] = [
-        "/server_id",
-        "/resource_uri",
-        "/workflow_id",
-        "/active",
-        "/provider",
-    ];
-    constraints.len() == REQUIRED_POINTERS.len()
-        && REQUIRED_POINTERS.iter().all(|pointer| {
-            constraints.iter().any(|constraint| {
-                constraint.pointer == *pointer
-                    && normalized_input.pointer(pointer) == Some(&constraint.expected)
-            })
-        })
-}
-
 fn is_matching_draft_approval(
     approval: &ApprovalToken,
     operation: &str,
@@ -3081,17 +3021,7 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
             require_str(input, "id")?;
             Ok(())
         }
-        "n8n.workflows.activate" => {
-            require_exact_object(input, &["id", "active"], "workflow activation input")?;
-            require_str(input, "id")?;
-            input
-                .get("active")
-                .and_then(serde_json::Value::as_bool)
-                .ok_or_else(|| {
-                    N8nError::InvalidInput("Missing required field: active (boolean)".into())
-                })?;
-            Ok(())
-        }
+        "n8n.workflows.activate" => parse_workflow_activation_input(input).map(|_| ()),
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
         "n8n.workflows.execute" => parse_workflow_execute_input(input).map(|_| ()),
         "n8n.workflows.archive" => parse_workflow_archive_input(input),
@@ -3221,24 +3151,68 @@ fn parse_mcp_access_input(input: &Value) -> N8nResult<McpAccessReconcileInput> {
     Ok(typed)
 }
 
+fn parse_workflow_activation_input(input: &Value) -> N8nResult<WorkflowActivationInput> {
+    if input.get("versionId").is_some_and(Value::is_null) {
+        return Err(N8nError::InvalidInput(
+            "workflow activation versionId must be omitted or a string".into(),
+        ));
+    }
+    let typed: WorkflowActivationInput = serde_json::from_value(input.clone()).map_err(|_| {
+        N8nError::InvalidInput(
+            "workflow activation input requires id, active, and exact guard precondition".into(),
+        )
+    })?;
+    validate_workflow_lifecycle_guard(
+        &typed.id,
+        &typed.guard,
+        typed.version_id.as_deref(),
+        if typed.active {
+            WorkflowLifecycleAction::Publish
+        } else {
+            WorkflowLifecycleAction::Unpublish
+        },
+    )?;
+    if !typed.active && typed.version_id.is_some() {
+        return Err(N8nError::InvalidInput(
+            "deactivation must not include a versionId".into(),
+        ));
+    }
+    Ok(typed)
+}
+
 fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleInput> {
     let typed: WorkflowLifecycleInput = serde_json::from_value(input.clone()).map_err(|_| {
         N8nError::InvalidInput(
             "workflow lifecycle input requires id, action, and exact guard precondition".into(),
         )
     })?;
-    sanitize_path_segment(&typed.id, "workflow id")?;
-    if typed.guard.approval_ref.is_empty()
-        || typed.guard.approval_ref.len() > 256
-        || typed.guard.approval_ref.trim() != typed.guard.approval_ref
-        || typed.guard.approval_ref.chars().any(char::is_control)
-        || uuid::Uuid::parse_str(&typed.guard.idempotency_key).is_err()
+    validate_workflow_lifecycle_guard(
+        &typed.id,
+        &typed.guard,
+        typed.version_id.as_deref(),
+        typed.action,
+    )?;
+    Ok(typed)
+}
+
+fn validate_workflow_lifecycle_guard(
+    workflow_id: &str,
+    guard: &WorkflowLifecycleGuard,
+    version_id: Option<&str>,
+    action: WorkflowLifecycleAction,
+) -> N8nResult<()> {
+    sanitize_path_segment(workflow_id, "workflow id")?;
+    if guard.approval_ref.is_empty()
+        || guard.approval_ref.len() > 256
+        || guard.approval_ref.trim() != guard.approval_ref
+        || guard.approval_ref.chars().any(char::is_control)
+        || uuid::Uuid::parse_str(&guard.idempotency_key).is_err()
     {
         return Err(N8nError::InvalidInput(
             "workflow lifecycle approvalRef and idempotencyKey are invalid".into(),
         ));
     }
-    let precondition = &typed.guard.precondition;
+    let precondition = &guard.precondition;
     if precondition.version_id.is_empty()
         || precondition.version_id.len() > 256
         || precondition.version_id.trim() != precondition.version_id
@@ -3256,19 +3230,19 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
             "workflow lifecycle activeVersionId is invalid".into(),
         ));
     }
-    if let Some(version_id) = typed.version_id.as_deref()
+    if let Some(version_id) = version_id
         && (version_id.is_empty() || version_id.len() > 256 || version_id.trim() != version_id)
     {
         return Err(N8nError::InvalidInput(
             "workflow lifecycle versionId is invalid".into(),
         ));
     }
-    if typed.action == WorkflowLifecycleAction::Unpublish && typed.version_id.is_some() {
+    if action == WorkflowLifecycleAction::Unpublish && version_id.is_some() {
         return Err(N8nError::InvalidInput(
             "unpublish must not include a versionId".into(),
         ));
     }
-    Ok(typed)
+    Ok(())
 }
 
 fn parse_workflow_delete_disposable_input(
@@ -4137,11 +4111,11 @@ fn op_info(
         description: Some(summary.into()),
         rate_limit: None,
         requires_approval: Some(match id {
-            "n8n.workflows.activate" => ApprovalMode::Policy,
             "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
                 ApprovalMode::Interactive
             }
             "n8n.mcp_access.reconcile"
+            | "n8n.workflows.activate"
             | "n8n.workflows.lifecycle"
             | "n8n.workflows.archive"
             | "n8n.workflows.unarchive"
@@ -4634,6 +4608,32 @@ fn workflow_lifecycle_input_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_activation_input_schema() -> serde_json::Value {
+    let mut schema = workflow_lifecycle_input_schema();
+    let object = schema
+        .as_object_mut()
+        .expect("workflow lifecycle input schema must be an object");
+    let required = object
+        .get_mut("required")
+        .and_then(Value::as_array_mut)
+        .expect("workflow lifecycle input schema required must be an array");
+    required.retain(|field| field.as_str() != Some("action"));
+    required.push(Value::String("active".into()));
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("workflow lifecycle input schema properties must be an object");
+    properties.remove("action");
+    properties.insert(
+        "active".into(),
+        json!({
+            "type": "boolean",
+            "description": "Whether to activate (true) or deactivate (false)"
+        }),
+    );
+    schema
+}
+
 fn workflow_archive_input_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -4725,6 +4725,31 @@ fn workflow_lifecycle_output_schema() -> serde_json::Value {
             "after": state,
         },
     })
+}
+
+fn workflow_activation_output_schema() -> serde_json::Value {
+    let mut schema = workflow_lifecycle_output_schema();
+    let object = schema
+        .as_object_mut()
+        .expect("workflow lifecycle output schema must be an object");
+    let required = object
+        .get_mut("required")
+        .and_then(Value::as_array_mut)
+        .expect("workflow lifecycle output schema required must be an array");
+    required.retain(|field| field.as_str() != Some("action"));
+    required.push(Value::String("active".into()));
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("workflow lifecycle output schema properties must be an object");
+    properties.insert(
+        "operation".into(),
+        json!({"const": "n8n.workflows.activate"}),
+    );
+    properties.insert("provider".into(), json!({"type": "string", "enum": ["rest"]}));
+    properties.remove("action");
+    properties.insert("active".into(), json!({"type": "boolean"}));
+    schema
 }
 
 fn workflow_execute_input_schema() -> serde_json::Value {
@@ -5139,20 +5164,21 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.activate",
-            "Capability- and approval-gated activation boundary; packet 1 fails closed and defers provider lifecycle I/O",
-            json!({"type": "object", "additionalProperties": false, "required": ["id", "active"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}, "active": {"type": "boolean", "description": "Whether to activate (true) or deactivate (false)"}}}),
-            json!({"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string"}}}),
+            "Activate or deactivate an exact n8n workflow through the canonical typed REST publish/unpublish routes with independent GET readback",
+            workflow_activation_input_schema(),
+            workflow_activation_output_schema(),
             "n8n.workflows.write",
-            RiskLevel::Medium,
+            RiskLevel::High,
             SafetyTier::Risky,
-            IdempotencyClass::None,
+            IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Request activation or deactivation only when the host has the mediated lifecycle path; packet 1 verifies capability and approval, then fails closed before provider I/O.".into(),
+                when_to_use: "Use only with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and a current-chat approval bound to this exact request.".into(),
                 common_mistakes: vec![
-                    "Expecting packet 1 to change provider lifecycle state; activation is deferred until the mediated write path is available.".into(),
-                    "Passing the workflow name instead of the numeric workflow ID, or omitting the matching execution approval.".into(),
+                    "active=true uses only POST /workflows/{workflowId}/publish and active=false uses only POST /workflows/{workflowId}/unpublish; deprecated activate/deactivate routes and graph PUT are never used.".into(),
+                    "The full versionId, explicit activeVersionId (null or value), active, isArchived, stateDigest, UUID idempotencyKey, and matching approval are required.".into(),
+                    "A timeout, conflict, malformed response, or readback mismatch is terminal/unknown and never retried automatically; success requires an independent GET preserving the draft and published invariants.".into(),
                 ],
-                examples: vec![r#"{"id": "1001", "active": true}"#.into()],
+                examples: vec![r#"{"id":"1001","active":true,"versionId":"published-v1","guard":{"approvalRef":"approval-1","idempotencyKey":"00000000-0000-4000-8000-000000000008","precondition":{"versionId":"draft-v1","activeVersionId":null,"active":false,"isArchived":false,"stateDigest":"blake3-256:0000000000000000000000000000000000000000000000000000000000000000"}}}"#.into()],
                 related: vec![
                     CapabilityId::from_static("n8n.workflows.get"),
                     CapabilityId::from_static("n8n.workflows.list"),
@@ -6536,20 +6562,23 @@ mod tests {
     }
 
     #[test]
-    fn activation_introspection_describes_deferred_lifecycle() {
+    fn activation_introspection_describes_typed_rest_lifecycle() {
         let activation = operations_info()
             .into_iter()
             .find(|op| op.id.as_ref() == "n8n.workflows.activate")
             .expect("activation operation should be catalogued");
-        assert!(activation.summary.contains("defer"));
-        assert!(activation.summary.contains("fails closed"));
-        assert!(activation.ai_hints.when_to_use.contains("fails closed"));
+        assert!(activation.summary.contains("canonical typed REST"));
+        assert_eq!(
+            activation.requires_approval,
+            Some(ApprovalMode::Interactive)
+        );
+        assert!(activation.ai_hints.when_to_use.contains("UUID"));
         assert!(
             activation
                 .ai_hints
                 .common_mistakes
                 .iter()
-                .any(|mistake| mistake.contains("deferred"))
+                .any(|mistake| mistake.contains("deprecated activate/deactivate"))
         );
     }
 
@@ -7728,5 +7757,78 @@ mod tests {
             FcpError::CapabilityDenied { reason, .. }
                 if reason.starts_with("capability_unavailable:")
         ));
+    }
+
+    #[test]
+    fn activation_input_maps_both_directions_and_rejects_route_controls() {
+        let guard = json!({
+            "approvalRef": "approval-1",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000008",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            }
+        });
+        let activate = parse_workflow_activation_input(&json!({
+            "id": "1001",
+            "active": true,
+            "versionId": "published-v1",
+            "guard": guard.clone()
+        }))
+        .expect("activation input");
+        assert!(activate.active);
+        assert_eq!(activate.version_id.as_deref(), Some("published-v1"));
+
+        let deactivate = parse_workflow_activation_input(&json!({
+            "id": "1001",
+            "active": false,
+            "guard": guard.clone()
+        }))
+        .expect("deactivation input");
+        assert!(!deactivate.active);
+        assert!(deactivate.version_id.is_none());
+
+        assert!(
+            parse_workflow_activation_input(&json!({
+                "id": "1001",
+                "active": false,
+                "versionId": "published-v1",
+                "guard": guard.clone()
+            }))
+            .is_err()
+        );
+        assert!(
+            parse_workflow_activation_input(&json!({
+                "id": "1001",
+                "active": true,
+                "route": "/activate",
+                "guard": guard
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn activation_schemas_require_guard_and_independent_readback() {
+        let input = workflow_activation_input_schema();
+        assert_eq!(input["required"], json!(["id", "guard", "active"]));
+        assert!(input["properties"]["guard"].is_object());
+        assert!(input["properties"]["active"].is_object());
+        assert!(input["properties"].get("action").is_none());
+
+        let output = workflow_activation_output_schema();
+        assert_eq!(
+            output["properties"]["operation"]["const"],
+            json!("n8n.workflows.activate")
+        );
+        assert_eq!(
+            output["properties"]["readback"]["enum"],
+            json!(["independent_get"])
+        );
+        assert!(output["properties"]["before"].is_object());
+        assert!(output["properties"]["after"].is_object());
     }
 }

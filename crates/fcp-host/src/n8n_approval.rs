@@ -36,6 +36,7 @@ const APPROVAL_PUBLIC_KEY_FILE_ENV: &str = "FCP_HOST_APPROVAL_PUBLIC_KEY_FILE";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum N8nLifecycleOperation {
+    Activate,
     Publish,
     Unpublish,
     Archive,
@@ -50,6 +51,7 @@ pub enum N8nLifecycleOperation {
 impl N8nLifecycleOperation {
     pub const fn operation_id(self) -> &'static str {
         match self {
+            Self::Activate => "n8n.workflows.activate",
             Self::Publish | Self::Unpublish => "n8n.workflows.lifecycle",
             Self::Archive => "n8n.workflows.archive",
             Self::Unarchive => "n8n.workflows.unarchive",
@@ -62,6 +64,7 @@ impl N8nLifecycleOperation {
 
     const fn as_str(self) -> &'static str {
         match self {
+            Self::Activate => "activate",
             Self::Publish => "publish",
             Self::Unpublish => "unpublish",
             Self::Archive => "archive",
@@ -280,6 +283,7 @@ impl N8nApprovalPlan {
         expires_at_ms: u64,
     ) -> Result<Self, N8nApprovalError> {
         let expected_tool = match operation {
+            N8nLifecycleOperation::Activate => "",
             N8nLifecycleOperation::Publish => "publish_workflow",
             N8nLifecycleOperation::Unpublish => "unpublish_workflow",
             N8nLifecycleOperation::Archive => "archive_workflow",
@@ -291,7 +295,8 @@ impl N8nApprovalPlan {
         };
         let direct_rest = matches!(
             operation,
-            N8nLifecycleOperation::CreateDraft
+            N8nLifecycleOperation::Activate
+                | N8nLifecycleOperation::CreateDraft
                 | N8nLifecycleOperation::Unarchive
                 | N8nLifecycleOperation::UpdateDraft
                 | N8nLifecycleOperation::DeleteDisposable
@@ -437,7 +442,8 @@ fn validate_issued_token_shape(
     };
     let request_bound = matches!(
         plan.operation,
-        N8nLifecycleOperation::CreateDraft
+        N8nLifecycleOperation::Activate
+            | N8nLifecycleOperation::CreateDraft
             | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
@@ -493,6 +499,7 @@ pub fn n8n_typed_approval_plan_digest(
     };
     let operation = match operation {
         "publish" => N8nLifecycleOperation::Publish,
+        "activate" => N8nLifecycleOperation::Activate,
         "unpublish" => N8nLifecycleOperation::Unpublish,
         "archive" => N8nLifecycleOperation::Archive,
         "unarchive" => N8nLifecycleOperation::Unarchive,
@@ -712,7 +719,8 @@ pub fn build_unsigned_n8n_approval_token(
     }
     let request_bound = matches!(
         request.operation,
-        N8nLifecycleOperation::CreateDraft
+        N8nLifecycleOperation::Activate
+            | N8nLifecycleOperation::CreateDraft
             | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
             | N8nLifecycleOperation::DeleteDisposable
@@ -790,6 +798,7 @@ fn validate_issue_request(
             "high-level input must be an object",
         ))?;
     let allowed_top_level: &[&str] = match request.operation {
+        N8nLifecycleOperation::Activate => &["id", "active", "versionId", "guard"],
         N8nLifecycleOperation::Publish => &["id", "action", "versionId", "guard"],
         N8nLifecycleOperation::Unpublish => &["id", "action", "guard"],
         N8nLifecycleOperation::Archive => &["id", "guard"],
@@ -836,6 +845,21 @@ fn validate_issue_request(
         return Ok(());
     }
     match request.operation {
+        N8nLifecycleOperation::Activate => {
+            if object.get("active").and_then(Value::as_bool).is_none() {
+                return Err(N8nApprovalError::InvalidPlan(
+                    "activation active flag is invalid",
+                ));
+            }
+            if let Some(version) = object.get("versionId") {
+                if object.get("active") == Some(&Value::Bool(false)) {
+                    return Err(N8nApprovalError::InvalidPlan(
+                        "deactivation must not include versionId",
+                    ));
+                }
+                validate_identifier(version, "activation version is invalid")?;
+            }
+        }
         N8nLifecycleOperation::Publish => {
             if object.get("action").and_then(Value::as_str) != Some("publish") {
                 return Err(N8nApprovalError::InvalidPlan("publish action is not exact"));
@@ -1896,6 +1920,25 @@ mod tests {
         operation: N8nLifecycleOperation,
     ) -> Result<N8nApprovalIssueRequest, N8nApprovalError> {
         let (workflow_id, input) = match operation {
+            N8nLifecycleOperation::Activate => (
+                "workflow-1".to_owned(),
+                json!({
+                    "id": "workflow-1",
+                    "active": true,
+                    "versionId": "published-v1",
+                    "guard": {
+                        "approvalRef": "approval-activate",
+                        "idempotencyKey": "00000000-0000-4000-8000-000000000008",
+                        "precondition": {
+                            "versionId": "version-1",
+                            "activeVersionId": null,
+                            "active": false,
+                            "isArchived": false,
+                            "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }),
+            ),
             N8nLifecycleOperation::CreateDraft => (
                 String::new(),
                 json!({
@@ -2026,6 +2069,7 @@ mod tests {
     #[test]
     fn direct_rest_issuer_matches_host_binding_for_create_and_disposable_delete() {
         for operation in [
+            N8nLifecycleOperation::Activate,
             N8nLifecycleOperation::CreateDraft,
             N8nLifecycleOperation::Unarchive,
             N8nLifecycleOperation::DeleteDisposable,

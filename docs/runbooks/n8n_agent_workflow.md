@@ -18,24 +18,38 @@ In scope:
 
 Boundaries:
 
-- `.24` is the source/capability triage surface. Implementation or live work
-  needs a separate bounded task and explicit authority;
 - do not invent new cryptography or change cryptographic authority as part of
   an n8n task;
 - do not explore, retry, or release outside the recorded task boundary.
 
-## Owner and authority
+## Dated handoff — 2026-09-21
+
+`handoff_at: 2026-09-21`. The `.23` acceptance is closed at main closeout
+`ccbccdadf`. The current candidate is rc26,
+`release-20260920-02d215cfd-unarchive-introspection-rc26`, produced by runner
+`4ef0578dc`, with retained evidence at:
+
+- EEC: `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1`;
+- Hetzner: `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85`.
+
+The next sequence is `.24` source/capability triage before any bounded,
+authorized implementation, then `.25`, then `.26`.
+
+## Default owner and authority
+
+These role and model assignments are defaults for this workflow; direct user
+instructions prevail.
 
 | Role | Model | Authority and responsibility |
 | --- | --- | --- |
-| Terra | medium | Coordinator. Frames the task, assigns the current owner, records evidence, accepts results, and manages handoffs without directing shell commands. |
+| Terra | medium | Coordinator. Frames the task, assigns the current owner, records evidence, accepts results, manages handoffs, and may run read-only or integration commands without directing implementer shell commands. |
 | Luna | xhigh | Implementer when assigned. Produces the bounded change and tests for the files assigned to the current task. |
 | Sol | medium | Reviewer when assigned. Checks the diff and evidence read-only and separates blockers from nonblocking findings. |
 | Astra | consultant | Answers a specific question after repeated identical blockers. The consultation is advisory; it does not transfer live authority. |
 
-Each bounded task designates one live writer and one build at a time; assignments
-may change only through the handoff below. Worktrees isolate Git files, not
-provider state, builds, Agent Mail, or other shared services.
+Each bounded task designates one live writer, and one shared build runs globally;
+assignments may change only through the handoff below. Worktrees isolate Git
+files, not provider state, builds, Agent Mail, or other shared services.
 
 ## Trigger and prerequisites
 
@@ -64,17 +78,13 @@ provider target (if any), and stop conditions. A valid task can be checked from
 the resulting diff, command output, test result, or redacted provider evidence;
 it cannot depend on an informal claim that work was done.
 
-Use `.24` for source/capability triage. If implementation or live work is
-needed, record it as a separate bounded task with its own owner, target,
-invariants, tests, and explicit authority.
-
 ### Step 2: Establish ownership and execution order
 
 Terra records the current writer and reserves the exact files before editing.
 Terra accepts results rather than prescribing shell commands; the implementer
 chooses the commands needed to satisfy the recorded tests and reports commands
-and outputs. The reviewer works read-only, and only one build may run for the
-task at a time.
+and outputs. The reviewer works read-only, and no second build starts while the
+one shared global build is in flight.
 
 Record coordination in Agent Mail. If a session is idle and needs to resume,
 preserve that history and also issue a direct terminal trigger with event
@@ -123,12 +133,13 @@ Use this ordered transition:
 
 `old quiescent -> handoff -> new accept -> old no longer owner`
 
-The old coordinator first stops writes, builds, and live actions, then sends a
-dated handoff (`handoff_at` in UTC ISO-8601) containing the old and new owner,
-task state, `cwd`, branch, owned files, current evidence, unresolved blockers,
-and next acceptance check. The new coordinator explicitly accepts that dated
-handoff before taking authority; only then is the old coordinator marked no
-longer owner. Preserve Agent Mail history and the tracked task record.
+The old coordinator quiesces new writes, builds, and live actions while bounded
+in-flight actions finish and reconcile. It then sends a dated handoff
+(`handoff_at` in UTC ISO-8601) containing the old and new owner, task state,
+`cwd`, branch, owned files, current evidence, unresolved blockers, and next
+acceptance check. The new coordinator explicitly accepts that dated handoff
+before taking authority; only then is the old coordinator marked no longer
+owner. Preserve Agent Mail history and the tracked task record.
 
 ## Verification
 
@@ -146,8 +157,6 @@ the Agent Mail history.
   and tests are recorded.
 - **Second writer or build:** stop the newcomer and keep the existing owner and
   build authoritative; do not merge competing evidence.
-- **`.24` scope drift:** stop implementation/live work and return a source or
-  capability question to triage.
 - **Unknown provider outcome:** mark `unknown`, preserve redacted evidence, and
   do not retry or replay from an assumption of failure or success.
 - **Approval pause, missing TTL, or expired TTL:** stop before invoke; an LLM
@@ -183,4 +192,4 @@ bodies in the repository, Agent Mail, or evidence.
 
 Apply this runbook to every n8n task. Re-review it whenever an n8n provider
 operation, approval contract, release-key binding, role assignment, or
-coordination transport changes, and before accepting a new release candidate.
+coordination transport changes.

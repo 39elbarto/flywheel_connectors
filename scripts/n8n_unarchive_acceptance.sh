@@ -16,10 +16,12 @@ readonly OPERATION="n8n.workflows.unarchive"
 readonly DEFAULT_REQUEST_ROOT="/var/lib/fwc-n8n/approval-requests"
 REQUEST_ROOT="$DEFAULT_REQUEST_ROOT"
 readonly APPROVAL_TTL_MS=45000
+readonly APPROVAL_TIMEOUT_SECONDS=40
 readonly DEADLINE_MS=30000
 readonly JQ_BIN="/usr/bin/jq"
 readonly STAT_BIN="/usr/bin/stat"
 readonly UUIDGEN_BIN="/usr/bin/uuidgen"
+readonly TIMEOUT_BIN="/usr/bin/timeout"
 readonly DEFAULT_LAUNCHER="/usr/local/bin/fwc-n8n"
 readonly DEFAULT_APPROVAL_HELPER="/home/ubuntu/Projects/flywheel_connectors/scripts/n8n_approval_once.sh"
 # This is the verified provisioned binary.  The similarly named path below
@@ -279,10 +281,15 @@ approval_fd3_handoff() {
   local reader_pid
   local helper_status
   local reader_status
-  local token_json
+  local invoke_fd
+  local invoke_pid
+  local invoke_status
+  local output_status
+  local invoke_output
 
   # Start the reader and writer together in this one bounded function.  No
-  # FIFO, polling, or long-lived approval request is used.
+  # FIFO, polling, or long-lived approval request is used.  The helper is
+  # bounded below its 45-second request TTL and receives the already-open FD3.
   coproc FWC_APPROVAL_READER { cat; }
   reader_fd="${FWC_APPROVAL_READER[0]}"
   writer_fd="${FWC_APPROVAL_READER[1]}"
@@ -290,56 +297,73 @@ approval_fd3_handoff() {
   exec 3>&"$writer_fd"
   exec {writer_fd}>&-
 
-  if "$APPROVAL_HELPER_PATH" --request-file "$basename" >&2; then
+  if sudo -n "$TIMEOUT_BIN" --signal=TERM --kill-after=2s \
+    "${APPROVAL_TIMEOUT_SECONDS}s" "$APPROVAL_HELPER_PATH" \
+    --request-file "$basename" >&2; then
     helper_status=0
   else
     helper_status=$?
   fi
   exec 3>&-
 
-  token_json="$(cat <&"$reader_fd")"
+  if (( helper_status != 0 )); then
+    cat <&"$reader_fd" >/dev/null 2>/dev/null || true
+    if wait "$reader_pid"; then
+      reader_status=0
+    else
+      reader_status=$?
+    fi
+    exec {reader_fd}<&-
+    (( reader_status == 0 )) || return 1
+    return 1
+  fi
+
+  # The token travels from FD3 -> cat -> jq stdin -> exactly one launcher
+  # invocation.  It never enters a shell variable, argv, file, or evidence.
+  coproc FWC_UNARCHIVE_INVOKE {
+    run_unarchive_once "$reader_fd";
+  }
+  invoke_fd="${FWC_UNARCHIVE_INVOKE[0]}"
+  invoke_pid="$FWC_UNARCHIVE_INVOKE_PID"
+  exec {reader_fd}<&-
+
+  invoke_output="$(cat <&"$invoke_fd")"
+  output_status=$?
+  if wait "$invoke_pid"; then
+    invoke_status=0
+  else
+    invoke_status=$?
+  fi
+  exec {invoke_fd}<&-
   if wait "$reader_pid"; then
     reader_status=0
   else
     reader_status=$?
   fi
-  exec {reader_fd}<&-
-  (( helper_status == 0 && reader_status == 0 )) || return 1
-  [[ -n "$token_json" ]] || return 1
-  # Keep the token in memory and validate it without placing it in argv or a
-  # file.  The caller pipes it to jq on stdin for the launcher envelope.
-  printf '%s\n' "$token_json" | "$JQ_BIN" -c -s \
-    'if length == 1 and (.[0] | type) == "object" then .[0] else error("one token required") end'
+  (( output_status == 0 && reader_status == 0 )) || invoke_status=125
+  INVOCATION_STATUS="$invoke_status"
+  if [[ -z "$invoke_output" ]]; then
+    INVOKE_PROJECTION='{"type":null,"status":"unknown","error_code":"empty_response"}'
+  else
+    INVOKE_PROJECTION="$(project_one_response "$invoke_output" 2>/dev/null)" ||
+      INVOKE_PROJECTION='{"type":null,"status":"unknown","error_code":"invalid_response"}'
+  fi
 }
 
 run_unarchive_once() {
-  local token_json="$1"
-  local raw
-  local status
-  raw="$(printf '%s\n' "$token_json" |
-    "$JQ_BIN" -cn --slurpfile token /dev/stdin \
+  local approval_reader_fd="$1"
+  "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
       --arg server "$SERVER" --argjson input "$UNARCHIVE_INPUT" \
       --arg correlation "$(uuid)" --argjson deadline "$DEADLINE_MS" \
-      '{server_id:$server,input:$input,approval_token:$token[0],
-        deadline_ms:$deadline,correlation_id:$correlation}' |
-    "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null)"
-  status=$?
-  INVOCATION_STATUS=$status
-  if [[ -z "$raw" ]]; then
-    INVOKE_PROJECTION='{"type":null,"status":"unknown","error_code":"empty_response"}'
-  else
-    INVOKE_PROJECTION="$(project_one_response "$raw" 2>/dev/null)" ||
-      INVOKE_PROJECTION='{"type":null,"status":"unknown","error_code":"invalid_response"}'
-  fi
-  return 0
+      '{server_id:$server,input:$input,approval_token:$approval[0],
+        deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
+    "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null
 }
 
 bounded_approval_and_invoke() {
-  local token_json
   # The request TTL and host deadline bound this whole section.  The helper's
   # FD3 reader/writer lifetime is nested inside the same one-shot function.
-  token_json="$(approval_fd3_handoff "$REQUEST_BASENAME")" || return 1
-  run_unarchive_once "$token_json"
+  approval_fd3_handoff "$REQUEST_BASENAME"
 }
 
 validate_baseline() {
@@ -428,8 +452,6 @@ run_self_test() {
   [[ "$handed_off" == fd3-status-marker && "$callback_status" -eq 1 ]] || return 1
 
   printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":4}\n' "$SCHEMA"
-  rm -f -- "$REQUEST_PATH"
-  rmdir -- "$REQUEST_ROOT" "$root"
 }
 
 parse_args() {
@@ -510,7 +532,7 @@ main() {
     emit_stop invalid_arguments
     return 10
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" ]]; then
+  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
     emit_stop dependency_missing
     return 10
   fi

@@ -37,6 +37,11 @@ contains only the redacted baseline/invoke/final projections and a summary;
 raw provider responses, request bodies, tokens, seeds, and secrets are not
 persisted there.
 
+The approval helper runs once through `sudo -n` and a 40-second `timeout`,
+inside the 45-second request TTL. The token is streamed from the helper's FD3
+pipe into the single launcher invocation; it is never placed in a shell
+variable, file, or evidence.
+
 ## Outcomes
 
 - `pass`, exit `0`: the independent readback proves the workflow is inactive,
@@ -59,3 +64,4 @@ Self-test uses only temporary safe data. It checks request write/read metadata,
 13-digit expiry acceptance and stale/over-limit rejection, and FD3 pipe
 handoff, EOF, and callback exit-status behavior. It does not need KeePass,
 `sudo`, the launcher, the parent helper, an issuer, or network access.
+The self-test intentionally does not perform destructive cleanup.

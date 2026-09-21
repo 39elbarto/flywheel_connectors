@@ -437,7 +437,8 @@ validate_invoke() {
     and .correlation_id == $correlation
     and .result.status == "verified"
     and .result.operation == $operation
-    and .result.id == $workflow
+    and .result.before.id == $workflow
+    and .result.after.id == $workflow
   ' <<<"$projection" >/dev/null 2>&1
 }
 
@@ -605,8 +606,8 @@ printf '1\n' >"$eof_file" || exit 77
    and .approval_token == "synthetic-fd3-token"
    and .correlation_id == $correlation' \
   <<<"$envelope" >/dev/null || exit 78
-printf '{"type":"response","correlationId":"%s","status":"ok","result":{"status":"verified","operation":"n8n.workflows.unarchive","id":"%s"}}\n' \
-  "$HANDOFF_TEST_CORRELATION" "$HANDOFF_TEST_WORKFLOW"
+printf '{"type":"response","correlationId":"%s","status":"ok","result":{"status":"verified","operation":"n8n.workflows.unarchive","provider":"rest","retry":"never_automatic","readback":"independent_get","before":{"id":"%s"},"after":{"id":"%s"}}}\n' \
+  "$HANDOFF_TEST_CORRELATION" "$HANDOFF_TEST_WORKFLOW" "$HANDOFF_TEST_WORKFLOW"
 EOF
   chmod 700 -- "$mock_launcher" || return 1
 

@@ -80,7 +80,7 @@ Usage:
 Options:
   --launcher PATH         fwc-n8n launcher (default: /usr/local/bin/fwc-n8n)
   --approval-helper PATH  n8n_approval_once.sh (default: /home/ubuntu/Projects/flywheel_connectors/scripts/n8n_approval_once.sh)
-  --parent-helper PATH    provisioned nqm81 parent-binding executable
+  --parent-helper PATH    verified rc20 parent-binding path (exact path required)
   --evidence-dir DIR      redaction-safe evidence directory (optional)
   --help                  show this help
 
@@ -120,7 +120,10 @@ valid_executable() {
 }
 
 valid_parent_helper() {
-  [[ -n "$1" && -x "$1" && ! -L "$1" ]]
+  # The parent-binding contract is provided only by the provisioned rc20
+  # binary.  Do not allow an arbitrary executable override, even when it is
+  # a regular non-symlink file; the guard must fail before any provider call.
+  [[ "$1" == "$DEFAULT_PARENT_HELPER" && -x "$1" && ! -L "$1" ]]
 }
 
 safe_response_projection() {

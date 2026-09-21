@@ -22,12 +22,12 @@ The positional form `scripts/n8n_unarchive_acceptance.sh eec WORKFLOW_ID` is
 also accepted. The launcher and approval helper default to
 `/usr/local/bin/fwc-n8n` and
 `/home/ubuntu/Projects/flywheel_connectors/scripts/n8n_approval_once.sh`.
-The parent-binding executable is configurable with `--parent-helper` or
-`N8N_PARENT_BINDING_HELPER`; the verified provisioned default is the rc20
-binary shown above. A legacy path named
+Callers may spell the verified parent-binding path with `--parent-helper` or
+`N8N_PARENT_BINDING_HELPER`, but the guard accepts only the exact rc20 binary
+path shown above; it is not a general executable override. A legacy path named
 `/srv/dev-ssd/fcp/targets/nqm81-cbor-helper/release/nqm81-cbor-helper` is a
 local diagnostic symlink to `/tmp` and is not a production entrypoint. Missing,
-unknown, or symlinked helper paths stop before any provider call.
+unknown, temporary, or symlinked helper paths stop before any provider call.
 
 The fixed approval root is
 `/var/lib/fwc-n8n/approval-requests`; the generated request is root-owned,

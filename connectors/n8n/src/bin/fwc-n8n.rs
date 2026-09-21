@@ -2129,17 +2129,26 @@ fn execute_workflow_execute_official_mcp(
     envelope: HostRunOnceEnvelope,
     request_deadline_at: Instant,
 ) -> Result<Value, AppError> {
-    let get = lifecycle_get_envelope(&envelope)?;
-    let baseline_response = run_host_bridge_once(
-        bundle,
-        &get,
-        BrokerCredentialPurpose::RestApi,
+    execute_workflow_execute_with_bridge(
+        envelope,
         request_deadline_at,
-    )?;
+        |request, purpose, deadline| run_host_bridge_once(bundle, request, purpose, deadline),
+    )
+}
+
+fn execute_workflow_execute_with_bridge<F>(
+    envelope: HostRunOnceEnvelope,
+    request_deadline_at: Instant,
+    mut bridge: F,
+) -> Result<Value, AppError>
+where
+    F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
+{
+    let get = lifecycle_get_envelope(&envelope)?;
+    let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = response_result(baseline_response, "unknown_outcome")?;
     verify_lifecycle_baseline(&envelope.input, &baseline)?;
-    let provider_response = run_host_bridge_once(
-        bundle,
+    let provider_response = bridge(
         &envelope,
         BrokerCredentialPurpose::OfficialMcp,
         request_deadline_at,
@@ -2159,8 +2168,7 @@ fn execute_workflow_execute_official_mcp(
         workflow_id,
         execution_id,
     ))?;
-    let readback_response = terminal_execute_readback(run_host_bridge_once(
-        bundle,
+    let readback_response = terminal_execute_readback(bridge(
         &execution_get,
         BrokerCredentialPurpose::RestApi,
         request_deadline_at,
@@ -3596,6 +3604,122 @@ mod tests {
                 }
             }
         })
+    }
+
+    fn execute_host_envelope_fixture() -> HostRunOnceEnvelope {
+        let operation =
+            HostRunOnceOperation::parse("n8n.workflows.execute").expect("execute operation");
+        build_host_run_once_envelope(
+            operation,
+            HostRunOnceInput {
+                server_id: HostRunOnceServerId::Eec,
+                input: execute_input_fixture(),
+                approval_token: None,
+                deadline_ms: Some(1_000),
+                correlation_id: None,
+            },
+        )
+        .expect("execute envelope")
+    }
+
+    struct ExecuteSequenceProbe {
+        calls: Vec<(String, String, String)>,
+        responses: std::collections::VecDeque<Result<Value, AppError>>,
+    }
+
+    impl ExecuteSequenceProbe {
+        fn dispatch(
+            &mut self,
+            envelope: &HostRunOnceEnvelope,
+            purpose: BrokerCredentialPurpose,
+            _deadline: Instant,
+        ) -> Result<Value, AppError> {
+            let purpose = match purpose {
+                BrokerCredentialPurpose::RestApi => "rest",
+                BrokerCredentialPurpose::OfficialMcp => "official_mcp",
+            };
+            self.calls.push((
+                purpose.to_owned(),
+                envelope.operation.as_str().to_owned(),
+                envelope.resource_uri.clone(),
+            ));
+            self.responses
+                .pop_front()
+                .expect("execute sequence response")
+        }
+    }
+
+    #[test]
+    fn execute_fixture_proves_preflight_single_provider_and_independent_readback() {
+        let baseline = json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        let provider = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "success": true,
+                    "workflowId": "workflow-1",
+                    "executionId": "execution-1",
+                    "initialStatus": "accepted"
+                }
+            }
+        });
+        let readback = json!({
+            "status": "ok",
+            "result": {
+                "id": "execution-1",
+                "workflowId": "workflow-1",
+                "workflowVersionId": "version-1",
+                "mode": "manual",
+                "status": "running"
+            }
+        });
+        let mut probe = ExecuteSequenceProbe {
+            calls: Vec::new(),
+            responses: [
+                Ok(json!({"status": "ok", "result": baseline})),
+                Ok(provider),
+                Ok(readback),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let result = execute_workflow_execute_with_bridge(
+            execute_host_envelope_fixture(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+        )
+        .expect("fixture execution path");
+
+        assert_eq!(result["status"], "submitted");
+        assert_eq!(result["readback"], "independent_execution_get");
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .map(|(purpose, operation, _)| (purpose.as_str(), operation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("rest", "n8n.workflows.get"),
+                ("official_mcp", "n8n.workflows.execute"),
+                ("rest", "n8n.executions.get"),
+            ]
+        );
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .filter(|(purpose, _, _)| purpose == "official_mcp")
+                .count(),
+            1
+        );
+        assert!(probe.calls[2].2.contains("executions"));
     }
 
     #[test]

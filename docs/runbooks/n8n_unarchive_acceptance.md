@@ -49,9 +49,12 @@ invocation and is never placed in a shell variable, file, or evidence.
   unarchived, unpublished, and has the same draft graph digest. Draft/state/
   version rotation is allowed by the unarchive contract.
 - `STOP`, exit `10`: the baseline, helper, request, approval, or pre-invocation
-  contract failed; no unarchive was attempted.
+  contract failed; no unarchive was attempted. It is also returned if the
+  single post-invoke readback proves a state while requested evidence cannot be
+  written; the state is known, but the acceptance artifacts are incomplete.
 - `unknown`, exit `20`: the unarchive may have started but the one readback was
-  unavailable or did not prove the exact postcondition. Do not retry or replay
+  unavailable or did not prove the exact postcondition, including when a
+  post-invoke evidence write fails before state is proven. Do not retry or replay
   this run; investigate the redacted evidence and start a separately approved
   acceptance only after the operator decides it is safe.
 

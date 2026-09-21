@@ -124,9 +124,13 @@ valid_parent_helper() {
 }
 
 safe_response_projection() {
-  # Deliberately select only the closed redaction-safe state projection.  In
-  # particular, never carry .result.provider, .result.body, or raw errors.
+  # Deliberately select only the closed redaction-safe state/correlation/status
+  # projection.  In particular, never carry provider or readback payloads.
   "$JQ_BIN" -c '
+    def correlation:
+      if type == "string" and
+         test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+      then . else null end;
     def graph:
       if type == "object" then
         {versionId:(.versionId // null), graphDigest:(.graphDigest // null)}
@@ -142,9 +146,9 @@ safe_response_projection() {
       else null end;
     if (.type == "response") and (.status == "ok")
        and ((.error? // null) == null) and ((.result | type) == "object") then
-      {type:.type, id:(.id // null), status:.status, result:{
+      {type:.type, correlation_id:(.correlationId // .correlation_id | correlation),
+       status:.status, result:{
         status:(.result.status // null), operation:(.result.operation // null),
-        provider:(.result.provider // null), readback:(.result.readback // null),
         id:(.result.id // null), versionId:(.result.versionId // null),
         graphDigest:(.result.graphDigest // null),
         stateDigest:(.result.stateDigest // null),
@@ -154,7 +158,8 @@ safe_response_projection() {
         draft:(.result.draft | graph), published:(.result.published | graph),
         before:(.result.before | state), after:(.result.after | state)}}
     else
-      {type:(.type // null), status:(.status // "unknown"),
+      {type:(.type // null), correlation_id:(.correlationId // .correlation_id | correlation),
+       status:(.status // "unknown"),
        error_code:(.error.code // .code // null)}
     end
   '
@@ -242,10 +247,11 @@ write_request_file() {
 read_request_metadata() {
   local path="$1"
   local metadata
-  metadata="$($STAT_BIN -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || return 1
   if (( SELF_TEST == 1 )); then
+    metadata="$($STAT_BIN -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || return 1
     [[ "$metadata" =~ ^[0-9]+:[0-9]+:600:1:regular\ file:[0-9]+$ ]]
   else
+    metadata="$(sudo -n "$STAT_BIN" -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || return 1
     [[ "$metadata" =~ ^0:0:600:1:regular\ file:[0-9]+$ ]]
   fi
 }
@@ -395,6 +401,20 @@ validate_final() {
   ' <<<"$projection" >/dev/null 2>&1
 }
 
+validate_unchanged() {
+  local projection="$1"
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" \
+    --arg version "$BASELINE_VERSION_ID" --arg graph "$BASELINE_GRAPH_DIGEST" \
+    --arg state "$BASELINE_STATE_DIGEST" '
+    .status == "ok" and .result.id == $workflow
+    and .result.active == false and .result.activeVersionId == null
+    and .result.isArchived == true and .result.published == null
+    and .result.versionId == $version
+    and .result.draft.graphDigest == $graph
+    and .result.stateDigest == $state
+  ' <<<"$projection" >/dev/null 2>&1
+}
+
 run_self_test() {
   local root
   local request_json
@@ -524,6 +544,9 @@ main() {
   local baseline_input
   local baseline_status
   local request_json
+  local evidence_status
+  local readback_proves_final
+  local readback_proves_original
 
   if [[ "${1:-}" == --self-test && "$#" -eq 1 ]]; then
     run_self_test || {
@@ -640,7 +663,6 @@ main() {
     emit_stop approval_failed
     return 10
   }
-  persist_projection invoke "$INVOKE_PROJECTION" || { emit_stop evidence_write_failed; return 10; }
 
   # Exactly one independent GET after the one unarchive attempt, including an
   # invocation error/timeout.  Its readback is the lifecycle authority.
@@ -652,8 +674,32 @@ main() {
     FINAL_PROJECTION="$(project_one_response "$raw_final" 2>/dev/null)" ||
       FINAL_PROJECTION='{"type":null,"status":"unknown","error_code":"invalid_response"}'
   fi
-  persist_projection final "$FINAL_PROJECTION" || { emit_stop evidence_write_failed; return 10; }
+
+  readback_proves_final=0
+  readback_proves_original=0
   if (( FINAL_GET_STATUS == 0 )) && validate_final "$FINAL_PROJECTION"; then
+    readback_proves_final=1
+  elif (( FINAL_GET_STATUS == 0 )) && validate_unchanged "$FINAL_PROJECTION"; then
+    readback_proves_original=1
+  fi
+
+  # Reconciliation is complete before any post-invoke evidence write.  A
+  # failed evidence write must not skip the readback or trigger a replay.
+  evidence_status=0
+  persist_projection invoke "$INVOKE_PROJECTION" || evidence_status=1
+  persist_projection final "$FINAL_PROJECTION" || evidence_status=1
+  if (( evidence_status != 0 )); then
+    if (( readback_proves_final == 1 || readback_proves_original == 1 )); then
+      persist_summary stop '"evidence_write_failed"' || true
+      emit_stop evidence_write_failed
+      return 10
+    fi
+    persist_summary unknown '"evidence_write_failed"' || true
+    emit_unknown evidence_write_failed
+    return 20
+  fi
+
+  if (( readback_proves_final == 1 )); then
     persist_summary pass null || { emit_stop evidence_write_failed; return 10; }
     emit_pass
     return 0

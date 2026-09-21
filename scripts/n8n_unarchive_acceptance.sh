@@ -300,10 +300,11 @@ approval_fd3_handoff() {
   exec {writer_fd}>&-
 
   if sudo -n /usr/bin/bash -c '
+      exec 3>&1
       exec "$1" --signal=TERM --kill-after=2s "$2" "$3" \
-        --request-file "$4" 3>&1 2>/dev/null
+        --request-file "$4" 2>/dev/null
     ' _ "$TIMEOUT_BIN" "${APPROVAL_TIMEOUT_SECONDS}s" \
-    "$APPROVAL_HELPER_PATH" "$basename" >&3 2>/dev/null; then
+    "$APPROVAL_HELPER_PATH" "$basename" 1>&3 2>/dev/null; then
     helper_status=0
   else
     helper_status=$?

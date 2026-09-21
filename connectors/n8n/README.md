@@ -799,10 +799,25 @@ These are excluded on purpose:
 
 ## Connector Update Review Gate
 
-The current update subsystem is a review-first contract, not a live updater:
+The current update subsystem is review-first and stages only an explicitly
+requested exact local `n8n-mcp` version:
 
 - `fwc-n8n update-review detect` is read-only. It compares normalized snapshots
   and emits a stable review digest and deduplication key.
+- `fwc-n8n update-review stage-local-mcp <exact-version>` is the single
+  owner-operated discovery/staging command. It uses only the fixed npm
+  metadata, pack, and install command plans, with an empty environment plus
+  the allowlisted npm home/cache, `--ignore-scripts`, `--no-audit`, and
+  `--no-fund`; it never accepts a path, shell fragment, registry, or generic
+  input object. The command is root-gated, stages only below
+  `/var/lib/fwc-n8n/update-staging/local-n8n-mcp`, and retains a redacted
+  verification receipt beside the exact UUID-v4 stage directory.
+- Before success, the command verifies registry metadata and SRI, performs a
+  bounded archive-listing preflight, runs the strict package manifest,
+  lockfile, complete-tree, and executable-entrypoint verifier, and persists
+  only provenance/digest/size evidence. It performs no retry after an unknown
+  result, provider call, secret lookup, global `/usr/local` package change,
+  FWC release promotion, activation, or public capability registration.
 - Authorization and apply are deliberately absent from the `update-review`
   command. A future owner-decision adapter must authenticate the owner and
   issue an opaque, single-use decision with a UUID, a short bounded lifetime,
@@ -839,11 +854,12 @@ The current update subsystem is a review-first contract, not a live updater:
   rejected; malformed or colliding committed records fail closed. A crash
   before commit may leave an ignored pending file but cannot consume the
   decision. The ledger trust root is not created by the runtime.
-- The public CLI still does not fetch from the registry or invoke `npm`, and
-  `update-review` exposes no apply mode. The separate `provision --mode apply`
-  command performs only the fixed-root, proof-carrying owner-gated immutable
-  release promotion described above; it is not this component update executor.
-  The implemented executor is the
+- The public CLI exposes no generic npm/shell operation and `update-review`
+  exposes no apply mode. Its one explicit owner-only staging command is bounded
+  to the exact local-MCP plan above and does not promote or activate anything.
+  The separate `provision --mode apply` command performs only the fixed-root,
+  proof-carrying owner-gated immutable release promotion described above; it
+  is not this component update executor. The implemented executor is the
   host-side security boundary for a future adapter: it re-verifies the exact
   stage before `apply_authorized`, and on every pre-activation materialize,
   extraction, re-verification, or candidate-mismatch failure it performs a
@@ -854,6 +870,9 @@ The current update subsystem is a review-first contract, not a live updater:
 - Registry lifecycle scripts are never executed and are represented only by a
   digest. Release notes are discarded. Neither registry content nor package
   content can authorize an update or directly edit documentation or skills.
+- Dependency updates and discovery cannot expand the public FWC function set;
+  any new capability requires an explicit, separately reviewed implementation
+  with its own contract and authorization evidence.
 
 The installed immutable bundle and the existing opt-in MCP fallback therefore
 remain unchanged by this subsystem.

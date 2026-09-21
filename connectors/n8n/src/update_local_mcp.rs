@@ -5,9 +5,7 @@
 //! executes a shell, accepts a caller-supplied path, or activates a package.
 
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
-use std::fs;
-use std::fs::{File, Metadata};
+use std::fs::{self, File, Metadata};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -34,8 +32,10 @@ const MAX_STAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_STAGE_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_STAGE_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const STAGE_TARBALL_RECEIPT: &str = ".registry-artifact.tgz";
+const VERIFICATION_RECEIPT: &str = ".verification-receipt.json";
 const TAR_PROGRAM: &str = "/usr/bin/tar";
 const MAX_ARCHIVE_LIST_BYTES: usize = 32 * 1024 * 1024;
+const MAX_NPM_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +85,7 @@ pub struct LocalMcpStagePlan {
     stage_root: String,
     package_json_path: String,
     package_lock_path: String,
+    pack: FixedCommandSpec,
     install: FixedCommandSpec,
 }
 
@@ -116,6 +117,18 @@ impl LocalMcpStagePlan {
     pub const fn install(&self) -> &FixedCommandSpec {
         &self.install
     }
+
+    pub const fn pack(&self) -> &FixedCommandSpec {
+        &self.pack
+    }
+
+    pub fn verification_receipt_path(&self) -> String {
+        let version_root = Path::new(&self.stage_root)
+            .parent()
+            .and_then(Path::to_str)
+            .unwrap_or(self.stage_root.as_str());
+        format!("{version_root}/{}{VERIFICATION_RECEIPT}", self.stage_id)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +151,7 @@ pub struct VerifiedLocalMcpStage {
     stage_tree_digest: String,
     package_manifest_digest: String,
     package_lock_digest: String,
+    entrypoint: String,
     entry_count: usize,
     total_bytes: u64,
 }
@@ -150,6 +164,7 @@ impl std::fmt::Debug for VerifiedLocalMcpStage {
             .field("stage_tree_digest", &"<redacted>")
             .field("package_manifest_digest", &"<redacted>")
             .field("package_lock_digest", &"<redacted>")
+            .field("entrypoint", &self.entrypoint)
             .field("entry_count", &self.entry_count)
             .field("total_bytes", &self.total_bytes)
             .finish()
@@ -164,6 +179,52 @@ impl VerifiedLocalMcpStage {
     pub fn into_candidate(self) -> VerifiedCandidate {
         self.candidate
     }
+
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
+    pub fn stage_tree_digest(&self) -> &str {
+        &self.stage_tree_digest
+    }
+
+    pub fn package_manifest_digest(&self) -> &str {
+        &self.package_manifest_digest
+    }
+
+    pub fn package_lock_digest(&self) -> &str {
+        &self.package_lock_digest
+    }
+
+    pub const fn entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalMcpVerificationReceipt {
+    pub schema: String,
+    pub status: String,
+    pub component: UpdateComponent,
+    pub version: String,
+    pub stage_id: String,
+    pub stage_root: String,
+    pub receipt_path: String,
+    pub metadata_digest: String,
+    pub registry_integrity: String,
+    pub registry_tarball_url: String,
+    pub artifact_binding_digest: String,
+    pub stage_tree_digest: String,
+    pub package_manifest_digest: String,
+    pub package_lock_digest: String,
+    pub entrypoint: String,
+    pub entry_count: usize,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +258,21 @@ impl std::fmt::Display for LocalMcpAdapterError {
 }
 
 impl std::error::Error for LocalMcpAdapterError {}
+
+impl LocalMcpAdapterError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidVersion => "invalid_version",
+            Self::InvalidMetadata(code) | Self::StageMismatch(code) => code,
+            Self::Encoding => "encoding_failed",
+            Self::StageLayout => "stage_layout_invalid",
+            Self::StagePermissions => "stage_permissions_invalid",
+            Self::StageBounds => "stage_bounds_exceeded",
+            Self::StageIo => "stage_io_failed",
+            Self::Snapshot(_) => "snapshot_invalid",
+        }
+    }
+}
 
 pub fn npm_latest_metadata_plan() -> FixedCommandSpec {
     npm_view_plan("latest")
@@ -233,6 +309,22 @@ fn build_local_mcp_stage_plan(
         stage_id: stage_id.to_string(),
         package_json_path: format!("{stage_root}/node_modules/{PACKAGE_NAME}/package.json"),
         package_lock_path: format!("{stage_root}/package-lock.json"),
+        pack: FixedCommandSpec {
+            program: NPM_PROGRAM.to_string(),
+            args: vec![
+                "pack".to_string(),
+                package_spec.clone(),
+                "--ignore-scripts".to_string(),
+                "--no-audit".to_string(),
+                "--no-fund".to_string(),
+                "--pack-destination".to_string(),
+                stage_root.clone(),
+            ],
+            environment: fixed_npm_environment(),
+            working_directory: staging_root.to_string(),
+            timeout_ms: COMMAND_TIMEOUT_MS,
+            env_clear: true,
+        },
         install: FixedCommandSpec {
             program: NPM_PROGRAM.to_string(),
             args: vec![
@@ -255,6 +347,10 @@ fn build_local_mcp_stage_plan(
     })
 }
 
+fn packed_artifact_path(plan: &LocalMcpStagePlan) -> PathBuf {
+    Path::new(plan.stage_root()).join(format!("{PACKAGE_NAME}-{}.tgz", plan.exact_version()))
+}
+
 pub fn parse_registry_metadata(
     value: &Value,
 ) -> Result<LocalMcpRegistryMetadata, LocalMcpAdapterError> {
@@ -272,8 +368,9 @@ pub fn parse_registry_metadata(
         return Err(LocalMcpAdapterError::InvalidMetadata("integrity_invalid"));
     }
     let registry_tarball_url = value
-        .pointer("/dist/tarball")
+        .get("dist.tarball")
         .and_then(Value::as_str)
+        .or_else(|| value.pointer("/dist/tarball").and_then(Value::as_str))
         .ok_or(LocalMcpAdapterError::InvalidMetadata("tarball_missing"))?;
     validate_registry_tarball_url(registry_tarball_url, version)?;
     let engine_requirement = object
@@ -284,7 +381,11 @@ pub fn parse_registry_metadata(
         .ok_or(LocalMcpAdapterError::InvalidMetadata("engine_missing"))?;
     validate_bounded_text(engine_requirement, "engine_invalid")?;
     let dependencies = parse_dependencies(object.get("dependencies"))?;
-    let lifecycle_scripts = object.get("scripts").cloned().unwrap_or_else(|| json!({}));
+    let lifecycle_scripts = object
+        .get("scripts")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     if !lifecycle_scripts.is_object() {
         return Err(LocalMcpAdapterError::InvalidMetadata("scripts_invalid"));
     }
@@ -332,6 +433,219 @@ pub fn snapshot_from_registry_metadata(
     crate::update::detect_update(snapshot.clone(), snapshot.clone())
         .map_err(LocalMcpAdapterError::Snapshot)?;
     Ok(snapshot)
+}
+
+pub trait LocalMcpCommandRunner {
+    fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError>;
+}
+
+#[derive(Debug, Default)]
+pub struct FixedNpmCommandRunner;
+
+impl LocalMcpCommandRunner for FixedNpmCommandRunner {
+    fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
+        run_fixed_npm_command(command)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmOutputError {
+    TooLarge,
+    Io,
+}
+
+fn read_bounded_npm_output<R: Read>(reader: &mut R) -> Result<Vec<u8>, NpmOutputError> {
+    let mut output = Vec::new();
+    let mut buffer = vec![0_u8; 16 * 1024].into_boxed_slice();
+    loop {
+        let read = reader.read(&mut buffer).map_err(|_| NpmOutputError::Io)?;
+        if read == 0 {
+            return Ok(output);
+        }
+        if output
+            .len()
+            .checked_add(read)
+            .is_none_or(|length| length > MAX_NPM_OUTPUT_BYTES)
+        {
+            return Err(NpmOutputError::TooLarge);
+        }
+        output.extend_from_slice(&buffer[..read]);
+    }
+}
+
+fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
+    if command.program() != NPM_PROGRAM
+        || !command.env_clear()
+        || command.working_directory() != STAGING_ROOT
+        || command.timeout_ms() == 0
+    {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    let mut child = Command::new(command.program())
+        .args(command.args())
+        .env_clear()
+        .envs(command.environment())
+        .current_dir(command.working_directory())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let mut stdout = child.stdout.take().ok_or(LocalMcpAdapterError::StageIo)?;
+    let mut stderr = child.stderr.take().ok_or(LocalMcpAdapterError::StageIo)?;
+    let (stdout_sender, stdout_receiver) = std::sync::mpsc::sync_channel(1);
+    let (stderr_sender, stderr_receiver) = std::sync::mpsc::sync_channel(1);
+    let stdout_reader = std::thread::spawn(move || {
+        let _ = stdout_sender.send(read_bounded_npm_output(&mut stdout));
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let _ = stderr_sender.send(read_bounded_npm_output(&mut stderr));
+    });
+
+    let deadline = Instant::now() + Duration::from_millis(command.timeout_ms());
+    let mut stdout_result = None;
+    let mut stderr_result = None;
+    let mut status = None;
+    loop {
+        if stdout_result.is_none() {
+            if let Ok(result) = stdout_receiver.try_recv() {
+                stdout_result = Some(result);
+            }
+        }
+        if stderr_result.is_none() {
+            if let Ok(result) = stderr_receiver.try_recv() {
+                stderr_result = Some(result);
+            }
+        }
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        }
+        if status.is_some() && stdout_result.is_some() && stderr_result.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(LocalMcpAdapterError::StageMismatch("npm_command_timeout"));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if stdout_reader.join().is_err() || stderr_reader.join().is_err() {
+        return Err(LocalMcpAdapterError::StageIo);
+    }
+    let stdout = match stdout_result.expect("stdout reader completed") {
+        Ok(bytes) => bytes,
+        Err(NpmOutputError::TooLarge) => return Err(LocalMcpAdapterError::StageBounds),
+        Err(NpmOutputError::Io) => return Err(LocalMcpAdapterError::StageIo),
+    };
+    match stderr_result.expect("stderr reader completed") {
+        Ok(_) => {}
+        Err(NpmOutputError::TooLarge) => return Err(LocalMcpAdapterError::StageBounds),
+        Err(NpmOutputError::Io) => return Err(LocalMcpAdapterError::StageIo),
+    }
+    if !status.expect("npm process completed").success() {
+        return Err(LocalMcpAdapterError::StageMismatch("npm_command_failed"));
+    }
+    Ok(stdout)
+}
+
+pub fn stage_exact_local_mcp(
+    version: &str,
+) -> Result<LocalMcpVerificationReceipt, LocalMcpAdapterError> {
+    #[cfg(unix)]
+    if rustix::process::geteuid().as_raw() != 0 {
+        return Err(LocalMcpAdapterError::StageMismatch("owner_required"));
+    }
+    #[cfg(not(unix))]
+    return Err(LocalMcpAdapterError::StageLayout);
+
+    let mut command_runner = FixedNpmCommandRunner;
+    let mut stage_io = FixedFilesystemLocalMcpStageIo;
+    stage_exact_local_mcp_with(version, &mut command_runner, &mut stage_io)
+}
+
+pub fn stage_exact_local_mcp_with<R, I>(
+    version: &str,
+    command_runner: &mut R,
+    stage_io: &mut I,
+) -> Result<LocalMcpVerificationReceipt, LocalMcpAdapterError>
+where
+    R: LocalMcpCommandRunner,
+    I: LocalMcpStageIo,
+{
+    let plan = local_mcp_stage_plan(version)?;
+    let metadata_output = command_runner.run(&npm_exact_metadata_plan(version)?)?;
+    let value: Value = serde_json::from_slice(&metadata_output)
+        .map_err(|_| LocalMcpAdapterError::InvalidMetadata("metadata_json_invalid"))?;
+    let metadata = parse_registry_metadata(&value)?;
+    validate_registry_metadata(&metadata)?;
+    stage_io.create_empty_stage(&plan)?;
+    let cleanup =
+        |stage_io: &mut I, error: LocalMcpAdapterError| match stage_io.discard_stage(&plan) {
+            Ok(()) => error,
+            Err(cleanup_error) => cleanup_error,
+        };
+    if let Err(error) = command_runner.run(plan.pack()) {
+        return Err(cleanup(stage_io, error));
+    }
+    let artifact = match stage_io.materialize_packed_artifact(&plan) {
+        Ok(artifact) => artifact,
+        Err(error) => return Err(cleanup(stage_io, error)),
+    };
+    if let Err(error) = verify_artifact_bytes(&artifact, &metadata) {
+        let adapter_error = match error {
+            LocalMcpExecutorError::Adapter(error) => error,
+            _ => LocalMcpAdapterError::StageMismatch("registry_integrity_mismatch"),
+        };
+        return Err(cleanup(stage_io, adapter_error));
+    }
+    if let Err(error) = stage_io.preflight_archive(&plan) {
+        return Err(cleanup(stage_io, error));
+    }
+    if let Err(error) = command_runner.run(plan.install()) {
+        return Err(cleanup(stage_io, error));
+    }
+    let verified = match stage_io.reverify(&plan, &metadata, Vec::new()) {
+        Ok(verified) => verified,
+        Err(error) => return Err(cleanup(stage_io, error)),
+    };
+    if verified.stage_id != plan.stage_id
+        || verified.snapshot().component != UpdateComponent::LocalN8nMcp
+        || verified.snapshot().version != metadata.version
+        || verified.snapshot().provenance.source_kind != "npm_staged_artifact"
+    {
+        return Err(cleanup(
+            stage_io,
+            LocalMcpAdapterError::StageMismatch("verified_stage_mismatch"),
+        ));
+    }
+    let receipt = LocalMcpVerificationReceipt {
+        schema: "fwc.n8n.local-mcp-verification-receipt.v1".to_string(),
+        status: "verified".to_string(),
+        component: UpdateComponent::LocalN8nMcp,
+        version: metadata.version,
+        stage_id: verified.stage_id.clone(),
+        stage_root: plan.stage_root().to_string(),
+        receipt_path: plan.verification_receipt_path(),
+        metadata_digest: metadata.metadata_digest,
+        registry_integrity: metadata.integrity,
+        registry_tarball_url: metadata.registry_tarball_url,
+        artifact_binding_digest: verified.snapshot().provenance.artifact_digest.clone(),
+        stage_tree_digest: verified.stage_tree_digest.clone(),
+        package_manifest_digest: verified.package_manifest_digest.clone(),
+        package_lock_digest: verified.package_lock_digest.clone(),
+        entrypoint: verified.entrypoint.clone(),
+        entry_count: verified.entry_count,
+        total_bytes: verified.total_bytes,
+    };
+    if let Err(error) = stage_io.persist_verification_receipt(&plan, &receipt) {
+        return Err(cleanup(stage_io, error));
+    }
+    Ok(receipt)
 }
 
 /// Verify one root-owned, uniquely identified staged npm installation.
@@ -409,7 +723,8 @@ fn verify_local_mcp_stage_for_owner(
     let package_root = package_json_path
         .parent()
         .ok_or(LocalMcpAdapterError::StageLayout)?;
-    let bin_path = package_root.join(package_bin_relative_path(&package_json)?);
+    let entrypoint_relative = package_bin_relative_path(&package_json)?;
+    let bin_path = package_root.join(&entrypoint_relative);
     if !bin_path.starts_with(package_root) {
         return Err(LocalMcpAdapterError::StageLayout);
     }
@@ -473,6 +788,7 @@ fn verify_local_mcp_stage_for_owner(
         stage_tree_digest: tree.digest,
         package_manifest_digest,
         package_lock_digest,
+        entrypoint: entrypoint_relative.to_string_lossy().into_owned(),
         entry_count: tree.entry_count,
         total_bytes: tree.total_bytes,
     })
@@ -1308,6 +1624,23 @@ pub trait LocalMcpStageIo {
         plan: &LocalMcpStagePlan,
     ) -> Result<(), LocalMcpAdapterError>;
 
+    fn materialize_packed_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+    ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError>;
+
+    fn preflight_archive(&mut self, _plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+        Ok(())
+    }
+
+    fn persist_verification_receipt(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+        _receipt: &LocalMcpVerificationReceipt,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Ok(())
+    }
+
     fn reverify(
         &mut self,
         plan: &LocalMcpStagePlan,
@@ -1961,6 +2294,30 @@ fn discard_fixed_stage(plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterEr
 }
 
 #[cfg(target_os = "linux")]
+fn open_fixed_version_directory(plan: &LocalMcpStagePlan) -> Result<File, LocalMcpAdapterError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+    validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let staging_fd = open_stage_root(Path::new(STAGING_ROOT), 0)?;
+    let version_fd = openat2(
+        &staging_fd,
+        plan.exact_version(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+    )
+    .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let version_fd = File::from(version_fd);
+    verify_stage_directory_metadata(
+        &version_fd
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?,
+        0,
+    )?;
+    Ok(version_fd)
+}
+
+#[cfg(target_os = "linux")]
 impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
     fn create_empty_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
         use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
@@ -2079,6 +2436,108 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         }
         Ok(())
     }
+
+    fn materialize_packed_artifact(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+    ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+        use std::os::unix::fs::MetadataExt;
+
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let stage_root = Path::new(plan.stage_root());
+        let stage_fd = open_stage_root(stage_root, 0)?;
+        let packed_path = packed_artifact_path(plan);
+        let mut packed = open_stage_file(
+            &stage_fd,
+            &packed_path,
+            stage_root,
+            0,
+            "packed_artifact_missing",
+        )?;
+        let before = packed
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if before.len() > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(before.len()).map_err(|_| LocalMcpAdapterError::StageBounds)?,
+        );
+        (&mut packed)
+            .take(MAX_STAGE_FILE_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if bytes.len() as u64 > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        let after = packed
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        verify_stage_file_metadata(&after, 0)?;
+        if before.len() != bytes.len() as u64 || file_metadata_changed(&before, &after) {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "packed_artifact_changed",
+            ));
+        }
+        let artifact = TrustedLocalMcpArtifact::from_registry_bytes(plan.exact_version(), bytes)?;
+        let receipt_path = stage_root.join(STAGE_TARBALL_RECEIPT);
+        if fs::symlink_metadata(&receipt_path).is_ok() {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        fs::rename(&packed_path, &receipt_path).map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let receipt_metadata =
+            fs::symlink_metadata(&receipt_path).map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if receipt_metadata.uid() != 0 {
+            return Err(LocalMcpAdapterError::StagePermissions);
+        }
+        Ok(artifact)
+    }
+
+    fn preflight_archive(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
+        preflight_archive(plan).map(|_| ())
+    }
+
+    fn persist_verification_receipt(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        receipt: &LocalMcpVerificationReceipt,
+    ) -> Result<(), LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, openat};
+        use std::os::unix::fs::MetadataExt;
+
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        if receipt.schema != "fwc.n8n.local-mcp-verification-receipt.v1"
+            || receipt.status != "verified"
+            || receipt.version != plan.exact_version()
+            || receipt.stage_id != plan.stage_id()
+            || receipt.stage_root != plan.stage_root()
+            || receipt.receipt_path != plan.verification_receipt_path()
+        {
+            return Err(LocalMcpAdapterError::StageMismatch("receipt_invalid"));
+        }
+        let encoded = serde_json::to_vec(receipt).map_err(|_| LocalMcpAdapterError::Encoding)?;
+        if encoded.len() > MAX_STAGE_JSON_BYTES as usize {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        let version_fd = open_fixed_version_directory(plan)?;
+        let receipt_name = format!("{}{VERIFICATION_RECEIPT}", plan.stage_id());
+        let fd = openat(
+            &version_fd,
+            &receipt_name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let mut file = File::from(fd);
+        file.write_all(&encoded)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        file.sync_all().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let metadata = file.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+            return Err(LocalMcpAdapterError::StagePermissions);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -2110,6 +2569,13 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         &mut self,
         _plan: &LocalMcpStagePlan,
     ) -> Result<(), LocalMcpAdapterError> {
+        Err(LocalMcpAdapterError::StageLayout)
+    }
+
+    fn materialize_packed_artifact(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+    ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
         Err(LocalMcpAdapterError::StageLayout)
     }
 }
@@ -2254,6 +2720,28 @@ mod tests {
                 "n8n-mcp@2.69.2",
             ]
         );
+        assert_eq!(plan.pack.program, NPM_PROGRAM);
+        assert_eq!(plan.pack.working_directory, STAGING_ROOT);
+        assert_eq!(plan.pack.environment, fixed_npm_environment());
+        assert!(plan.pack.env_clear);
+        assert_eq!(
+            &plan.pack.args[..],
+            [
+                "pack",
+                "n8n-mcp@2.69.2",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                "--pack-destination",
+                plan.stage_root.as_str(),
+            ]
+        );
+        assert!(plan.verification_receipt_path().starts_with(STAGING_ROOT));
+        assert!(
+            !plan
+                .verification_receipt_path()
+                .starts_with(&format!("{}/", plan.stage_root()))
+        );
     }
 
     #[test]
@@ -2307,6 +2795,70 @@ mod tests {
         assert!(!encoded.contains("UNTRUSTED-INSTRUCTION-CANARY"));
         assert!(parsed.lifecycle_scripts_digest.starts_with("blake3-256:"));
         assert_eq!(parsed.integrity, INTEGRITY);
+    }
+
+    #[test]
+    fn npm_view_literal_tarball_and_null_scripts_are_normalized() {
+        let raw = json!({
+            "version": "2.69.2",
+            "dist.integrity": INTEGRITY,
+            "dist.tarball": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
+            "engines": {"node": ">=18.0.0"},
+            "dependencies": {"zod": "^3.25.0"},
+            "scripts": null
+        });
+        let parsed = parse_registry_metadata(&raw).expect("npm view output shape");
+        assert_eq!(
+            parsed.registry_tarball_url,
+            raw["dist.tarball"].as_str().expect("tarball string")
+        );
+        assert!(parsed.lifecycle_scripts_digest.starts_with("blake3-256:"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn staged_plan_returns_redacted_receipt_through_command_and_stage_seams() {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+
+        let artifact_bytes = b"bounded test tarball bytes".to_vec();
+        let integrity = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha512::digest(&artifact_bytes))
+        );
+        let mut raw = metadata_value("2.69.2");
+        raw["dist.integrity"] = Value::String(integrity.clone());
+        let metadata_output = serde_json::to_vec(&raw).expect("metadata output");
+        let (_root, fixture_plan, fixture_metadata, owner) = staged_fixture();
+        let verified =
+            verify_local_mcp_stage_for_owner(&fixture_plan, &fixture_metadata, Vec::new(), owner)
+                .expect("verified fixture");
+        let mut stage_io = MockStageIo {
+            verified: Some(verified),
+            packed_artifact: Some(
+                TrustedLocalMcpArtifact::from_registry_bytes("2.69.2", artifact_bytes)
+                    .expect("trusted artifact"),
+            ),
+            ..MockStageIo::default()
+        };
+        let mut command_runner = MockCommandRunner {
+            metadata: metadata_output,
+            ..MockCommandRunner::default()
+        };
+        let receipt = stage_exact_local_mcp_with("2.69.2", &mut command_runner, &mut stage_io)
+            .expect("successful staged review");
+        assert_eq!(receipt.status, "verified");
+        assert_eq!(receipt.registry_integrity, integrity);
+        assert_eq!(receipt.version, "2.69.2");
+        assert!(receipt.receipt_path.starts_with(STAGING_ROOT));
+        assert_eq!(command_runner.calls.len(), 3);
+        assert_eq!(command_runner.calls[0][0], "view");
+        assert_eq!(command_runner.calls[1][0], "pack");
+        assert_eq!(command_runner.calls[2][0], "install");
+        let encoded = serde_json::to_string(&receipt).expect("receipt encoding");
+        assert!(!encoded.contains("UNTRUSTED-COMMAND-CANARY"));
+        assert!(!encoded.contains("stderr"));
+        assert_eq!(stage_io.persisted_receipt, Some(receipt));
     }
 
     #[test]
@@ -2510,6 +3062,8 @@ mod tests {
     struct MockStageIo {
         calls: Vec<&'static str>,
         verified: Option<VerifiedLocalMcpStage>,
+        packed_artifact: Option<TrustedLocalMcpArtifact>,
+        persisted_receipt: Option<LocalMcpVerificationReceipt>,
         create_error: Option<LocalMcpAdapterError>,
         materialize_error: Option<LocalMcpAdapterError>,
         extract_error: Option<LocalMcpAdapterError>,
@@ -2548,9 +3102,19 @@ mod tests {
             self.extract_error.take().map_or(Ok(()), Err)
         }
 
-        fn reverify(
+        fn materialize_packed_artifact(
             &mut self,
             _plan: &LocalMcpStagePlan,
+        ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+            self.calls.push("pack");
+            self.packed_artifact
+                .take()
+                .ok_or(LocalMcpAdapterError::StageMismatch("missing_mock_artifact"))
+        }
+
+        fn reverify(
+            &mut self,
+            plan: &LocalMcpStagePlan,
             _metadata: &LocalMcpRegistryMetadata,
             _tools: Vec<ToolSnapshot>,
         ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
@@ -2558,11 +3122,40 @@ mod tests {
             if let Some(error) = self.reverify_error.take() {
                 return Err(error);
             }
-            self.verified
+            let mut verified = self
+                .verified
                 .take()
                 .ok_or(LocalMcpAdapterError::StageMismatch(
                     "missing_mock_verification",
-                ))
+                ))?;
+            verified.stage_id = plan.stage_id().to_string();
+            Ok(verified)
+        }
+
+        fn persist_verification_receipt(
+            &mut self,
+            _plan: &LocalMcpStagePlan,
+            receipt: &LocalMcpVerificationReceipt,
+        ) -> Result<(), LocalMcpAdapterError> {
+            self.persisted_receipt = Some(receipt.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockCommandRunner {
+        metadata: Vec<u8>,
+        calls: Vec<Vec<String>>,
+    }
+
+    impl LocalMcpCommandRunner for MockCommandRunner {
+        fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
+            self.calls.push(command.args.clone());
+            if command.args.first().map(String::as_str) == Some("view") {
+                Ok(self.metadata.clone())
+            } else {
+                Ok(Vec::new())
+            }
         }
     }
 
@@ -2766,6 +3359,7 @@ mod tests {
             stage_tree_digest: format!("blake3-256:{}", "d".repeat(64)),
             package_manifest_digest: format!("blake3-256:{}", "e".repeat(64)),
             package_lock_digest: format!("blake3-256:{}", "f".repeat(64)),
+            entrypoint: "node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js".to_string(),
             entry_count: 1,
             total_bytes: 1,
         };

@@ -390,9 +390,11 @@ historical/update-path tests. This is historical version evidence only, not the
 current installed runtime policy and not a live provider check.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
-`run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
-`status`. `provision` defaults to read-only `preflight`; mutation requires the
-explicit owner-gated `provision --mode apply`. `run-once` supports ten Phase-1
+`run-once`, `update-review detect`, the explicit owner-only
+`update-review stage-local-mcp <exact-version>` staging review, `provision
+[--mode preflight|apply]`, and `status`. `provision` defaults to read-only
+`preflight`; mutation requires the explicit owner-gated `provision --mode
+apply`. `run-once` supports ten Phase-1
 REST reads, guarded REST draft create/update, typed source paths for lifecycle
 `publish`/`unpublish` and archive, two local knowledge/validation operations,
 and one official-MCP discovery operation, `n8n.capabilities.inspect`, plus the
@@ -416,11 +418,16 @@ sorted tool names, SHA-256 input/output schema digests, and explicit
 
 Implementation status snapshot (2026-08-19): the host-side local
 `n8n-mcp` update executor and its security primitives are implemented behind
-the connector boundary. The public CLI still has no registry fetch, `npm`
-invocation, or apply mode for `update-review`. Its separate explicit
-`provision --mode apply` path is limited to fixed-root, proof-carrying,
-owner-gated immutable release promotion; it is not a generic live update
-command. The implementation status
+the connector boundary. The public CLI has one explicit root-gated
+`update-review stage-local-mcp <exact-version>` path that obtains metadata and
+the exact tarball through fixed npm plans, stages only under the fixed local-MCP
+root with scripts/audit/fund disabled, emits a retained redacted receipt, and
+strictly verifies metadata/SRI/tarball/lock/tree/entrypoint before success. It
+does not modify the global package, promote an FWC release, call a provider, or
+register a capability; no retry occurs after an unknown result. Its separate
+explicit `provision --mode apply` path is limited to fixed-root,
+proof-carrying, owner-gated immutable release promotion; it is not a generic
+live update command. The implementation status
 and evidence are maintained in `connectors/n8n/README.md`; this document
 continues to define the accepted public contract and owner gates.
 
@@ -2022,9 +2029,14 @@ The trusted local-provider update path is review-first and host-owned:
   authority.
 
 The executor's apply path is tested offline, but wiring registry discovery and
-live acceptance remain separate gates. A failed
+the owner-operated staging path is tested offline through command/stage seams;
+live acceptance remains a separate gate. A failed
 exact precondition returns before the component lock is acquired; callers must
 not infer lock ownership from that error.
+
+Dependency updates and discovery cannot expand the public FWC function set.
+Any new capability requires an explicit, separately reviewed implementation
+with its own contract and authorization evidence.
 
 ### 12.2 Fail-closed acceptance preflight
 

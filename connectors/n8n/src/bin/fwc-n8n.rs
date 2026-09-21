@@ -30,6 +30,7 @@ use fcp_n8n::router::{
     TargetResolution, TargetResolver,
 };
 use fcp_n8n::update::{ComponentSnapshot, detect_update};
+use fcp_n8n::update_local_mcp::stage_exact_local_mcp;
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use fcp_prelude::ApprovalToken;
 use serde::{Deserialize, Serialize};
@@ -121,10 +122,13 @@ enum Command {
     Status,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Subcommand)]
 enum UpdateReviewCommand {
     /// Diff current and candidate safe capability snapshots without applying.
     Detect,
+    /// Owner-only fetch, stage, and strictly verify one exact n8n-mcp version.
+    #[command(name = "stage-local-mcp")]
+    StageLocalMcp { version: String },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -501,7 +505,16 @@ fn run_update_review(command: UpdateReviewCommand) -> Result<Value, AppError> {
             let input: UpdateDetectInput = read_stdin_json()?;
             detect_update_input(input)
         }
+        UpdateReviewCommand::StageLocalMcp { version } => run_stage_local_mcp(&version),
     }
+}
+
+fn run_stage_local_mcp(version: &str) -> Result<Value, AppError> {
+    if !effective_uid_is_root() {
+        return Err(AppError::new("update_owner_required"));
+    }
+    let receipt = stage_exact_local_mcp(version).map_err(|error| AppError::new(error.code()))?;
+    serde_json::to_value(receipt).map_err(|_| AppError::new("output_encoding_failed"))
 }
 
 fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {

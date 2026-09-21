@@ -25,9 +25,9 @@ Boundaries:
 ## Dated handoff — 2026-09-21
 
 `handoff_at: 2026-09-21`. The `.23` acceptance is closed at main closeout
-`ccbccdadf`. The current candidate is rc26,
-`release-20260920-02d215cfd-unarchive-introspection-rc26`, produced by runner
-`4ef0578dc`, with retained evidence at:
+`ccbccdadf`. Installed release: rc26,
+`release-20260920-02d215cfd-unarchive-introspection-rc26`. Tracked acceptance
+runner fix: `4ef0578dc`, with retained evidence at:
 
 - EEC: `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1`;
 - Hetzner: `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85`.

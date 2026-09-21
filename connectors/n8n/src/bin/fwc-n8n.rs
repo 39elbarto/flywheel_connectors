@@ -2148,11 +2148,11 @@ where
     let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = response_result(baseline_response, "unknown_outcome")?;
     verify_lifecycle_baseline(&envelope.input, &baseline)?;
-    let provider_response = bridge(
+    let provider_response = terminal_execute_readback(bridge(
         &envelope,
         BrokerCredentialPurpose::OfficialMcp,
         request_deadline_at,
-    )?;
+    ))?;
     let workflow_id = envelope
         .input
         .get("id")
@@ -3767,6 +3767,42 @@ mod tests {
                 .code,
             "unknown_outcome"
         );
+    }
+
+    #[test]
+    fn execute_provider_transport_failure_is_unknown_without_retry() {
+        let baseline = json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        let mut probe = ExecuteSequenceProbe {
+            calls: Vec::new(),
+            responses: [
+                Ok(json!({"status": "ok", "result": baseline})),
+                Err(AppError::with_diagnostic(
+                    "provider_unavailable",
+                    Some("response_upstream_timeout"),
+                )),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = execute_workflow_execute_with_bridge(
+            execute_host_envelope_fixture(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+        )
+        .expect_err("provider transport failure must remain unknown");
+
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("response_upstream_timeout"));
+        assert_eq!(probe.calls.len(), 2, "provider failure must not be retried");
+        assert_eq!(probe.calls[1].0, "official_mcp");
     }
 
     #[test]

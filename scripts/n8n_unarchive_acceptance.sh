@@ -13,6 +13,10 @@ export LC_ALL=C
 
 readonly SCHEMA="fwc.n8n.unarchive-acceptance.v1"
 readonly OPERATION="n8n.workflows.unarchive"
+# The FCP launcher/parent-binding operation and the owner-approval request
+# intentionally use different wire names.  The production issuer deserializes
+# this field as N8nLifecycleOperation::Unarchive (snake_case: "unarchive").
+readonly APPROVAL_OPERATION="unarchive"
 readonly DEFAULT_REQUEST_ROOT="/var/lib/fwc-n8n/approval-requests"
 REQUEST_ROOT="$DEFAULT_REQUEST_ROOT"
 readonly APPROVAL_TTL_MS=45000
@@ -404,6 +408,24 @@ run_unarchive_once() {
     "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null
 }
 
+build_approval_request_json() {
+  local expiry_ms="$1"
+  local server="$2"
+  local workflow_id="$3"
+  local input_json="$4"
+  local parent_binding="$5"
+
+  "$JQ_BIN" -cn \
+    --arg server "$server" --arg workflow_id "$workflow_id" \
+    --arg operation "$APPROVAL_OPERATION" --argjson input "$input_json" \
+    --arg parent "$parent_binding" --argjson expiry "$expiry_ms" \
+    '{schema:"fwc.n8n.owner-approval-request.v1",server:$server,
+      workflow_id:$workflow_id,operation:$operation,input:$input,
+      official_mcp_tool:"",official_mcp_resource_uri:"",
+      official_mcp_payload_digest:"",parent_binding_sha256:$parent,
+      expires_at_ms:$expiry}'
+}
+
 bounded_approval_and_invoke() {
   # The request TTL and host deadline bound this whole section.  The helper's
   # FD3 reader/writer lifetime is nested inside the same one-shot function.
@@ -473,11 +495,21 @@ run_self_test() {
   local reader_pid
   local handed_off
   local callback_status
+  local approval_request_json
 
   SELF_TEST=1
   root="$(mktemp -d "${TMPDIR:-/tmp}/n8n-unarchive-self-test.XXXXXX")" || return 1
   REQUEST_ROOT="$root/approval-requests"
   mkdir -m 700 -- "$REQUEST_ROOT" || return 1
+  approval_request_json="$(build_approval_request_json \
+    "$valid" "hetzner" "synthetic-workflow" '{"id":"synthetic-workflow"}' \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")" || return 1
+  "$JQ_BIN" -e '
+    .schema == "fwc.n8n.owner-approval-request.v1"
+    and .operation == "unarchive"
+    and .operation != "n8n.workflows.unarchive"
+    and .workflow_id == "synthetic-workflow"
+  ' <<<"$approval_request_json" >/dev/null || return 1
   REQUEST_BASENAME="self-test.json"
   request_json='{"schema":"test","expires_at_ms":1700000001000}'
   write_request_file "$request_json" || return 1
@@ -802,15 +834,8 @@ main() {
   expiry_ms="$((current_ms + APPROVAL_TTL_MS))"
   validate_expiry "$expiry_ms" "$current_ms" || { emit_stop expiry_invalid; return 10; }
   REQUEST_BASENAME="nqm81.23-unarchive-$SERVER-$RUN_ID.json"
-  request_json="$("$JQ_BIN" -cn \
-    --arg server "$SERVER" --arg workflow_id "$WORKFLOW_ID" \
-    --arg operation "$OPERATION" --argjson input "$UNARCHIVE_INPUT" \
-    --arg parent "$PARENT_BINDING" --argjson expiry "$expiry_ms" \
-    '{schema:"fwc.n8n.owner-approval-request.v1",server:$server,
-      workflow_id:$workflow_id,operation:$operation,input:$input,
-      official_mcp_tool:"",official_mcp_resource_uri:"",
-      official_mcp_payload_digest:"",parent_binding_sha256:$parent,
-      expires_at_ms:$expiry}')" || {
+  request_json="$(build_approval_request_json \
+    "$expiry_ms" "$SERVER" "$WORKFLOW_ID" "$UNARCHIVE_INPUT" "$PARENT_BINDING")" || {
     emit_stop approval_request_build_failed
     return 10
   }

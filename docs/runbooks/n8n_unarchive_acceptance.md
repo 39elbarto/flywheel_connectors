@@ -38,9 +38,10 @@ raw provider responses, request bodies, tokens, seeds, and secrets are not
 persisted there.
 
 The approval helper runs once through `sudo -n` and a 40-second `timeout`,
-inside the 45-second request TTL. The token is streamed from the helper's FD3
-pipe into the single launcher invocation; it is never placed in a shell
-variable, file, or evidence.
+inside the 45-second request TTL. Because sudo-rs closes inherited FD3, a
+root `bash -c` maps the helper's FD3 to stdout and the parent maps stdout back
+to its protected FD3 pipe; the token is streamed into the single launcher
+invocation and is never placed in a shell variable, file, or evidence.
 
 ## Outcomes
 

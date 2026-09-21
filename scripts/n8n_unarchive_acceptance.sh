@@ -289,7 +289,9 @@ approval_fd3_handoff() {
 
   # Start the reader and writer together in this one bounded function.  No
   # FIFO, polling, or long-lived approval request is used.  The helper is
-  # bounded below its 45-second request TTL and receives the already-open FD3.
+  # bounded below its 45-second request TTL.  sudo-rs closes inherited FD3, so
+  # root bash maps the helper's FD3 to stdout and this parent maps stdout back
+  # to the already-open FD3 pipe.
   coproc FWC_APPROVAL_READER { cat; }
   reader_fd="${FWC_APPROVAL_READER[0]}"
   writer_fd="${FWC_APPROVAL_READER[1]}"
@@ -297,9 +299,11 @@ approval_fd3_handoff() {
   exec 3>&"$writer_fd"
   exec {writer_fd}>&-
 
-  if sudo -n "$TIMEOUT_BIN" --signal=TERM --kill-after=2s \
-    "${APPROVAL_TIMEOUT_SECONDS}s" "$APPROVAL_HELPER_PATH" \
-    --request-file "$basename" >&2; then
+  if sudo -n /usr/bin/bash -c '
+      exec "$1" --signal=TERM --kill-after=2s "$2" "$3" \
+        --request-file "$4" 3>&1 2>/dev/null
+    ' _ "$TIMEOUT_BIN" "${APPROVAL_TIMEOUT_SECONDS}s" \
+    "$APPROVAL_HELPER_PATH" "$basename" >&3 2>/dev/null; then
     helper_status=0
   else
     helper_status=$?

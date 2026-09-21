@@ -16,25 +16,26 @@ In scope:
 - source and capability triage, bounded implementation, review, and handoff;
 - tracked procedures and redaction-safe evidence for FCP/n8n operations.
 
-Out of scope:
+Boundaries:
 
-- `.24` implementation or live work; `.24` is source/capability triage only;
-- inventing new cryptography or changing cryptographic authority as part of an
-  n8n task;
-- unbounded provider exploration, retry, or release activity outside an
-  explicitly bounded task.
+- `.24` is the source/capability triage surface. Implementation or live work
+  needs a separate bounded task and explicit authority;
+- do not invent new cryptography or change cryptographic authority as part of
+  an n8n task;
+- do not explore, retry, or release outside the recorded task boundary.
 
 ## Owner and authority
 
 | Role | Model | Authority and responsibility |
 | --- | --- | --- |
-| Terra | medium | Coordinator. Frames the task, assigns roles, records evidence, accepts results, and manages handoffs. Terra does not direct shell commands or become a second implementer. |
-| Luna | xhigh | Implementer. Owns the assigned files and produces the bounded change and tests. Luna is the only live writer for that task. |
-| Sol | medium | Reviewer. Works read-only, checks the diff and evidence, and separates blockers from nonblocking findings. |
-| Astra | consultant | Consultant only. Answers a specific question after repeated identical blockers; Astra has no live authority, write authority, approval authority, or release authority. |
+| Terra | medium | Coordinator. Frames the task, assigns the current owner, records evidence, accepts results, and manages handoffs without directing shell commands. |
+| Luna | xhigh | Implementer when assigned. Produces the bounded change and tests for the files assigned to the current task. |
+| Sol | medium | Reviewer when assigned. Checks the diff and evidence read-only and separates blockers from nonblocking findings. |
+| Astra | consultant | Answers a specific question after repeated identical blockers. The consultation is advisory; it does not transfer live authority. |
 
-One task has one live writer and one build at a time. Worktrees isolate Git
-files, not provider state, builds, Agent Mail, or other shared services.
+Each bounded task designates one live writer and one build at a time; assignments
+may change only through the handoff below. Worktrees isolate Git files, not
+provider state, builds, Agent Mail, or other shared services.
 
 ## Trigger and prerequisites
 
@@ -53,9 +54,6 @@ Before work begins, confirm all of the following in the task record:
 - a redaction-safe evidence location; no secret or raw provider/request body may
   be persisted there.
 
-Rediscover Agent Mail and terminal handles for each session or handoff. Never
-put a permanent agent ID, terminal ID, or dispatch handle in `AGENTS.md`.
-
 ## Procedure
 
 ### Step 1: Frame a bounded task
@@ -66,22 +64,22 @@ provider target (if any), and stop conditions. A valid task can be checked from
 the resulting diff, command output, test result, or redacted provider evidence;
 it cannot depend on an informal claim that work was done.
 
-Keep `.24` strictly at source/capability triage. If the proposed work would
-implement, install, invoke, or otherwise operate `.24`, stop and return it to
-triage; do not grant a live exception.
+Use `.24` for source/capability triage. If implementation or live work is
+needed, record it as a separate bounded task with its own owner, target,
+invariants, tests, and explicit authority.
 
 ### Step 2: Establish ownership and execution order
 
-Terra assigns Luna as the sole live writer and reserves the exact files before
-editing. Terra accepts results rather than prescribing shell commands; Luna
-chooses the commands needed to satisfy the recorded tests and reports the
-commands and outputs. Sol is read-only, and only one build may run for the task
-at a time.
+Terra records the current writer and reserves the exact files before editing.
+Terra accepts results rather than prescribing shell commands; the implementer
+chooses the commands needed to satisfy the recorded tests and reports commands
+and outputs. The reviewer works read-only, and only one build may run for the
+task at a time.
 
 Record coordination in Agent Mail. If a session is idle and needs to resume,
-preserve the Agent Mail history and also issue a direct terminal trigger whose
-event is `turn_started`. Do not treat a single untracked chat message or a
-stale handle as a handoff.
+preserve that history and also issue a direct terminal trigger with event
+`turn_started`. Rediscover Agent Mail and terminal handles at each session or
+handoff; do not fix IDs permanently in `AGENTS.md`.
 
 ### Step 3: Implement and verify the bounded change
 
@@ -97,17 +95,10 @@ keeps the procedure reproducible in tracked files. Before any provider invoke:
 - do not add new cryptography; use the existing FCP authority and capability
   contracts.
 
-For a release candidate, require all of the following before building:
-
-1. A proven binary change exists; a version bump or source-only claim is not
-   enough.
-2. The dependency closure for the changed binary is identified and checked.
-3. The public owner-key binding is checked against the intended binary and
-   release identity.
-
-Only after these checks pass may the single task build produce a new RC. Record
-the binary identity, dependency-closure result, owner-key-binding result, and
-build result without recording secrets.
+Build a new RC only after evidence proves a binary change, the dependency
+closure is checked, and the public owner-key binding matches the intended
+binary and release identity. Record those results and the one build result
+without recording secrets.
 
 ### Step 4: Handle blockers without creating authority drift
 
@@ -120,17 +111,11 @@ recorded before treating the blocker as changed.
 
 ### Step 5: Review and accept
 
-Sol reviews the owned diff, task record, tests, and evidence read-only. The
-review must report two separate classes:
-
-- **Blockers:** violations that prevent acceptance or live action;
-- **Nonblocking:** concerns that do not prevent the recorded acceptance and are
-  retained as follow-up.
-
-Terra accepts only when all blockers are resolved, the observable tests pass,
-the ownership boundary was respected, and the evidence is redaction-safe.
-Terra records the acceptance and does not turn acceptance into an ad hoc shell
-instruction stream.
+Sol reviews the owned diff, task record, tests, and evidence read-only, and
+reports **blockers** separately from **nonblocking** follow-up. Terra accepts
+the result when blockers are resolved, the recorded observable tests pass, and
+the evidence is redaction-safe; acceptance is not an ad hoc shell instruction
+stream.
 
 ### Step 6: Transfer coordination safely
 
@@ -139,31 +124,19 @@ Use this ordered transition:
 `old quiescent -> handoff -> new accept -> old no longer owner`
 
 The old coordinator first stops writes, builds, and live actions, then sends a
-handoff containing the task state, owned files, current evidence, unresolved
-blockers, and next acceptance check. The new coordinator explicitly accepts
-the handoff before taking authority. Only after that acceptance may the old
-coordinator be marked no longer owner. Preserve Agent Mail history and the
-tracked task record throughout; if the new coordinator has not accepted, the
-old coordinator remains the owner and no split-brain work starts.
+dated handoff (`handoff_at` in UTC ISO-8601) containing the old and new owner,
+task state, `cwd`, branch, owned files, current evidence, unresolved blockers,
+and next acceptance check. The new coordinator explicitly accepts that dated
+handoff before taking authority; only then is the old coordinator marked no
+longer owner. Preserve Agent Mail history and the tracked task record.
 
 ## Verification
 
-For each task, Terra records the following checks and their redaction-safe
-outputs:
-
-- `cwd`, branch, base revision, file reservations, and current owner;
-- the exact diff and the list of changed files;
-- the recorded tests and their exit statuses;
-- for live work, one known outcome or an explicit `unknown` stop state, never an
-  inferred success;
-- for a new RC, proof of binary change, dependency closure, public owner-key
-  binding, and the one build result;
-- Sol's separate blocker/nonblocking review and Terra's acceptance decision;
-- for a handoff, the old-quiescent marker, handoff record, new-accept marker,
-  and preserved history.
-
-An unknown result, missing TTL, missing owner, second writer, second build, or
-unreviewed blocker is a failed verification and stops the workflow.
+Terra records the task's `cwd`, branch, owned files, invariants, tests, and
+redaction-safe outputs. A live task records one known outcome; an unknown
+outcome is a stop state, not a retry. Sol's blocker/nonblocking review, the
+RC evidence when applicable, and the dated handoff markers are retained with
+the Agent Mail history.
 
 ## Failure modes and edge cases
 
@@ -186,10 +159,6 @@ unreviewed blocker is a failed verification and stops the workflow.
   dependency closure, and public owner-key binding are checked.
 - **Review finding:** blockers stop acceptance; nonblocking findings remain
   visible and do not silently become blockers.
-- **Agent Mail outage:** do not restart the shared Agent Mail service. Keep the
-  task quiescent until coordination history and ownership can be recorded;
-  direct terminal activity alone does not grant authority.
-
 ## Rollback and abort
 
 Abort before a provider invoke when any prerequisite or invariant is missing.

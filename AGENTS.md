@@ -65,7 +65,7 @@ holder. Do not bypass the conflict by creating an untracked parallel copy.
 
 ## n8n-Specific Coordination
 
-n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions. Keep `.24` limited to source/capability triage; do not perform `.24` implementation or live work.
+n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions. Use `.24` for source/capability triage; implementation or live work needs its own bounded task and explicit authority.
 
 ---
 

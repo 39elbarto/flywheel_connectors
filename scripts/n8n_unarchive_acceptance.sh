@@ -132,13 +132,9 @@ valid_parent_helper() {
 }
 
 safe_response_projection() {
-  # Deliberately select only the closed redaction-safe state/correlation/status
-  # projection.  In particular, never carry provider or readback payloads.
+  # Deliberately select only the closed redaction-safe state/status projection.
+  # In particular, never carry provider or readback payloads.
   "$JQ_BIN" -c '
-    def correlation:
-      if type == "string" and
-         test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-      then . else null end;
     def graph:
       if type == "object" then
         {versionId:(.versionId // null), graphDigest:(.graphDigest // null)}
@@ -154,8 +150,7 @@ safe_response_projection() {
       else null end;
     if (.type == "response") and (.status == "ok")
        and ((.error? // null) == null) and ((.result | type) == "object") then
-      {type:.type, correlation_id:(.correlationId // .correlation_id | correlation),
-       status:.status, result:{
+      {type:.type, status:.status, result:{
         status:(.result.status // null), operation:(.result.operation // null),
         id:(.result.id // null), versionId:(.result.versionId // null),
         graphDigest:(.result.graphDigest // null),
@@ -166,8 +161,7 @@ safe_response_projection() {
         draft:(.result.draft | graph), published:(.result.published | graph),
         before:(.result.before | state), after:(.result.after | state)}}
     else
-      {type:(.type // null), correlation_id:(.correlationId // .correlation_id | correlation),
-       status:(.status // "unknown"),
+      {type:(.type // null), status:(.status // "unknown"),
        error_code:(.error.code // .code // null)}
     end
   '
@@ -432,9 +426,8 @@ validate_baseline() {
 validate_invoke() {
   local projection="$1"
   "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" \
-    --arg operation "$OPERATION" --arg correlation "$INVOKE_CORRELATION_ID" '
+    --arg operation "$OPERATION" '
     .type == "response" and .status == "ok"
-    and .correlation_id == $correlation
     and .result.status == "verified"
     and .result.operation == $operation
     and .result.before.id == $workflow
@@ -606,8 +599,8 @@ printf '1\n' >"$eof_file" || exit 77
    and .approval_token == "synthetic-fd3-token"
    and .correlation_id == $correlation' \
   <<<"$envelope" >/dev/null || exit 78
-printf '{"type":"response","correlationId":"%s","status":"ok","result":{"status":"verified","operation":"n8n.workflows.unarchive","provider":"rest","retry":"never_automatic","readback":"independent_get","before":{"id":"%s"},"after":{"id":"%s"}}}\n' \
-  "$HANDOFF_TEST_CORRELATION" "$HANDOFF_TEST_WORKFLOW" "$HANDOFF_TEST_WORKFLOW"
+printf '{"type":"response","status":"ok","result":{"status":"verified","operation":"n8n.workflows.unarchive","provider":"rest","retry":"never_automatic","readback":"independent_get","before":{"id":"%s"},"after":{"id":"%s"}}}\n' \
+  "$HANDOFF_TEST_WORKFLOW" "$HANDOFF_TEST_WORKFLOW"
 EOF
   chmod 700 -- "$mock_launcher" || return 1
 

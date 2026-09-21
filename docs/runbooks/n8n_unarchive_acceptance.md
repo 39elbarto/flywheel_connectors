@@ -47,9 +47,9 @@ invocation and is never placed in a shell variable, file, or evidence.
 
 - `pass`, exit `0`: the single invoke exited `0`, its redacted response has
   wrapper `status: "ok"`, result `status: "verified"`, the expected
-  operation/correlation, and the requested workflow target in both production
-  state records (`result.before.id` and `result.after.id`); the independent
-  readback proves the workflow is inactive, unarchived, unpublished, has
+  operation, and the requested workflow target in both production state
+  records (`result.before.id` and `result.after.id`); the independent readback
+  proves the workflow is inactive, unarchived, unpublished, has
   `activeVersionId: null`, and has the same draft graph digest. Draft/state/
   version rotation is allowed by the unarchive contract. The production result
   has no top-level `result.id`; target identity is carried by `before.id` and
@@ -88,7 +88,7 @@ scripts/n8n_unarchive_acceptance.sh --handoff-self-test
 It uses a mock approval helper through the same `sudo`/root-`bash` FD3-to-
 stdout bridge and a mock launcher that consumes one JSON envelope, verifies
 receipt of a synthetic non-secret token, returns one production-shaped safe
-verified response with target IDs nested under `before.id` and `after.id`, and
-asserts one invoke, EOF, helper/reader/invoke exit status `0`, and no retry.
-It does not print the token or provider body and does not add a FIFO or another
-transport.
+verified response with target IDs nested under `before.id` and `after.id`,
+and asserts one invoke, EOF, helper/reader/invoke exit status `0`, and no
+retry. It does not print the token or provider body and does not add a FIFO or
+another transport.

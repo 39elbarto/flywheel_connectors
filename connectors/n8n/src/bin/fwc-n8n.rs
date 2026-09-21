@@ -1995,7 +1995,13 @@ fn decode_official_mcp_execute_result(
     response: Value,
     workflow_id: &str,
 ) -> Result<Value, AppError> {
-    let mut result = response_result(response, "unknown_outcome")?;
+    let provider_failed = response.get("status").and_then(Value::as_str) != Some("ok")
+        || response.get("error").is_some_and(|value| !value.is_null());
+    let mut result = response
+        .get("result")
+        .cloned()
+        .filter(Value::is_object)
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
     if let Some(structured) = result.get("structuredContent").cloned() {
         result = structured;
     } else if let Some(content) = result.get("content").and_then(Value::as_array) {
@@ -2012,21 +2018,33 @@ fn decode_official_mcp_execute_result(
     let object = result
         .as_object()
         .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    if object.get("success").and_then(Value::as_bool) != Some(true)
-        || object.get("workflowId").and_then(Value::as_str) != Some(workflow_id)
-        || object
-            .get("executionId")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        || object.get("error").is_some_and(|value| !value.is_null())
-    {
-        return Err(AppError::new("unknown_outcome"));
-    }
     let execution_id = object
         .get("executionId")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::new("unknown_outcome"))?;
     if execution_id.len() > 256 || execution_id.chars().any(char::is_control) {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    if object
+        .get("workflowId")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value != workflow_id)
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
+    let provider_failed = provider_failed
+        || object.get("success").and_then(Value::as_bool) != Some(true)
+        || object.get("error").is_some_and(|value| !value.is_null());
+    if provider_failed {
+        return Ok(json!({
+            "success": false,
+            "providerFailure": true,
+            "workflowId": workflow_id,
+            "executionId": execution_id,
+        }));
+    }
+    if object.get("workflowId").and_then(Value::as_str) != Some(workflow_id) {
         return Err(AppError::new("unknown_outcome"));
     }
     let initial_status = object
@@ -2180,6 +2198,9 @@ where
         execution_id,
         &readback,
     ))?;
+    if provider.get("providerFailure").and_then(Value::as_bool) == Some(true) {
+        return Err(AppError::new("unknown_outcome"));
+    }
     let mode = envelope
         .input
         .get("mode")
@@ -3803,6 +3824,81 @@ mod tests {
         assert_eq!(error.diagnostic, Some("response_upstream_timeout"));
         assert_eq!(probe.calls.len(), 2, "provider failure must not be retried");
         assert_eq!(probe.calls[1].0, "official_mcp");
+    }
+
+    #[test]
+    fn execute_provider_failure_with_id_reads_back_once_then_is_unknown() {
+        let baseline = json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        let provider = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "success": false,
+                    "workflowId": "workflow-1",
+                    "executionId": "execution-1",
+                    "error": "provider failure must remain redacted"
+                }
+            }
+        });
+        let readback = json!({
+            "status": "ok",
+            "result": {
+                "id": "execution-1",
+                "workflowId": "workflow-1",
+                "workflowVersionId": "version-1",
+                "mode": "manual",
+                "status": "error"
+            }
+        });
+        let mut probe = ExecuteSequenceProbe {
+            calls: Vec::new(),
+            responses: [
+                Ok(json!({"status": "ok", "result": baseline})),
+                Ok(provider),
+                Ok(readback),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = execute_workflow_execute_with_bridge(
+            execute_host_envelope_fixture(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+        )
+        .expect_err("provider failure must remain unknown after one readback");
+
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, None);
+        assert_eq!(probe.calls.len(), 3, "baseline, execute, one readback");
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .map(|(_, operation, _)| operation.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "n8n.workflows.get",
+                "n8n.workflows.execute",
+                "n8n.executions.get"
+            ]
+        );
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .filter(|(purpose, _, _)| purpose == "official_mcp")
+                .count(),
+            1,
+            "provider attempt must not be retried"
+        );
     }
 
     #[test]

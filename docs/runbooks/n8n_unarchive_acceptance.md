@@ -45,18 +45,23 @@ invocation and is never placed in a shell variable, file, or evidence.
 
 ## Outcomes
 
-- `pass`, exit `0`: the independent readback proves the workflow is inactive,
-  unarchived, unpublished, and has the same draft graph digest. Draft/state/
-  version rotation is allowed by the unarchive contract.
+- `pass`, exit `0`: the single invoke exited `0`, its redacted response has
+  wrapper `status: "ok"`, result `status: "verified"`, and the expected
+  operation/target/correlation; the independent readback proves the workflow
+  is inactive, unarchived, unpublished, has `activeVersionId: null`, and has
+  the same draft graph digest. Draft/state/version rotation is allowed by the
+  unarchive contract.
 - `STOP`, exit `10`: the baseline, helper, request, approval, or pre-invocation
   contract failed; no unarchive was attempted. It is also returned if the
   single post-invoke readback proves a state while requested evidence cannot be
   written; the state is known, but the acceptance artifacts are incomplete.
 - `unknown`, exit `20`: the unarchive may have started but the one readback was
-  unavailable or did not prove the exact postcondition, including when a
-  post-invoke evidence write fails before state is proven. Do not retry or replay
-  this run; investigate the redacted evidence and start a separately approved
-  acceptance only after the operator decides it is safe.
+  unavailable or did not prove the exact postcondition, the invoke was not
+  verified, or a post-invoke evidence write fails before state is proven. A
+  matching final GET after an invoke failure is reconciled provider state only,
+  never a full pass. Do not retry or replay this run; investigate the redacted
+  evidence and start a separately approved acceptance only after the operator
+  decides it is safe.
 
 ## Offline self-test
 
@@ -69,3 +74,17 @@ Self-test uses only temporary safe data. It checks request write/read metadata,
 handoff, EOF, and callback exit-status behavior. It does not need KeePass,
 `sudo`, the launcher, the parent helper, an issuer, or network access.
 The self-test intentionally does not perform destructive cleanup.
+
+The actual handoff synthetic test exercises the complete `approval_fd3_handoff`
+shape without provider access:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh --handoff-self-test
+```
+
+It uses a mock approval helper through the same `sudo`/root-`bash` FD3-to-
+stdout bridge and a mock launcher that consumes one JSON envelope, verifies
+receipt of a synthetic non-secret token, returns one safe verified response,
+and asserts one invoke, EOF, helper/reader/invoke exit status `0`, and no
+retry. It does not print the token or provider body and does not add a FIFO or
+another transport.

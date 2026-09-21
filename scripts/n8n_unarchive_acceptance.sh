@@ -49,8 +49,12 @@ BASELINE_STATE_DIGEST=""
 BASELINE_VERSION_ID=""
 UNARCHIVE_INPUT=""
 PARENT_BINDING=""
+INVOKE_CORRELATION_ID=""
 INVOCATION_STATUS=125
 FINAL_GET_STATUS=125
+APPROVAL_HELPER_STATUS=125
+APPROVAL_READER_STATUS=125
+HANDOFF_TEST_SUDO=""
 
 emit_stop() {
   local code="${1:-${LAST_ERROR:-unknown_stop}}"
@@ -76,6 +80,7 @@ Usage:
   n8n_unarchive_acceptance.sh --server eec|hetzner --workflow-id ID [options]
   n8n_unarchive_acceptance.sh eec ID [options]
   n8n_unarchive_acceptance.sh --self-test
+  n8n_unarchive_acceptance.sh --handoff-self-test
 
 Options:
   --launcher PATH         fwc-n8n launcher (default: /usr/local/bin/fwc-n8n)
@@ -195,12 +200,17 @@ persist_summary() {
     --arg verdict "$verdict" --argjson abort_code "$code" \
     --arg evidence_directory "$EVIDENCE_DIR" \
     --arg request_file "$REQUEST_BASENAME" \
+    --arg invoke_correlation_id "$INVOKE_CORRELATION_ID" \
+    --argjson approval_helper_status "$APPROVAL_HELPER_STATUS" \
+    --argjson approval_reader_status "$APPROVAL_READER_STATUS" \
     --argjson invocation_status "$INVOCATION_STATUS" \
     --argjson final_get_status "$FINAL_GET_STATUS" \
     '{schema:"fwc.n8n.unarchive-acceptance.v1",server:$server,workflow_id:$workflow_id,
       verdict:$verdict,abort_code:$abort_code,evidence_directory:$evidence_directory,
       sequence:["baseline_get","parent_binding","approval_once","unarchive_once","independent_get"],
-      request_file:$request_file,invocation_status:$invocation_status,
+      request_file:$request_file,invoke_correlation_id:$invoke_correlation_id,
+      approval_helper_status:$approval_helper_status,approval_reader_status:$approval_reader_status,
+      invocation_status:$invocation_status,
       final_get_status:$final_get_status,raw_provider_bodies_persisted:false,
       raw_request_bodies_persisted:false,tokens_persisted:false,seeds_persisted:false}' \
     >"$EVIDENCE_DIR/summary.json" || return 1
@@ -295,6 +305,15 @@ approval_fd3_handoff() {
   local invoke_status
   local output_status
   local invoke_output
+  local invoke_reader_fd
+  local sudo_bin
+
+  APPROVAL_HELPER_STATUS=125
+  APPROVAL_READER_STATUS=125
+  sudo_bin="/usr/bin/sudo"
+  if (( SELF_TEST == 1 )); then
+    sudo_bin="$HANDOFF_TEST_SUDO"
+  fi
 
   # Start the reader and writer together in this one bounded function.  No
   # FIFO, polling, or long-lived approval request is used.  The helper is
@@ -308,7 +327,7 @@ approval_fd3_handoff() {
   exec 3>&"$writer_fd"
   exec {writer_fd}>&-
 
-  if sudo -n /usr/bin/bash -c '
+  if "$sudo_bin" -n /usr/bin/bash -c '
       exec 3>&1
       exec "$1" --signal=TERM --kill-after=2s "$2" "$3" \
         --request-file "$4" 2>/dev/null
@@ -318,6 +337,7 @@ approval_fd3_handoff() {
   else
     helper_status=$?
   fi
+  APPROVAL_HELPER_STATUS="$helper_status"
   exec 3>&-
 
   if (( helper_status != 0 )); then
@@ -327,6 +347,7 @@ approval_fd3_handoff() {
     else
       reader_status=$?
     fi
+    APPROVAL_READER_STATUS="$reader_status"
     exec {reader_fd}<&-
     (( reader_status == 0 )) || return 1
     return 1
@@ -334,11 +355,25 @@ approval_fd3_handoff() {
 
   # The token travels from FD3 -> cat -> jq stdin -> exactly one launcher
   # invocation.  It never enters a shell variable, argv, file, or evidence.
+  # Bash's coproc descriptors are not guaranteed to survive into a second
+  # coproc child. Duplicate the reader to an ordinary descriptor first.
+  if ! exec {invoke_reader_fd}<&"$reader_fd"; then
+    cat <&"$reader_fd" >/dev/null 2>/dev/null || true
+    if wait "$reader_pid"; then
+      reader_status=0
+    else
+      reader_status=$?
+    fi
+    APPROVAL_READER_STATUS="$reader_status"
+    exec {reader_fd}<&-
+    return 1
+  fi
   coproc FWC_UNARCHIVE_INVOKE {
-    run_unarchive_once "$reader_fd";
+    run_unarchive_once "$invoke_reader_fd";
   }
   invoke_fd="${FWC_UNARCHIVE_INVOKE[0]}"
   invoke_pid="$FWC_UNARCHIVE_INVOKE_PID"
+  exec {invoke_reader_fd}<&-
   exec {reader_fd}<&-
 
   invoke_output="$(cat <&"$invoke_fd")"
@@ -354,6 +389,7 @@ approval_fd3_handoff() {
   else
     reader_status=$?
   fi
+  APPROVAL_READER_STATUS="$reader_status"
   (( output_status == 0 && reader_status == 0 )) || invoke_status=125
   INVOCATION_STATUS="$invoke_status"
   if [[ -z "$invoke_output" ]]; then
@@ -368,7 +404,7 @@ run_unarchive_once() {
   local approval_reader_fd="$1"
   "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
       --arg server "$SERVER" --argjson input "$UNARCHIVE_INPUT" \
-      --arg correlation "$(uuid)" --argjson deadline "$DEADLINE_MS" \
+      --arg correlation "$INVOKE_CORRELATION_ID" --argjson deadline "$DEADLINE_MS" \
       '{server_id:$server,input:$input,approval_token:$approval[0],
         deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
     "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null
@@ -390,6 +426,18 @@ validate_baseline() {
     and (.result.draft.versionId | type) == "string"
     and (.result.draft.graphDigest | type) == "string"
     and (.result.stateDigest | type) == "string"
+  ' <<<"$projection" >/dev/null 2>&1
+}
+
+validate_invoke() {
+  local projection="$1"
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" \
+    --arg operation "$OPERATION" --arg correlation "$INVOKE_CORRELATION_ID" '
+    .type == "response" and .status == "ok"
+    and .correlation_id == $correlation
+    and .result.status == "verified"
+    and .result.operation == $operation
+    and .result.id == $workflow
   ' <<<"$projection" >/dev/null 2>&1
 }
 
@@ -482,6 +530,112 @@ run_self_test() {
   printf '{"schema":"%s","verdict":"pass","mode":"self-test","acceptance":false,"cases":4}\n' "$SCHEMA"
 }
 
+run_handoff_self_test() {
+  local root
+  local mock_sudo
+  local mock_approval
+  local mock_launcher
+  local count_file
+  local eof_file
+  local handoff_status
+  local count
+  local eof
+
+  SELF_TEST=1
+  SERVER="synthetic"
+  WORKFLOW_ID="synthetic-workflow"
+  INVOKE_CORRELATION_ID="00000000-0000-4000-8000-000000000001"
+  UNARCHIVE_INPUT='{"id":"synthetic-workflow"}'
+  root="$(mktemp -d "${TMPDIR:-/tmp}/n8n-unarchive-handoff-test.XXXXXX")" || return 1
+  REQUEST_ROOT="$root/approval-requests"
+  mkdir -m 700 -- "$REQUEST_ROOT" || return 1
+  REQUEST_BASENAME="handoff-self-test.json"
+  write_request_file '{"schema":"handoff-test"}' || return 1
+
+  mock_sudo="$root/sudo"
+  mock_approval="$root/approval-helper"
+  mock_launcher="$root/launcher"
+  count_file="$root/invoke-count"
+  eof_file="$root/launcher-eof"
+
+  # This wrapper deliberately preserves the production argument shape and
+  # runs the same root-bash FD3/stdout bridge without invoking sudo/provider.
+  cat >"$mock_sudo" <<'EOF'
+#!/usr/bin/env bash
+set -u
+[[ "${1:-}" == "-n" ]] || exit 64
+shift
+[[ "${1:-}" == "/usr/bin/bash" && "${2:-}" == "-c" ]] || exit 64
+shift 2
+exec /usr/bin/bash -c "$@"
+EOF
+  chmod 700 -- "$mock_sudo" || return 1
+
+  cat >"$mock_approval" <<'EOF'
+#!/usr/bin/env bash
+set -u
+[[ -e /proc/$$/fd/3 ]] || exit 70
+printf '%s\n' '"synthetic-fd3-token"' >&3
+EOF
+  chmod 700 -- "$mock_approval" || return 1
+
+  cat >"$mock_launcher" <<'EOF'
+#!/usr/bin/env bash
+set -u
+count_file="$HANDOFF_TEST_INVOKE_COUNT"
+eof_file="$HANDOFF_TEST_EOF_FILE"
+count=0
+if [[ -f "$count_file" ]]; then
+  count="$(cat -- "$count_file")" || exit 71
+fi
+[[ "$count" =~ ^[0-9]+$ ]] || exit 72
+printf '%s\n' "$((count + 1))" >"$count_file" || exit 73
+[[ "${1:-}" == "run-once" && "${2:-}" == "n8n.workflows.unarchive" ]] || exit 74
+IFS= read -r envelope || exit 75
+if IFS= read -r extra; then
+  exit 76
+fi
+printf '1\n' >"$eof_file" || exit 77
+/usr/bin/jq -e \
+  --arg server "$HANDOFF_TEST_SERVER" \
+  --arg workflow "$HANDOFF_TEST_WORKFLOW" \
+  --arg correlation "$HANDOFF_TEST_CORRELATION" \
+  '.server_id == $server
+   and .input.id == $workflow
+   and .approval_token == "synthetic-fd3-token"
+   and .correlation_id == $correlation' \
+  <<<"$envelope" >/dev/null || exit 78
+printf '{"type":"response","correlationId":"%s","status":"ok","result":{"status":"verified","operation":"n8n.workflows.unarchive","id":"%s"}}\n' \
+  "$HANDOFF_TEST_CORRELATION" "$HANDOFF_TEST_WORKFLOW"
+EOF
+  chmod 700 -- "$mock_launcher" || return 1
+
+  HANDOFF_TEST_SUDO="$mock_sudo"
+  APPROVAL_HELPER_PATH="$mock_approval"
+  LAUNCHER_PATH="$mock_launcher"
+  export HANDOFF_TEST_INVOKE_COUNT="$count_file"
+  export HANDOFF_TEST_EOF_FILE="$eof_file"
+  export HANDOFF_TEST_SERVER="$SERVER"
+  export HANDOFF_TEST_WORKFLOW="$WORKFLOW_ID"
+  export HANDOFF_TEST_CORRELATION="$INVOKE_CORRELATION_ID"
+
+  if approval_fd3_handoff "$REQUEST_BASENAME"; then
+    handoff_status=0
+  else
+    handoff_status=$?
+  fi
+  count="$(cat -- "$count_file" 2>/dev/null || true)"
+  eof="$(cat -- "$eof_file" 2>/dev/null || true)"
+  [[ "$handoff_status" -eq 0 ]] || return 1
+  [[ "$APPROVAL_HELPER_STATUS" -eq 0 ]] || return 1
+  [[ "$APPROVAL_READER_STATUS" -eq 0 ]] || return 1
+  [[ "$INVOCATION_STATUS" -eq 0 ]] || return 1
+  validate_invoke "$INVOKE_PROJECTION" || return 1
+  [[ "$count" == 1 && "$eof" == 1 ]] || return 1
+
+  printf '{"schema":"%s","verdict":"pass","mode":"handoff-self-test","acceptance":false,"cases":7}\n' "$SCHEMA"
+}
+
 parse_args() {
   local positional=()
   while (( $# > 0 )); do
@@ -548,12 +702,20 @@ main() {
   local baseline_status
   local request_json
   local evidence_status
+  local invoke_proves_verified
   local readback_proves_final
   local readback_proves_original
 
   if [[ "${1:-}" == --self-test && "$#" -eq 1 ]]; then
     run_self_test || {
       printf '{"schema":"%s","verdict":"STOP","abort_code":"self_test_failed"}\n' "$SCHEMA"
+      return 1
+    }
+    return 0
+  fi
+  if [[ "${1:-}" == --handoff-self-test && "$#" -eq 1 ]]; then
+    run_handoff_self_test || {
+      printf '{"schema":"%s","verdict":"STOP","abort_code":"handoff_self_test_failed"}\n' "$SCHEMA"
       return 1
     }
     return 0
@@ -585,6 +747,7 @@ main() {
   fi
 
   RUN_ID="$(uuid)" || { emit_stop uuid_failed; return 10; }
+  INVOKE_CORRELATION_ID="$RUN_ID"
   RESOURCE_URI="fwc-n8n://$SERVER/workflows/$WORKFLOW_ID"
 
   # Exactly one fresh baseline GET.  Its raw response remains in memory only.
@@ -680,6 +843,10 @@ main() {
 
   readback_proves_final=0
   readback_proves_original=0
+  invoke_proves_verified=0
+  if (( INVOCATION_STATUS == 0 )) && validate_invoke "$INVOKE_PROJECTION"; then
+    invoke_proves_verified=1
+  fi
   if (( FINAL_GET_STATUS == 0 )) && validate_final "$FINAL_PROJECTION"; then
     readback_proves_final=1
   elif (( FINAL_GET_STATUS == 0 )) && validate_unchanged "$FINAL_PROJECTION"; then
@@ -702,10 +869,15 @@ main() {
     return 20
   fi
 
-  if (( readback_proves_final == 1 )); then
+  if (( readback_proves_final == 1 && invoke_proves_verified == 1 )); then
     persist_summary pass null || { emit_stop evidence_write_failed; return 10; }
     emit_pass
     return 0
+  fi
+  if (( readback_proves_final == 1 && invoke_proves_verified == 0 )); then
+    persist_summary unknown '"invoke_not_verified"' || true
+    emit_unknown invoke_not_verified
+    return 20
   fi
   if (( FINAL_GET_STATUS != 0 )); then
     persist_summary unknown '"unknown_outcome"' || true

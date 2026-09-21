@@ -63,6 +63,10 @@ Reserve before editing in either a task checkout or `main`; if you hit a
 `FILE_RESERVATION_CONFLICT`, wait, narrow the pattern, or coordinate with the
 holder. Do not bypass the conflict by creating an untracked parallel copy.
 
+## n8n-Specific Coordination
+
+n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions. Keep `.24` limited to source/capability triage; do not perform `.24` implementation or live work.
+
 ---
 
 ## AGENT MAIL (am) PROCESS PROTECTION — DO NOT TOUCH

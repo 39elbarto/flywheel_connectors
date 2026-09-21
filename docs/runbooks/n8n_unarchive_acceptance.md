@@ -1,5 +1,38 @@
 # n8n unarchive acceptance
 
+## Current acceptance and closeout (2026-09-21; PASS)
+
+`flywheel_connectors-nqm81.23` acceptance is complete for EEC and Hetzner.
+The main fix is `4ef0578dc`; the installed candidate is
+`release-20260920-02d215cfd-unarchive-introspection-rc26` (rc26).
+The retained evidence is server-specific:
+
+| Server | Workflow | PASS evidence directory |
+| --- | --- | --- |
+| EEC | `2Zdk8MWoC70eyqeb` | `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1` |
+| Hetzner | `uQXXNMWE2lzlCgag` | `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85` |
+
+Each acceptance used exactly one fresh archived baseline GET, one approval,
+one typed REST unarchive, and one independent GET. Both prove
+`isArchived: true -> false`, with `active=false`, `published=null`, and
+`activeVersionId=null` before and after, and the draft graph digest preserved.
+Draft version identifiers and state digests rotated as allowed by the contract.
+The invoke projections report `status: "verified"`; the summaries report
+`verdict: "pass"` and zero approval, invocation, and final-GET exit statuses.
+There was no retry, and no raw provider/request bodies, tokens, seeds, or
+secrets were persisted in the evidence.
+
+This closes bounded REST unarchive acceptance only. `restore_workflow_version`
+is a separate version-restore operation; this result does not repair or accept
+MCP `archive_workflow`. Earlier NO-GO comments and acceptance history remain
+historical records of their candidates/attempts, not the current verdict.
+
+The next order is `nqm81.24` activation capability decision, then `nqm81.25`
+guarded test/manual execution, then `nqm81.26` production gate. This closeout
+does not claim those follow-up gates are implemented or accepted.
+
+## Runner scope
+
 This runner proves one bounded unarchive of one already-existing archived
 workflow on one explicit n8n server. It performs one fresh `GET` baseline,
 derives the exact unarchive precondition and parent binding, creates one fresh

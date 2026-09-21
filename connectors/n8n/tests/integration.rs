@@ -20,7 +20,7 @@ use fcp_crypto::{
 };
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
-    FcpResult, InputConstraint, ZoneId,
+    FcpResult, ZoneId,
 };
 use fcp_sdk::ConnectorRuntimeConfig;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -165,22 +165,8 @@ fn capability_token_with_options(
 }
 
 fn approval_token(input: &Value) -> ApprovalToken {
-    let workflow_id = input["id"].as_str().expect("workflow id for approval");
-    let active = input["active"].as_bool().expect("active for approval");
     let resource_uri = resource_uri("n8n.workflows.activate", input);
-    let constraints = [
-        ("/server_id", json!(TEST_SERVER_ID)),
-        ("/resource_uri", json!(resource_uri)),
-        ("/workflow_id", json!(workflow_id)),
-        ("/active", json!(active)),
-        ("/provider", json!("rest")),
-    ]
-    .into_iter()
-    .map(|(pointer, expected)| InputConstraint {
-        pointer: pointer.into(),
-        expected,
-    })
-    .collect();
+    let input_hash = approval_binding_hash("n8n.workflows.activate", &resource_uri, input);
     let now = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current timestamp should fit in u64");
     ApprovalToken::approved(
@@ -192,12 +178,33 @@ fn approval_token(input: &Value) -> ApprovalToken {
             connector_id: "fcp.n8n".into(),
             method_pattern: "n8n.workflows.activate".into(),
             request_object_id: None,
-            input_hash: None,
-            input_constraints: constraints,
+            input_hash: Some(input_hash),
+            input_constraints: Vec::new(),
         }),
         ZoneId::work(),
         Some(vec![1_u8]),
     )
+}
+
+fn activation_input(
+    id: &str,
+    active: bool,
+    version_id: Option<&str>,
+    precondition: Value,
+) -> Value {
+    let mut input = json!({
+        "id": id,
+        "active": active,
+        "guard": {
+            "approvalRef": "approval-test",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000101",
+            "precondition": precondition,
+        }
+    });
+    if let Some(version_id) = version_id {
+        input["versionId"] = json!(version_id);
+    }
+    input
 }
 
 fn canonical_json(value: &Value) -> Value {
@@ -3888,12 +3895,22 @@ async fn workflows_get_missing_id() {
 async fn exact_object_inputs_reject_unknown_fields_before_egress() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
+    let mut activation = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "a".repeat(64))
+        }),
+    );
+    activation["unknown"] = json!(true);
     let cases = [
         ("n8n.workflows.get", json!({"id": "1001", "unknown": true})),
-        (
-            "n8n.workflows.activate",
-            json!({"id": "1001", "active": true, "unknown": true}),
-        ),
+        ("n8n.workflows.activate", activation),
         (
             "n8n.executions.get",
             json!({"workflow_id": "1001", "id": "50001", "unknown": true}),
@@ -3908,8 +3925,13 @@ async fn exact_object_inputs_reject_unknown_fields_before_egress() {
         let error = invoke(&c, operation, input)
             .await
             .expect_err("unknown exact-object input field must fail closed");
+        let expected_marker = if operation == "n8n.workflows.activate" {
+            "exact guard precondition"
+        } else {
+            "unsupported property"
+        };
         assert!(
-            error.to_string().contains("unsupported property"),
+            error.to_string().contains(expected_marker),
             "unexpected error for {operation}: {error}"
         );
     }
@@ -3992,46 +4014,132 @@ async fn capability_gate_denials_do_not_egress() {
 #[fcp_async_core::runtime::test]
 async fn workflows_activate() {
     let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001",
+        "name": "Activation test",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let readback = json!({
+        "id": "1001",
+        "name": "Activation test",
+        "active": true,
+        "versionId": "draft-v1",
+        "activeVersionId": "published-v1",
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": published.clone()
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .and(body_json(json!({"versionId": "published-v1"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
-    let err = invoke(
-        &c,
-        "n8n.workflows.activate",
-        json!({"id": "1001", "active": true}),
-    )
-    .await
-    .expect_err("activation must fail closed until mediated lifecycle support exists");
-    assert!(matches!(
-        err,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("deferred")
-    ));
-    assert!(server.received_requests().await.unwrap().is_empty());
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": workflow_state_digest_for_fixture(&baseline)
+        }),
+    );
+    let result = invoke(&c, "n8n.workflows.activate", input)
+        .await
+        .expect("activation should publish and verify");
+    assert_eq!(result["status"], "verified");
+    assert_eq!(result["operation"], "n8n.workflows.activate");
+    assert_eq!(result["active"], true);
+    assert_eq!(result["after"]["activeVersionId"], "published-v1");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3, "baseline GET, one publish, readback GET");
 }
 
 #[fcp_async_core::runtime::test]
 async fn workflows_activate_ignores_unrelated_approval_tokens() {
     let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Activation test", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": false,
+        "nodes": [], "connections": {}, "activeVersion": null
+    });
+    let published = json!({"versionId": "published-v1", "nodes": [], "connections": {}});
+    let readback = json!({
+        "id": "1001", "name": "Activation test", "active": true,
+        "versionId": "draft-v1", "activeVersionId": "published-v1", "isArchived": false,
+        "nodes": [], "connections": {}, "activeVersion": published
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .and(body_json(json!({"versionId": "published-v1"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
-    let input = json!({"id": "1001", "active": true});
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false, "stateDigest": workflow_state_digest_for_fixture(&baseline)
+        }),
+    );
     let mut params = authorized_params("n8n.workflows.activate", &input);
     params["approval_tokens"] = json!([unrelated_approval_token(&input), approval_token(&input),]);
-    let err = c
+    let result = c
         .handle_invoke(params)
         .await
-        .expect_err("valid approval must still stop at the deferred lifecycle boundary");
-    assert!(matches!(
-        err,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("deferred")
-    ));
-    assert!(server.received_requests().await.unwrap().is_empty());
+        .expect("matching activation approval should permit the typed REST path");
+    assert_eq!(result["operation"], "n8n.workflows.activate");
 }
 
 #[fcp_async_core::runtime::test]
 async fn workflows_activate_rejects_multiple_matching_approval_tokens() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    let input = json!({"id": "1001", "active": true});
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+        }),
+    );
     let mut params = authorized_params("n8n.workflows.activate", &input);
     params["approval_tokens"] = json!([approval_token(&input), approval_token(&input)]);
     let err = c
@@ -4049,17 +4157,25 @@ async fn workflows_activate_rejects_multiple_matching_approval_tokens() {
 async fn workflows_activate_allows_host_bound_input_hash_for_semantic_gate() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    let input = json!({"id": "1001", "active": true});
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+        }),
+    );
     let mut params = authorized_params("n8n.workflows.activate", &input);
     params["approval_tokens"] = json!([host_bound_input_hash_approval_token(&input)]);
     let err = c
         .handle_invoke(params)
         .await
-        .expect_err("host-bound input_hash approval must not enable direct lifecycle I/O");
+        .expect_err("mismatched input_hash approval must fail closed");
     assert!(matches!(
         err,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("deferred")
+        fcp_prelude::FcpError::CapabilityDenied { .. }
     ));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -4068,7 +4184,16 @@ async fn workflows_activate_allows_host_bound_input_hash_for_semantic_gate() {
 async fn workflows_activate_rejects_malformed_approval_entry() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    let input = json!({"id": "1001", "active": true});
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+        }),
+    );
     let mut params = authorized_params("n8n.workflows.activate", &input);
     params["approval_tokens"] = json!([
         {"malformed": true},
@@ -4085,7 +4210,16 @@ async fn workflows_activate_rejects_malformed_approval_entry() {
 async fn approval_gate_denials_do_not_egress_provider() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    let input = json!({"id": "1001", "active": true});
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+        }),
+    );
 
     let mut missing = authorized_params("n8n.workflows.activate", &input);
     missing
@@ -4104,10 +4238,16 @@ async fn approval_gate_denials_do_not_egress_provider() {
     wrong_zone["approval_tokens"] = json!([wrong_zone_token]);
 
     let mut wrong_target = authorized_params("n8n.workflows.activate", &input);
-    wrong_target["approval_tokens"] = json!([approval_token(&json!({
-        "id": "1001",
-        "active": false
-    }))]);
+    wrong_target["approval_tokens"] = json!([approval_token(&activation_input(
+        "1001",
+        false,
+        None,
+        json!({
+            "versionId": "draft-v1", "activeVersionId": "published-v1", "active": true,
+            "isArchived": false,
+            "stateDigest": format!("blake3-256:{}", "0".repeat(64))
+        }),
+    ))]);
 
     for (label, params) in [
         ("missing", missing),
@@ -4129,20 +4269,55 @@ async fn approval_gate_denials_do_not_egress_provider() {
 #[fcp_async_core::runtime::test]
 async fn workflows_deactivate() {
     let server = MockServer::start().await;
+    let published = json!({
+        "versionId": "published-v1",
+        "nodes": [{"id": "published-node"}],
+        "connections": {}
+    });
+    let baseline = json!({
+        "id": "1002", "name": "Deactivation test", "active": true,
+        "versionId": "draft-v1", "activeVersionId": "published-v1", "isArchived": false,
+        "nodes": [{"id": "draft-node"}], "connections": {}, "activeVersion": published
+    });
+    let readback = json!({
+        "id": "1002", "name": "Deactivation test", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": false,
+        "nodes": [{"id": "draft-node"}], "connections": {}, "activeVersion": null
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1002"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1002/unpublish"))
+        .and(body_string(""))
+        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .mount(&server)
+        .await;
     let c = setup_connector(&server.uri()).await;
-    let err = invoke(
+    let result = invoke(
         &c,
         "n8n.workflows.activate",
-        json!({"id": "1002", "active": false}),
+        activation_input(
+            "1002",
+            false,
+            None,
+            json!({
+                "versionId": "draft-v1", "activeVersionId": "published-v1", "active": true,
+                "isArchived": false,
+                "stateDigest": workflow_state_digest_for_fixture(&baseline)
+            }),
+        ),
     )
     .await
-    .expect_err("deactivation must fail closed until mediated lifecycle support exists");
-    assert!(matches!(
-        err,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("deferred")
-    ));
-    assert!(server.received_requests().await.unwrap().is_empty());
+    .expect("deactivation should unpublish and verify");
+    assert_eq!(result["operation"], "n8n.workflows.activate");
+    assert_eq!(result["active"], false);
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[fcp_async_core::runtime::test]
@@ -4492,7 +4667,11 @@ async fn workflows_lifecycle_conflict_is_unknown_without_retry() {
         .await
         .expect_err("409 must be unknown");
     assert!(error.to_string().contains("unknown"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "baseline GET, one attempted publish, and one independent readback GET"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -4536,7 +4715,11 @@ async fn workflows_lifecycle_timeout_is_unknown_without_retry() {
         .await
         .expect_err("timeout must be unknown");
     assert!(error.to_string().contains("unknown"));
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        3,
+        "baseline GET, one attempted publish, and one independent readback GET"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -5884,7 +6067,7 @@ async fn invoke_before_configure_fails() {
 // -- Empty response body handling --
 
 #[fcp_async_core::runtime::test]
-async fn valid_activation_fails_closed_before_provider() {
+async fn activation_requires_full_guard_before_provider() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     let err = invoke(
@@ -5893,12 +6076,8 @@ async fn valid_activation_fails_closed_before_provider() {
         json!({"id": "1001", "active": true}),
     )
     .await
-    .expect_err("valid activation must fail closed before provider I/O");
-    assert!(matches!(
-        err,
-        fcp_prelude::FcpError::CapabilityDenied { reason, .. }
-            if reason.contains("deferred")
-    ));
+    .expect_err("activation without guard must fail before provider I/O");
+    assert!(matches!(err, fcp_prelude::FcpError::InvalidRequest { .. }));
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 

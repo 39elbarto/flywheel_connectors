@@ -1559,21 +1559,40 @@ impl N8nConnector {
             ));
         }
 
-        let provider_workflow = match typed.action {
-            WorkflowLifecycleAction::Publish => client
-                .publish_workflow(&typed.id, typed.version_id.as_deref(), context.clone())
-                .await
-                .map_err(classify_lifecycle_attempt_error)?,
-            WorkflowLifecycleAction::Unpublish => client
-                .unpublish_workflow(&typed.id, context.clone())
-                .await
-                .map_err(classify_lifecycle_attempt_error)?,
+        // Once the canonical POST is entered, every non-deterministic result
+        // is potentially ambiguous.  Keep deterministic pre-request errors
+        // fail-closed, but always reconcile a provider-attempt error with one
+        // independent GET before classifying the outcome.  The provider body
+        // is advisory; the readback is the only authoritative proof.
+        let provider_state = match typed.action {
+            WorkflowLifecycleAction::Publish => {
+                match client
+                    .publish_workflow(&typed.id, typed.version_id.as_deref(), context.clone())
+                    .await
+                {
+                    Ok(provider_workflow) if provider_workflow.id == typed.id => {
+                        normalize_workflow_state(provider_workflow).ok()
+                    }
+                    Ok(_) => None,
+                    Err(error @ N8nError::InvalidInput(_)) => return Err(error),
+                    Err(error @ N8nError::PreconditionFailed(_))
+                    | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+                    Err(_) => None,
+                }
+            }
+            WorkflowLifecycleAction::Unpublish => {
+                match client.unpublish_workflow(&typed.id, context.clone()).await {
+                    Ok(provider_workflow) if provider_workflow.id == typed.id => {
+                        normalize_workflow_state(provider_workflow).ok()
+                    }
+                    Ok(_) => None,
+                    Err(error @ N8nError::InvalidInput(_)) => return Err(error),
+                    Err(error @ N8nError::PreconditionFailed(_))
+                    | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+                    Err(_) => None,
+                }
+            }
         };
-        if provider_workflow.id != typed.id {
-            return Err(N8nError::UnknownOutcome);
-        }
-        let provider_state =
-            normalize_workflow_state(provider_workflow).map_err(|_| N8nError::UnknownOutcome)?;
 
         let readback_workflow = client
             .get_workflow_typed(&typed.id, context)
@@ -1589,7 +1608,7 @@ impl N8nConnector {
             typed.action,
             typed.version_id.as_deref(),
             &baseline,
-            &provider_state,
+            provider_state.as_ref(),
             &readback,
         )?;
 
@@ -3495,20 +3514,6 @@ fn parse_workflow_unarchive_input(input: &Value) -> N8nResult<WorkflowUnarchiveI
     Ok(typed)
 }
 
-fn classify_lifecycle_attempt_error(error: N8nError) -> N8nError {
-    match error {
-        N8nError::Http(_)
-        | N8nError::Json(_)
-        | N8nError::MalformedProviderResponse
-        | N8nError::UnknownOutcome
-        | N8nError::RateLimited { .. } => N8nError::UnknownOutcome,
-        N8nError::Api { status_code, .. } if status_code == 409 || status_code >= 500 => {
-            N8nError::UnknownOutcome
-        }
-        other => other,
-    }
-}
-
 fn verify_workflow_lifecycle_precondition(
     precondition: &crate::types::WorkflowLifecyclePrecondition,
     workflow: &WorkflowDetail,
@@ -3531,50 +3536,43 @@ fn verify_workflow_lifecycle_readback(
     action: WorkflowLifecycleAction,
     requested_version_id: Option<&str>,
     baseline: &WorkflowStateView,
-    provider: &WorkflowStateView,
+    provider: Option<&WorkflowStateView>,
     readback: &WorkflowStateView,
 ) -> N8nResult<()> {
-    if provider.draft != baseline.draft {
+    if provider.is_some_and(|provider| provider.draft != baseline.draft) {
         return Err(N8nError::UnknownOutcome);
     }
+    let mismatch = |provider_state: Option<&WorkflowStateView>| {
+        if provider_state.is_some() {
+            N8nError::ReadbackMismatch
+        } else {
+            N8nError::UnknownOutcome
+        }
+    };
     match action {
         WorkflowLifecycleAction::Publish => {
             let target_version_id = requested_version_id
-                .or(provider.active_version_id.as_deref())
-                .ok_or(N8nError::UnknownOutcome)?;
-            if !provider.active
-                || provider.active_version_id.as_deref() != Some(target_version_id)
-                || provider
-                    .published
-                    .as_ref()
-                    .is_none_or(|published| published.version_id.as_str() != target_version_id)
-            {
-                return Err(N8nError::UnknownOutcome);
-            }
+                .or(readback.active_version_id.as_deref())
+                .ok_or_else(|| mismatch(provider))?;
             if !readback.active
-                || readback.is_archived
+                || readback.is_archived != baseline.is_archived
                 || readback.active_version_id.as_deref() != Some(target_version_id)
-                || readback.published != provider.published
                 || readback
                     .published
                     .as_ref()
                     .is_none_or(|published| published.version_id.as_str() != target_version_id)
                 || readback.draft != baseline.draft
             {
-                return Err(N8nError::ReadbackMismatch);
+                return Err(mismatch(provider));
             }
         }
         WorkflowLifecycleAction::Unpublish => {
-            if provider.active || provider.active_version_id.is_some() {
-                return Err(N8nError::UnknownOutcome);
-            }
             if readback.active
                 || readback.active_version_id.is_some()
                 || readback.is_archived != baseline.is_archived
-                || readback.published != provider.published
                 || readback.draft != baseline.draft
             {
-                return Err(N8nError::ReadbackMismatch);
+                return Err(mismatch(provider));
             }
         }
     }
@@ -4746,7 +4744,10 @@ fn workflow_activation_output_schema() -> serde_json::Value {
         "operation".into(),
         json!({"const": "n8n.workflows.activate"}),
     );
-    properties.insert("provider".into(), json!({"type": "string", "enum": ["rest"]}));
+    properties.insert(
+        "provider".into(),
+        json!({"type": "string", "enum": ["rest"]}),
+    );
     properties.remove("action");
     properties.insert("active".into(), json!({"type": "boolean"}));
     schema

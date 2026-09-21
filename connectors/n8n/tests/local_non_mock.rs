@@ -17,11 +17,13 @@ use std::{
     time::Duration,
 };
 
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_crypto::{
+    canonicalize::to_deterministic_cbor, cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey,
+};
 use fcp_n8n::connector::N8nConnector;
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
-    InputConstraint, ZoneId,
+    ZoneId,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
@@ -103,6 +105,18 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
             "200 OK",
             r#"{"data":[{"id":"1001","name":"Ops workflow","active":false}]}"#,
         ),
+        HttpResponse::json(
+            "200 OK",
+            r#"{"id":"1001","name":"Ops workflow","active":false,"versionId":"draft-v1","activeVersionId":null,"isArchived":false,"nodes":[{"id":"draft-node"}],"connections":{},"activeVersion":null}"#,
+        ),
+        HttpResponse::json(
+            "200 OK",
+            r#"{"id":"1001","name":"Ops workflow","active":true,"versionId":"draft-v1","activeVersionId":"published-v1","isArchived":false,"nodes":[{"id":"draft-node"}],"connections":{},"activeVersion":{"versionId":"published-v1","nodes":[{"id":"published-node"}],"connections":{}}}"#,
+        ),
+        HttpResponse::json(
+            "200 OK",
+            r#"{"id":"1001","name":"Ops workflow","active":true,"versionId":"draft-v1","activeVersionId":"published-v1","isArchived":false,"nodes":[{"id":"draft-node"}],"connections":{},"activeVersion":{"versionId":"published-v1","nodes":[{"id":"published-node"}],"connections":{}}}"#,
+        ),
         HttpResponse::json("200 OK", r#"{"data":[{"id":"5001","finished":true}]}"#),
         HttpResponse::json(
             "200 OK",
@@ -117,17 +131,27 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         .expect("workflows.list should invoke n8n client path");
     assert_eq!(workflows["data"][0]["id"], "1001");
 
-    let activation_err = connector
-        .handle_invoke(authorized_params(
-            OP_WORKFLOWS_ACTIVATE,
-            &json!({"id": "1001", "active": true}),
-        ))
+    let baseline = json!({
+        "id": "1001",
+        "name": "Ops workflow",
+        "active": false,
+        "versionId": "draft-v1",
+        "activeVersionId": null,
+        "isArchived": false,
+        "nodes": [{"id": "draft-node"}],
+        "connections": {},
+        "activeVersion": null
+    });
+    let activation_input =
+        activation_input("1001", true, workflow_state_digest_for_fixture(&baseline));
+    let activation = connector
+        .handle_invoke(authorized_params(OP_WORKFLOWS_ACTIVATE, &activation_input))
         .await
-        .expect_err("activation must fail closed before direct provider I/O");
-    assert!(matches!(
-        activation_err,
-        FcpError::CapabilityDenied { reason, .. } if reason.contains("deferred")
-    ));
+        .expect("activation should publish and verify through the production HTTP client");
+    assert_eq!(activation["status"], "verified");
+    assert_eq!(activation["operation"], OP_WORKFLOWS_ACTIVATE);
+    assert_eq!(activation["active"], true);
+    assert_eq!(activation["after"]["activeVersionId"], "published-v1");
 
     let executions = connector
         .handle_invoke(authorized_params(OP_EXECUTIONS_LIST, &json!({})))
@@ -150,22 +174,28 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         .await
         .expect("shutdown connector");
     let requests = server.join();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 6);
     assert_request(
         &requests[0],
         "GET /api/v1/workflows?limit=50&excludePinnedData=true HTTP/1.1",
     );
+    assert_request(&requests[1], "GET /api/v1/workflows/1001 HTTP/1.1");
+    assert_request(&requests[2], "POST /api/v1/workflows/1001/publish HTTP/1.1");
+    assert_request(&requests[3], "GET /api/v1/workflows/1001 HTTP/1.1");
     assert_request(
-        &requests[1],
+        &requests[4],
         "GET /api/v1/executions?limit=50&includeData=false&ignoreDataSizeLimit=false&redactExecutionData=true HTTP/1.1",
     );
     assert_request(
-        &requests[2],
+        &requests[5],
         "GET /api/v1/executions/5001?includeData=true HTTP/1.1",
     );
     assert_eq!(requests[0].body, json!({}));
     assert_eq!(requests[1].body, json!({}));
-    assert_eq!(requests[2].body, json!({}));
+    assert_eq!(requests[2].body, json!({"versionId": "published-v1"}));
+    assert_eq!(requests[3].body, json!({}));
+    assert_eq!(requests[4].body, json!({}));
+    assert_eq!(requests[5].body, json!({}));
 
     let rendered = serde_json::to_string(&json!({
         "workflows": workflows,
@@ -183,8 +213,10 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
                 "status": 200
             },
             "workflows_activate": {
-                "status": "deferred",
-                "provider_requests": 0
+                "method": "POST",
+                "path": "/api/v1/workflows/1001/publish",
+                "status": 200,
+                "readback_status": "verified"
             },
             "executions_list": {
                 "method": "GET",
@@ -203,9 +235,9 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
             "api_key_header_verified": true
         },
         "write_operation_shape": {
-            "workflow_activate_fail_closed_before_provider": true,
+            "workflow_activate_typed_rest": true,
             "workflow_id": "1001",
-            "body": {"active": true}
+            "body": {"versionId": "published-v1"}
         },
         "redaction": {
             "api_key_redacted_from_output": true
@@ -279,7 +311,12 @@ async fn local_non_mock_rejects_workflow_path_traversal_before_egress() {
     let err = connector
         .handle_invoke(authorized_params(
             OP_WORKFLOWS_ACTIVATE,
-            &json!({"id": "../admin", "active": true}),
+            &activation_input(
+                "../admin",
+                true,
+                "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+            ),
         ))
         .await
         .expect_err("path traversal workflow id should be rejected before egress");
@@ -344,6 +381,84 @@ fn test_signing_key() -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[42_u8; 32]).expect("fixed test key should parse")
 }
 
+fn activation_input(id: &str, active: bool, state_digest: String) -> Value {
+    let mut input = json!({
+        "id": id,
+        "active": active,
+        "guard": {
+            "approvalRef": "approval-local-non-mock",
+            "idempotencyKey": "00000000-0000-4000-8000-000000000101",
+            "precondition": {
+                "versionId": "draft-v1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": state_digest
+            }
+        }
+    });
+    if active {
+        input["versionId"] = json!("published-v1");
+    }
+    input
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by_key(|(key, _)| *key);
+            let mut canonical = serde_json::Map::new();
+            for (key, child) in entries {
+                canonical.insert(key.clone(), canonical_json(child));
+            }
+            Value::Object(canonical)
+        }
+        Value::Array(array) => Value::Array(array.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
+fn workflow_state_digest_for_fixture(workflow: &Value) -> String {
+    let active_version = workflow["activeVersion"].clone();
+    let published = active_version.as_object().map(|published| {
+        json!({
+            "versionId": published["versionId"],
+            "nodes": published["nodes"],
+            "connections": published["connections"],
+        })
+    });
+    let canonical = canonical_json(&json!({
+        "schema": "fwc-n8n.workflow-state.v1",
+        "id": workflow["id"],
+        "name": workflow.get("name").cloned().unwrap_or(Value::Null),
+        "description": workflow.get("description").cloned().unwrap_or(Value::Null),
+        "projectId": workflow.get("projectId").cloned().unwrap_or(Value::Null),
+        "folderId": workflow
+            .get("parentFolderId")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "versionId": workflow["versionId"],
+        "active": workflow["active"],
+        "activeVersionId": workflow["activeVersionId"],
+        "isArchived": workflow["isArchived"],
+        "createdAt": workflow.get("createdAt").cloned().unwrap_or(Value::Null),
+        "updatedAt": workflow.get("updatedAt").cloned().unwrap_or(Value::Null),
+        "tags": workflow.get("tags").cloned().unwrap_or(Value::Null),
+        "draft": {
+            "nodes": workflow["nodes"],
+            "connections": workflow["connections"],
+        },
+        "published": published,
+    }));
+    let bytes = serde_json::to_vec(&canonical).expect("state digest JSON");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fwc-n8n.state-digest.v1");
+    hasher.update(&[0]);
+    hasher.update(&bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
 fn resource_uri(operation: &str, input: &Value) -> String {
     match operation {
         OP_WORKFLOWS_LIST | OP_EXECUTIONS_LIST => format!("fwc-n8n://{TEST_SERVER_ID}"),
@@ -398,22 +513,15 @@ fn capability_token(operation: &str, input: &Value) -> CapabilityToken {
 }
 
 fn approval_token(input: &Value) -> ApprovalToken {
-    let workflow_id = input["id"].as_str().expect("workflow id for approval");
-    let active = input["active"].as_bool().expect("active for approval");
     let resource_uri = resource_uri(OP_WORKFLOWS_ACTIVATE, input);
-    let constraints = [
-        ("/server_id", json!(TEST_SERVER_ID)),
-        ("/resource_uri", json!(resource_uri)),
-        ("/workflow_id", json!(workflow_id)),
-        ("/active", json!(active)),
-        ("/provider", json!("rest")),
-    ]
-    .into_iter()
-    .map(|(pointer, expected)| InputConstraint {
-        pointer: pointer.into(),
-        expected,
-    })
-    .collect();
+    let input_bytes = to_deterministic_cbor(&json!({
+        "server_id": TEST_SERVER_ID,
+        "resource_uri": resource_uri,
+        "operation": OP_WORKFLOWS_ACTIVATE,
+        "input": input,
+    }))
+    .expect("approval binding CBOR");
+    let input_hash = *blake3::hash(&input_bytes).as_bytes();
     let now = u64::try_from(chrono::Utc::now().timestamp_millis())
         .expect("current timestamp should fit in u64");
     ApprovalToken::approved(
@@ -425,8 +533,8 @@ fn approval_token(input: &Value) -> ApprovalToken {
             connector_id: "fcp.n8n".into(),
             method_pattern: OP_WORKFLOWS_ACTIVATE.into(),
             request_object_id: None,
-            input_hash: None,
-            input_constraints: constraints,
+            input_hash: Some(input_hash),
+            input_constraints: Vec::new(),
         }),
         ZoneId::work(),
         Some(vec![1_u8]),

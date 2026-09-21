@@ -459,17 +459,18 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 10] = [
     "n8n.workflows.get",
     "n8n.workflows.list",
 ];
-const N8N_WRITE_OPERATIONS: [&str; 8] = [
+const N8N_WRITE_OPERATIONS: [&str; 9] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
     "n8n.workflows.unarchive",
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 18] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 19] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -483,6 +484,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 18] = [
     "n8n.mcp_access.reconcile",
     "n8n.workflows.create_draft",
     "n8n.workflows.update_draft",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.archive",
     "n8n.workflows.unarchive",
@@ -4916,7 +4918,7 @@ mod owned_per_invocation_unit_tests {
     }
 
     #[test]
-    fn fixed_filesystem_boundary_admits_only_typed_n8n_draft_writes() {
+    fn fixed_filesystem_boundary_admits_only_typed_n8n_writes() {
         let zone_id: ZoneId = ZoneId::work();
         let connector_id = ConnectorId::from_static("fcp.n8n");
         for operation in N8N_WRITE_OPERATIONS {
@@ -4927,19 +4929,9 @@ mod owned_per_invocation_unit_tests {
                 None,
                 true,
             )
-            .expect("typed draft write should pass fixed filesystem boundary");
+            .expect("typed n8n write should pass fixed filesystem boundary");
             assert!(zone_dir.is_none());
         }
-        assert!(
-            owned_handshake_zone_dir(
-                &connector_id,
-                &OperationId::from_static("n8n.workflows.activate"),
-                &zone_id,
-                None,
-                true,
-            )
-            .is_err()
-        );
     }
 
     #[test]
@@ -10643,6 +10635,46 @@ fn validate_n8n_workflow_lifecycle_input(input: &Value) -> HostResult<()> {
     Ok(())
 }
 
+fn validate_n8n_workflow_activation_input(input: &Value) -> HostResult<()> {
+    let object = input.as_object().ok_or_else(|| {
+        HostError::InvalidFilter("n8n workflow activation input must be an object".to_string())
+    })?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "active" | "versionId" | "guard"))
+        || !["id", "active", "guard"]
+            .iter()
+            .all(|field| object.contains_key(*field))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow activation input contains unsupported or missing fields".to_string(),
+        ));
+    }
+    let active = object
+        .get("active")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow activation active flag is invalid".to_string())
+        })?;
+    if !active && object.contains_key("versionId") {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow deactivation must not include versionId".to_string(),
+        ));
+    }
+
+    let mut lifecycle_input = object.clone();
+    lifecycle_input.remove("active");
+    lifecycle_input.insert(
+        "action".to_string(),
+        Value::String(if active { "publish" } else { "unpublish" }.to_string()),
+    );
+    validate_n8n_workflow_lifecycle_input(&Value::Object(lifecycle_input)).map_err(|_| {
+        HostError::InvalidFilter(
+            "n8n workflow activation guard or precondition is invalid".to_string(),
+        )
+    })
+}
+
 fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
     let encoded = serde_json::to_vec(input).map_err(|_| {
         HostError::InvalidFilter("n8n workflow execute input is not valid JSON".to_string())
@@ -11280,6 +11312,10 @@ fn expected_n8n_read_only_resource_uri(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
+        "n8n.workflows.activate" => Ok(format!(
+            "{root}/workflows/{}",
+            encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
+        )),
         "n8n.workflows.lifecycle" => Ok(format!(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
@@ -11342,6 +11378,8 @@ fn build_n8n_read_only_run_once_plan(
     }
     if input.operation == "n8n.mcp_access.reconcile" {
         validate_n8n_mcp_access_input(&input.input)?;
+    } else if input.operation == "n8n.workflows.activate" {
+        validate_n8n_workflow_activation_input(&input.input)?;
     } else if input.operation == "n8n.workflows.lifecycle" {
         validate_n8n_workflow_lifecycle_input(&input.input)?;
     } else if input.operation == "n8n.workflows.archive" {
@@ -12320,6 +12358,72 @@ fn n8n_run_once_approval_material(
             "mutation_digest": mutation_digest.clone(),
             "provider": "rest",
             "side_effect": "workflow_unarchive",
+        });
+        return Ok((material, String::new(), mutation_digest));
+    }
+    if plan.operation.as_str() == "n8n.workflows.activate" {
+        let object = plan.input.as_object().ok_or_else(|| {
+            HostError::InvalidFilter("n8n workflow activation input is invalid".to_string())
+        })?;
+        let guard = object
+            .get("guard")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("n8n workflow activation guard is invalid".to_string())
+            })?;
+        let precondition = guard
+            .get("precondition")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                HostError::InvalidFilter(
+                    "n8n workflow activation precondition is invalid".to_string(),
+                )
+            })?;
+        let resource_digest = n8n_run_once_digest(
+            b"fwc-n8n.resource.v1",
+            &Value::String(plan.resource_uri.clone()),
+        );
+        let workflow_id_digest = n8n_run_once_digest(
+            b"fwc-n8n.workflow-id.v1",
+            object.get("id").unwrap_or(&Value::Null),
+        );
+        let idempotency_key_hash = n8n_run_once_digest(
+            b"fwc-n8n.idempotency-key.v1",
+            guard.get("idempotencyKey").unwrap_or(&Value::Null),
+        );
+        let approval_ref_hash = n8n_run_once_digest(
+            b"fwc-n8n.approval-ref.v1",
+            guard.get("approvalRef").unwrap_or(&Value::Null),
+        );
+        let mutation_digest = n8n_run_once_digest(
+            b"fwc-n8n.activation-mutation.v1",
+            &json!({
+                "server_id": plan.server_id.as_str(),
+                "resource_digest": resource_digest.clone(),
+                "workflow_id_digest": workflow_id_digest.clone(),
+                "active": object.get("active").cloned().unwrap_or(Value::Null),
+                "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+                "precondition": precondition,
+            }),
+        );
+        let material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_digest": resource_digest,
+            "operation": plan.operation.as_str(),
+            "workflow_id_digest": workflow_id_digest,
+            "active": object.get("active").cloned().unwrap_or(Value::Null),
+            "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+            "precondition_version_id": precondition.get("versionId").cloned().unwrap_or(Value::Null),
+            "active_version_id": precondition.get("activeVersionId").cloned().unwrap_or(Value::Null),
+            "active_version_id_present": precondition.contains_key("activeVersionId"),
+            "precondition_active": precondition.get("active").cloned().unwrap_or(Value::Null),
+            "is_archived": precondition.get("isArchived").cloned().unwrap_or(Value::Null),
+            "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
+            "approval_ref_hash": approval_ref_hash,
+            "idempotency_key_hash": idempotency_key_hash,
+            "mutation_digest": mutation_digest.clone(),
+            "provider": "rest",
+            "side_effect": "workflow_activation",
         });
         return Ok((material, String::new(), mutation_digest));
     }
@@ -36375,6 +36479,53 @@ done"#;
         }
     }
 
+    fn n8n_activation_test_input(active: bool) -> N8nReadOnlyRunOnceInput {
+        let (resource_uri, version_id, active_version_id, precondition_active) = if active {
+            (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                Some("published-v1"),
+                None,
+                false,
+            )
+        } else {
+            (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                None,
+                Some("published-v1"),
+                true,
+            )
+        };
+        let mut input = json!({
+            "id": "workflow-1",
+            "active": active,
+            "guard": {
+                "approvalRef": "activation-approval",
+                "idempotencyKey": "55555555-6666-4777-8888-999999999999",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": active_version_id,
+                    "active": precondition_active,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        });
+        if let Some(version_id) = version_id {
+            input["versionId"] = json!(version_id);
+        }
+        N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.activate".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: resource_uri.to_string(),
+            input,
+            approval_token: None,
+            deadline_ms: None,
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        }
+    }
+
     fn n8n_mutation_digest_golden_input(credential_id: &str) -> Value {
         json!({
             "graph": {
@@ -36549,6 +36700,26 @@ done"#;
             .expect("precondition object")
             .remove("activeVersionId");
         assert!(build_n8n_read_only_run_once_plan(missing_lifecycle_pointer, &config).is_err());
+    }
+
+    #[test]
+    fn n8n_workflow_activation_run_once_plan_admits_both_transitions() {
+        let config = run_once_n8n_draft_test_config();
+        for active in [true, false] {
+            let plan =
+                build_n8n_read_only_run_once_plan(n8n_activation_test_input(active), &config)
+                    .expect("activation must be admitted as a typed REST write");
+            assert_eq!(plan.operation.as_str(), "n8n.workflows.activate");
+            assert_eq!(plan.resource_uri, "fwc-n8n://eec/workflows/workflow%2D1");
+            let (material, graph_digest, mutation_digest) =
+                n8n_run_once_approval_material(&plan).expect("activation approval material");
+            assert!(graph_digest.is_empty());
+            assert!(mutation_digest.starts_with("blake3-256:"));
+            assert_eq!(material["provider"], "rest");
+            assert_eq!(material["side_effect"], "workflow_activation");
+            assert_eq!(material["active"], active);
+            assert!(!material.to_string().contains("activation-approval"));
+        }
     }
 
     #[test]
@@ -37279,7 +37450,7 @@ done"#;
                 .expect("declared read-only operation must be admitted");
         }
 
-        for operation in ["n8n.workflows.activate", "n8n.workflows.delete"] {
+        for operation in ["n8n.workflows.delete"] {
             assert!(
                 build_n8n_read_only_run_once_plan(n8n_read_only_test_input(operation), &config)
                     .is_err(),

@@ -4027,7 +4027,7 @@ async fn workflows_activate() {
     });
     let published = json!({
         "versionId": "published-v1",
-        "nodes": [{"id": "published-node"}],
+        "nodes": [{"id": "draft-node"}],
         "connections": {}
     });
     let readback = json!({
@@ -4052,7 +4052,21 @@ async fn workflows_activate() {
     Mock::given(method("POST"))
         .and(path("/api/v1/workflows/1001/publish"))
         .and(body_json(json!({"versionId": "published-v1"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(readback))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "1001",
+            "name": "Activation test",
+            "active": true,
+            "versionId": "draft-v1",
+            "activeVersionId": "published-v1",
+            "isArchived": false,
+            "nodes": [{"id": "provider-advisory-draft"}],
+            "connections": {},
+            "activeVersion": {
+                "versionId": "published-v1",
+                "nodes": [{"id": "provider-advisory-published"}],
+                "connections": {}
+            }
+        })))
         .mount(&server)
         .await;
     let c = setup_connector(&server.uri()).await;
@@ -4077,6 +4091,56 @@ async fn workflows_activate() {
     assert_eq!(result["after"]["activeVersionId"], "published-v1");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3, "baseline GET, one publish, readback GET");
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflows_activate_rejects_published_graph_mismatch() {
+    let server = MockServer::start().await;
+    let baseline = json!({
+        "id": "1001", "name": "Mismatched graph activation", "active": false,
+        "versionId": "draft-v1", "activeVersionId": null, "isArchived": false,
+        "nodes": [{"id": "draft-node"}], "connections": {}, "activeVersion": null
+    });
+    let mismatched_readback = json!({
+        "id": "1001", "name": "Mismatched graph activation", "active": true,
+        "versionId": "draft-v1", "activeVersionId": "published-v1", "isArchived": false,
+        "nodes": [{"id": "draft-node"}], "connections": {},
+        "activeVersion": {
+            "versionId": "published-v1",
+            "nodes": [{"id": "published-node"}],
+            "connections": {}
+        }
+    });
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/1001"))
+        .respond_with(SequentialJsonResponse::new(vec![
+            baseline.clone(),
+            mismatched_readback.clone(),
+        ]))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/workflows/1001/publish"))
+        .and(body_json(json!({"versionId": "published-v1"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mismatched_readback))
+        .mount(&server)
+        .await;
+    let c = setup_connector(&server.uri()).await;
+    let input = activation_input(
+        "1001",
+        true,
+        Some("published-v1"),
+        json!({
+            "versionId": "draft-v1", "activeVersionId": null, "active": false,
+            "isArchived": false,
+            "stateDigest": workflow_state_digest_for_fixture(&baseline)
+        }),
+    );
+    let error = invoke(&c, "n8n.workflows.activate", input)
+        .await
+        .expect_err("publish must reject a published graph that differs from the draft");
+    assert!(error.to_string().contains("readback"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
 #[fcp_async_core::runtime::test]
@@ -4120,7 +4184,7 @@ async fn workflows_activate_malformed_post_response_reconciles_once() {
         "nodes": [{"id": "draft-node"}], "connections": {}, "activeVersion": null
     });
     let published = json!({
-        "versionId": "published-v1", "nodes": [{"id": "published-node"}],
+        "versionId": "published-v1", "nodes": [{"id": "draft-node"}],
         "connections": {}
     });
     let readback = json!({
@@ -4557,7 +4621,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
     });
     let published = json!({
         "versionId": "published-v1",
-        "nodes": [{"id": "published-node"}],
+        "nodes": [{"id": "draft-node"}],
         "connections": {}
     });
     let readback = json!({
@@ -4721,7 +4785,7 @@ async fn workflows_lifecycle_publish_uses_provider_version_when_omitted() {
     });
     let published = json!({
         "versionId": "published-v2",
-        "nodes": [{"id": "published-node"}],
+        "nodes": [{"id": "draft-node"}],
         "connections": {}
     });
     let readback = json!({

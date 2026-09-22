@@ -94,6 +94,39 @@ hashes, statuses, postcondition verdicts, and
 claim requires both server runs and durable evidence; source implementation,
 focused WireMock/host tests, and an assembled candidate alone are insufficient.
 
+The executable activation runner is an activation-specific extension of this
+acceptance script; it is not a generic REST runner. Run its contract preflight
+and self-test before any live invocation:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh --activation-self-test
+```
+
+Then run exactly one server at a time, EEC first and Hetzner only after the EEC
+run is a verified `pass`:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh \
+  --activation --server eec \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/activation-eec-evidence
+
+scripts/n8n_unarchive_acceptance.sh \
+  --activation --server hetzner \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/activation-hetzner-evidence
+```
+
+Activation mode validates a closed plan before the first provider call: one
+credential-free Webhook draft with `availableInMCP=false`, one create/readback,
+one publish/readback, one active-state GET, and one unpublish/readback. It uses
+only `fwc-n8n run-once`, permits zero retries and zero execution/cleanup
+actions, and the self-test reports `provider_actions:0`; it does not invoke the
+Webhook, use credentials, or persist request/provider bodies, tokens, or
+secrets. A timeout, malformed response, or readback mismatch returns
+`unknown`/`STOP`; do not retry or start the next server after an unresolved
+result.
+
 ## Runner scope
 
 This runner proves one bounded unarchive of one already-existing archived

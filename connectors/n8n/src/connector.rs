@@ -3559,9 +3559,6 @@ fn verify_workflow_lifecycle_readback(
     provider: Option<&WorkflowStateView>,
     readback: &WorkflowStateView,
 ) -> N8nResult<()> {
-    if provider.is_some_and(|provider| provider.draft != baseline.draft) {
-        return Err(N8nError::UnknownOutcome);
-    }
     if readback.id != baseline.id || readback.draft != baseline.draft {
         return Err(N8nError::UnknownOutcome);
     }
@@ -3581,7 +3578,9 @@ fn verify_workflow_lifecycle_readback(
                 || readback.is_archived != baseline.is_archived
                 || readback.active_version_id.as_deref() != Some(target_version_id)
                 || readback.published.as_ref().is_none_or(|published| {
-                    published.version_id != target_version_id || published.graph_digest.is_empty()
+                    published.version_id != target_version_id
+                        || published.graph_digest.is_empty()
+                        || published.graph_digest != readback.draft.graph_digest
                 })
             {
                 return Err(mismatch(provider));

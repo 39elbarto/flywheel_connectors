@@ -807,15 +807,19 @@ requested exact local `n8n-mcp` version:
 - `fwc-n8n update-review stage-local-mcp <exact-version>` is the single
   owner-operated discovery/staging command. It uses only the fixed npm
   metadata, pack, and install command plans, with an empty environment plus
-  the allowlisted npm home/cache, `--ignore-scripts`, `--no-audit`, and
-  `--no-fund`; it never accepts a path, shell fragment, registry, or generic
+  the allowlisted npm home/cache, `--ignore-scripts`, `--no-audit`,
+  `--no-fund`, and `--bin-links=false`; it never accepts a path, shell
+  fragment, registry, or generic
   input object. The command is root-gated, stages only below
   `/var/lib/fwc-n8n/update-staging/local-n8n-mcp`, and retains a redacted
   verification receipt beside the exact UUID-v4 stage directory.
 - Before success, the command verifies registry metadata and SRI, performs a
   bounded archive-listing preflight, runs the strict package manifest,
-  lockfile, complete-tree, and executable-entrypoint verifier, and persists
-  only provenance/digest/size evidence. It performs no retry after an unknown
+  canonical registry-only lock closure (including exact integrity records and
+  installed package-path parity), complete-tree, and executable-entrypoint
+  verifier, and persists only provenance/digest/size evidence. npm and tar run
+  in dedicated process groups; a timeout terminates the complete group before
+  output readers are joined. It performs no retry after an unknown
   result, provider call, secret lookup, global `/usr/local` package change,
   FWC release promotion, activation, or public capability registration.
 - Authorization and apply are deliberately absent from the `update-review`

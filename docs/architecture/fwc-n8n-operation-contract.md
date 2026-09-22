@@ -421,8 +421,11 @@ Implementation status snapshot (2026-08-19): the host-side local
 the connector boundary. The public CLI has one explicit root-gated
 `update-review stage-local-mcp <exact-version>` path that obtains metadata and
 the exact tarball through fixed npm plans, stages only under the fixed local-MCP
-root with scripts/audit/fund disabled, emits a retained redacted receipt, and
-strictly verifies metadata/SRI/tarball/lock/tree/entrypoint before success. It
+  root with scripts/audit/fund/bin-links disabled, emits a retained redacted
+  receipt, and strictly verifies metadata/SRI/tarball/canonical registry-only
+  lock closure/tree/entrypoint before success. npm and tar run in dedicated
+  process groups, and timeout teardown terminates the complete group before
+  output readers are joined. It
 does not modify the global package, promote an FWC release, call a provider, or
 register a capability; no retry occurs after an unknown result. Its separate
 explicit `provision --mode apply` path is limited to fixed-root,
@@ -2014,8 +2017,9 @@ The trusted local-provider update path is review-first and host-owned:
 - candidate, stage plan, metadata, registry URL, and exact artifact SRI are
   bound before stage creation; a mismatch performs no stage I/O;
 - archive listing is streamed with a hard output bound and absolute deadline;
-  timeout handling kills and waits for the same child, and non-zero, oversized,
-  or I/O failures are fail-closed;
+  timeout handling terminates and waits for the complete dedicated process
+  group, so descendants cannot retain output pipes; non-zero, oversized, or I/O
+  failures are fail-closed;
 - the receipt digest is checked before and after listing and again on a fresh
   descriptor immediately before extraction, so the validated artifact cannot be
   silently replaced between those phases;

@@ -334,6 +334,7 @@ fn build_local_mcp_stage_plan(
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
+                "--bin-links=false".to_string(),
                 "--package-lock=true".to_string(),
                 "--save-exact".to_string(),
                 package_spec,
@@ -481,7 +482,10 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
     {
         return Err(LocalMcpAdapterError::StageLayout);
     }
-    let mut child = Command::new(command.program())
+    let mut process = Command::new(command.program());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut process, 0);
+    let mut child = process
         .args(command.args())
         .env_clear()
         .envs(command.environment())
@@ -526,8 +530,7 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
             break;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate_child(&mut child);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(LocalMcpAdapterError::StageMismatch("npm_command_timeout"));
@@ -716,7 +719,7 @@ fn verify_local_mcp_stage_for_owner(
         tree.file_evidence(package_lock_path, stage_root)?,
     )?;
     validate_installed_package_manifest(&package_json, metadata, plan.exact_version())?;
-    validate_installed_package_lock(&package_lock, metadata, plan.exact_version())?;
+    validate_installed_package_lock(&package_lock, metadata, plan.exact_version(), &tree)?;
 
     let package_manifest_digest = canonical_digest(&package_json)?;
     let package_lock_digest = canonical_digest(&package_lock)?;
@@ -884,6 +887,7 @@ fn validate_installed_package_lock(
     value: &Value,
     metadata: &LocalMcpRegistryMetadata,
     exact_version: &str,
+    tree: &StageTreeDigest,
 ) -> Result<(), LocalMcpAdapterError> {
     let object = value
         .as_object()
@@ -897,20 +901,26 @@ fn validate_installed_package_lock(
             "lock_version_unsupported",
         ));
     }
-    let package = object
+    let packages = object
         .get("packages")
         .and_then(Value::as_object)
-        .and_then(|packages| packages.get("node_modules/n8n-mcp"))
+        .ok_or(LocalMcpAdapterError::StageMismatch("lock_packages_invalid"))?;
+    let package = packages
+        .get("node_modules/n8n-mcp")
         .and_then(Value::as_object)
         .ok_or(LocalMcpAdapterError::StageMismatch("lock_package_missing"))?;
-    let root = object
-        .get("packages")
-        .and_then(Value::as_object)
-        .and_then(|packages| packages.get(""))
+    let root = packages
+        .get("")
         .and_then(Value::as_object)
         .ok_or(LocalMcpAdapterError::StageMismatch("lock_root_missing"))?;
-    let root_dependencies = parse_dependencies(root.get("dependencies"))?;
+    let root_dependencies = parse_lock_dependencies(root.get("dependencies"))?;
     if root_dependencies != BTreeMap::from([(PACKAGE_NAME.to_string(), exact_version.to_string())])
+        || root
+            .get("devDependencies")
+            .is_some_and(|dependencies| !dependencies.is_null())
+        || root
+            .get("optionalDependencies")
+            .is_some_and(|dependencies| !dependencies.is_null())
     {
         return Err(LocalMcpAdapterError::StageMismatch("lock_root_mismatch"));
     }
@@ -918,13 +928,473 @@ fn validate_installed_package_lock(
         || package.get("integrity").and_then(Value::as_str) != Some(metadata.integrity.as_str())
         || package.get("resolved").and_then(Value::as_str)
             != Some(metadata.registry_tarball_url.as_str())
-        || parse_dependencies(package.get("dependencies"))? != metadata.dependencies
+        || parse_lock_dependencies(package.get("dependencies"))? != metadata.dependencies
     {
         return Err(LocalMcpAdapterError::StageMismatch("lock_package_mismatch"));
+    }
+
+    let mut lock_package_keys = BTreeSet::new();
+    for (key, record) in packages {
+        if key.is_empty() {
+            continue;
+        }
+        let package_name = validate_lock_package_key(key)?;
+        validate_lock_package_record(key, &package_name, record)?;
+        lock_package_keys.insert(key.clone());
+    }
+    let installed_package_keys = installed_lock_package_keys(tree);
+    if installed_package_keys != lock_package_keys {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_dependency_closure_mismatch",
+        ));
+    }
+
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec!["node_modules/n8n-mcp".to_string()];
+    while let Some(package_key) = pending.pop() {
+        if !reachable.insert(package_key.clone()) {
+            continue;
+        }
+        let record = packages
+            .get(&package_key)
+            .and_then(Value::as_object)
+            .ok_or(LocalMcpAdapterError::StageMismatch(
+                "lock_dependency_missing",
+            ))?;
+        for (dependency_name, dependency_spec) in lock_record_dependencies(record)? {
+            let dependency_key =
+                resolve_lock_dependency_key(&package_key, &dependency_name, packages).ok_or(
+                    LocalMcpAdapterError::StageMismatch("lock_dependency_missing"),
+                )?;
+            let dependency_record = packages
+                .get(&dependency_key)
+                .and_then(Value::as_object)
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "lock_dependency_missing",
+                ))?;
+            let dependency_version = dependency_record
+                .get("version")
+                .and_then(Value::as_str)
+                .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+            if !dependency_spec_allows_version(&dependency_spec, dependency_version) {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_dependency_version_mismatch",
+                ));
+            }
+            pending.push(dependency_key);
+        }
+    }
+    if reachable != lock_package_keys {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_dependency_closure_mismatch",
+        ));
     }
     Ok(())
 }
 
+fn validate_lock_package_key(key: &str) -> Result<String, LocalMcpAdapterError> {
+    if key.is_empty() || key.len() > 4096 || !key.is_ascii() || key.contains('\\') {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_package_key_invalid",
+        ));
+    }
+    let parts: Vec<_> = key.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || matches!(*part, "." | ".."))
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_package_key_invalid",
+        ));
+    }
+    let mut index = 0;
+    let mut package_name = None;
+    while index < parts.len() {
+        if parts[index] != "node_modules" {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "lock_package_key_invalid",
+            ));
+        }
+        index += 1;
+        let name_start = index;
+        if parts.get(index).is_some_and(|part| part.starts_with('@')) {
+            index = index.saturating_add(2);
+        } else {
+            index = index.saturating_add(1);
+        }
+        if index > parts.len() {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "lock_package_key_invalid",
+            ));
+        }
+        let name = parts[name_start..index].join("/");
+        validate_package_name(&name)
+            .map_err(|_| LocalMcpAdapterError::StageMismatch("lock_package_name_invalid"))?;
+        package_name = Some(name);
+        if index < parts.len() && parts[index] != "node_modules" {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "lock_package_key_invalid",
+            ));
+        }
+    }
+    package_name.ok_or(LocalMcpAdapterError::StageMismatch(
+        "lock_package_key_invalid",
+    ))
+}
+
+fn validate_lock_package_record(
+    _key: &str,
+    package_name: &str,
+    value: &Value,
+) -> Result<(), LocalMcpAdapterError> {
+    let record = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+    if record.get("link").is_some_and(|link| !link.is_null())
+        || record
+            .get("bundledDependencies")
+            .is_some_and(|dependencies| !dependencies.is_null())
+        || record
+            .get("bundleDependencies")
+            .is_some_and(|dependencies| !dependencies.is_null())
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_record_non_registry",
+        ));
+    }
+    if record
+        .get("name")
+        .is_some_and(|name| name.as_str() != Some(package_name))
+        || record
+            .get("version")
+            .and_then(Value::as_str)
+            .is_none_or(|version| validate_exact_npm_version(version).is_err())
+    {
+        return Err(LocalMcpAdapterError::StageMismatch("lock_record_malformed"));
+    }
+    let version = record
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+    let resolved = record.get("resolved").and_then(Value::as_str).ok_or(
+        LocalMcpAdapterError::StageMismatch("lock_record_non_registry"),
+    )?;
+    validate_registry_package_tarball_url(resolved, package_name, version)?;
+    let integrity = record.get("integrity").and_then(Value::as_str).ok_or(
+        LocalMcpAdapterError::StageMismatch("lock_record_integrity_missing"),
+    )?;
+    if !valid_integrity(integrity) {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_record_integrity_invalid",
+        ));
+    }
+    for field in [
+        "dependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "requires",
+    ] {
+        parse_lock_dependencies(record.get(field))?;
+    }
+    if record
+        .get("peerDependenciesMeta")
+        .is_some_and(|meta| !meta.is_object())
+    {
+        return Err(LocalMcpAdapterError::StageMismatch("lock_record_malformed"));
+    }
+    for field in ["dev", "devOptional", "optional", "peer", "hasInstallScript"] {
+        if record.get(field).is_some_and(|flag| !flag.is_boolean()) {
+            return Err(LocalMcpAdapterError::StageMismatch("lock_record_malformed"));
+        }
+    }
+    Ok(())
+}
+
+fn installed_lock_package_keys(tree: &StageTreeDigest) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    for directory in &tree.directories {
+        let parts: Vec<_> = directory.split('/').collect();
+        for (index, part) in parts.iter().enumerate() {
+            if *part != "node_modules" || index + 1 >= parts.len() {
+                continue;
+            }
+            let package_end = if parts[index + 1].starts_with('@') {
+                index + 3
+            } else {
+                index + 2
+            };
+            if package_end <= parts.len() {
+                keys.insert(parts[..package_end].join("/"));
+            }
+        }
+    }
+    keys
+}
+
+fn parse_lock_dependencies(
+    value: Option<&Value>,
+) -> Result<BTreeMap<String, String>, LocalMcpAdapterError> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::StageMismatch(
+            "lock_dependencies_invalid",
+        ))?;
+    if object.len() > 512 {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_dependencies_oversized",
+        ));
+    }
+    object
+        .iter()
+        .map(|(name, value)| {
+            validate_package_name(name)
+                .map_err(|_| LocalMcpAdapterError::StageMismatch("lock_dependency_name_invalid"))?;
+            let spec = value.as_str().ok_or(LocalMcpAdapterError::StageMismatch(
+                "lock_dependency_spec_invalid",
+            ))?;
+            validate_registry_dependency_spec(spec)
+                .map_err(|_| LocalMcpAdapterError::StageMismatch("lock_dependency_non_registry"))?;
+            Ok((name.clone(), spec.to_string()))
+        })
+        .collect()
+}
+
+fn lock_record_dependencies(
+    record: &serde_json::Map<String, Value>,
+) -> Result<BTreeMap<String, String>, LocalMcpAdapterError> {
+    let mut dependencies = BTreeMap::new();
+    for field in [
+        "dependencies",
+        "optionalDependencies",
+        "peerDependencies",
+        "requires",
+    ] {
+        for (name, spec) in parse_lock_dependencies(record.get(field))? {
+            if dependencies.insert(name, spec).is_some() {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_dependency_duplicate",
+                ));
+            }
+        }
+    }
+    Ok(dependencies)
+}
+
+fn resolve_lock_dependency_key(
+    package_key: &str,
+    dependency_name: &str,
+    packages: &serde_json::Map<String, Value>,
+) -> Option<String> {
+    let mut base = package_key;
+    loop {
+        let candidate = format!("{base}/node_modules/{dependency_name}");
+        if packages.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        base = base
+            .rsplit_once("/node_modules/")
+            .map_or("", |(parent, _)| parent);
+        if base.is_empty() {
+            let candidate = format!("node_modules/{dependency_name}");
+            return packages.contains_key(&candidate).then_some(candidate);
+        }
+    }
+}
+
+fn validate_registry_package_tarball_url(
+    value: &str,
+    package_name: &str,
+    version: &str,
+) -> Result<(), LocalMcpAdapterError> {
+    let basename = package_name.rsplit('/').next().unwrap_or(package_name);
+    let suffix = format!("/{package_name}/-/{basename}-{version}.tgz");
+    if value.len() > 1024
+        || !value.is_ascii()
+        || !value.starts_with("https://registry.npmjs.org/")
+        || !value.ends_with(&suffix)
+        || value.contains(['?', '#', '\\'])
+        || value.chars().any(char::is_control)
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_record_non_registry",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NpmVersionParts {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+fn npm_version_parts(value: &str) -> Option<NpmVersionParts> {
+    let core = value.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    Some(NpmVersionParts {
+        major: parts.next()?.parse().ok()?,
+        minor: parts.next()?.parse().ok()?,
+        patch: parts.next()?.parse().ok()?,
+    })
+    .filter(|_| parts.next().is_none())
+}
+
+fn dependency_spec_allows_version(spec: &str, version: &str) -> bool {
+    let Some(version) = npm_version_parts(version) else {
+        return false;
+    };
+    spec.split("||").any(|alternative| {
+        alternative
+            .split_ascii_whitespace()
+            .all(|token| dependency_token_allows_version(token, version))
+    })
+}
+
+fn dependency_token_allows_version(token: &str, version: NpmVersionParts) -> bool {
+    let (operator, value) = dependency_token_parts(token);
+    if value.contains(['x', 'X', '*']) {
+        if operator != "=" {
+            return false;
+        }
+        let parts: Vec<_> = value.split('.').collect();
+        return match parts.as_slice() {
+            [major, "x"] | [major, "X"] => major.parse::<u64>().ok() == Some(version.major),
+            [major, minor, "x"] | [major, minor, "X"] => {
+                major.parse::<u64>().ok() == Some(version.major)
+                    && minor.parse::<u64>().ok() == Some(version.minor)
+            }
+            _ => false,
+        };
+    }
+    let Some(bound) = npm_version_parts(value) else {
+        return false;
+    };
+    match operator {
+        "=" => version == bound,
+        ">=" => version >= bound,
+        "<=" => version <= bound,
+        ">" => version > bound,
+        "<" => version < bound,
+        "~" => version >= bound && version.major == bound.major && version.minor == bound.minor,
+        "^" => {
+            let upper = if bound.major > 0 {
+                NpmVersionParts {
+                    major: bound.major + 1,
+                    minor: 0,
+                    patch: 0,
+                }
+            } else if bound.minor > 0 {
+                NpmVersionParts {
+                    major: 0,
+                    minor: bound.minor + 1,
+                    patch: 0,
+                }
+            } else {
+                NpmVersionParts {
+                    major: 0,
+                    minor: 0,
+                    patch: bound.patch + 1,
+                }
+            };
+            version >= bound && version < upper
+        }
+        _ => false,
+    }
+}
+
+fn dependency_token_parts(token: &str) -> (&str, &str) {
+    if let Some(value) = token.strip_prefix(">=") {
+        (">=", value)
+    } else if let Some(value) = token.strip_prefix("<=") {
+        ("<=", value)
+    } else if let Some(value) = token.strip_prefix('>') {
+        (">", value)
+    } else if let Some(value) = token.strip_prefix('<') {
+        ("<", value)
+    } else if let Some(value) = token.strip_prefix('^') {
+        ("^", value)
+    } else if let Some(value) = token.strip_prefix('~') {
+        ("~", value)
+    } else {
+        ("=", token.strip_prefix('=').unwrap_or(token))
+    }
+}
+
+fn dependency_spec_syntax_is_valid(value: &str) -> bool {
+    value.split("||").all(|alternative| {
+        let tokens: Vec<_> = alternative.split_ascii_whitespace().collect();
+        !tokens.is_empty()
+            && tokens.iter().all(|token| {
+                let (operator, version) = dependency_token_parts(token);
+                if version.contains(['x', 'X', '*']) {
+                    if operator != "=" {
+                        return false;
+                    }
+                    let parts: Vec<_> = version.split('.').collect();
+                    match parts.as_slice() {
+                        [major, "x"] | [major, "X"] => {
+                            major.bytes().all(|byte| byte.is_ascii_digit())
+                        }
+                        [major, minor, "x"] | [major, minor, "X"] => {
+                            major.bytes().all(|byte| byte.is_ascii_digit())
+                                && minor.bytes().all(|byte| byte.is_ascii_digit())
+                        }
+                        _ => false,
+                    }
+                } else {
+                    npm_version_parts(version).is_some()
+                }
+            })
+    })
+}
+
+fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterError> {
+    if value.is_empty()
+        || value.len() > 256
+        || !value.is_ascii()
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+        || !value.bytes().any(|byte| byte.is_ascii_digit())
+        || value.bytes().any(|byte| {
+            !(byte.is_ascii_digit()
+                || matches!(
+                    byte,
+                    b'.' | b'-'
+                        | b'+'
+                        | b'^'
+                        | b'~'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b'*'
+                        | b'x'
+                        | b'X'
+                        | b'|'
+                        | b' '
+                ))
+        })
+        || value.contains("..")
+        || value.contains("|||")
+        || !dependency_spec_syntax_is_valid(value)
+    {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "dependency_version_invalid",
+        ));
+    }
+    if value
+        .split("||")
+        .any(|alternative| alternative.trim().is_empty())
+    {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "dependency_version_invalid",
+        ));
+    }
+    Ok(())
+}
 fn validate_safe_relative_path(value: &str) -> Result<(), LocalMcpAdapterError> {
     if value.is_empty() || value.len() > 512 || !value.is_ascii() || value.contains('\\') {
         return Err(LocalMcpAdapterError::StageMismatch("package_bin_invalid"));
@@ -1050,6 +1520,7 @@ struct StageTreeDigest {
     digest: String,
     entry_count: usize,
     total_bytes: u64,
+    directories: BTreeSet<String>,
     files: BTreeMap<String, StageFileEvidence>,
 }
 
@@ -1135,6 +1606,7 @@ fn hash_stage_tree(
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"fwc.n8n.local-mcp-stage-tree.v1\0");
     let mut total_bytes = 0u64;
+    let mut directories = BTreeSet::new();
     let mut files = BTreeMap::new();
     for (path, metadata, file) in &mut entries {
         let relative = stage_relative_path(path, stage_root)?;
@@ -1143,6 +1615,7 @@ fn hash_stage_tree(
         hasher.update(relative_bytes);
         if metadata.file_type().is_dir() {
             hasher.update(b"d");
+            directories.insert(relative.to_string());
             continue;
         }
         if metadata.len() > MAX_STAGE_FILE_BYTES {
@@ -1202,6 +1675,7 @@ fn hash_stage_tree(
         digest: format!("blake3-256:{}", hasher.finalize().to_hex()),
         entry_count: entries.len(),
         total_bytes,
+        directories,
         files,
     })
 }
@@ -1507,13 +1981,21 @@ fn parse_dependencies(
                     "dependency_version_invalid",
                 ))?;
             validate_bounded_text(version, "dependency_version_invalid")?;
+            validate_registry_dependency_spec(version)?;
             Ok((name.clone(), version.to_string()))
         })
         .collect()
 }
 
 fn validate_package_name(name: &str) -> Result<(), LocalMcpAdapterError> {
-    if name.is_empty()
+    let name_parts: Vec<_> = name.split('/').collect();
+    let valid_shape = if name.starts_with('@') {
+        name_parts.len() == 2 && name_parts.iter().all(|part| !part.is_empty())
+    } else {
+        name_parts.len() == 1
+    };
+    if !valid_shape
+        || name.is_empty()
         || name.len() > 214
         || !name.is_ascii()
         || name.bytes().any(|byte| {
@@ -1839,6 +2321,7 @@ fn fixed_tar_environment() -> BTreeMap<&'static str, &'static str> {
 fn fixed_tar_command() -> Command {
     let mut command = Command::new(TAR_PROGRAM);
     command.env_clear().envs(fixed_tar_environment());
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command
 }
 
@@ -2017,7 +2500,16 @@ fn read_bounded_tar_listing<R: Read>(reader: &mut R) -> Result<Vec<u8>, TarListi
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
+fn terminate_child(child: &mut Child) {
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as _) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
 fn terminate_child(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -2620,7 +3112,9 @@ mod tests {
         let package_root = Path::new(plan.package_json_path())
             .parent()
             .expect("package root");
+        let zod_root = Path::new(plan.stage_root()).join("node_modules/zod");
         fs::create_dir_all(package_root.join("dist/mcp")).expect("package directories");
+        fs::create_dir_all(&zod_root).expect("dependency directories");
         for directory in [
             Path::new(plan.stage_root())
                 .parent()
@@ -2630,6 +3124,7 @@ mod tests {
             package_root,
             &package_root.join("dist"),
             &package_root.join("dist/mcp"),
+            &zod_root,
         ] {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
                 .expect("private stage directory");
@@ -2668,6 +3163,11 @@ mod tests {
                     "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
                     "integrity": INTEGRITY,
                     "dependencies": {"zod": "^3.25.0"}
+                },
+                "node_modules/zod": {
+                    "version": "3.25.0",
+                    "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                    "integrity": INTEGRITY
                 }
             }
         });
@@ -2678,6 +3178,20 @@ mod tests {
         .expect("write package lock");
         fs::set_permissions(plan.package_lock_path(), fs::Permissions::from_mode(0o600))
             .expect("private package lock");
+        fs::write(
+            zod_root.join("package.json"),
+            br#"{"name":"zod","version":"3.25.0"}"#,
+        )
+        .expect("write dependency manifest");
+        fs::set_permissions(
+            zod_root.join("package.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private dependency manifest");
+        fs::write(zod_root.join("index.js"), b"module.exports = {};\n")
+            .expect("write dependency entrypoint");
+        fs::set_permissions(zod_root.join("index.js"), fs::Permissions::from_mode(0o600))
+            .expect("private dependency entrypoint");
         fs::write(
             Path::new(plan.stage_root()).join(STAGE_TARBALL_RECEIPT),
             b"registry tarball receipt\n",
@@ -2715,6 +3229,7 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
+                "--bin-links=false",
                 "--package-lock=true",
                 "--save-exact",
                 "n8n-mcp@2.69.2",
@@ -2905,6 +3420,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn non_registry_dependency_specs_are_rejected_before_npm_install() {
+        for spec in [
+            "file:../outside",
+            "link:../outside",
+            "git+https://github.com/example/dependency.git",
+            "git://github.com/example/dependency.git",
+            "ssh://git@github.com/example/dependency.git",
+            "git@github.com:example/dependency.git",
+            "https://example.invalid/dependency.tgz",
+            "http://example.invalid/dependency.tgz",
+            "github:example/dependency",
+            "npm:other-package@1.0.0",
+        ] {
+            let mut raw = metadata_value("2.69.2");
+            raw["dependencies"]["zod"] = Value::String(spec.to_string());
+            assert!(
+                parse_registry_metadata(&raw).is_err(),
+                "non-registry dependency spec accepted: {spec}"
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn verified_stage_binds_registry_lock_manifest_and_complete_tree() {
@@ -2997,6 +3535,11 @@ mod tests {
                     "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
                     "integrity": "sha512-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
                     "dependencies": {"zod": "^3.25.0"}
+                },
+                "node_modules/zod": {
+                    "version": "3.25.0",
+                    "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                    "integrity": INTEGRITY
                 }
             }
         });
@@ -3009,6 +3552,53 @@ mod tests {
             verify_local_mcp_stage_for_owner(&plan, &metadata, Vec::new(), owner),
             Err(LocalMcpAdapterError::StageMismatch("lock_package_mismatch"))
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lock_validation_rejects_incomplete_extra_malformed_and_non_registry_closure() {
+        for mutation in ["missing", "extra", "malformed", "integrity", "non_registry"] {
+            let (_root, plan, metadata, owner) = staged_fixture();
+            let stage_root = Path::new(plan.stage_root());
+            let stage_fd = open_stage_root(stage_root, owner).expect("open stage root");
+            let tree = hash_stage_tree(stage_root, &stage_fd, owner).expect("hash stage");
+            let mut lock: Value = serde_json::from_slice(
+                &fs::read(plan.package_lock_path()).expect("read package lock"),
+            )
+            .expect("decode package lock");
+            let packages = lock["packages"].as_object_mut().expect("packages object");
+            match mutation {
+                "missing" => {
+                    packages.remove("node_modules/zod");
+                }
+                "extra" => {
+                    packages.insert(
+                        "node_modules/extra".to_string(),
+                        json!({
+                            "version": "1.0.0",
+                            "resolved": "https://registry.npmjs.org/extra/-/extra-1.0.0.tgz",
+                            "integrity": INTEGRITY
+                        }),
+                    );
+                }
+                "malformed" => {
+                    packages.insert("node_modules/zod".to_string(), json!("not-a-record"));
+                }
+                "integrity" => {
+                    packages.get_mut("node_modules/zod").expect("zod record")["integrity"] =
+                        Value::String("sha1-weak".to_string());
+                }
+                "non_registry" => {
+                    packages.get_mut("node_modules/zod").expect("zod record")["resolved"] =
+                        Value::String("git+https://github.com/example/zod.git".to_string());
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_installed_package_lock(&lock, &metadata, "2.69.2", &tree).is_err(),
+                "lock mutation accepted: {mutation}"
+            );
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -3750,6 +4340,36 @@ mod tests {
                 .expect("child status after timeout")
                 .is_some()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_terminates_descendants_that_hold_output_pipes() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn().expect("spawn process-tree fixture");
+        let mut stdout = child.stdout.take().expect("child stdout");
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).expect("read child stdout");
+        });
+        let started = Instant::now();
+        assert_eq!(
+            wait_child_until(
+                &mut child,
+                started + Duration::from_millis(20),
+                "process_tree_timeout",
+            ),
+            Err(LocalMcpAdapterError::StageMismatch("process_tree_timeout"))
+        );
+        reader.join().expect("descendant output pipe closed");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[cfg(target_os = "linux")]

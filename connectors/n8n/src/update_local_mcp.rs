@@ -3059,24 +3059,7 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
             .spawn()
             .map_err(|_| LocalMcpAdapterError::StageIo)?;
         let deadline = Instant::now() + Duration::from_millis(COMMAND_TIMEOUT_MS);
-        loop {
-            if child
-                .try_wait()
-                .map_err(|_| LocalMcpAdapterError::StageIo)?
-                .is_some()
-            {
-                break;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(LocalMcpAdapterError::StageMismatch(
-                    "artifact_extract_timeout",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let status = child.wait().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let status = wait_child_until(&mut child, deadline, "artifact_extract_timeout")?;
         if !status.success() {
             return Err(LocalMcpAdapterError::StageMismatch(
                 "artifact_extract_failed",
@@ -4638,7 +4621,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn timeout_terminates_descendants_that_hold_output_pipes() {
+    fn artifact_extract_timeout_terminates_descendants_that_hold_output_pipes() {
         use std::os::unix::process::CommandExt;
 
         let mut command = Command::new("/bin/sh");
@@ -4658,9 +4641,11 @@ mod tests {
             wait_child_until(
                 &mut child,
                 started + Duration::from_millis(20),
-                "process_tree_timeout",
+                "artifact_extract_timeout",
             ),
-            Err(LocalMcpAdapterError::StageMismatch("process_tree_timeout"))
+            Err(LocalMcpAdapterError::StageMismatch(
+                "artifact_extract_timeout",
+            ))
         );
         reader.join().expect("descendant output pipe closed");
         assert!(started.elapsed() < Duration::from_secs(2));

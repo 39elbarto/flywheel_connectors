@@ -1052,7 +1052,7 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
     {
         return Err(LocalMcpAdapterError::StageLayout);
     }
-    reject_project_npmrc(command)?;
+    preflight_npm_command(command)?;
     let mut process = Command::new(command.program());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut process, 0);
@@ -1127,18 +1127,72 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
     Ok(stdout)
 }
 
-fn reject_project_npmrc(command: &FixedCommandSpec) -> Result<(), LocalMcpAdapterError> {
-    let project_root = command
+fn preflight_npm_command(command: &FixedCommandSpec) -> Result<(), LocalMcpAdapterError> {
+    let expected_global_config = format!("--globalconfig={NPM_GLOBAL_CONFIG}");
+    if !command
         .args()
-        .windows(2)
-        .find(|window| window[0] == "--prefix")
-        .map_or(STAGING_ROOT, |window| window[1].as_str());
-    let project_npmrc = Path::new(project_root).join(".npmrc");
-    match std::fs::symlink_metadata(project_npmrc) {
+        .iter()
+        .any(|argument| argument == &expected_global_config)
+    {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    preflight_npm_command_with_global_config(command, Path::new(NPM_GLOBAL_CONFIG))
+}
+
+fn preflight_npm_command_with_global_config(
+    command: &FixedCommandSpec,
+    global_config: &Path,
+) -> Result<(), LocalMcpAdapterError> {
+    reject_unsafe_npm_global_config(global_config)?;
+    reject_ambient_npm_markers(command.working_directory())?;
+    if let Some(prefix) = npm_prefix(command) {
+        reject_ambient_npm_markers(prefix)?;
+    }
+    Ok(())
+}
+
+fn reject_unsafe_npm_global_config(path: &Path) -> Result<(), LocalMcpAdapterError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => Ok(()),
         Ok(_) => Err(LocalMcpAdapterError::StageLayout),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(LocalMcpAdapterError::StageIo),
     }
+}
+
+fn reject_ambient_npm_markers(path: &str) -> Result<(), LocalMcpAdapterError> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    let mut ancestor = Some(path);
+    while let Some(path) = ancestor {
+        for marker in [".npmrc", "package.json", "node_modules"] {
+            match std::fs::symlink_metadata(path.join(marker)) {
+                Ok(_) => return Err(LocalMcpAdapterError::StageLayout),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(LocalMcpAdapterError::StageIo),
+            }
+        }
+        ancestor = path.parent();
+    }
+    Ok(())
+}
+
+fn npm_prefix(command: &FixedCommandSpec) -> Option<&str> {
+    command
+        .args()
+        .windows(2)
+        .find(|window| window[0] == "--prefix")
+        .map(|window| window[1].as_str())
+}
+
+#[cfg(test)]
+fn preflight_npm_command_for_test(
+    command: &FixedCommandSpec,
+    global_config: &Path,
+) -> Result<(), LocalMcpAdapterError> {
+    preflight_npm_command_with_global_config(command, global_config)
 }
 
 pub fn stage_exact_local_mcp(
@@ -5317,6 +5371,130 @@ mod tests {
         );
     }
 
+    fn npm_command_builder_suite(root: &Path) -> Vec<FixedCommandSpec> {
+        let plan =
+            build_local_mcp_stage_plan("2.69.2", STAGE_ID, root).expect("synthetic staging plan");
+        let mut root_view = npm_latest_metadata_plan();
+        root_view.working_directory = root.to_string_lossy().into_owned();
+        let mut dependency_view = npm_dependency_metadata_plan_for_cache(
+            "zod",
+            "^3.25.0",
+            &root.join("cache").to_string_lossy(),
+        )
+        .expect("dependency metadata plan");
+        dependency_view.working_directory = root.to_string_lossy().into_owned();
+        let dependency_pack = npm_registry_pack_plan(
+            &plan,
+            "zod",
+            "3.25.0",
+            "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+        )
+        .expect("dependency pack plan");
+        let mut dependency_pack = dependency_pack;
+        dependency_pack.working_directory = root.to_string_lossy().into_owned();
+        let cache_add =
+            npm_registry_cache_add_plan(&plan, "zod", "3.25.0").expect("cache add plan");
+        let mut cache_add = cache_add;
+        cache_add.working_directory = root.to_string_lossy().into_owned();
+        vec![
+            root_view,
+            dependency_view,
+            plan.pack().clone(),
+            dependency_pack,
+            plan.install().clone(),
+            cache_add,
+        ]
+    }
+
+    #[test]
+    fn npm_preflight_accepts_clean_synthetic_layouts_and_empty_global_config() {
+        for config_state in ["missing", "empty"] {
+            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let global_config = root.path().join("global.npmrc");
+            if config_state == "empty" {
+                fs::write(&global_config, b"").expect("empty global config");
+            }
+            for command in npm_command_builder_suite(root.path()) {
+                assert_eq!(
+                    preflight_npm_command_for_test(&command, &global_config),
+                    Ok(()),
+                    "clean preflight rejected {config_state} global config for {:?}",
+                    command.args().first(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn npm_preflight_rejects_unsafe_global_config_across_all_command_builders() {
+        for config_state in ["nonempty", "directory"] {
+            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let global_config = root.path().join("global.npmrc");
+            if config_state == "nonempty" {
+                fs::write(&global_config, b"registry=https://example.invalid\n")
+                    .expect("nonempty global config");
+            } else {
+                fs::create_dir(&global_config).expect("directory global config");
+            }
+            for command in npm_command_builder_suite(root.path()) {
+                assert_eq!(
+                    preflight_npm_command_for_test(&command, &global_config),
+                    Err(LocalMcpAdapterError::StageLayout),
+                    "unsafe {config_state} config reached spawn for {:?}",
+                    command.args().first(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn npm_preflight_rejects_each_ambient_marker_across_all_command_builders() {
+        for marker in [".npmrc", "package.json", "node_modules"] {
+            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let marker_path = root.path().join(marker);
+            if marker == "node_modules" {
+                fs::create_dir(&marker_path).expect("node_modules marker");
+            } else {
+                fs::write(&marker_path, b"ambient marker").expect("ambient marker");
+            }
+            let global_config = root.path().join("global.npmrc");
+            for command in npm_command_builder_suite(root.path()) {
+                assert_eq!(
+                    preflight_npm_command_for_test(&command, &global_config),
+                    Err(LocalMcpAdapterError::StageLayout),
+                    "ambient {marker} marker reached spawn for {:?}",
+                    command.args().first(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn npm_preflight_rejects_ambient_prefix_ancestry_before_ci_spawn() {
+        let root = tempfile::tempdir().expect("synthetic preflight root");
+        let prefix_parent = root.path().join("prefix-parent");
+        let prefix = prefix_parent.join("prefix");
+        fs::create_dir_all(&prefix_parent).expect("prefix parent");
+        fs::write(prefix_parent.join("package.json"), b"ambient marker")
+            .expect("prefix package marker");
+        let global_config = root.path().join("global.npmrc");
+        let install = npm_command_builder_suite(root.path())
+            .into_iter()
+            .find(|command| command.args().first().is_some_and(|arg| arg == "ci"))
+            .expect("ci command");
+        let mut install = install;
+        let prefix_argument = install
+            .args
+            .windows(2)
+            .position(|window| window[0] == "--prefix")
+            .expect("ci prefix argument");
+        install.args[prefix_argument + 1] = prefix.to_string_lossy().into_owned();
+        assert_eq!(
+            preflight_npm_command_for_test(&install, &global_config),
+            Err(LocalMcpAdapterError::StageLayout)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn actual_empty_cache_offline_ci_uses_only_verified_artifact_and_rejects_negatives() {
@@ -5528,7 +5706,7 @@ mod tests {
             env_clear: true,
         };
         assert_eq!(
-            reject_project_npmrc(&command),
+            preflight_npm_command_for_test(&command, &root.path().join("missing-global.npmrc"),),
             Err(LocalMcpAdapterError::StageLayout)
         );
     }

@@ -100,7 +100,8 @@ handle. The worker sends `worker_done` exactly once, with the matching
 succeeds, the worker has one narrow exception to the immediate-stop rule: it
 sends exactly one terminal wake to that coordinator handle using
 `orca terminal send --enter --wait-submit 10` with the message `Task/Dispatch
-settled`, then consumes the resulting Orca delivery.
+settled`, then observes that terminal-send receipt and stops. The coordinator
+consumes, validates, and acknowledges its own Orca delivery.
 
 The wake is only a notification and receipt observation. The worker must not
 create tasks, poll, resend `worker_done`, or mutate lifecycle; a queued
@@ -108,6 +109,10 @@ coordinator is normal, and `input_accepted` is not `turn_started`. A timeout is
 not permission to resend. If transport is ambiguous, use only the retry-request
 for the same `requestId`; do not issue a fresh request. A wake failure never
 invalidates a successfully received `worker_done`.
+
+After three empty waits, the coordinator inspects `worker-list` and continues
+waiting; it never finalizes solely because of a timeout. A queued wake is only
+a queued delivery, not proof that an idle coordinator was awakened.
 
 The coordinator treats the wake as a cue only: it verifies the actual Dispatch
 and delivery state, and never repeats provider calls.

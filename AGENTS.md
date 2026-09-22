@@ -72,12 +72,16 @@ spec. The worker sends `worker_done` exactly once with the matching `taskId`,
 `dispatchId`, and `outcome`; only after its durable receipt succeeds, it makes
 the one narrow post-settlement action: exactly one `orca terminal send` to that
 handle with `--enter --wait-submit 10` saying `Task/Dispatch settled`, then
-consumes the Orca delivery. This is only a wake and receipt observation: never
+observes that terminal-send receipt and stops. The coordinator consumes,
+validates, and acknowledges its own Orca delivery. This is only a wake and
+receipt observation: never
 create tasks, poll, resend `worker_done`, or mutate lifecycle; `input_accepted`
 is not `turn_started`, a queued coordinator is normal, timeout does not permit
 a resend, and ambiguous transport permits only a retry-request for the same
 `requestId`. Wake failure never invalidates `worker_done`; the coordinator
-verifies actual dispatch/delivery and never repeats provider calls.
+verifies actual dispatch/delivery and never repeats provider calls. After three
+empty waits, it inspects `worker-list` and continues waiting; it never
+finalizes solely because of a timeout.
 
 ---
 

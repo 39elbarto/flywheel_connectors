@@ -86,10 +86,31 @@ chooses the commands needed to satisfy the recorded tests and reports commands
 and outputs. The reviewer works read-only, and no second build starts while the
 one shared global build is in flight.
 
-Record coordination in Agent Mail. If a session is idle and needs to resume,
-preserve that history and also issue a direct terminal trigger with event
-`turn_started`. Rediscover Agent Mail and terminal handles at each session or
-handoff; do not fix IDs permanently in `AGENTS.md`.
+Record coordination in Agent Mail. Rediscover Agent Mail and terminal handles at
+each session or handoff; do not fix IDs permanently in `AGENTS.md`. For the
+n8n-specific completion wake and receipt procedure, follow the dedicated rule
+in [the n8n Dispatch completion section](#n8n-dispatch-completion-and-coordinator-wake)
+below; `input_accepted` is not evidence of `turn_started`.
+
+### n8n Dispatch completion and coordinator wake
+
+Every new Dispatch specification must include the current coordinator terminal
+handle. The worker sends `worker_done` exactly once, with the matching
+`taskId`, `dispatchId`, and `outcome`. After the durable `worker_done` receipt
+succeeds, the worker has one narrow exception to the immediate-stop rule: it
+sends exactly one terminal wake to that coordinator handle using
+`orca terminal send --enter --wait-submit 10` with the message `Task/Dispatch
+settled`, then consumes the resulting Orca delivery.
+
+The wake is only a notification and receipt observation. The worker must not
+create tasks, poll, resend `worker_done`, or mutate lifecycle; a queued
+coordinator is normal, and `input_accepted` is not `turn_started`. A timeout is
+not permission to resend. If transport is ambiguous, use only the retry-request
+for the same `requestId`; do not issue a fresh request. A wake failure never
+invalidates a successfully received `worker_done`.
+
+The coordinator treats the wake as a cue only: it verifies the actual Dispatch
+and delivery state, and never repeats provider calls.
 
 ### Step 3: Implement and verify the bounded change
 

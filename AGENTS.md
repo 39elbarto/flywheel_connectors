@@ -67,6 +67,18 @@ holder. Do not bypass the conflict by creating an untracked parallel copy.
 
 n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the default Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions; direct user instructions prevail.
 
+For every new Dispatch, include the current coordinator terminal handle in the
+spec. The worker sends `worker_done` exactly once with the matching `taskId`,
+`dispatchId`, and `outcome`; only after its durable receipt succeeds, it makes
+the one narrow post-settlement action: exactly one `orca terminal send` to that
+handle with `--enter --wait-submit 10` saying `Task/Dispatch settled`, then
+consumes the Orca delivery. This is only a wake and receipt observation: never
+create tasks, poll, resend `worker_done`, or mutate lifecycle; `input_accepted`
+is not `turn_started`, a queued coordinator is normal, timeout does not permit
+a resend, and ambiguous transport permits only a retry-request for the same
+`requestId`. Wake failure never invalidates `worker_done`; the coordinator
+verifies actual dispatch/delivery and never repeats provider calls.
+
 ---
 
 ## AGENT MAIL (am) PROCESS PROTECTION — DO NOT TOUCH

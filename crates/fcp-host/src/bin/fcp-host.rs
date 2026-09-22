@@ -36739,6 +36739,63 @@ done"#;
     }
 
     #[test]
+    fn n8n_activation_runner_create_input_matches_production_validators() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/n8n_unarchive_acceptance.sh");
+        let output = std::process::Command::new("/usr/bin/bash")
+            .arg(script)
+            .arg("--activation-create-input-self-test")
+            .output()
+            .expect("activation input self-test should launch");
+        assert!(
+            output.status.success(),
+            "activation input self-test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let input: Value = serde_json::from_slice(&output.stdout)
+            .expect("activation input self-test should emit one JSON object");
+        assert_eq!(input["guard"]["precondition"], json!({}));
+
+        let config = run_once_n8n_draft_test_config();
+        let plan_input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.create_draft".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-n8n://eec".to_string(),
+            input: input.clone(),
+            approval_token: None,
+            deadline_ms: Some(30_000),
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        };
+        build_n8n_read_only_run_once_plan(plan_input, &config)
+            .expect("runner-generated create input must pass production host validator");
+
+        let now_ms = n8n_run_once_now_ms();
+        let canonical_binding = to_deterministic_cbor(&json!({
+            "server_id": "eec",
+            "resource_uri": "fwc-n8n://eec",
+            "operation": "n8n.workflows.create_draft",
+            "input": input.clone(),
+        }))
+        .expect("create input parent binding should canonicalize");
+        let issue_request = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: String::new(),
+            operation: N8nLifecycleOperation::CreateDraft,
+            input,
+            official_mcp_tool: String::new(),
+            official_mcp_resource_uri: String::new(),
+            official_mcp_payload_digest: String::new(),
+            parent_binding_sha256: hex::encode(blake3::hash(&canonical_binding).as_bytes()),
+            expires_at_ms: now_ms.saturating_add(30_000),
+        };
+        build_unsigned_n8n_approval_token(&issue_request, now_ms)
+            .expect("runner-generated create input must pass production issuer validator");
+    }
+
+    #[test]
     fn n8n_workflow_lifecycle_plan_is_strictly_bound_and_redacted() {
         let config = run_once_n8n_draft_test_config();
         let state_digest = format!("blake3-256:{}", "a".repeat(64));

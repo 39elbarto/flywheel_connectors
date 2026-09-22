@@ -145,6 +145,7 @@ Usage:
   n8n_unarchive_acceptance.sh --self-test
   n8n_unarchive_acceptance.sh --handoff-self-test
   n8n_unarchive_acceptance.sh --activation-self-test
+  n8n_unarchive_acceptance.sh --activation-create-input-self-test
 
 Options:
   --launcher PATH         fwc-n8n launcher (default: /usr/local/bin/fwc-n8n)
@@ -218,6 +219,41 @@ build_activation_plan() {
         provider_action_in_self_test:false},
       evidence:{raw_provider_bodies:false,raw_request_bodies:false,
         tokens:false,secrets:false}}'
+}
+
+build_activation_create_input() {
+  local name="$1"
+  local path="$2"
+  local idempotency="$3"
+  local approval_ref="$4"
+
+  "$JQ_BIN" -cn \
+    --arg name "$name" --arg path "$path" \
+    --arg idempotency "$idempotency" --arg approval_ref "$approval_ref" \
+    '{name:$name,graph:{nodes:[{parameters:{path:$path,httpMethod:"POST",
+      responseMode:"lastNode"},type:"n8n-nodes-base.webhook",typeVersion:2.1,
+      position:[0,0],id:"fwc-activation-webhook"}],connections:{},
+      settings:{availableInMCP:false}},
+      guard:{approvalRef:$approval_ref,idempotencyKey:$idempotency,
+        precondition:{}}}'
+}
+
+validate_activation_create_input() {
+  local input="$1"
+  "$JQ_BIN" -e '
+    ((keys_unsorted | sort) == ["graph","guard","name"])
+    and (.name | type) == "string" and (.name | length) > 0
+    and ((.graph | keys_unsorted | sort) == ["connections","nodes","settings"])
+    and (.graph.nodes | type) == "array" and (.graph.nodes | length) == 1
+    and (.graph.connections | type) == "object"
+    and .graph.settings == {availableInMCP:false}
+    and ((.guard | keys_unsorted | sort) ==
+      ["approvalRef","idempotencyKey","precondition"])
+    and (.guard.approvalRef | type) == "string"
+    and (.guard.idempotencyKey |
+      test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+    and .guard.precondition == {}
+  ' <<<"$input" >/dev/null 2>&1
 }
 
 validate_activation_plan() {
@@ -301,6 +337,7 @@ activation_preflight() {
 run_activation_self_test() {
   local base
   local fixture
+  local create_input
   local root
   local output
   SELF_TEST=1
@@ -308,6 +345,11 @@ run_activation_self_test() {
   SERVER="hetzner"
   base="$(build_activation_plan)" || return 1
   validate_activation_plan "$base" || return 1
+  create_input="$(build_activation_create_input \
+    "fwc activation self-test" "fwc-activation-self-test" \
+    "00000000-0000-4000-8000-000000000001" \
+    "n8n-activation-self-test")" || return 1
+  validate_activation_create_input "$create_input" || return 1
   ACTIVATION_PLAN="$base"
   EVIDENCE_DIR=""
   if persist_activation_plan; then return 1; fi
@@ -328,8 +370,21 @@ run_activation_self_test() {
   if validate_activation_plan "$fixture"; then return 1; fi
   fixture="$("$JQ_BIN" -c '.sequence[5] = "publish_once"' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
-  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":8}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":9}\n' \
     "$ACTIVATION_SCHEMA"
+}
+
+run_activation_create_input_self_test() {
+  local create_input
+  SELF_TEST=1
+  ACTIVATION_MODE=1
+  SERVER="eec"
+  create_input="$(build_activation_create_input \
+    "fwc activation input self-test" "fwc-activation-input-self-test" \
+    "00000000-0000-4000-8000-000000000001" \
+    "n8n-activation-input-self-test")" || return 1
+  validate_activation_create_input "$create_input" || return 1
+  printf '%s\n' "$create_input"
 }
 
 safe_response_projection() {
@@ -1050,15 +1105,9 @@ run_activation_acceptance() {
   ACTIVATION_CREATE_APPROVAL="n8n-activation-$SERVER-create-$ACTIVATION_CREATE_IDEMPOTENCY"
   create_name="fwc activation $SERVER $RUN_ID"
   create_path="fwc-activation-$RUN_ID"
-  ACTIVATION_CREATE_INPUT="$("$JQ_BIN" -cn \
-    --arg name "$create_name" --arg path "$create_path" \
-    --arg idempotency "$ACTIVATION_CREATE_IDEMPOTENCY" \
-    --arg approval_ref "$ACTIVATION_CREATE_APPROVAL" \
-    '{name:$name,graph:{nodes:[{parameters:{path:$path,httpMethod:"POST",
-      responseMode:"lastNode"},type:"n8n-nodes-base.webhook",typeVersion:2.1,
-      position:[0,0],id:"fwc-activation-webhook"}],connections:{},
-      settings:{availableInMCP:false}},
-      guard:{approvalRef:$approval_ref,idempotencyKey:$idempotency}}')" || {
+  ACTIVATION_CREATE_INPUT="$(build_activation_create_input \
+    "$create_name" "$create_path" "$ACTIVATION_CREATE_IDEMPOTENCY" \
+    "$ACTIVATION_CREATE_APPROVAL")" || {
     emit_activation_stop create_input_failed
     return 10
   }
@@ -1551,6 +1600,14 @@ main() {
   if [[ "${1:-}" == --activation-self-test && "$#" -eq 1 ]]; then
     run_activation_self_test || {
       printf '{"schema":"%s","verdict":"STOP","mode":"activation-self-test","abort_code":"self_test_failed"}\n' \
+        "$ACTIVATION_SCHEMA"
+      return 1
+    }
+    return 0
+  fi
+  if [[ "${1:-}" == --activation-create-input-self-test && "$#" -eq 1 ]]; then
+    run_activation_create_input_self_test || {
+      printf '{"schema":"%s","verdict":"STOP","mode":"activation-create-input-self-test","abort_code":"self_test_failed"}\n' \
         "$ACTIVATION_SCHEMA"
       return 1
     }

@@ -2034,9 +2034,27 @@ The trusted local-provider update path is review-first and host-owned:
 
 The executor's apply path is tested offline, but wiring registry discovery and
 the owner-operated staging path is tested offline through command/stage seams;
-live acceptance remains a separate gate. A failed
-exact precondition returns before the component lock is acquired; callers must
-not infer lock ownership from that error.
+live acceptance remains a separate gate. Registry range metadata is resolved
+explicitly: npm `view` object and array results are normalized, the highest
+matching concrete semver is selected deterministically, and the selected
+package/version/SRI/tarball closure is hashed into the redacted receipt. The
+root exact-version gate remains mandatory. A failed exact precondition returns
+before the component lock is acquired; callers must not infer lock ownership
+from that error.
+
+The staging path rejects file/link/git/ssh/http(s), npm aliases, bundled
+dependencies, and overrides on direct, optional, peer, and transitive edges
+before any package-content fetch. It creates an initially empty cache under
+the UUID-v4 stage, runs one fixed exact `npm pack` per selected registry
+artifact, verifies every tarball's SHA-512 SRI, rejects published package
+lockfiles, bundles, aliases, and manifest disagreement before install, seeds
+only that stage cache, and invokes npm install with `--offline` and that cache
+path. Environment clearing, the fixed-prefix project `.npmrc` guard, and
+`/dev/null` user/global npmrc arguments prevent ambient npm configuration or
+cache state from changing the closure. npm may omit an optional dependency for
+the current platform, but all selected optional and peer artifacts are still
+resolved and cached; every package retained in the installed lock must belong
+to the selected closure.
 
 Dependency updates and discovery cannot expand the public FWC function set.
 Any new capability requires an explicit, separately reviewed implementation

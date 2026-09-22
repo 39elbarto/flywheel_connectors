@@ -805,23 +805,39 @@ requested exact local `n8n-mcp` version:
 - `fwc-n8n update-review detect` is read-only. It compares normalized snapshots
   and emits a stable review digest and deduplication key.
 - `fwc-n8n update-review stage-local-mcp <exact-version>` is the single
-  owner-operated discovery/staging command. It uses only the fixed npm
-  metadata, pack, and install command plans, with an empty environment plus
-  the allowlisted npm home/cache, `--ignore-scripts`, `--no-audit`,
-  `--no-fund`, and `--bin-links=false`; it never accepts a path, shell
-  fragment, registry, or generic
-  input object. The command is root-gated, stages only below
-  `/var/lib/fwc-n8n/update-staging/local-n8n-mcp`, and retains a redacted
-  verification receipt beside the exact UUID-v4 stage directory.
-- Before success, the command verifies registry metadata and SRI, performs a
-  bounded archive-listing preflight, runs the strict package manifest,
-  canonical registry-only lock closure (including exact integrity records and
-  installed package-path parity), complete-tree, and executable-entrypoint
-  verifier, and persists only provenance/digest/size evidence. npm and tar run
-  in dedicated process groups; a timeout terminates the complete group before
-  output readers are joined. It performs no retry after an unknown
-  result, provider call, secret lookup, global `/usr/local` package change,
-  FWC release promotion, activation, or public capability registration.
+  owner-operated discovery/staging command. The root argument is an exact
+  semver version; only the fixed registry metadata, per-package pack/cache-add,
+  and offline install plans are generated internally. For each ordinary npm
+  dependency range, the resolver accepts npm's object or array `view` output,
+  chooses the highest matching concrete version with stable SRI/tarball
+  tie-breakers, and records the complete selected registry-only closure in the
+  redacted receipt. File/link/git/ssh/http(s)/bundled/override and alias
+  sources across dependencies, optional dependencies, peer dependencies, and
+  transitive edges are rejected before any package content fetch.
+- The command uses an empty inherited environment plus only fixed npm values,
+  rejects a project `.npmrc` at the fixed npm prefix, disables user/global
+  npmrc loading, and applies `--ignore-scripts`,
+  `--no-audit`, `--no-fund`, and `--bin-links=false`. It never accepts a path,
+  shell fragment, registry, or generic input object. The command is
+  root-gated, stages only below
+  `/var/lib/fwc-n8n/update-staging/local-n8n-mcp`, creates an initially empty
+  `.registry-cache` owned by that UUID-v4 stage, materializes every selected
+  exact tarball there, verifies each SHA-512 SRI, rejects package lockfiles,
+  bundles, aliases, and manifest disagreement before install, seeds only that
+  cache, and runs npm install with `--offline --cache <stage>/.registry-cache`.
+  npm may omit an optional package for the current platform; all selected
+  optional and peer artifacts are nevertheless resolved and cached, while every
+  package that npm records in the installed lock must belong to that closure.
+- Before success, the command verifies registry metadata and every selected
+  artifact SRI, performs a bounded archive-listing preflight, runs the strict
+  package manifest, canonical registry-only lock closure (including exact
+  integrity records and installed package-path parity), complete-tree, and
+  executable-entrypoint verifier, and persists only provenance/digest/size
+  evidence plus the auditable closure digest/package list. npm and tar run in
+  dedicated process groups; a timeout terminates the complete group before
+  output readers are joined. It performs no retry after an unknown result,
+  provider call, secret lookup, global `/usr/local` package change, FWC release
+  promotion, activation, or public capability registration.
 - Authorization and apply are deliberately absent from the `update-review`
   command. A future owner-decision adapter must authenticate the owner and
   issue an opaque, single-use decision with a UUID, a short bounded lifetime,

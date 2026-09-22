@@ -5,7 +5,7 @@
 //! executes a shell, accepts a caller-supplied path, or activates a package.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File, Metadata};
+use std::fs::{File, Metadata};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -32,7 +32,9 @@ const MAX_STAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_STAGE_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_STAGE_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_REGISTRY_CLOSURE_PACKAGES: usize = 10_000;
+const MAX_REGISTRY_CLOSURE_EDGES: usize = 50_000;
 const STAGE_TARBALL_RECEIPT: &str = ".registry-artifact.tgz";
+const STAGE_REGISTRY_CACHE: &str = ".registry-cache";
 const VERIFICATION_RECEIPT: &str = ".verification-receipt.json";
 const TAR_PROGRAM: &str = "/usr/bin/tar";
 const MAX_ARCHIVE_LIST_BYTES: usize = 32 * 1024 * 1024;
@@ -86,6 +88,7 @@ pub struct LocalMcpStagePlan {
     stage_root: String,
     package_json_path: String,
     package_lock_path: String,
+    registry_cache_path: String,
     pack: FixedCommandSpec,
     install: FixedCommandSpec,
 }
@@ -115,6 +118,10 @@ impl LocalMcpStagePlan {
         &self.package_lock_path
     }
 
+    pub fn registry_cache_path(&self) -> &str {
+        &self.registry_cache_path
+    }
+
     pub const fn install(&self) -> &FixedCommandSpec {
         &self.install
     }
@@ -142,6 +149,59 @@ pub struct LocalMcpRegistryMetadata {
     pub dependencies: BTreeMap<String, String>,
     pub lifecycle_scripts_digest: String,
     pub metadata_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryClosurePackage {
+    package_name: String,
+    version: String,
+    integrity: String,
+    registry_tarball_url: String,
+    dependencies: BTreeMap<String, String>,
+    optional_dependencies: BTreeMap<String, String>,
+    peer_dependencies: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryPackageMetadata {
+    package_name: String,
+    version: String,
+    integrity: String,
+    registry_tarball_url: String,
+    engine_requirement: Option<String>,
+    lifecycle_scripts_digest: String,
+    dependencies: BTreeMap<String, String>,
+    optional_dependencies: BTreeMap<String, String>,
+    peer_dependencies: BTreeMap<String, String>,
+    peer_dependencies_meta_digest: String,
+}
+
+impl RegistryPackageMetadata {
+    fn closure_package(&self) -> RegistryClosurePackage {
+        RegistryClosurePackage {
+            package_name: self.package_name.clone(),
+            version: self.version.clone(),
+            integrity: self.integrity.clone(),
+            registry_tarball_url: self.registry_tarball_url.clone(),
+            dependencies: self.dependencies.clone(),
+            optional_dependencies: self.optional_dependencies.clone(),
+            peer_dependencies: self.peer_dependencies.clone(),
+        }
+    }
+
+    fn edges(&self) -> impl Iterator<Item = (&String, &String)> {
+        self.dependencies
+            .iter()
+            .chain(self.optional_dependencies.iter())
+            .chain(self.peer_dependencies.iter())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryClosure {
+    packages: Vec<RegistryPackageMetadata>,
+    digest: String,
 }
 
 #[derive(Serialize)]
@@ -219,6 +279,8 @@ pub struct LocalMcpVerificationReceipt {
     pub metadata_digest: String,
     pub registry_integrity: String,
     pub registry_tarball_url: String,
+    pub registry_closure_digest: String,
+    pub registry_closure_packages: Vec<RegistryClosurePackage>,
     pub artifact_binding_digest: String,
     pub stage_tree_digest: String,
     pub package_manifest_digest: String,
@@ -303,6 +365,7 @@ fn build_local_mcp_stage_plan(
         .to_str()
         .ok_or(LocalMcpAdapterError::StageLayout)?;
     let stage_root = format!("{staging_root}/{version}/{stage_id}");
+    let registry_cache_path = format!("{stage_root}/{STAGE_REGISTRY_CACHE}");
     let package_spec = format!("{PACKAGE_NAME}@{version}");
     Ok(LocalMcpStagePlan {
         component: UpdateComponent::LocalN8nMcp,
@@ -310,6 +373,7 @@ fn build_local_mcp_stage_plan(
         stage_id: stage_id.to_string(),
         package_json_path: format!("{stage_root}/node_modules/{PACKAGE_NAME}/package.json"),
         package_lock_path: format!("{stage_root}/package-lock.json"),
+        registry_cache_path: registry_cache_path.clone(),
         pack: FixedCommandSpec {
             program: NPM_PROGRAM.to_string(),
             args: vec![
@@ -318,11 +382,20 @@ fn build_local_mcp_stage_plan(
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
+                "--bin-links=false".to_string(),
+                "--userconfig=/dev/null".to_string(),
+                "--globalconfig=/dev/null".to_string(),
+                "--cache".to_string(),
+                registry_cache_path.clone(),
                 "--registry=https://registry.npmjs.org".to_string(),
                 "--pack-destination".to_string(),
-                stage_root.clone(),
+                Path::new(&registry_cache_path)
+                    .join(registry_package_key(PACKAGE_NAME)?)
+                    .to_str()
+                    .ok_or(LocalMcpAdapterError::StageLayout)?
+                    .to_string(),
             ],
-            environment: fixed_npm_environment(),
+            environment: fixed_npm_environment_for(&registry_cache_path),
             working_directory: staging_root.to_string(),
             timeout_ms: COMMAND_TIMEOUT_MS,
             env_clear: true,
@@ -336,14 +409,18 @@ fn build_local_mcp_stage_plan(
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
+                "--cache".to_string(),
+                registry_cache_path.clone(),
                 "--offline".to_string(),
                 "--registry=https://registry.npmjs.org".to_string(),
                 "--bin-links=false".to_string(),
+                "--userconfig=/dev/null".to_string(),
+                "--globalconfig=/dev/null".to_string(),
                 "--package-lock=true".to_string(),
                 "--save-exact".to_string(),
                 package_spec,
             ],
-            environment: fixed_npm_environment(),
+            environment: fixed_npm_environment_for(&registry_cache_path),
             working_directory: staging_root.to_string(),
             timeout_ms: COMMAND_TIMEOUT_MS,
             env_clear: true,
@@ -353,7 +430,22 @@ fn build_local_mcp_stage_plan(
 }
 
 fn packed_artifact_path(plan: &LocalMcpStagePlan) -> PathBuf {
-    Path::new(plan.stage_root()).join(format!("{PACKAGE_NAME}-{}.tgz", plan.exact_version()))
+    Path::new(plan.registry_cache_path())
+        .join(registry_package_key(PACKAGE_NAME).expect("fixed package name"))
+        .join(format!("{PACKAGE_NAME}-{}.tgz", plan.exact_version()))
+}
+
+fn packed_registry_artifact_path(
+    plan: &LocalMcpStagePlan,
+    package_name: &str,
+    version: &str,
+) -> Result<PathBuf, LocalMcpAdapterError> {
+    if package_name == PACKAGE_NAME && version == plan.exact_version() {
+        return Ok(packed_artifact_path(plan));
+    }
+    Ok(Path::new(plan.registry_cache_path())
+        .join(registry_package_key(package_name)?)
+        .join(registry_artifact_filename(package_name, version)?))
 }
 
 pub fn parse_registry_metadata(
@@ -427,20 +519,76 @@ fn registry_metadata_string<'a>(value: &'a Value, dotted_key: &str) -> Option<&'
         .or_else(|| value.pointer(pointer).and_then(Value::as_str))
 }
 
-fn registry_dependency_edges(value: &Value) -> Result<Vec<(String, String)>, LocalMcpAdapterError> {
+fn registry_package_metadata(
+    package_name: &str,
+    value: &Value,
+) -> Result<RegistryPackageMetadata, LocalMcpAdapterError> {
     let object = value
         .as_object()
         .ok_or(LocalMcpAdapterError::InvalidMetadata(
             "registry_dependency_closure_invalid",
         ))?;
-    let mut edges = Vec::new();
-    for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
-        let dependencies = object.get(field).filter(|value| !value.is_null());
-        let dependencies = parse_dependencies(dependencies).map_err(|_| {
+    let version = object.get("version").and_then(Value::as_str).ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    validate_exact_npm_version(version).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let integrity = registry_metadata_string(value, "dist.integrity").ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    if !valid_integrity(integrity) {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ));
+    }
+    let tarball = registry_metadata_string(value, "dist.tarball").ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    validate_registry_package_tarball_url(tarball, package_name, version).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let dependencies = parse_dependencies(object.get("dependencies")).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let optional_dependencies =
+        parse_dependencies(object.get("optionalDependencies")).map_err(|_| {
             LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
         })?;
-        edges.extend(dependencies);
+    let peer_dependencies = parse_dependencies(object.get("peerDependencies")).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let engine_requirement = match object.get("engines").filter(|value| !value.is_null()) {
+        None => None,
+        Some(engines) => {
+            let engines = engines
+                .as_object()
+                .ok_or(LocalMcpAdapterError::InvalidMetadata(
+                    "registry_dependency_closure_invalid",
+                ))?;
+            engines
+                .get("node")
+                .map(|value| {
+                    let value = value.as_str().ok_or(LocalMcpAdapterError::InvalidMetadata(
+                        "registry_dependency_closure_invalid",
+                    ))?;
+                    validate_bounded_text(value, "registry_dependency_closure_invalid")?;
+                    Ok::<_, LocalMcpAdapterError>(value.to_string())
+                })
+                .transpose()?
+        }
+    };
+    let lifecycle_scripts = object
+        .get("scripts")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !lifecycle_scripts.is_object() {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ));
     }
+    let lifecycle_scripts_digest = canonical_digest(&lifecycle_scripts)?;
     if let Some(meta) = object
         .get("peerDependenciesMeta")
         .filter(|value| !value.is_null())
@@ -461,67 +609,191 @@ fn registry_dependency_edges(value: &Value) -> Result<Vec<(String, String)>, Loc
             }
         }
     }
+    let peer_dependencies_meta = object
+        .get("peerDependenciesMeta")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let peer_dependencies_meta_digest = canonical_digest(&peer_dependencies_meta)?;
+    // These fields can alter the package source or the selected tree and are
+    // intentionally unsupported. Reject them before any tarball is fetched.
     for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
-        if object.get(field).is_some_and(|value| !value.is_null()) {
+        if object.get(field).is_some_and(|entry| !entry.is_null()) {
             return Err(LocalMcpAdapterError::InvalidMetadata(
                 "registry_dependency_closure_invalid",
             ));
         }
     }
-    Ok(edges)
+    Ok(RegistryPackageMetadata {
+        package_name: package_name.to_string(),
+        version: version.to_string(),
+        integrity: integrity.to_string(),
+        registry_tarball_url: tarball.to_string(),
+        engine_requirement,
+        lifecycle_scripts_digest,
+        dependencies,
+        optional_dependencies,
+        peer_dependencies,
+        peer_dependencies_meta_digest,
+    })
 }
 
-fn validate_registry_dependency_metadata(
+fn registry_view_candidates(
     package_name: &str,
     value: &Value,
-) -> Result<Vec<(String, String)>, LocalMcpAdapterError> {
-    let version = value.get("version").and_then(Value::as_str).ok_or(
-        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
-    )?;
-    validate_exact_npm_version(version).map_err(|_| {
-        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
-    })?;
-    let integrity = registry_metadata_string(value, "dist.integrity").ok_or(
-        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
-    )?;
-    if !valid_integrity(integrity) {
+) -> Result<Vec<Value>, LocalMcpAdapterError> {
+    if let Some(array) = value.as_array() {
+        if array.is_empty() || array.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        return Ok(array.clone());
+    }
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ))?;
+    if object.get("version").is_some() {
+        return Ok(vec![value.clone()]);
+    }
+    // Some npm versions return a compact object keyed by concrete versions
+    // when the query spans more than one result. Normalize that shape without
+    // trusting the key as metadata: the selected object's version remains the
+    // authority, and a missing version is rejected below.
+    let mut candidates = Vec::new();
+    for (version, candidate) in object {
+        if npm_version_parts(version).is_some() && candidate.is_object() {
+            let mut candidate = candidate.clone();
+            if candidate.get("version").is_none() {
+                candidate["version"] = Value::String(version.clone());
+            }
+            candidates.push(candidate);
+        }
+    }
+    if candidates.is_empty() {
         return Err(LocalMcpAdapterError::InvalidMetadata(
             "registry_dependency_closure_invalid",
         ));
     }
-    let tarball = registry_metadata_string(value, "dist.tarball").ok_or(
-        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
-    )?;
-    validate_registry_package_tarball_url(tarball, package_name, version).map_err(|_| {
-        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
-    })?;
-    registry_dependency_edges(value)
+    let _ = package_name;
+    Ok(candidates)
 }
 
-fn preflight_registry_dependency_closure<R: LocalMcpCommandRunner>(
+fn resolve_registry_view_metadata(
+    package_name: &str,
+    spec: &str,
+    value: &Value,
+) -> Result<RegistryPackageMetadata, LocalMcpAdapterError> {
+    let selected = select_registry_view_value(package_name, spec, value)?;
+    registry_package_metadata(package_name, &selected)
+}
+
+fn select_registry_view_value(
+    package_name: &str,
+    spec: &str,
+    value: &Value,
+) -> Result<Value, LocalMcpAdapterError> {
+    let mut candidates = Vec::new();
+    for candidate in registry_view_candidates(package_name, value)? {
+        let metadata = registry_package_metadata(package_name, &candidate)?;
+        if dependency_spec_allows_version(spec, &metadata.version) {
+            candidates.push((metadata, candidate));
+        }
+    }
+    candidates.sort_by(|(left, _), (right, _)| {
+        npm_version_parts(&right.version)
+            .cmp(&npm_version_parts(&left.version))
+            .then_with(|| left.integrity.cmp(&right.integrity))
+            .then_with(|| left.registry_tarball_url.cmp(&right.registry_tarball_url))
+    });
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, candidate)| candidate)
+        .ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ))
+}
+
+fn registry_closure_digest(
+    packages: &[RegistryPackageMetadata],
+) -> Result<String, LocalMcpAdapterError> {
+    let safe = packages
+        .iter()
+        .map(RegistryPackageMetadata::closure_package)
+        .collect::<Vec<_>>();
+    canonical_digest(&("fwc.n8n.registry-closure.v1", safe))
+}
+
+fn registry_closure_receipt_digest(
+    packages: &[RegistryClosurePackage],
+) -> Result<String, LocalMcpAdapterError> {
+    canonical_digest(&("fwc.n8n.registry-closure.v1", packages))
+}
+
+fn resolve_registry_dependency_closure<R: LocalMcpCommandRunner>(
     command_runner: &mut R,
     root_metadata: &Value,
-) -> Result<(), LocalMcpAdapterError> {
-    let mut pending = registry_dependency_edges(root_metadata)?;
+    root: &LocalMcpRegistryMetadata,
+) -> Result<RegistryClosure, LocalMcpAdapterError> {
+    let root_package = registry_package_metadata(PACKAGE_NAME, root_metadata)?;
+    if root_package.version != root.version
+        || root_package.integrity != root.integrity
+        || root_package.registry_tarball_url != root.registry_tarball_url
+    {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ));
+    }
+    let mut packages = BTreeMap::<(String, String), RegistryPackageMetadata>::new();
+    packages.insert(
+        (
+            root_package.package_name.clone(),
+            root_package.version.clone(),
+        ),
+        root_package,
+    );
+    let mut pending = packages
+        .values()
+        .flat_map(|package| {
+            package
+                .edges()
+                .map(|(name, spec)| (name.clone(), spec.clone()))
+        })
+        .collect::<Vec<_>>();
     let mut inspected = BTreeSet::new();
+    let mut edge_count = 0usize;
     while let Some((package_name, spec)) = pending.pop() {
+        edge_count = edge_count
+            .checked_add(1)
+            .ok_or(LocalMcpAdapterError::StageBounds)?;
+        if edge_count > MAX_REGISTRY_CLOSURE_EDGES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
         if !inspected.insert((package_name.clone(), spec.clone())) {
             continue;
-        }
-        if inspected.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
-            return Err(LocalMcpAdapterError::StageBounds);
         }
         let plan = npm_dependency_metadata_plan(&package_name, &spec)?;
         let output = command_runner.run(&plan)?;
         let value: Value = serde_json::from_slice(&output).map_err(|_| {
             LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
         })?;
-        pending.extend(validate_registry_dependency_metadata(
-            &package_name,
-            &value,
-        )?);
+        let selected = resolve_registry_view_metadata(&package_name, &spec, &value)?;
+        let key = (selected.package_name.clone(), selected.version.clone());
+        if packages.insert(key, selected.clone()).is_none() {
+            if packages.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
+                return Err(LocalMcpAdapterError::StageBounds);
+            }
+            pending.extend(
+                selected
+                    .edges()
+                    .map(|(name, child_spec)| (name.clone(), child_spec.clone())),
+            );
+        }
     }
-    Ok(())
+    let packages = packages.into_values().collect::<Vec<_>>();
+    let digest = registry_closure_digest(&packages)?;
+    Ok(RegistryClosure { packages, digest })
 }
 
 pub fn snapshot_from_registry_metadata(
@@ -595,6 +867,7 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
     {
         return Err(LocalMcpAdapterError::StageLayout);
     }
+    reject_project_npmrc(command)?;
     let mut process = Command::new(command.program());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut process, 0);
@@ -669,6 +942,20 @@ fn run_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcp
     Ok(stdout)
 }
 
+fn reject_project_npmrc(command: &FixedCommandSpec) -> Result<(), LocalMcpAdapterError> {
+    let project_root = command
+        .args()
+        .windows(2)
+        .find(|window| window[0] == "--prefix")
+        .map_or(STAGING_ROOT, |window| window[1].as_str());
+    let project_npmrc = Path::new(project_root).join(".npmrc");
+    match std::fs::symlink_metadata(project_npmrc) {
+        Ok(_) => Err(LocalMcpAdapterError::StageLayout),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(LocalMcpAdapterError::StageIo),
+    }
+}
+
 pub fn stage_exact_local_mcp(
     version: &str,
 ) -> Result<LocalMcpVerificationReceipt, LocalMcpAdapterError> {
@@ -697,31 +984,73 @@ where
     let metadata_output = command_runner.run(&npm_exact_metadata_plan(version)?)?;
     let value: Value = serde_json::from_slice(&metadata_output)
         .map_err(|_| LocalMcpAdapterError::InvalidMetadata("metadata_json_invalid"))?;
-    let metadata = parse_registry_metadata(&value)?;
+    let root_value = select_registry_view_value(PACKAGE_NAME, version, &value)?;
+    let metadata = parse_registry_metadata(&root_value)?;
     validate_registry_metadata(&metadata)?;
-    // npm's resolver sees optional, peer, and transitive package metadata only
-    // after the root package is resolved. Walk that closure through `npm view`
-    // first, so a non-registry source fails before pack/install can fetch it.
-    preflight_registry_dependency_closure(command_runner, &value)?;
+    // Resolve every dependency range to one concrete registry metadata record
+    // before creating the stage. This is deterministic (highest matching
+    // semver, then integrity/tarball tie-breakers), and rejects source or
+    // graph features npm could otherwise fetch or reinterpret during install.
+    let closure = resolve_registry_dependency_closure(command_runner, &root_value, &metadata)?;
     stage_io.create_empty_stage(&plan)?;
     let cleanup =
         |stage_io: &mut I, error: LocalMcpAdapterError| match stage_io.discard_stage(&plan) {
             Ok(()) => error,
             Err(cleanup_error) => cleanup_error,
         };
-    if let Err(error) = command_runner.run(plan.pack()) {
-        return Err(cleanup(stage_io, error));
-    }
-    let artifact = match stage_io.materialize_packed_artifact(&plan) {
-        Ok(artifact) => artifact,
-        Err(error) => return Err(cleanup(stage_io, error)),
-    };
-    if let Err(error) = verify_artifact_bytes(&artifact, &metadata) {
-        let adapter_error = match error {
-            LocalMcpExecutorError::Adapter(error) => error,
-            _ => LocalMcpAdapterError::StageMismatch("registry_integrity_mismatch"),
+    // Pack each selected exact package into the stage-owned cache, verify its
+    // bytes against the selected registry SRI, and only then add it to the
+    // same isolated npm cache used by the offline install.
+    for package in &closure.packages {
+        if let Err(error) = stage_io.prepare_registry_artifact_destination(
+            &plan,
+            &package.package_name,
+            &package.version,
+        ) {
+            return Err(cleanup(stage_io, error));
+        }
+        let pack = if package.package_name == PACKAGE_NAME && package.version == metadata.version {
+            plan.pack().clone()
+        } else {
+            npm_registry_pack_plan(&plan, &package.package_name, &package.version)?
         };
-        return Err(cleanup(stage_io, adapter_error));
+        if let Err(error) = command_runner.run(&pack) {
+            return Err(cleanup(stage_io, error));
+        }
+        let artifact = match stage_io.materialize_packed_artifact_for(
+            &plan,
+            &package.package_name,
+            &package.version,
+        ) {
+            Ok(artifact) => artifact,
+            Err(error) => return Err(cleanup(stage_io, error)),
+        };
+        let artifact_metadata = LocalMcpRegistryMetadata {
+            version: package.version.clone(),
+            integrity: package.integrity.clone(),
+            registry_tarball_url: package.registry_tarball_url.clone(),
+            engine_requirement: package.engine_requirement.clone().unwrap_or_default(),
+            dependencies: package.dependencies.clone(),
+            lifecycle_scripts_digest: package.lifecycle_scripts_digest.clone(),
+            metadata_digest: metadata.metadata_digest.clone(),
+        };
+        if let Err(error) = verify_artifact_bytes(&artifact, &artifact_metadata) {
+            let adapter_error = match error {
+                LocalMcpExecutorError::Adapter(error) => error,
+                _ => LocalMcpAdapterError::StageMismatch("registry_integrity_mismatch"),
+            };
+            return Err(cleanup(stage_io, adapter_error));
+        }
+        if let Some(manifest) = artifact.manifest.as_ref() {
+            if let Err(error) = validate_selected_registry_manifest(manifest, package) {
+                return Err(cleanup(stage_io, error));
+            }
+        }
+        let cache_add =
+            npm_registry_cache_add_plan(&plan, &package.package_name, &package.version)?;
+        if let Err(error) = command_runner.run(&cache_add) {
+            return Err(cleanup(stage_io, error));
+        }
     }
     if let Err(error) = stage_io.preflight_archive(&plan) {
         return Err(cleanup(stage_io, error));
@@ -729,7 +1058,7 @@ where
     if let Err(error) = command_runner.run(plan.install()) {
         return Err(cleanup(stage_io, error));
     }
-    let verified = match stage_io.reverify(&plan, &metadata, Vec::new()) {
+    let verified = match stage_io.reverify_with_closure(&plan, &metadata, &closure, Vec::new()) {
         Ok(verified) => verified,
         Err(error) => return Err(cleanup(stage_io, error)),
     };
@@ -754,6 +1083,12 @@ where
         metadata_digest: metadata.metadata_digest,
         registry_integrity: metadata.integrity,
         registry_tarball_url: metadata.registry_tarball_url,
+        registry_closure_digest: closure.digest,
+        registry_closure_packages: closure
+            .packages
+            .iter()
+            .map(RegistryPackageMetadata::closure_package)
+            .collect(),
         artifact_binding_digest: verified.snapshot().provenance.artifact_digest.clone(),
         stage_tree_digest: verified.stage_tree_digest.clone(),
         package_manifest_digest: verified.package_manifest_digest.clone(),
@@ -806,6 +1141,17 @@ fn verify_local_mcp_stage_for_owner(
     tools: Vec<ToolSnapshot>,
     expected_owner: u32,
 ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
+    verify_local_mcp_stage_for_owner_with_closure(plan, metadata, None, tools, expected_owner)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_local_mcp_stage_for_owner_with_closure(
+    plan: &LocalMcpStagePlan,
+    metadata: &LocalMcpRegistryMetadata,
+    expected_closure: Option<&RegistryClosure>,
+    tools: Vec<ToolSnapshot>,
+    expected_owner: u32,
+) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
     validate_registry_metadata(metadata)?;
     if metadata.version != plan.exact_version {
         return Err(LocalMcpAdapterError::StageMismatch(
@@ -836,7 +1182,13 @@ fn verify_local_mcp_stage_for_owner(
         tree.file_evidence(package_lock_path, stage_root)?,
     )?;
     validate_installed_package_manifest(&package_json, metadata, plan.exact_version())?;
-    validate_installed_package_lock(&package_lock, metadata, plan.exact_version(), &tree)?;
+    validate_installed_package_lock_with_closure(
+        &package_lock,
+        metadata,
+        plan.exact_version(),
+        &tree,
+        expected_closure,
+    )?;
 
     let package_manifest_digest = canonical_digest(&package_json)?;
     let package_lock_digest = canonical_digest(&package_lock)?;
@@ -1006,6 +1358,16 @@ fn validate_installed_package_lock(
     exact_version: &str,
     tree: &StageTreeDigest,
 ) -> Result<(), LocalMcpAdapterError> {
+    validate_installed_package_lock_with_closure(value, metadata, exact_version, tree, None)
+}
+
+fn validate_installed_package_lock_with_closure(
+    value: &Value,
+    metadata: &LocalMcpRegistryMetadata,
+    exact_version: &str,
+    tree: &StageTreeDigest,
+    expected_closure: Option<&RegistryClosure>,
+) -> Result<(), LocalMcpAdapterError> {
     let object = value
         .as_object()
         .ok_or(LocalMcpAdapterError::StageMismatch("package_lock_invalid"))?;
@@ -1057,6 +1419,31 @@ fn validate_installed_package_lock(
         }
         let package_name = validate_lock_package_key(key)?;
         validate_lock_package_record(key, &package_name, record)?;
+        if let Some(closure) = expected_closure {
+            let record = record
+                .as_object()
+                .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+            let version = record
+                .get("version")
+                .and_then(Value::as_str)
+                .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+            let integrity = record.get("integrity").and_then(Value::as_str).ok_or(
+                LocalMcpAdapterError::StageMismatch("lock_record_integrity_missing"),
+            )?;
+            let resolved = record.get("resolved").and_then(Value::as_str).ok_or(
+                LocalMcpAdapterError::StageMismatch("lock_record_non_registry"),
+            )?;
+            if !closure.packages.iter().any(|selected| {
+                selected.package_name == package_name
+                    && selected.version == version
+                    && selected.integrity == integrity
+                    && selected.registry_tarball_url == resolved
+            }) {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_registry_closure_mismatch",
+                ));
+            }
+        }
         lock_package_keys.insert(key.clone());
     }
     let installed_package_keys = installed_lock_package_keys(tree);
@@ -1352,21 +1739,39 @@ struct NpmVersionParts {
 fn npm_version_parts(value: &str) -> Option<NpmVersionParts> {
     let core = value.split(['-', '+']).next()?;
     let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some(NpmVersionParts {
-        major: parts.next()?.parse().ok()?,
-        minor: parts.next()?.parse().ok()?,
-        patch: parts.next()?.parse().ok()?,
+        major,
+        minor,
+        patch,
     })
-    .filter(|_| parts.next().is_none())
 }
 
 fn dependency_spec_allows_version(spec: &str, version: &str) -> bool {
+    if version.contains('-') && !spec.contains('-') {
+        return false;
+    }
     let Some(version) = npm_version_parts(version) else {
         return false;
     };
     spec.split("||").any(|alternative| {
-        alternative
-            .split_ascii_whitespace()
+        let tokens = alternative.split_ascii_whitespace().collect::<Vec<_>>();
+        if tokens.len() == 3 && tokens[1] == "-" {
+            let Some(lower) = npm_range_bound(tokens[0]) else {
+                return false;
+            };
+            let Some(upper) = npm_range_bound(tokens[2]) else {
+                return false;
+            };
+            return version >= lower && version <= upper;
+        }
+        tokens
+            .into_iter()
             .all(|token| dependency_token_allows_version(token, version))
     })
 }
@@ -1377,44 +1782,99 @@ fn dependency_token_allows_version(token: &str, version: NpmVersionParts) -> boo
         if operator != "=" {
             return false;
         }
+        if value == "*" || value.eq_ignore_ascii_case("x") {
+            return true;
+        }
         let parts: Vec<_> = value.split('.').collect();
         return match parts.as_slice() {
-            [major, "x"] | [major, "X"] => major.parse::<u64>().ok() == Some(version.major),
-            [major, minor, "x"] | [major, minor, "X"] => {
+            [major, "x" | "X"] => major.parse::<u64>().ok() == Some(version.major),
+            [major, minor, "x" | "X"] => {
                 major.parse::<u64>().ok() == Some(version.major)
                     && minor.parse::<u64>().ok() == Some(version.minor)
             }
             _ => false,
         };
     }
-    let Some(bound) = npm_version_parts(value) else {
+    let Some(bound) = npm_range_bound(value) else {
         return false;
     };
     match operator {
-        "=" => version == bound,
+        "=" => {
+            let component_count = value
+                .split(['-', '+'])
+                .next()
+                .unwrap_or_default()
+                .split('.')
+                .count();
+            if component_count < 3 {
+                let upper = if component_count == 1 {
+                    NpmVersionParts {
+                        major: bound.major.saturating_add(1),
+                        minor: 0,
+                        patch: 0,
+                    }
+                } else {
+                    NpmVersionParts {
+                        major: bound.major,
+                        minor: bound.minor.saturating_add(1),
+                        patch: 0,
+                    }
+                };
+                version >= bound && version < upper
+            } else {
+                version == bound
+            }
+        }
         ">=" => version >= bound,
         "<=" => version <= bound,
         ">" => version > bound,
         "<" => version < bound,
-        "~" => version >= bound && version.major == bound.major && version.minor == bound.minor,
-        "^" => {
-            let upper = if bound.major > 0 {
+        "~" => {
+            let component_count = value
+                .split(['-', '+'])
+                .next()
+                .unwrap_or_default()
+                .split('.')
+                .count();
+            let upper = if component_count < 2 {
                 NpmVersionParts {
-                    major: bound.major + 1,
+                    major: bound.major.saturating_add(1),
+                    minor: 0,
+                    patch: 0,
+                }
+            } else {
+                NpmVersionParts {
+                    major: bound.major,
+                    minor: bound.minor.saturating_add(1),
+                    patch: 0,
+                }
+            };
+            version >= bound && version < upper
+        }
+        "^" => {
+            let component_count = value
+                .split(['-', '+'])
+                .next()
+                .unwrap_or_default()
+                .split('.')
+                .count();
+            let upper = if bound.major > 0 || component_count == 1 {
+                NpmVersionParts {
+                    major: bound.major.saturating_add(1),
                     minor: 0,
                     patch: 0,
                 }
             } else if bound.minor > 0 {
                 NpmVersionParts {
                     major: 0,
-                    minor: bound.minor + 1,
+                    minor: bound.minor.saturating_add(1),
                     patch: 0,
                 }
             } else {
                 NpmVersionParts {
                     major: 0,
                     minor: 0,
-                    patch: bound.patch + 1,
+                    patch: bound.patch.saturating_add(1),
                 }
             };
             version >= bound && version < upper
@@ -1445,25 +1905,31 @@ fn dependency_spec_syntax_is_valid(value: &str) -> bool {
     value.split("||").all(|alternative| {
         let tokens: Vec<_> = alternative.split_ascii_whitespace().collect();
         !tokens.is_empty()
+            && (tokens.len() != 2 || tokens[0] != "-")
+            && (!tokens.contains(&"-") || (tokens.len() == 3 && tokens[1] == "-"))
             && tokens.iter().all(|token| {
+                if *token == "-" {
+                    return true;
+                }
                 let (operator, version) = dependency_token_parts(token);
+                if version == "*" || version.eq_ignore_ascii_case("x") {
+                    return operator == "=";
+                }
                 if version.contains(['x', 'X', '*']) {
                     if operator != "=" {
                         return false;
                     }
                     let parts: Vec<_> = version.split('.').collect();
                     match parts.as_slice() {
-                        [major, "x"] | [major, "X"] => {
-                            major.bytes().all(|byte| byte.is_ascii_digit())
-                        }
-                        [major, minor, "x"] | [major, minor, "X"] => {
+                        [major, "x" | "X"] => major.bytes().all(|byte| byte.is_ascii_digit()),
+                        [major, minor, "x" | "X"] => {
                             major.bytes().all(|byte| byte.is_ascii_digit())
                                 && minor.bytes().all(|byte| byte.is_ascii_digit())
                         }
                         _ => false,
                     }
                 } else {
-                    npm_version_parts(version).is_some()
+                    npm_range_bound(version).is_some()
                 }
             })
     })
@@ -1475,7 +1941,6 @@ fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterE
         || !value.is_ascii()
         || value.trim() != value
         || value.chars().any(char::is_control)
-        || !value.bytes().any(|byte| byte.is_ascii_digit())
         || value.bytes().any(|byte| {
             !(byte.is_ascii_digit()
                 || matches!(
@@ -1511,6 +1976,33 @@ fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterE
         ));
     }
     Ok(())
+}
+
+fn npm_range_bound(value: &str) -> Option<NpmVersionParts> {
+    let value = value.split(['-', '+']).next()?;
+    if value.is_empty() || value == "*" || value.eq_ignore_ascii_case("x") {
+        return Some(NpmVersionParts {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        });
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let mut numbers = [0_u64; 3];
+    for (index, part) in parts.iter().enumerate() {
+        if part.eq_ignore_ascii_case("x") || *part == "*" {
+            break;
+        }
+        numbers[index] = part.parse().ok()?;
+    }
+    Some(NpmVersionParts {
+        major: numbers[0],
+        minor: numbers[1],
+        patch: numbers[2],
+    })
 }
 fn validate_safe_relative_path(value: &str) -> Result<(), LocalMcpAdapterError> {
     if value.is_empty() || value.len() > 512 || !value.is_ascii() || value.contains('\\') {
@@ -2011,6 +2503,10 @@ fn npm_view_plan(version: &str) -> FixedCommandSpec {
             "bundledDependencies".to_string(),
             "overrides".to_string(),
             "scripts".to_string(),
+            "--userconfig=/dev/null".to_string(),
+            "--globalconfig=/dev/null".to_string(),
+            "--cache".to_string(),
+            NPM_CACHE.to_string(),
             "--registry=https://registry.npmjs.org".to_string(),
             "--json".to_string(),
         ],
@@ -2025,6 +2521,14 @@ fn npm_dependency_metadata_plan(
     package_name: &str,
     spec: &str,
 ) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
+    npm_dependency_metadata_plan_for_cache(package_name, spec, NPM_CACHE)
+}
+
+fn npm_dependency_metadata_plan_for_cache(
+    package_name: &str,
+    spec: &str,
+    cache: &str,
+) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
     validate_package_name(package_name)
         .map_err(|_| LocalMcpAdapterError::InvalidMetadata("dependency_name_invalid"))?;
     validate_registry_dependency_spec(spec)?;
@@ -2036,6 +2540,7 @@ fn npm_dependency_metadata_plan(
             "version".to_string(),
             "dist.integrity".to_string(),
             "dist.tarball".to_string(),
+            "engines".to_string(),
             "dependencies".to_string(),
             "optionalDependencies".to_string(),
             "peerDependencies".to_string(),
@@ -2043,10 +2548,103 @@ fn npm_dependency_metadata_plan(
             "bundleDependencies".to_string(),
             "bundledDependencies".to_string(),
             "overrides".to_string(),
+            "scripts".to_string(),
+            "--userconfig=/dev/null".to_string(),
+            "--globalconfig=/dev/null".to_string(),
+            "--cache".to_string(),
+            cache.to_string(),
             "--registry=https://registry.npmjs.org".to_string(),
             "--json".to_string(),
         ],
-        environment: fixed_npm_environment(),
+        environment: fixed_npm_environment_for(cache),
+        working_directory: STAGING_ROOT.to_string(),
+        timeout_ms: COMMAND_TIMEOUT_MS,
+        env_clear: true,
+    })
+}
+
+fn registry_package_key(package_name: &str) -> Result<String, LocalMcpAdapterError> {
+    validate_package_name(package_name)
+        .map_err(|_| LocalMcpAdapterError::InvalidMetadata("dependency_name_invalid"))?;
+    Ok(package_name.replace('/', "__"))
+}
+
+fn registry_artifact_filename(
+    package_name: &str,
+    version: &str,
+) -> Result<String, LocalMcpAdapterError> {
+    validate_exact_npm_version(version)?;
+    let basename = package_name.rsplit('/').next().unwrap_or(package_name);
+    Ok(format!("{basename}-{version}.tgz"))
+}
+
+fn npm_registry_pack_plan(
+    plan: &LocalMcpStagePlan,
+    package_name: &str,
+    version: &str,
+) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
+    let package_key = registry_package_key(package_name)?;
+    let destination = Path::new(plan.registry_cache_path()).join(package_key);
+    let destination = destination
+        .to_str()
+        .ok_or(LocalMcpAdapterError::StageLayout)?;
+    validate_exact_npm_version(version)?;
+    Ok(FixedCommandSpec {
+        program: NPM_PROGRAM.to_string(),
+        args: vec![
+            "pack".to_string(),
+            format!("{package_name}@{version}"),
+            "--ignore-scripts".to_string(),
+            "--no-audit".to_string(),
+            "--no-fund".to_string(),
+            "--bin-links=false".to_string(),
+            "--userconfig=/dev/null".to_string(),
+            "--globalconfig=/dev/null".to_string(),
+            "--cache".to_string(),
+            plan.registry_cache_path().to_string(),
+            "--registry=https://registry.npmjs.org".to_string(),
+            "--pack-destination".to_string(),
+            destination.to_string(),
+        ],
+        environment: fixed_npm_environment_for(plan.registry_cache_path()),
+        working_directory: STAGING_ROOT.to_string(),
+        timeout_ms: COMMAND_TIMEOUT_MS,
+        env_clear: true,
+    })
+}
+
+fn npm_registry_cache_add_plan(
+    plan: &LocalMcpStagePlan,
+    package_name: &str,
+    version: &str,
+) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
+    let source = if package_name == PACKAGE_NAME && version == plan.exact_version() {
+        Path::new(plan.stage_root()).join(STAGE_TARBALL_RECEIPT)
+    } else {
+        let package_key = registry_package_key(package_name)?;
+        Path::new(plan.registry_cache_path())
+            .join(package_key)
+            .join(registry_artifact_filename(package_name, version)?)
+    };
+    let source = source.to_str().ok_or(LocalMcpAdapterError::StageLayout)?;
+    Ok(FixedCommandSpec {
+        program: NPM_PROGRAM.to_string(),
+        args: vec![
+            "cache".to_string(),
+            "add".to_string(),
+            source.to_string(),
+            "--cache".to_string(),
+            plan.registry_cache_path().to_string(),
+            "--offline".to_string(),
+            "--ignore-scripts".to_string(),
+            "--no-audit".to_string(),
+            "--no-fund".to_string(),
+            "--registry=https://registry.npmjs.org".to_string(),
+            "--bin-links=false".to_string(),
+            "--userconfig=/dev/null".to_string(),
+            "--globalconfig=/dev/null".to_string(),
+        ],
+        environment: fixed_npm_environment_for(plan.registry_cache_path()),
         working_directory: STAGING_ROOT.to_string(),
         timeout_ms: COMMAND_TIMEOUT_MS,
         env_clear: true,
@@ -2054,11 +2652,15 @@ fn npm_dependency_metadata_plan(
 }
 
 fn fixed_npm_environment() -> BTreeMap<String, String> {
+    fixed_npm_environment_for(NPM_CACHE)
+}
+
+fn fixed_npm_environment_for(cache: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("HOME".to_string(), NPM_HOME.to_string()),
         ("NO_UPDATE_NOTIFIER".to_string(), "1".to_string()),
         ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-        ("npm_config_cache".to_string(), NPM_CACHE.to_string()),
+        ("npm_config_cache".to_string(), cache.to_string()),
     ])
 }
 
@@ -2178,11 +2780,13 @@ fn validate_bounded_text(value: &str, code: &'static str) -> Result<(), LocalMcp
 }
 
 fn valid_integrity(value: &str) -> bool {
+    use base64::Engine;
+
     value.strip_prefix("sha512-").is_some_and(|encoded| {
-        (80..=128).contains(&encoded.len())
-            && encoded
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+        encoded.len() == 88
+            && base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .is_ok_and(|bytes| bytes.len() == 64)
     })
 }
 
@@ -2228,6 +2832,7 @@ fn registry_release_binding(
 pub struct TrustedLocalMcpArtifact {
     version: String,
     bytes: Vec<u8>,
+    manifest: Option<Value>,
 }
 
 impl TrustedLocalMcpArtifact {
@@ -2242,6 +2847,7 @@ impl TrustedLocalMcpArtifact {
         Ok(Self {
             version: version.to_string(),
             bytes,
+            manifest: None,
         })
     }
 }
@@ -2267,6 +2873,30 @@ pub trait LocalMcpStageIo {
         plan: &LocalMcpStagePlan,
     ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError>;
 
+    fn prepare_registry_artifact_destination(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+        _package_name: &str,
+        _version: &str,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Ok(())
+    }
+
+    fn materialize_packed_artifact_for(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        package_name: &str,
+        version: &str,
+    ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+        if package_name == PACKAGE_NAME && version == plan.exact_version() {
+            self.materialize_packed_artifact(plan)
+        } else {
+            Err(LocalMcpAdapterError::StageMismatch(
+                "packed_artifact_missing",
+            ))
+        }
+    }
+
     fn preflight_archive(&mut self, _plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
         Ok(())
     }
@@ -2286,6 +2916,16 @@ pub trait LocalMcpStageIo {
         tools: Vec<ToolSnapshot>,
     ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
         verify_root_owned_local_mcp_stage(plan, metadata, tools)
+    }
+
+    fn reverify_with_closure(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        metadata: &LocalMcpRegistryMetadata,
+        _closure: &RegistryClosure,
+        tools: Vec<ToolSnapshot>,
+    ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
+        self.reverify(plan, metadata, tools)
     }
 }
 
@@ -2349,6 +2989,89 @@ fn verify_artifact_bytes(
         ));
     }
     Ok(digest)
+}
+
+fn validate_selected_registry_manifest(
+    manifest: &Value,
+    metadata: &RegistryPackageMetadata,
+) -> Result<(), LocalMcpAdapterError> {
+    let object = manifest
+        .as_object()
+        .ok_or(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_invalid",
+        ))?;
+    if object.get("name").and_then(Value::as_str) != Some(metadata.package_name.as_str())
+        || object.get("version").and_then(Value::as_str) != Some(metadata.version.as_str())
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    let engine_requirement = object
+        .get("engines")
+        .and_then(Value::as_object)
+        .and_then(|engines| engines.get("node"))
+        .map(|value| {
+            value.as_str().ok_or(LocalMcpAdapterError::StageMismatch(
+                "registry_manifest_invalid",
+            ))
+        })
+        .transpose()?;
+    if engine_requirement != metadata.engine_requirement.as_deref() {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    let dependencies = parse_dependencies(object.get("dependencies")).map_err(|_| {
+        LocalMcpAdapterError::StageMismatch("registry_manifest_dependencies_invalid")
+    })?;
+    let optional_dependencies =
+        parse_dependencies(object.get("optionalDependencies")).map_err(|_| {
+            LocalMcpAdapterError::StageMismatch("registry_manifest_dependencies_invalid")
+        })?;
+    let peer_dependencies = parse_dependencies(object.get("peerDependencies")).map_err(|_| {
+        LocalMcpAdapterError::StageMismatch("registry_manifest_dependencies_invalid")
+    })?;
+    if dependencies != metadata.dependencies
+        || optional_dependencies != metadata.optional_dependencies
+        || peer_dependencies != metadata.peer_dependencies
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    let peer_dependencies_meta = object
+        .get("peerDependenciesMeta")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !peer_dependencies_meta.is_object()
+        || canonical_digest(&peer_dependencies_meta)? != metadata.peer_dependencies_meta_digest
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    let lifecycle_scripts = object
+        .get("scripts")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !lifecycle_scripts.is_object()
+        || canonical_digest(&lifecycle_scripts)? != metadata.lifecycle_scripts_digest
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
+        if object.get(field).is_some_and(|entry| !entry.is_null()) {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_manifest_metadata_unsupported",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_pre_activation_error<I: LocalMcpStageIo>(
@@ -2658,8 +3381,10 @@ fn read_bounded_tar_listing<R: Read>(reader: &mut R) -> Result<Vec<u8>, TarListi
 
 #[cfg(unix)]
 fn terminate_child(child: &mut Child) {
-    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as _) {
-        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    if let Ok(pid_raw) = i32::try_from(child.id()) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid_raw) {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -2966,6 +3691,160 @@ fn open_fixed_version_directory(plan: &LocalMcpStagePlan) -> Result<File, LocalM
 }
 
 #[cfg(target_os = "linux")]
+fn read_packed_registry_artifact(
+    plan: &LocalMcpStagePlan,
+    package_name: &str,
+    version: &str,
+) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+    validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let stage_root = Path::new(plan.stage_root());
+    let stage_fd = open_stage_root(stage_root, 0)?;
+    let packed_path = packed_registry_artifact_path(plan, package_name, version)?;
+    let mut packed = open_stage_file(
+        &stage_fd,
+        &packed_path,
+        stage_root,
+        0,
+        "packed_artifact_missing",
+    )?;
+    let before = packed
+        .metadata()
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    if before.len() > MAX_STAGE_FILE_BYTES {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(before.len()).map_err(|_| LocalMcpAdapterError::StageBounds)?,
+    );
+    (&mut packed)
+        .take(MAX_STAGE_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    if bytes.len() as u64 > MAX_STAGE_FILE_BYTES {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    let after = packed
+        .metadata()
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    verify_stage_file_metadata(&after, 0)?;
+    if before.len() != bytes.len() as u64 || file_metadata_changed(&before, &after) {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "packed_artifact_changed",
+        ));
+    }
+    let manifest = read_registry_package_manifest(&packed)?;
+    Ok(TrustedLocalMcpArtifact {
+        version: version.to_string(),
+        bytes,
+        manifest: Some(manifest),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_registry_archive_listing(listing: &[u8]) -> Result<(), LocalMcpAdapterError> {
+    validate_archive_listing(listing)?;
+    for raw_line in listing.split(|byte| *byte == b'\n') {
+        let raw_line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if raw_line.is_empty() {
+            continue;
+        }
+        let line = std::str::from_utf8(raw_line)
+            .map_err(|_| LocalMcpAdapterError::StageMismatch("archive_listing_invalid"))?;
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        let name = fields
+            .get(5)
+            .ok_or(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_invalid",
+            ))?
+            .trim_end_matches('/');
+        if name == "package/.npmrc"
+            || (name.starts_with("package/")
+                && (name.ends_with("/npm-shrinkwrap.json") || name.ends_with("/package-lock.json")))
+        {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_archive_metadata_unsupported",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_registry_package_manifest(packed: &File) -> Result<Value, LocalMcpAdapterError> {
+    let receipt_path = proc_fd_path(packed);
+    let listing = run_bounded_tar_listing(&receipt_path)?;
+    validate_registry_archive_listing(&listing)?;
+    let deadline = Instant::now() + Duration::from_millis(COMMAND_TIMEOUT_MS);
+    let mut child = fixed_tar_command()
+        .args([
+            "--extract",
+            "--to-stdout",
+            "--file",
+            receipt_path.as_str(),
+            "package/package.json",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_child(&mut child);
+        return Err(LocalMcpAdapterError::StageIo);
+    };
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let _ = sender.send(read_bounded_npm_output(&mut stdout));
+    });
+    let mut output = None;
+    let mut status = None;
+    loop {
+        if output.is_none() {
+            if let Ok(result) = receiver.try_recv() {
+                output = Some(result);
+            }
+        }
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        }
+        if output.is_some() && status.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            terminate_child(&mut child);
+            let _ = reader.join();
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_manifest_timeout",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if reader.join().is_err() {
+        return Err(LocalMcpAdapterError::StageIo);
+    }
+    let output = match output.expect("tar manifest reader completed") {
+        Ok(bytes) => bytes,
+        Err(NpmOutputError::TooLarge) => return Err(LocalMcpAdapterError::StageBounds),
+        Err(NpmOutputError::Io) => return Err(LocalMcpAdapterError::StageIo),
+    };
+    if !status.expect("tar manifest process completed").success() {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_missing",
+        ));
+    }
+    let manifest: Value = serde_json::from_slice(&output)
+        .map_err(|_| LocalMcpAdapterError::StageMismatch("registry_manifest_invalid"))?;
+    if !manifest.is_object() {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_invalid",
+        ));
+    }
+    Ok(manifest)
+}
+
+#[cfg(target_os = "linux")]
 impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
     fn create_empty_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
         use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
@@ -3005,7 +3884,33 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
             0,
         )?;
         mkdirat(&version_fd, plan.stage_id(), Mode::from_raw_mode(0o700))
-            .map_err(|_| LocalMcpAdapterError::StageLayout)
+            .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let stage_fd = openat2(
+            &version_fd,
+            plan.stage_id(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let stage_fd = File::from(stage_fd);
+        mkdirat(&stage_fd, STAGE_REGISTRY_CACHE, Mode::from_raw_mode(0o700))
+            .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let cache_fd = openat2(
+            &stage_fd,
+            STAGE_REGISTRY_CACHE,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let cache_fd = File::from(cache_fd);
+        mkdirat(
+            &cache_fd,
+            registry_package_key(PACKAGE_NAME)?,
+            Mode::from_raw_mode(0o700),
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)
     }
 
     fn discard_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
@@ -3072,56 +3977,116 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         &mut self,
         plan: &LocalMcpStagePlan,
     ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, openat};
         use std::os::unix::fs::MetadataExt;
 
-        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
-        let stage_root = Path::new(plan.stage_root());
-        let stage_fd = open_stage_root(stage_root, 0)?;
-        let packed_path = packed_artifact_path(plan);
-        let mut packed = open_stage_file(
+        let artifact = read_packed_registry_artifact(plan, PACKAGE_NAME, plan.exact_version())?;
+
+        let stage_fd = open_stage_root(Path::new(plan.stage_root()), 0)?;
+        let fd = openat(
             &stage_fd,
-            &packed_path,
-            stage_root,
-            0,
-            "packed_artifact_missing",
-        )?;
-        let before = packed
+            STAGE_TARBALL_RECEIPT,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let mut receipt = File::from(fd);
+        receipt
+            .write_all(&artifact.bytes)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        receipt
+            .sync_all()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let receipt_metadata = receipt
             .metadata()
             .map_err(|_| LocalMcpAdapterError::StageIo)?;
-        if before.len() > MAX_STAGE_FILE_BYTES {
-            return Err(LocalMcpAdapterError::StageBounds);
-        }
-        let mut bytes = Vec::with_capacity(
-            usize::try_from(before.len()).map_err(|_| LocalMcpAdapterError::StageBounds)?,
-        );
-        (&mut packed)
-            .take(MAX_STAGE_FILE_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| LocalMcpAdapterError::StageIo)?;
-        if bytes.len() as u64 > MAX_STAGE_FILE_BYTES {
-            return Err(LocalMcpAdapterError::StageBounds);
-        }
-        let after = packed
-            .metadata()
-            .map_err(|_| LocalMcpAdapterError::StageIo)?;
-        verify_stage_file_metadata(&after, 0)?;
-        if before.len() != bytes.len() as u64 || file_metadata_changed(&before, &after) {
-            return Err(LocalMcpAdapterError::StageMismatch(
-                "packed_artifact_changed",
-            ));
-        }
-        let artifact = TrustedLocalMcpArtifact::from_registry_bytes(plan.exact_version(), bytes)?;
-        let receipt_path = stage_root.join(STAGE_TARBALL_RECEIPT);
-        if fs::symlink_metadata(&receipt_path).is_ok() {
-            return Err(LocalMcpAdapterError::StageLayout);
-        }
-        fs::rename(&packed_path, &receipt_path).map_err(|_| LocalMcpAdapterError::StageIo)?;
-        let receipt_metadata =
-            fs::symlink_metadata(&receipt_path).map_err(|_| LocalMcpAdapterError::StageIo)?;
         if receipt_metadata.uid() != 0 {
             return Err(LocalMcpAdapterError::StagePermissions);
         }
         Ok(artifact)
+    }
+
+    fn prepare_registry_artifact_destination(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        package_name: &str,
+        version: &str,
+    ) -> Result<(), LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        if package_name == PACKAGE_NAME && version == plan.exact_version() {
+            return Ok(());
+        }
+        let stage_fd = open_stage_root(Path::new(plan.stage_root()), 0)?;
+        let cache_fd = openat2(
+            &stage_fd,
+            STAGE_REGISTRY_CACHE,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let cache_fd = File::from(cache_fd);
+        let package_key = registry_package_key(package_name)?;
+        if mkdirat(&cache_fd, &package_key, Mode::from_raw_mode(0o700)).is_ok() {
+            Ok(())
+        } else {
+            let package_fd = openat2(
+                &cache_fd,
+                &package_key,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+            )
+            .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+            let package_fd = File::from(package_fd);
+            verify_stage_directory_metadata(
+                &package_fd
+                    .metadata()
+                    .map_err(|_| LocalMcpAdapterError::StageIo)?,
+                0,
+            )
+        }
+    }
+
+    fn materialize_packed_artifact_for(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        package_name: &str,
+        version: &str,
+    ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags, openat};
+
+        let artifact = read_packed_registry_artifact(plan, package_name, version)?;
+        if package_name == PACKAGE_NAME && version == plan.exact_version() {
+            let stage_fd = open_stage_root(Path::new(plan.stage_root()), 0)?;
+            let fd = openat(
+                &stage_fd,
+                STAGE_TARBALL_RECEIPT,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+            let mut receipt = File::from(fd);
+            receipt
+                .write_all(&artifact.bytes)
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+            receipt
+                .sync_all()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        }
+        Ok(artifact)
+    }
+
+    fn reverify_with_closure(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        metadata: &LocalMcpRegistryMetadata,
+        closure: &RegistryClosure,
+        tools: Vec<ToolSnapshot>,
+    ) -> Result<VerifiedLocalMcpStage, LocalMcpAdapterError> {
+        verify_local_mcp_stage_for_owner_with_closure(plan, metadata, Some(closure), tools, 0)
     }
 
     fn preflight_archive(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
@@ -3143,8 +4108,17 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
             || receipt.stage_id != plan.stage_id()
             || receipt.stage_root != plan.stage_root()
             || receipt.receipt_path != plan.verification_receipt_path()
+            || !valid_blake3_digest(&receipt.registry_closure_digest)
+            || receipt.registry_closure_packages.is_empty()
         {
             return Err(LocalMcpAdapterError::StageMismatch("receipt_invalid"));
+        }
+        if registry_closure_receipt_digest(&receipt.registry_closure_packages)?
+            != receipt.registry_closure_digest
+        {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_dependency_closure_invalid",
+            ));
         }
         let encoded = serde_json::to_vec(receipt).map_err(|_| LocalMcpAdapterError::Encoding)?;
         if encoded.len() > MAX_STAGE_JSON_BYTES as usize {
@@ -3219,6 +4193,7 @@ mod tests {
         BackendError, DecisionLedger, DetectionOutcome, OwnerPrincipal, ReviewDecision,
         SmokeReport, authorize_update, detect_update,
     };
+    use std::fs;
 
     const STAGE_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -3357,7 +4332,10 @@ mod tests {
         );
         assert_eq!(plan.install.program, NPM_PROGRAM);
         assert_eq!(plan.install.working_directory, STAGING_ROOT);
-        assert_eq!(plan.install.environment, fixed_npm_environment());
+        assert_eq!(
+            plan.install.environment,
+            fixed_npm_environment_for(plan.registry_cache_path())
+        );
         assert!(plan.install.env_clear);
         assert_eq!(plan.install.args[0], "install");
         assert_eq!(plan.install.args[1], "--prefix");
@@ -3368,9 +4346,13 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
+                "--cache",
+                plan.registry_cache_path(),
                 "--offline",
                 "--registry=https://registry.npmjs.org",
                 "--bin-links=false",
+                "--userconfig=/dev/null",
+                "--globalconfig=/dev/null",
                 "--package-lock=true",
                 "--save-exact",
                 "n8n-mcp@2.69.2",
@@ -3378,7 +4360,10 @@ mod tests {
         );
         assert_eq!(plan.pack.program, NPM_PROGRAM);
         assert_eq!(plan.pack.working_directory, STAGING_ROOT);
-        assert_eq!(plan.pack.environment, fixed_npm_environment());
+        assert_eq!(
+            plan.pack.environment,
+            fixed_npm_environment_for(plan.registry_cache_path())
+        );
         assert!(plan.pack.env_clear);
         assert_eq!(
             &plan.pack.args[..],
@@ -3388,9 +4373,17 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
+                "--bin-links=false",
+                "--userconfig=/dev/null",
+                "--globalconfig=/dev/null",
+                "--cache",
+                plan.registry_cache_path(),
                 "--registry=https://registry.npmjs.org",
                 "--pack-destination",
-                plan.stage_root.as_str(),
+                Path::new(plan.registry_cache_path())
+                    .join(registry_package_key(PACKAGE_NAME).expect("package key"))
+                    .to_str()
+                    .expect("cache path"),
             ]
         );
         assert!(plan.verification_receipt_path().starts_with(STAGING_ROOT));
@@ -3472,6 +4465,79 @@ mod tests {
         assert!(parsed.lifecycle_scripts_digest.starts_with("blake3-256:"));
     }
 
+    #[test]
+    fn registry_range_array_selects_highest_matching_concrete_version() {
+        let output = json!([
+            {
+                "version": "3.25.0",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                "dependencies": {}
+            },
+            {
+                "version": "3.27.1",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.27.1.tgz",
+                "dependencies": {}
+            },
+            {
+                "version": "4.0.0",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-4.0.0.tgz",
+                "dependencies": {}
+            }
+        ]);
+        let selected =
+            resolve_registry_view_metadata("zod", "^3.25.0", &output).expect("range metadata");
+        assert_eq!(selected.version, "3.27.1");
+        assert_eq!(
+            selected.registry_tarball_url,
+            "https://registry.npmjs.org/zod/-/zod-3.27.1.tgz"
+        );
+    }
+
+    #[test]
+    fn registry_range_object_map_is_normalized_to_concrete_versions() {
+        let output = json!({
+            "3.25.0": {
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                "dependencies": {}
+            },
+            "3.26.0": {
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.26.0.tgz",
+                "dependencies": {}
+            }
+        });
+        let selected = resolve_registry_view_metadata("zod", "^3.25.0", &output)
+            .expect("object range metadata");
+        assert_eq!(selected.version, "3.26.0");
+    }
+
+    #[test]
+    fn ordinary_npm_semver_ranges_are_accepted_and_matched() {
+        for (spec, version, expected) in [
+            ("^1.2", "1.9.0", true),
+            ("~1.2", "1.2.9", true),
+            (">=1.0.0 <2", "1.8.0", true),
+            ("1.2.x", "1.2.7", true),
+            ("*", "9.0.0", true),
+            ("1.2", "1.3.0", false),
+            ("1.2.3 - 2.0.0", "2.1.0", false),
+        ] {
+            assert!(
+                validate_registry_dependency_spec(spec).is_ok(),
+                "range syntax rejected: {spec}"
+            );
+            assert_eq!(
+                dependency_spec_allows_version(spec, version),
+                expected,
+                "{spec}"
+            );
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn staged_plan_returns_redacted_receipt_through_command_and_stage_seams() {
@@ -3507,12 +4573,24 @@ mod tests {
         assert_eq!(receipt.status, "verified");
         assert_eq!(receipt.registry_integrity, integrity);
         assert_eq!(receipt.version, "2.69.2");
+        assert_eq!(receipt.registry_closure_packages.len(), 2);
+        assert!(receipt.registry_closure_digest.starts_with("blake3-256:"));
         assert!(receipt.receipt_path.starts_with(STAGING_ROOT));
-        assert_eq!(command_runner.calls.len(), 4);
+        assert_eq!(command_runner.calls.len(), 7);
         assert_eq!(command_runner.calls[0][0], "view");
         assert_eq!(command_runner.calls[1][0], "view");
         assert_eq!(command_runner.calls[2][0], "pack");
-        assert_eq!(command_runner.calls[3][0], "install");
+        assert_eq!(command_runner.calls[3][0], "cache");
+        assert_eq!(command_runner.calls[4][0], "pack");
+        assert_eq!(command_runner.calls[5][0], "cache");
+        assert_eq!(command_runner.calls[6][0], "install");
+        assert!(
+            command_runner.calls[..6]
+                .iter()
+                .all(|args| args.first().is_some_and(|arg| arg != "install"))
+        );
+        assert!(command_runner.calls[6].contains(&"--offline".to_string()));
+        assert!(command_runner.calls[6].contains(&"--cache".to_string()));
         let encoded = serde_json::to_string(&receipt).expect("receipt encoding");
         assert!(!encoded.contains("UNTRUSTED-COMMAND-CANARY"));
         assert!(!encoded.contains("stderr"));
@@ -3561,6 +4639,24 @@ mod tests {
         ] {
             assert!(parse_registry_metadata(&value).is_err());
         }
+    }
+
+    #[test]
+    fn registry_manifest_disagreement_fails_before_install() {
+        let metadata_value = metadata_value("2.69.2");
+        let metadata = registry_package_metadata(PACKAGE_NAME, &metadata_value)
+            .expect("selected registry metadata");
+        let mut manifest = metadata_value.clone();
+        manifest["name"] = Value::String(PACKAGE_NAME.to_string());
+        assert!(validate_selected_registry_manifest(&manifest, &metadata).is_ok());
+
+        let mut changed_dependencies = manifest.clone();
+        changed_dependencies["dependencies"]["zod"] = Value::String("^4.0.0".to_string());
+        assert!(validate_selected_registry_manifest(&changed_dependencies, &metadata).is_err());
+
+        let mut published_override = manifest;
+        published_override["overrides"] = json!({});
+        assert!(validate_selected_registry_manifest(&published_override, &metadata).is_err());
     }
 
     #[test]
@@ -3935,6 +5031,26 @@ mod tests {
                 .ok_or(LocalMcpAdapterError::StageMismatch("missing_mock_artifact"))
         }
 
+        fn materialize_packed_artifact_for(
+            &mut self,
+            plan: &LocalMcpStagePlan,
+            package_name: &str,
+            version: &str,
+        ) -> Result<TrustedLocalMcpArtifact, LocalMcpAdapterError> {
+            self.calls.push("pack");
+            if package_name == PACKAGE_NAME && version == plan.exact_version() {
+                return self
+                    .packed_artifact
+                    .take()
+                    .ok_or(LocalMcpAdapterError::StageMismatch("missing_mock_artifact"));
+            }
+            TrustedLocalMcpArtifact::from_registry_bytes(
+                version,
+                b"bounded test tarball bytes".to_vec(),
+            )
+            .map_err(|_| LocalMcpAdapterError::StageMismatch("missing_mock_artifact"))
+        }
+
         fn reverify(
             &mut self,
             plan: &LocalMcpStagePlan,
@@ -3982,9 +5098,11 @@ mod tests {
                 {
                     Ok(self.metadata.clone())
                 } else {
+                    let root = serde_json::from_slice::<Value>(&self.metadata)
+                        .expect("root metadata fixture");
                     Ok(serde_json::to_vec(&json!({
                         "version": "3.25.0",
-                        "dist.integrity": INTEGRITY,
+                        "dist.integrity": root["dist.integrity"].clone(),
                         "dist.tarball":
                             "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz"
                     }))
@@ -4566,6 +5684,9 @@ mod tests {
             MAX_STAGE_FILE_BYTES + 1
         );
         assert!(validate_archive_listing(oversized.as_bytes()).is_err());
+        let published_lockfile =
+            b"drwxr-xr-x 0/0 0 2026-08-19 00:00 package\n-rw-r--r-- 0/0 1 2026-08-19 00:00 package/npm-shrinkwrap.json";
+        assert!(validate_registry_archive_listing(published_lockfile).is_err());
     }
 
     #[cfg(target_os = "linux")]

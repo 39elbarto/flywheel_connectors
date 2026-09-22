@@ -25,6 +25,7 @@ const PACKAGE_NAME: &str = "n8n-mcp";
 const STAGING_ROOT: &str = "/var/lib/fwc-n8n/update-staging/local-n8n-mcp";
 const NPM_HOME: &str = "/var/lib/fwc-n8n/npm-home";
 const NPM_CACHE: &str = "/var/cache/fwc-n8n/npm";
+const NPM_GLOBAL_CONFIG: &str = "/var/lib/fwc-n8n/npm-home/global.npmrc";
 const MAX_VERSION_BYTES: usize = 96;
 const COMMAND_TIMEOUT_MS: u64 = 180_000;
 const MAX_STAGE_ENTRIES: usize = 100_000;
@@ -35,7 +36,10 @@ const MAX_REGISTRY_CLOSURE_PACKAGES: usize = 10_000;
 const MAX_REGISTRY_CLOSURE_EDGES: usize = 50_000;
 const STAGE_TARBALL_RECEIPT: &str = ".registry-artifact.tgz";
 const STAGE_REGISTRY_CACHE: &str = ".registry-cache";
+const STAGE_PROJECT_PACKAGE_JSON: &str = "package.json";
 const VERIFICATION_RECEIPT: &str = ".verification-receipt.json";
+const LOCK_PROJECT_NAME: &str = "fwc-n8n-local-mcp-stage";
+const LOCK_PROJECT_VERSION: &str = "0.0.0";
 const TAR_PROGRAM: &str = "/usr/bin/tar";
 const MAX_ARCHIVE_LIST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_NPM_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -443,7 +447,6 @@ fn build_local_mcp_stage_plan(
         .ok_or(LocalMcpAdapterError::StageLayout)?;
     let stage_root = format!("{staging_root}/{version}/{stage_id}");
     let registry_cache_path = format!("{stage_root}/{STAGE_REGISTRY_CACHE}");
-    let package_spec = format!("{PACKAGE_NAME}@{version}");
     let package_tarball_url =
         format!("https://registry.npmjs.org/{PACKAGE_NAME}/-/{PACKAGE_NAME}-{version}.tgz");
     Ok(LocalMcpStagePlan {
@@ -463,7 +466,7 @@ fn build_local_mcp_stage_plan(
                 "--no-fund".to_string(),
                 "--bin-links=false".to_string(),
                 "--userconfig=/dev/null".to_string(),
-                "--globalconfig=/dev/null".to_string(),
+                "--globalconfig=/var/lib/fwc-n8n/npm-home/global.npmrc".to_string(),
                 "--cache".to_string(),
                 registry_cache_path.clone(),
                 "--registry=https://registry.npmjs.org".to_string(),
@@ -482,7 +485,7 @@ fn build_local_mcp_stage_plan(
         install: FixedCommandSpec {
             program: NPM_PROGRAM.to_string(),
             args: vec![
-                "install".to_string(),
+                "ci".to_string(),
                 "--prefix".to_string(),
                 stage_root.clone(),
                 "--ignore-scripts".to_string(),
@@ -494,10 +497,8 @@ fn build_local_mcp_stage_plan(
                 "--registry=https://registry.npmjs.org".to_string(),
                 "--bin-links=false".to_string(),
                 "--userconfig=/dev/null".to_string(),
-                "--globalconfig=/dev/null".to_string(),
+                "--globalconfig=/var/lib/fwc-n8n/npm-home/global.npmrc".to_string(),
                 "--package-lock=true".to_string(),
-                "--save-exact".to_string(),
-                package_spec,
             ],
             environment: fixed_npm_environment_for(&registry_cache_path),
             working_directory: staging_root.to_string(),
@@ -1241,6 +1242,24 @@ where
             return Err(cleanup(stage_io, error));
         }
     }
+    let Some(root_package) = closure.packages.iter().find(|package| {
+        package.package_name == PACKAGE_NAME && package.version == metadata.version
+    }) else {
+        return Err(cleanup(
+            stage_io,
+            LocalMcpAdapterError::StageMismatch("registry_dependency_closure_invalid"),
+        ));
+    };
+    let project_manifest = build_frozen_install_project_manifest(root_package);
+    let frozen_lock = match build_frozen_install_lock(root_package, &closure) {
+        Ok(lock) => lock,
+        Err(error) => return Err(cleanup(stage_io, error)),
+    };
+    if let Err(error) =
+        stage_io.materialize_frozen_install_inputs(&plan, &project_manifest, &frozen_lock)
+    {
+        return Err(cleanup(stage_io, error));
+    }
     if let Err(error) = stage_io.preflight_archive(&plan) {
         return Err(cleanup(stage_io, error));
     }
@@ -1353,8 +1372,17 @@ fn verify_local_mcp_stage_for_owner_with_closure(
     let stage_fd = open_stage_root(stage_root, expected_owner)?;
     let tree = hash_stage_tree(stage_root, &stage_fd, expected_owner)?;
 
+    let project_package_json_path = stage_root.join(STAGE_PROJECT_PACKAGE_JSON);
     let package_json_path = Path::new(&plan.package_json_path);
     let package_lock_path = Path::new(&plan.package_lock_path);
+    let project_package_json = read_bounded_stage_json(
+        &stage_fd,
+        &project_package_json_path,
+        stage_root,
+        expected_owner,
+        MAX_STAGE_JSON_BYTES,
+        tree.file_evidence(&project_package_json_path, stage_root)?,
+    )?;
     let package_json = read_bounded_stage_json(
         &stage_fd,
         package_json_path,
@@ -1371,6 +1399,7 @@ fn verify_local_mcp_stage_for_owner_with_closure(
         MAX_STAGE_JSON_BYTES,
         tree.file_evidence(package_lock_path, stage_root)?,
     )?;
+    validate_stage_project_manifest(&project_package_json, plan.exact_version())?;
     validate_installed_package_manifest(&package_json, metadata, plan.exact_version())?;
     validate_installed_package_lock_with_closure(
         &package_lock,
@@ -1529,6 +1558,40 @@ fn validate_installed_package_manifest(
     Ok(())
 }
 
+fn validate_stage_project_manifest(
+    value: &Value,
+    exact_version: &str,
+) -> Result<(), LocalMcpAdapterError> {
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::StageMismatch(
+            "project_manifest_invalid",
+        ))?;
+    let dependencies = parse_dependencies(object.get("dependencies")).map_err(|_| {
+        LocalMcpAdapterError::StageMismatch("project_manifest_dependencies_invalid")
+    })?;
+    let expected = BTreeMap::from([(PACKAGE_NAME.to_string(), exact_version.to_string())]);
+    if object.get("name").and_then(Value::as_str) != Some(LOCK_PROJECT_NAME)
+        || object.get("version").and_then(Value::as_str) != Some(LOCK_PROJECT_VERSION)
+        || object.get("private").and_then(Value::as_bool) != Some(true)
+        || dependencies != expected
+        || object
+            .get("devDependencies")
+            .is_some_and(|value| !value.is_null())
+        || object
+            .get("optionalDependencies")
+            .is_some_and(|value| !value.is_null())
+        || object
+            .get("peerDependencies")
+            .is_some_and(|value| !value.is_null())
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "project_manifest_mismatch",
+        ));
+    }
+    Ok(())
+}
+
 fn package_bin_relative_path(value: &Value) -> Result<PathBuf, LocalMcpAdapterError> {
     let bin_path = value
         .get("bin")
@@ -1584,6 +1647,9 @@ fn validate_installed_package_lock_with_closure(
         .ok_or(LocalMcpAdapterError::StageMismatch("lock_root_missing"))?;
     let root_dependencies = parse_lock_dependencies(root.get("dependencies"))?;
     if root_dependencies != BTreeMap::from([(PACKAGE_NAME.to_string(), exact_version.to_string())])
+        || root.get("name").and_then(Value::as_str) != Some(LOCK_PROJECT_NAME)
+        || root.get("version").and_then(Value::as_str) != Some(LOCK_PROJECT_VERSION)
+        || root.get("private").and_then(Value::as_bool) != Some(true)
         || root
             .get("devDependencies")
             .is_some_and(|dependencies| !dependencies.is_null())
@@ -1628,42 +1694,60 @@ fn validate_installed_package_lock_with_closure(
                     .ok_or(LocalMcpAdapterError::StageMismatch(
                         "lock_registry_closure_mismatch",
                     ))?;
-            if parse_lock_dependencies(record.get("dependencies"))? != selected.dependencies
-                || parse_lock_dependencies(record.get("optionalDependencies"))?
-                    != selected.optional_dependencies
-                || parse_lock_dependencies(record.get("peerDependencies"))?
-                    != selected.peer_dependencies
-            {
-                return Err(LocalMcpAdapterError::StageMismatch(
-                    "lock_manifest_dependency_mismatch",
-                ));
-            }
-            let peer_meta = parse_lock_peer_dependencies_meta(
-                record.get("peerDependenciesMeta"),
-                &selected.peer_dependencies,
-            )?;
-            if peer_meta != selected.peer_dependencies_meta {
-                return Err(LocalMcpAdapterError::StageMismatch(
-                    "lock_manifest_dependency_mismatch",
-                ));
-            }
-            let os = parse_lock_platform_constraints(record.get("os"))?;
-            let cpu = parse_lock_platform_constraints(record.get("cpu"))?;
-            if (!selected.os.is_empty() && os != selected.os)
-                || (!selected.cpu.is_empty() && cpu != selected.cpu)
-            {
-                return Err(LocalMcpAdapterError::StageMismatch(
-                    "lock_manifest_platform_mismatch",
-                ));
-            }
+            validate_lock_record_against_selected(record, selected)?;
         }
         lock_package_keys.insert(key.clone());
     }
     let installed_package_keys = installed_lock_package_keys(tree);
-    if installed_package_keys != lock_package_keys {
+    if !installed_package_keys.is_subset(&lock_package_keys) {
         return Err(LocalMcpAdapterError::StageMismatch(
             "lock_dependency_closure_mismatch",
         ));
+    }
+    let missing_package_keys = lock_package_keys
+        .difference(&installed_package_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if expected_closure.is_none() && !missing_package_keys.is_empty() {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_dependency_closure_mismatch",
+        ));
+    }
+    if let Some(closure) = expected_closure {
+        for package_key in missing_package_keys {
+            let record = packages
+                .get(&package_key)
+                .and_then(Value::as_object)
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "lock_dependency_missing",
+                ))?;
+            let package_name = validate_lock_package_key(&package_key)?;
+            let version = record
+                .get("version")
+                .and_then(Value::as_str)
+                .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+            let target = closure
+                .packages
+                .iter()
+                .find(|package| package.package_name == package_name && package.version == version)
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "lock_registry_closure_mismatch",
+                ))?;
+            let incoming = closure.edges.iter().filter(|edge| {
+                edge.dependency_name == target.package_name
+                    && edge.target_version == target.version
+                    && edge.target_integrity == target.integrity
+                    && edge.target_registry_tarball_url == target.registry_tarball_url
+            });
+            if incoming
+                .into_iter()
+                .any(|edge| !optional_edge_omission_is_allowed(edge, target))
+            {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_dependency_missing",
+                ));
+            }
+        }
     }
 
     let mut reachable = BTreeSet::new();
@@ -1779,6 +1863,41 @@ fn validate_installed_package_lock_with_closure(
     if reachable != lock_package_keys {
         return Err(LocalMcpAdapterError::StageMismatch(
             "lock_dependency_closure_mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lock_record_against_selected(
+    record: &serde_json::Map<String, Value>,
+    selected: &RegistryPackageMetadata,
+) -> Result<(), LocalMcpAdapterError> {
+    if record
+        .get("name")
+        .is_some_and(|name| name.as_str() != Some(selected.package_name.as_str()))
+        || parse_lock_dependencies(record.get("dependencies"))? != selected.dependencies
+        || parse_lock_dependencies(record.get("optionalDependencies"))?
+            != selected.optional_dependencies
+        || parse_lock_dependencies(record.get("peerDependencies"))? != selected.peer_dependencies
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_manifest_dependency_mismatch",
+        ));
+    }
+    let peer_meta = parse_lock_peer_dependencies_meta(
+        record.get("peerDependenciesMeta"),
+        &selected.peer_dependencies,
+    )?;
+    let os = parse_lock_platform_constraints(record.get("os"))?;
+    let cpu = parse_lock_platform_constraints(record.get("cpu"))?;
+    if peer_meta != selected.peer_dependencies_meta {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_manifest_dependency_mismatch",
+        ));
+    }
+    if os != selected.os || cpu != selected.cpu {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "lock_manifest_platform_mismatch",
         ));
     }
     Ok(())
@@ -2053,6 +2172,167 @@ fn closure_package_for_identity<'a>(
             && package.version == version
             && package.integrity == integrity
             && package.registry_tarball_url == resolved
+    })
+}
+
+fn package_parent_path(path: &str) -> Option<&str> {
+    path.rsplit_once("/node_modules/").map(|(parent, _)| parent)
+}
+
+fn registry_lock_peer_meta(package: &RegistryPackageMetadata) -> Value {
+    let meta = package
+        .peer_dependencies_meta
+        .iter()
+        .map(|(name, optional)| (name.clone(), json!({"optional": optional})))
+        .collect::<serde_json::Map<_, _>>();
+    Value::Object(meta)
+}
+
+fn registry_lock_package_record(package: &RegistryPackageMetadata) -> Value {
+    let mut record = serde_json::Map::from_iter([
+        (
+            "name".to_string(),
+            Value::String(package.package_name.clone()),
+        ),
+        (
+            "version".to_string(),
+            Value::String(package.version.clone()),
+        ),
+        (
+            "resolved".to_string(),
+            Value::String(package.registry_tarball_url.clone()),
+        ),
+        (
+            "integrity".to_string(),
+            Value::String(package.integrity.clone()),
+        ),
+        (
+            "dependencies".to_string(),
+            serde_json::to_value(&package.dependencies).unwrap_or_else(|_| json!({})),
+        ),
+        (
+            "optionalDependencies".to_string(),
+            serde_json::to_value(&package.optional_dependencies).unwrap_or_else(|_| json!({})),
+        ),
+        (
+            "peerDependencies".to_string(),
+            serde_json::to_value(&package.peer_dependencies).unwrap_or_else(|_| json!({})),
+        ),
+        (
+            "peerDependenciesMeta".to_string(),
+            registry_lock_peer_meta(package),
+        ),
+    ]);
+    if let Some(engine_requirement) = &package.engine_requirement {
+        record.insert("engines".to_string(), json!({"node": engine_requirement}));
+    }
+    if !package.os.is_empty() {
+        record.insert("os".to_string(), json!(package.os));
+    }
+    if !package.cpu.is_empty() {
+        record.insert("cpu".to_string(), json!(package.cpu));
+    }
+    Value::Object(record)
+}
+
+fn frozen_lock_dependency_path(
+    records: &serde_json::Map<String, Value>,
+    source_path: &str,
+    dependency_name: &str,
+    target: &RegistryPackageMetadata,
+) -> Result<String, LocalMcpAdapterError> {
+    let mut base = Some(source_path);
+    while let Some(path) = base {
+        let candidate = format!("{path}/node_modules/{dependency_name}");
+        if let Some(record) = records.get(&candidate) {
+            let version = record.get("version").and_then(Value::as_str).ok_or(
+                LocalMcpAdapterError::StageMismatch("registry_lock_placement_invalid"),
+            )?;
+            if version == target.version {
+                return Ok(candidate);
+            }
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_lock_placement_conflict",
+            ));
+        }
+        base = package_parent_path(path);
+    }
+    let candidate = format!("node_modules/{dependency_name}");
+    if let Some(record) = records.get(&candidate) {
+        let version = record.get("version").and_then(Value::as_str).ok_or(
+            LocalMcpAdapterError::StageMismatch("registry_lock_placement_invalid"),
+        )?;
+        if version == target.version {
+            return Ok(candidate);
+        }
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_lock_placement_conflict",
+        ));
+    }
+    Ok(candidate)
+}
+
+fn build_frozen_install_lock(
+    root: &RegistryPackageMetadata,
+    closure: &RegistryClosure,
+) -> Result<Value, LocalMcpAdapterError> {
+    let root_path = format!("node_modules/{PACKAGE_NAME}");
+    let mut records =
+        serde_json::Map::from_iter([(root_path.clone(), registry_lock_package_record(root))]);
+    let mut pending = vec![(root_path, root.clone())];
+    let mut expanded = BTreeSet::new();
+    while let Some((source_path, source)) = pending.pop() {
+        if !expanded.insert(source_path.clone()) {
+            continue;
+        }
+        for edge in closure.edges.iter().filter(|edge| {
+            edge.source_package_name == source.package_name && edge.source_version == source.version
+        }) {
+            let target = closure
+                .packages
+                .iter()
+                .find(|package| {
+                    package.package_name == edge.dependency_name
+                        && package.version == edge.target_version
+                        && package.integrity == edge.target_integrity
+                        && package.registry_tarball_url == edge.target_registry_tarball_url
+                })
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "registry_dependency_closure_invalid",
+                ))?;
+            let target_path =
+                frozen_lock_dependency_path(&records, &source_path, &edge.dependency_name, target)?;
+            if !records.contains_key(&target_path) {
+                records.insert(target_path.clone(), registry_lock_package_record(target));
+                pending.push((target_path, target.clone()));
+            }
+        }
+    }
+    let root_dependencies = BTreeMap::from([(PACKAGE_NAME.to_string(), root.version.clone())]);
+    let root_record = json!({
+        "name": LOCK_PROJECT_NAME,
+        "version": LOCK_PROJECT_VERSION,
+        "private": true,
+        "dependencies": root_dependencies,
+    });
+    let mut package_records = serde_json::Map::from_iter([(String::new(), root_record)]);
+    package_records.extend(records);
+    Ok(json!({
+        "name": LOCK_PROJECT_NAME,
+        "version": LOCK_PROJECT_VERSION,
+        "lockfileVersion": 3,
+        "requires": true,
+        "packages": package_records,
+    }))
+}
+
+fn build_frozen_install_project_manifest(root: &RegistryPackageMetadata) -> Value {
+    let dependencies = BTreeMap::from([(PACKAGE_NAME.to_string(), root.version.clone())]);
+    json!({
+        "name": LOCK_PROJECT_NAME,
+        "version": LOCK_PROJECT_VERSION,
+        "private": true,
+        "dependencies": dependencies,
     })
 }
 
@@ -2404,20 +2684,22 @@ fn npm_add_partial_comparators(
     let full = partial.major.is_some() && partial.minor.is_some() && partial.patch.is_some();
     match operator {
         "=" => {
-            output.push(NpmComparator {
-                operator: NpmComparatorOperator::GreaterOrEqual,
-                version: lower.clone(),
-            });
-            if let Some(upper) = upper {
+            if full {
                 output.push(NpmComparator {
-                    operator: NpmComparatorOperator::Less,
-                    version: upper,
-                });
-            } else if full {
-                output.push(NpmComparator {
-                    operator: NpmComparatorOperator::LessOrEqual,
+                    operator: NpmComparatorOperator::Equal,
                     version: lower,
                 });
+            } else {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::GreaterOrEqual,
+                    version: lower,
+                });
+                if let Some(upper) = upper {
+                    output.push(NpmComparator {
+                        operator: NpmComparatorOperator::Less,
+                        version: upper,
+                    });
+                }
             }
         }
         ">=" => output.push(NpmComparator {
@@ -2425,19 +2707,35 @@ fn npm_add_partial_comparators(
             version: lower,
         }),
         ">" => {
-            output.push(NpmComparator {
-                operator: NpmComparatorOperator::GreaterOrEqual,
-                version: upper?,
-            });
+            if full {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::Greater,
+                    version: lower,
+                });
+            } else {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::GreaterOrEqual,
+                    version: upper?,
+                });
+            }
         }
         "<" => output.push(NpmComparator {
             operator: NpmComparatorOperator::Less,
             version: lower,
         }),
-        "<=" => output.push(NpmComparator {
-            operator: NpmComparatorOperator::Less,
-            version: upper?,
-        }),
+        "<=" => {
+            if full {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::LessOrEqual,
+                    version: lower,
+                });
+            } else {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::Less,
+                    version: upper?,
+                });
+            }
+        }
         "~" => {
             output.push(NpmComparator {
                 operator: NpmComparatorOperator::GreaterOrEqual,
@@ -3064,7 +3362,7 @@ fn npm_view_plan(version: &str) -> FixedCommandSpec {
             "overrides".to_string(),
             "scripts".to_string(),
             "--userconfig=/dev/null".to_string(),
-            "--globalconfig=/dev/null".to_string(),
+            format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
             "--cache".to_string(),
             NPM_CACHE.to_string(),
             "--registry=https://registry.npmjs.org".to_string(),
@@ -3112,7 +3410,7 @@ fn npm_dependency_metadata_plan_for_cache(
             "overrides".to_string(),
             "scripts".to_string(),
             "--userconfig=/dev/null".to_string(),
-            "--globalconfig=/dev/null".to_string(),
+            format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
             "--cache".to_string(),
             cache.to_string(),
             "--registry=https://registry.npmjs.org".to_string(),
@@ -3163,7 +3461,7 @@ fn npm_registry_pack_plan(
             "--no-fund".to_string(),
             "--bin-links=false".to_string(),
             "--userconfig=/dev/null".to_string(),
-            "--globalconfig=/dev/null".to_string(),
+            format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
             "--cache".to_string(),
             plan.registry_cache_path().to_string(),
             "--registry=https://registry.npmjs.org".to_string(),
@@ -3206,7 +3504,7 @@ fn npm_registry_cache_add_plan(
             "--registry=https://registry.npmjs.org".to_string(),
             "--bin-links=false".to_string(),
             "--userconfig=/dev/null".to_string(),
-            "--globalconfig=/dev/null".to_string(),
+            format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
         ],
         environment: fixed_npm_environment_for(plan.registry_cache_path()),
         working_directory: STAGING_ROOT.to_string(),
@@ -3438,6 +3736,15 @@ pub trait LocalMcpStageIo {
                 "packed_artifact_missing",
             ))
         }
+    }
+
+    fn materialize_frozen_install_inputs(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+        _project_manifest: &Value,
+        _frozen_lock: &Value,
+    ) -> Result<(), LocalMcpAdapterError> {
+        Ok(())
     }
 
     fn preflight_archive(&mut self, _plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
@@ -4397,6 +4704,31 @@ fn read_registry_package_manifest(packed: &File) -> Result<Value, LocalMcpAdapte
 }
 
 #[cfg(target_os = "linux")]
+fn write_stage_json_file(
+    stage_fd: &File,
+    name: &str,
+    value: &Value,
+) -> Result<(), LocalMcpAdapterError> {
+    use rustix::fs::{Mode, OFlags, openat};
+
+    let encoded = serde_json::to_vec(value).map_err(|_| LocalMcpAdapterError::Encoding)?;
+    if encoded.len() > MAX_STAGE_JSON_BYTES as usize {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    let fd = openat(
+        stage_fd,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+    let mut file = File::from(fd);
+    file.write_all(&encoded)
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    file.sync_all().map_err(|_| LocalMcpAdapterError::StageIo)
+}
+
+#[cfg(target_os = "linux")]
 impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
     fn create_empty_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
         use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
@@ -4631,6 +4963,18 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         Ok(artifact)
     }
 
+    fn materialize_frozen_install_inputs(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+        project_manifest: &Value,
+        frozen_lock: &Value,
+    ) -> Result<(), LocalMcpAdapterError> {
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let stage_fd = open_stage_root(Path::new(plan.stage_root()), 0)?;
+        write_stage_json_file(&stage_fd, STAGE_PROJECT_PACKAGE_JSON, project_manifest)?;
+        write_stage_json_file(&stage_fd, "package-lock.json", frozen_lock)
+    }
+
     fn reverify_with_closure(
         &mut self,
         plan: &LocalMcpStagePlan,
@@ -4797,6 +5141,22 @@ mod tests {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
                 .expect("private stage directory");
         }
+        let project_manifest = json!({
+            "name": LOCK_PROJECT_NAME,
+            "version": LOCK_PROJECT_VERSION,
+            "private": true,
+            "dependencies": {"n8n-mcp": "2.69.2"},
+        });
+        fs::write(
+            Path::new(plan.stage_root()).join(STAGE_PROJECT_PACKAGE_JSON),
+            serde_json::to_vec(&project_manifest).expect("project package json"),
+        )
+        .expect("write project package json");
+        fs::set_permissions(
+            Path::new(plan.stage_root()).join(STAGE_PROJECT_PACKAGE_JSON),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("private project package json");
         let package_json = json!({
             "name": PACKAGE_NAME,
             "version": "2.69.2",
@@ -4825,7 +5185,12 @@ mod tests {
         let package_lock = json!({
             "lockfileVersion": 3,
             "packages": {
-                "": {"dependencies": {"n8n-mcp": "2.69.2"}},
+                "": {
+                    "name": LOCK_PROJECT_NAME,
+                    "version": LOCK_PROJECT_VERSION,
+                    "private": true,
+                    "dependencies": {"n8n-mcp": "2.69.2"}
+                },
                 "node_modules/n8n-mcp": {
                     "version": "2.69.2",
                     "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
@@ -4891,7 +5256,7 @@ mod tests {
             fixed_npm_environment_for(plan.registry_cache_path())
         );
         assert!(plan.install.env_clear);
-        assert_eq!(plan.install.args[0], "install");
+        assert_eq!(plan.install.args[0], "ci");
         assert_eq!(plan.install.args[1], "--prefix");
         assert_eq!(plan.install.args[2], plan.stage_root);
         assert_eq!(
@@ -4906,10 +5271,8 @@ mod tests {
                 "--registry=https://registry.npmjs.org",
                 "--bin-links=false",
                 "--userconfig=/dev/null",
-                "--globalconfig=/dev/null",
+                "--globalconfig=/var/lib/fwc-n8n/npm-home/global.npmrc",
                 "--package-lock=true",
-                "--save-exact",
-                "n8n-mcp@2.69.2",
             ]
         );
         assert_eq!(plan.pack.program, NPM_PROGRAM);
@@ -4929,7 +5292,7 @@ mod tests {
                 "--no-fund",
                 "--bin-links=false",
                 "--userconfig=/dev/null",
-                "--globalconfig=/dev/null",
+                "--globalconfig=/var/lib/fwc-n8n/npm-home/global.npmrc",
                 "--cache",
                 plan.registry_cache_path(),
                 "--registry=https://registry.npmjs.org",
@@ -4945,6 +5308,222 @@ mod tests {
             !plan
                 .verification_receipt_path()
                 .starts_with(&format!("{}/", plan.stage_root()))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn actual_empty_cache_offline_ci_uses_only_verified_artifact_and_rejects_negatives() {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+        use std::os::unix::fs::PermissionsExt;
+
+        fn create_tarball(root: &Path, label: &str, body: &str) -> (PathBuf, String) {
+            let source = root.join(format!("source-{label}/package"));
+            fs::create_dir_all(&source).expect("package source");
+            fs::write(
+                source.join("package.json"),
+                br#"{"name":"n8n-mcp","version":"0.0.1","bin":{"n8n-mcp":"index.js"}}"#,
+            )
+            .expect("package manifest");
+            fs::write(source.join("index.js"), body).expect("package entrypoint");
+            fs::set_permissions(source.join("index.js"), fs::Permissions::from_mode(0o700))
+                .expect("entrypoint permissions");
+            let tarball = root.join(format!("n8n-mcp-0.0.1-{label}.tgz"));
+            let status = Command::new(TAR_PROGRAM)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .args([
+                    "--create",
+                    "--gzip",
+                    "--file",
+                    tarball.to_str().expect("tarball path"),
+                    "--directory",
+                    source
+                        .parent()
+                        .expect("package parent")
+                        .to_str()
+                        .expect("source path"),
+                    "package",
+                ])
+                .status()
+                .expect("tar executable");
+            assert!(status.success(), "tarball creation failed: {status}");
+            let bytes = fs::read(&tarball).expect("tarball bytes");
+            let integrity = format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode(Sha512::digest(bytes))
+            );
+            (tarball, integrity)
+        }
+
+        fn write_project(stage: &Path, integrity: &str) {
+            fs::create_dir_all(stage.join("node_modules")).expect("stage node_modules");
+            fs::write(
+                stage.join("package.json"),
+                br#"{"name":"fwc-n8n-local-mcp-stage","version":"0.0.0","private":true,"dependencies":{"n8n-mcp":"0.0.1"}}"#,
+            )
+            .expect("stage package manifest");
+            let lock = json!({
+                "name": LOCK_PROJECT_NAME,
+                "version": LOCK_PROJECT_VERSION,
+                "lockfileVersion": 3,
+                "requires": true,
+                "packages": {
+                    "": {
+                        "name": LOCK_PROJECT_NAME,
+                        "version": LOCK_PROJECT_VERSION,
+                        "private": true,
+                        "dependencies": {"n8n-mcp": "0.0.1"}
+                    },
+                    "node_modules/n8n-mcp": {
+                        "name": "n8n-mcp",
+                        "version": "0.0.1",
+                        "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-0.0.1.tgz",
+                        "integrity": integrity
+                    }
+                }
+            });
+            fs::write(
+                stage.join("package-lock.json"),
+                serde_json::to_vec(&lock).expect("stage lock"),
+            )
+            .expect("stage package lock");
+        }
+
+        fn run_npm(stage: &Path, cache: &Path, home: &Path, args: &[String]) -> bool {
+            Command::new(NPM_PROGRAM)
+                .env_clear()
+                .env("HOME", home)
+                .env("NO_UPDATE_NOTIFIER", "1")
+                .env("PATH", "/usr/bin:/bin")
+                .env("npm_config_cache", cache)
+                .args(args)
+                .current_dir(stage)
+                .status()
+                .expect("npm executable")
+                .success()
+        }
+
+        fn common_install_args(stage: &Path, cache: &Path) -> Vec<String> {
+            vec![
+                "ci".to_string(),
+                "--prefix".to_string(),
+                stage.to_string_lossy().into_owned(),
+                "--ignore-scripts".to_string(),
+                "--no-audit".to_string(),
+                "--no-fund".to_string(),
+                "--cache".to_string(),
+                cache.to_string_lossy().into_owned(),
+                "--offline".to_string(),
+                "--registry=https://registry.npmjs.org".to_string(),
+                "--bin-links=false".to_string(),
+                "--userconfig=/dev/null".to_string(),
+                format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
+                "--package-lock=true".to_string(),
+            ]
+        }
+
+        let root = tempfile::tempdir().expect("offline npm fixture root");
+        let (artifact, integrity) =
+            create_tarball(root.path(), "verified", "module.exports = 1;\n");
+        let (tampered_artifact, _tampered_integrity) =
+            create_tarball(root.path(), "tampered", "module.exports = 2;\n");
+        let success_stage = root.path().join("success-stage");
+        let success_cache = root.path().join("success-cache");
+        let success_home = root.path().join("success-home");
+        fs::create_dir_all(&success_cache).expect("empty success cache");
+        fs::create_dir_all(&success_home).expect("success npm home");
+        write_project(&success_stage, &integrity);
+        let cache_args = vec![
+            "cache".to_string(),
+            "add".to_string(),
+            artifact.to_string_lossy().into_owned(),
+            "--cache".to_string(),
+            success_cache.to_string_lossy().into_owned(),
+            "--offline".to_string(),
+            "--ignore-scripts".to_string(),
+            "--no-audit".to_string(),
+            "--no-fund".to_string(),
+            "--registry=https://registry.npmjs.org".to_string(),
+            "--userconfig=/dev/null".to_string(),
+            format!("--globalconfig={NPM_GLOBAL_CONFIG}"),
+        ];
+        assert!(run_npm(
+            &success_stage,
+            &success_cache,
+            &success_home,
+            &cache_args
+        ));
+        assert!(run_npm(
+            &success_stage,
+            &success_cache,
+            &success_home,
+            &common_install_args(&success_stage, &success_cache)
+        ));
+        assert!(
+            success_stage
+                .join("node_modules/n8n-mcp/package.json")
+                .is_file()
+        );
+
+        let missing_stage = root.path().join("missing-stage");
+        let missing_cache = root.path().join("missing-cache");
+        let missing_home = root.path().join("missing-home");
+        fs::create_dir_all(&missing_cache).expect("empty missing cache");
+        fs::create_dir_all(&missing_home).expect("missing npm home");
+        write_project(&missing_stage, &integrity);
+        assert!(!run_npm(
+            &missing_stage,
+            &missing_cache,
+            &missing_home,
+            &common_install_args(&missing_stage, &missing_cache)
+        ));
+
+        let tampered_stage = root.path().join("tampered-stage");
+        let tampered_cache = root.path().join("tampered-cache");
+        let tampered_home = root.path().join("tampered-home");
+        fs::create_dir_all(&tampered_cache).expect("empty tampered cache");
+        fs::create_dir_all(&tampered_home).expect("tampered npm home");
+        write_project(&tampered_stage, &integrity);
+        let mut tampered_cache_args = cache_args;
+        tampered_cache_args[2] = tampered_artifact.to_string_lossy().into_owned();
+        tampered_cache_args[4] = tampered_cache.to_string_lossy().into_owned();
+        assert!(run_npm(
+            &tampered_stage,
+            &tampered_cache,
+            &tampered_home,
+            &tampered_cache_args
+        ));
+        assert!(!run_npm(
+            &tampered_stage,
+            &tampered_cache,
+            &tampered_home,
+            &common_install_args(&tampered_stage, &tampered_cache)
+        ));
+
+        let config_stage = root.path().join("config-stage");
+        fs::create_dir_all(&config_stage).expect("config stage");
+        fs::write(
+            config_stage.join(".npmrc"),
+            b"registry=https://example.invalid\n",
+        )
+        .expect("project npmrc");
+        let command = FixedCommandSpec {
+            program: NPM_PROGRAM.to_string(),
+            args: vec![
+                "ci".to_string(),
+                "--prefix".to_string(),
+                config_stage.to_string_lossy().into_owned(),
+            ],
+            environment: BTreeMap::new(),
+            working_directory: STAGING_ROOT.to_string(),
+            timeout_ms: COMMAND_TIMEOUT_MS,
+            env_clear: true,
+        };
+        assert_eq!(
+            reject_project_npmrc(&command),
+            Err(LocalMcpAdapterError::StageLayout)
         );
     }
 
@@ -5124,6 +5703,34 @@ mod tests {
     }
 
     #[test]
+    fn npm_semver_comparators_preserve_full_version_bounds() {
+        for (spec, version, expected) in [
+            (">1.2.3", "1.2.3", false),
+            (">1.2.3", "1.2.4", true),
+            ("<=1.2.3", "1.2.3", true),
+            ("<=1.2.3", "1.2.4", false),
+            ("<1.2.3", "1.2.2", true),
+            ("<1.2.3", "1.2.3", false),
+            (">=1.2.3", "1.2.3", true),
+            (">=1.2.3", "1.2.2", false),
+            ("<=1.2", "1.2.99", true),
+            ("<=1.2", "1.3.0", false),
+            (">1.2", "1.3.0", true),
+            (">1.2", "1.2.99", false),
+        ] {
+            assert!(
+                validate_registry_dependency_spec(spec).is_ok(),
+                "range syntax rejected: {spec}"
+            );
+            assert_eq!(
+                dependency_spec_allows_version(spec, version),
+                expected,
+                "unexpected npm range result for {spec} / {version}"
+            );
+        }
+    }
+
+    #[test]
     fn optional_peer_metadata_is_normalized_and_platform_constraints_are_bound() {
         let mut raw = json!({
             "version": "3.25.0",
@@ -5158,6 +5765,98 @@ mod tests {
 
         raw["peerDependenciesMeta"]["peer-package"] = json!({"optional": "yes"});
         assert!(registry_package_metadata("optional-package", &raw).is_err());
+    }
+
+    #[test]
+    fn frozen_lock_platform_constraints_require_strict_two_way_equality() {
+        let selected = registry_package_metadata(
+            "platform-package",
+            &json!({
+                "version": "1.0.0",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/platform-package/-/platform-package-1.0.0.tgz",
+                "dependencies": {},
+                "os": ["linux"],
+                "cpu": ["x64"]
+            }),
+        )
+        .expect("selected platform metadata");
+        let mut missing_constraints = registry_lock_package_record(&selected)
+            .as_object()
+            .expect("lock record")
+            .clone();
+        missing_constraints.remove("os");
+        missing_constraints.remove("cpu");
+        assert!(matches!(
+            validate_lock_record_against_selected(&missing_constraints, &selected),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "lock_manifest_platform_mismatch"
+            ))
+        ));
+
+        let unconstrained = registry_package_metadata(
+            "platform-package",
+            &json!({
+                "version": "1.0.0",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/platform-package/-/platform-package-1.0.0.tgz",
+                "dependencies": {}
+            }),
+        )
+        .expect("unconstrained metadata");
+        let constrained_record = registry_lock_package_record(&selected);
+        assert!(matches!(
+            validate_lock_record_against_selected(
+                constrained_record.as_object().expect("lock record"),
+                &unconstrained,
+            ),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "lock_manifest_platform_mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn frozen_lock_is_materialized_from_exact_registry_graph_and_placement() {
+        let root = registry_package_metadata(PACKAGE_NAME, &metadata_value("2.69.2"))
+            .expect("root metadata");
+        let zod = registry_package_metadata(
+            "zod",
+            &json!({
+                "version": "3.25.0",
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                "dependencies": {}
+            }),
+        )
+        .expect("zod metadata");
+        let edge = RegistryClosureEdge {
+            source_package_name: PACKAGE_NAME.to_string(),
+            source_version: root.version.clone(),
+            dependency_name: "zod".to_string(),
+            dependency_spec: "^3.25.0".to_string(),
+            dependency_kind: "dependencies".to_string(),
+            optional: false,
+            target_version: zod.version.clone(),
+            target_integrity: zod.integrity.clone(),
+            target_registry_tarball_url: zod.registry_tarball_url.clone(),
+        };
+        let closure = RegistryClosure {
+            packages: vec![root.clone(), zod],
+            edges: vec![edge],
+            digest: "blake3-256:test".to_string(),
+        };
+        let lock = build_frozen_install_lock(&root, &closure).expect("frozen lock");
+        let packages = lock["packages"].as_object().expect("lock packages");
+        assert!(packages.contains_key(""));
+        assert!(packages.contains_key("node_modules/n8n-mcp"));
+        assert!(packages.contains_key("node_modules/zod"));
+        assert_eq!(
+            packages["node_modules/zod"]["resolved"],
+            "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz"
+        );
+        assert_eq!(packages["node_modules/zod"]["integrity"], INTEGRITY);
+        assert_eq!(packages[""]["dependencies"][PACKAGE_NAME], "2.69.2");
     }
 
     #[cfg(target_os = "linux")]
@@ -5209,7 +5908,7 @@ mod tests {
         assert_eq!(command_runner.calls[3][0], "cache");
         assert_eq!(command_runner.calls[4][0], "pack");
         assert_eq!(command_runner.calls[5][0], "cache");
-        assert_eq!(command_runner.calls[6][0], "install");
+        assert_eq!(command_runner.calls[6][0], "ci");
         assert!(
             command_runner.calls[..6]
                 .iter()
@@ -5484,7 +6183,12 @@ mod tests {
         let mismatched_lock = json!({
             "lockfileVersion": 3,
             "packages": {
-                "": {"dependencies": {"n8n-mcp": "2.69.2"}},
+                "": {
+                    "name": LOCK_PROJECT_NAME,
+                    "version": LOCK_PROJECT_VERSION,
+                    "private": true,
+                    "dependencies": {"n8n-mcp": "2.69.2"}
+                },
                 "node_modules/n8n-mcp": {
                     "version": "2.69.2",
                     "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
@@ -5613,7 +6317,12 @@ mod tests {
         let lock = json!({
             "lockfileVersion": 3,
             "packages": {
-                "": {"dependencies": {"n8n-mcp": "2.69.2"}},
+                "": {
+                    "name": LOCK_PROJECT_NAME,
+                    "version": LOCK_PROJECT_VERSION,
+                    "private": true,
+                    "dependencies": {"n8n-mcp": "2.69.2"}
+                },
                 "node_modules/n8n-mcp": {
                     "version": "2.69.2",
                     "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",

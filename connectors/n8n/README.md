@@ -826,13 +826,15 @@ requested exact local `n8n-mcp` version:
   `.registry-cache` owned by that UUID-v4 stage, materializes every selected
   exact tarball from its frozen validated registry URL there, verifies each
   SHA-512 SRI, rejects package lockfiles, bundles, aliases, and manifest
-  disagreement before install, seeds only that cache, and runs npm install
-  with `--offline --cache <stage>/.registry-cache`. Optional dependencies may
-  be absent only when the selected package declares an incompatible `os`/`cpu`
-  constraint; optional peers may be absent by npm semantics. Required and
-  non-optional peer edges must be present, and every installed lock edge must
-  match the frozen selected manifest map and exact closure target rather than
-  merely satisfying a mutable range.
+  disagreement before install, writes a root project manifest plus an immutable
+  npm-compatible `package-lock.json` from the frozen closure and deterministic
+  package placement, seeds only that cache, and runs `npm ci --offline
+  --cache <stage>/.registry-cache` without a package spec. Optional dependencies
+  may be absent only when the selected package declares an incompatible
+  `os`/`cpu` constraint; optional peers may be absent by npm semantics. Required
+  and non-optional peer edges must be present, and every installed lock edge
+  must match the frozen selected manifest map and exact closure target rather
+  than merely satisfying a mutable range.
 - Before success, the command verifies registry metadata and every selected
   artifact SRI, performs a bounded archive-listing preflight, runs the strict
   package manifest, canonical registry-only lock closure (including exact

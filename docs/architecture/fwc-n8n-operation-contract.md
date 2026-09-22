@@ -2049,13 +2049,15 @@ dependencies, and overrides on direct, optional, peer, and transitive edges
 before any package-content fetch. It creates an initially empty cache under
 the UUID-v4 stage, runs one fixed exact `npm pack` per selected registry
 artifact, verifies every tarball's SHA-512 SRI, rejects published package
-lockfiles, bundles, aliases, and manifest disagreement before install, seeds
-only that stage cache, and invokes npm install with `--offline` and that cache
-path. Pack consumes each frozen validated registry tarball URL; install can
-consume only the stage-owned cache and placement, never a fresh registry
-resolution. Environment clearing, the fixed-prefix project `.npmrc` guard, and
-`/dev/null` user/global npmrc arguments prevent ambient npm configuration or
-cache state from changing the closure. Optional dependencies may be omitted
+lockfiles, bundles, aliases, and manifest disagreement before install, writes a
+root project manifest plus an immutable npm-compatible `package-lock.json`
+from the frozen closure with deterministic package placement, seeds only that
+stage cache, and invokes `npm ci --offline` without a package spec. Pack
+consumes each frozen validated registry tarball URL; install can consume only
+the stage-owned cache and placement, never a fresh registry resolution.
+Environment clearing, the fixed-prefix project `.npmrc` guard, and distinct
+fixed empty user/global npmrc paths prevent ambient npm configuration or cache
+state from changing the closure. Optional dependencies may be omitted
 only for a selected package whose `os`/`cpu` constraints exclude the current
 platform; optional peers may be absent by npm semantics. Required and
 non-optional peer edges must be present, and every installed lock dependency

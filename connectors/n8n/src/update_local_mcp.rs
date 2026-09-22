@@ -31,6 +31,7 @@ const MAX_STAGE_ENTRIES: usize = 100_000;
 const MAX_STAGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_STAGE_FILE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_STAGE_JSON_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_REGISTRY_CLOSURE_PACKAGES: usize = 10_000;
 const STAGE_TARBALL_RECEIPT: &str = ".registry-artifact.tgz";
 const VERIFICATION_RECEIPT: &str = ".verification-receipt.json";
 const TAR_PROGRAM: &str = "/usr/bin/tar";
@@ -317,6 +318,7 @@ fn build_local_mcp_stage_plan(
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
+                "--registry=https://registry.npmjs.org".to_string(),
                 "--pack-destination".to_string(),
                 stage_root.clone(),
             ],
@@ -334,6 +336,8 @@ fn build_local_mcp_stage_plan(
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
+                "--offline".to_string(),
+                "--registry=https://registry.npmjs.org".to_string(),
                 "--bin-links=false".to_string(),
                 "--package-lock=true".to_string(),
                 "--save-exact".to_string(),
@@ -409,6 +413,115 @@ pub fn parse_registry_metadata(
         lifecycle_scripts_digest,
         metadata_digest,
     })
+}
+
+fn registry_metadata_string<'a>(value: &'a Value, dotted_key: &str) -> Option<&'a str> {
+    let pointer = match dotted_key {
+        "dist.integrity" => "/dist/integrity",
+        "dist.tarball" => "/dist/tarball",
+        _ => return None,
+    };
+    value
+        .get(dotted_key)
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer(pointer).and_then(Value::as_str))
+}
+
+fn registry_dependency_edges(value: &Value) -> Result<Vec<(String, String)>, LocalMcpAdapterError> {
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ))?;
+    let mut edges = Vec::new();
+    for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        let dependencies = object.get(field).filter(|value| !value.is_null());
+        let dependencies = parse_dependencies(dependencies).map_err(|_| {
+            LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+        })?;
+        edges.extend(dependencies);
+    }
+    if let Some(meta) = object
+        .get("peerDependenciesMeta")
+        .filter(|value| !value.is_null())
+    {
+        let meta = meta
+            .as_object()
+            .ok_or(LocalMcpAdapterError::InvalidMetadata(
+                "registry_dependency_closure_invalid",
+            ))?;
+        for (name, entry) in meta {
+            validate_package_name(name).map_err(|_| {
+                LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+            })?;
+            if !entry.is_object() {
+                return Err(LocalMcpAdapterError::InvalidMetadata(
+                    "registry_dependency_closure_invalid",
+                ));
+            }
+        }
+    }
+    for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
+        if object.get(field).is_some_and(|value| !value.is_null()) {
+            return Err(LocalMcpAdapterError::InvalidMetadata(
+                "registry_dependency_closure_invalid",
+            ));
+        }
+    }
+    Ok(edges)
+}
+
+fn validate_registry_dependency_metadata(
+    package_name: &str,
+    value: &Value,
+) -> Result<Vec<(String, String)>, LocalMcpAdapterError> {
+    let version = value.get("version").and_then(Value::as_str).ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    validate_exact_npm_version(version).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let integrity = registry_metadata_string(value, "dist.integrity").ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    if !valid_integrity(integrity) {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ));
+    }
+    let tarball = registry_metadata_string(value, "dist.tarball").ok_or(
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid"),
+    )?;
+    validate_registry_package_tarball_url(tarball, package_name, version).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    registry_dependency_edges(value)
+}
+
+fn preflight_registry_dependency_closure<R: LocalMcpCommandRunner>(
+    command_runner: &mut R,
+    root_metadata: &Value,
+) -> Result<(), LocalMcpAdapterError> {
+    let mut pending = registry_dependency_edges(root_metadata)?;
+    let mut inspected = BTreeSet::new();
+    while let Some((package_name, spec)) = pending.pop() {
+        if !inspected.insert((package_name.clone(), spec.clone())) {
+            continue;
+        }
+        if inspected.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        let plan = npm_dependency_metadata_plan(&package_name, &spec)?;
+        let output = command_runner.run(&plan)?;
+        let value: Value = serde_json::from_slice(&output).map_err(|_| {
+            LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+        })?;
+        pending.extend(validate_registry_dependency_metadata(
+            &package_name,
+            &value,
+        )?);
+    }
+    Ok(())
 }
 
 pub fn snapshot_from_registry_metadata(
@@ -586,6 +699,10 @@ where
         .map_err(|_| LocalMcpAdapterError::InvalidMetadata("metadata_json_invalid"))?;
     let metadata = parse_registry_metadata(&value)?;
     validate_registry_metadata(&metadata)?;
+    // npm's resolver sees optional, peer, and transitive package metadata only
+    // after the root package is resolved. Walk that closure through `npm view`
+    // first, so a non-registry source fails before pack/install can fetch it.
+    preflight_registry_dependency_closure(command_runner, &value)?;
     stage_io.create_empty_stage(&plan)?;
     let cleanup =
         |stage_io: &mut I, error: LocalMcpAdapterError| match stage_io.discard_stage(&plan) {
@@ -1887,7 +2004,14 @@ fn npm_view_plan(version: &str) -> FixedCommandSpec {
             "dist.tarball".to_string(),
             "engines".to_string(),
             "dependencies".to_string(),
+            "optionalDependencies".to_string(),
+            "peerDependencies".to_string(),
+            "peerDependenciesMeta".to_string(),
+            "bundleDependencies".to_string(),
+            "bundledDependencies".to_string(),
+            "overrides".to_string(),
             "scripts".to_string(),
+            "--registry=https://registry.npmjs.org".to_string(),
             "--json".to_string(),
         ],
         environment: fixed_npm_environment(),
@@ -1895,6 +2019,38 @@ fn npm_view_plan(version: &str) -> FixedCommandSpec {
         timeout_ms: COMMAND_TIMEOUT_MS,
         env_clear: true,
     }
+}
+
+fn npm_dependency_metadata_plan(
+    package_name: &str,
+    spec: &str,
+) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
+    validate_package_name(package_name)
+        .map_err(|_| LocalMcpAdapterError::InvalidMetadata("dependency_name_invalid"))?;
+    validate_registry_dependency_spec(spec)?;
+    Ok(FixedCommandSpec {
+        program: NPM_PROGRAM.to_string(),
+        args: vec![
+            "view".to_string(),
+            format!("{package_name}@{spec}"),
+            "version".to_string(),
+            "dist.integrity".to_string(),
+            "dist.tarball".to_string(),
+            "dependencies".to_string(),
+            "optionalDependencies".to_string(),
+            "peerDependencies".to_string(),
+            "peerDependenciesMeta".to_string(),
+            "bundleDependencies".to_string(),
+            "bundledDependencies".to_string(),
+            "overrides".to_string(),
+            "--registry=https://registry.npmjs.org".to_string(),
+            "--json".to_string(),
+        ],
+        environment: fixed_npm_environment(),
+        working_directory: STAGING_ROOT.to_string(),
+        timeout_ms: COMMAND_TIMEOUT_MS,
+        env_clear: true,
+    })
 }
 
 fn fixed_npm_environment() -> BTreeMap<String, String> {
@@ -3229,6 +3385,8 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
+                "--offline",
+                "--registry=https://registry.npmjs.org",
                 "--bin-links=false",
                 "--package-lock=true",
                 "--save-exact",
@@ -3247,6 +3405,7 @@ mod tests {
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
+                "--registry=https://registry.npmjs.org",
                 "--pack-destination",
                 plan.stage_root.as_str(),
             ]
@@ -3366,10 +3525,11 @@ mod tests {
         assert_eq!(receipt.registry_integrity, integrity);
         assert_eq!(receipt.version, "2.69.2");
         assert!(receipt.receipt_path.starts_with(STAGING_ROOT));
-        assert_eq!(command_runner.calls.len(), 3);
+        assert_eq!(command_runner.calls.len(), 4);
         assert_eq!(command_runner.calls[0][0], "view");
-        assert_eq!(command_runner.calls[1][0], "pack");
-        assert_eq!(command_runner.calls[2][0], "install");
+        assert_eq!(command_runner.calls[1][0], "view");
+        assert_eq!(command_runner.calls[2][0], "pack");
+        assert_eq!(command_runner.calls[3][0], "install");
         let encoded = serde_json::to_string(&receipt).expect("receipt encoding");
         assert!(!encoded.contains("UNTRUSTED-COMMAND-CANARY"));
         assert!(!encoded.contains("stderr"));
@@ -3439,6 +3599,96 @@ mod tests {
             assert!(
                 parse_registry_metadata(&raw).is_err(),
                 "non-registry dependency spec accepted: {spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_non_registry_dependency_specs_are_rejected_before_pack_or_install() {
+        fn nested_metadata(
+            package_name: &str,
+            version: &str,
+            field: &str,
+            dependency_name: &str,
+            spec: &str,
+        ) -> Vec<u8> {
+            let mut value = json!({
+                "version": version,
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": format!(
+                    "https://registry.npmjs.org/{package_name}/-/{package_name}-{version}.tgz"
+                ),
+                "dependencies": {}
+            });
+            value[field][dependency_name] = Value::String(spec.to_string());
+            serde_json::to_vec(&value).expect("nested metadata")
+        }
+
+        let cases = [
+            (
+                "optional-file",
+                vec![nested_metadata(
+                    "zod",
+                    "3.25.0",
+                    "optionalDependencies",
+                    "evil",
+                    "file:../outside",
+                )],
+            ),
+            (
+                "peer-url",
+                vec![nested_metadata(
+                    "zod",
+                    "3.25.0",
+                    "peerDependencies",
+                    "evil",
+                    "https://example.invalid/dependency.tgz",
+                )],
+            ),
+            (
+                "transitive-git",
+                vec![
+                    nested_metadata("zod", "3.25.0", "dependencies", "transitive", "1.0.0"),
+                    nested_metadata(
+                        "transitive",
+                        "1.0.0",
+                        "dependencies",
+                        "evil",
+                        "git+https://github.com/example/evil.git",
+                    ),
+                ],
+            ),
+            (
+                "transitive-ssh",
+                vec![
+                    nested_metadata("zod", "3.25.0", "dependencies", "transitive", "1.0.0"),
+                    nested_metadata(
+                        "transitive",
+                        "1.0.0",
+                        "dependencies",
+                        "evil",
+                        "ssh://git@example.invalid/evil.git",
+                    ),
+                ],
+            ),
+        ];
+
+        for (label, nested) in cases {
+            let mut command_runner = ClosureCommandRunner {
+                root: serde_json::to_vec(&metadata_value("2.69.2")).expect("root metadata"),
+                nested,
+                calls: Vec::new(),
+            };
+            let mut stage_io = MockStageIo::default();
+            let result = stage_exact_local_mcp_with("2.69.2", &mut command_runner, &mut stage_io);
+            assert!(result.is_err(), "nested source accepted: {label}");
+            assert!(stage_io.calls.is_empty(), "stage created for {label}");
+            assert!(
+                command_runner
+                    .calls
+                    .iter()
+                    .all(|args| args.first().map(String::as_str) == Some("view")),
+                "pack/install reached for {label}"
             );
         }
     }
@@ -3742,9 +3992,53 @@ mod tests {
         fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
             self.calls.push(command.args.clone());
             if command.args.first().map(String::as_str) == Some("view") {
-                Ok(self.metadata.clone())
+                if command
+                    .args
+                    .get(1)
+                    .is_some_and(|spec| spec.starts_with("n8n-mcp@"))
+                {
+                    Ok(self.metadata.clone())
+                } else {
+                    Ok(serde_json::to_vec(&json!({
+                        "version": "3.25.0",
+                        "dist.integrity": INTEGRITY,
+                        "dist.tarball":
+                            "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz"
+                    }))
+                    .expect("nested metadata"))
+                }
             } else {
                 Ok(Vec::new())
+            }
+        }
+    }
+
+    struct ClosureCommandRunner {
+        root: Vec<u8>,
+        nested: Vec<Vec<u8>>,
+        calls: Vec<Vec<String>>,
+    }
+
+    impl LocalMcpCommandRunner for ClosureCommandRunner {
+        fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
+            self.calls.push(command.args.clone());
+            if command.args.first().map(String::as_str) != Some("view") {
+                return Err(LocalMcpAdapterError::StageMismatch("unexpected_npm_fetch"));
+            }
+            let view_count = self
+                .calls
+                .iter()
+                .filter(|args| args.first().map(String::as_str) == Some("view"))
+                .count();
+            if view_count == 1 {
+                Ok(self.root.clone())
+            } else {
+                self.nested
+                    .get(view_count - 2)
+                    .cloned()
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "missing_nested_metadata",
+                    ))
             }
         }
     }

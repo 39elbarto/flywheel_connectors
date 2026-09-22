@@ -607,8 +607,25 @@ disconnect, HTTP error, malformed/advisory response, provider identity or
 normalization failure) therefore reaches exactly one GET; readback drift or
 failure is terminal `unknown_outcome` with no retry.
 
-Activation,
-restore_workflow_version, versions, execution, credential mutation, and permanent
+The public `n8n.workflows.activate` operation is now source-implemented as a
+typed REST contract for EEC and Hetzner only. `active=true` maps only to one
+`POST /api/v1/workflows/{id}/publish` (with the optional exact `versionId` in
+the input), while `active=false` maps only to one no-body
+`POST /api/v1/workflows/{id}/unpublish`; each transition is exactly baseline
+GET, one POST, and one independent GET, with no automatic retry. The host binds
+the exact original input and approval, fixes credential purpose to REST API,
+enforces the 1 MiB HTTPS response policy, and derives a trusted timeout that
+reserves the readback tail. Publish succeeds only when readback proves
+`active=true`, matching `activeVersionId`, matching `published.versionId` and
+published graph digest, while preserving workflow identity, draft graph, and
+archive state; unpublish proves `active=false`, `activeVersionId=null`,
+`published=null`, and the same identity/draft/archive invariants. A newly
+created credential-free Webhook draft is the only acceptance target; the
+webhook is never invoked, uncertainty stops the run, and no automatic cleanup
+is performed. Source and offline evidence are present, but live acceptance and
+release promotion remain unclaimed.
+
+`restore_workflow_version`, versions, execution, credential mutation, and permanent
 deletion remain outside this packet; no legacy route is guessed. The bounded
 `n8n.workflows.archive` operation separately maps only to the documented
 official MCP `archive_workflow` tool, requires an inactive/unarchived baseline,
@@ -958,6 +975,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.compare` | `n8n.workflows.read` | Safe / Medium | None | None | official MCP | both version URIs/digests | 512 KiB |
 | `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
+| `n8n.workflows.activate` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST publish/unpublish on EEC/Hetzner with independent REST GET readback | active transition with matching published version/graph, or inactive/null active version/null published; draft graph/archive preserved | 1 MiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
 | `n8n.workflows.unarchive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | typed REST `POST /api/v1/workflows/{workflowId}/unarchive` with independent REST GET readback | unarchived state; draft graph/published/lifecycle state unchanged; draft version rotation allowed | 256 KiB |
@@ -984,7 +1002,8 @@ separate:
   `workflows.update_draft`, `workflows.lifecycle`, `workflows.archive`,
   `workflows.delete_disposable`, `workflows.execute`, and
   `mcp_access.reconcile`. A manifest declaration does
-  not override an operation's fail-closed provider gate.
+  not override an operation's fail-closed provider gate; the typed REST
+  activation implementation is present in source but remains live-unaccepted.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is absent from
   the connector manifest. The wrapper/host path accepts an empty operation
   input, derives a fixed EEC/Hetzner server from its bounded envelope, and
@@ -999,8 +1018,9 @@ separate:
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
   without a corresponding host/connector dispatch remain future or
   unimplemented execution paths. `restore_workflow_version`, `versions`, credential
-  mutation, permanent/general deletion, and the provider activation path remain
-  fail-closed/non-goals.
+  mutation, and permanent/general deletion remain fail-closed/non-goals. Typed
+  REST activation is implemented but remains outside live acceptance until the
+  bounded EEC-then-Hetzner procedure passes.
 
 Historical live acceptance boundary (2026-08-21; release ID and evidence receipt
 not recorded here): the then-installed owner-gated bundle
@@ -1490,6 +1510,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
 | `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
+| `workflows.activate` | exact workflow target, `active`, full `guard.precondition`, UUID idempotency key | publish `versionId` (required for pinned activation), one matching approval | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState,active:true|false}` after one REST POST and independent REST GET readback |
 | `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact official-MCP call and independent REST GET readback |
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
 | `workflows.execute` | exact workflow target, `mode`, `versionId`, `guard` | `inputs` (bounded), `wait=false` | `{status,operation,provider,workflowId,mode,versionId,executionId,initialStatus,retry,readback}`; only bounded identifiers/status are returned. Host admission requires the exact immutable owner-provisioned EEC/Hetzner schema binding; after any provider attempt, readback transport/decode/mismatch is terminal `unknown_outcome` with no automatic retry. |
@@ -1550,10 +1571,10 @@ The default is `runtime`; provider-specific extra profiles cannot become public
 without a contract revision.
 
 `workflows.lifecycle.action` is exactly `publish` or `unpublish`; archive is a
-separate typed `n8n.workflows.archive` operation. Restore/unarchive,
-activation/deactivation, version operations, and execution cannot be
-represented as aliases here; each provider action is fixed by its typed enum
-and route.
+separate typed `n8n.workflows.archive` operation, and activation/deactivation
+is the separate typed `n8n.workflows.activate` REST operation. Restore/unarchive,
+version operations, and execution cannot be represented as aliases here; each
+provider action is fixed by its typed enum and route.
 
 Lifecycle acceptance fixtures have a stricter provider-readiness requirement
 than draft creation: the graph must contain at least one activation-eligible

@@ -23,20 +23,29 @@ use tracing::{info, instrument};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
+const HOST_ACTIVATION_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS";
 
-fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
-    let Some(value) = std::env::var_os(HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV) else {
+fn host_request_timeout(env_key: &str, operation: &str) -> N8nResult<Option<Duration>> {
+    let Some(value) = std::env::var_os(env_key) else {
         return Ok(None);
     };
     let value = value
         .to_str()
-        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+        .ok_or_else(|| N8nError::InvalidInput(format!("invalid {operation} request timeout")))?;
     let milliseconds = value
         .parse::<u64>()
         .ok()
         .filter(|milliseconds| *milliseconds > 0)
-        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+        .ok_or_else(|| N8nError::InvalidInput(format!("invalid {operation} request timeout")))?;
     Ok(Some(Duration::from_millis(milliseconds)))
+}
+
+fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
+    host_request_timeout(HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV, "unarchive")
+}
+
+fn host_activation_request_timeout() -> N8nResult<Option<Duration>> {
+    host_request_timeout(HOST_ACTIVATION_REQUEST_TIMEOUT_ENV, "activation")
 }
 
 use crate::{
@@ -486,9 +495,15 @@ impl N8nConnector {
     /// variables are incomplete, conflicting, invalid, or unsupported.
     pub fn try_new() -> N8nResult<Self> {
         let unarchive_timeout = host_unarchive_request_timeout()?;
+        let activation_timeout = host_activation_request_timeout()?;
+        if unarchive_timeout.is_some() && activation_timeout.is_some() {
+            return Err(N8nError::InvalidInput(
+                "conflicting n8n request timeout launch configuration".into(),
+            ));
+        }
         let mut runtime_config =
             ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30));
-        if let Some(timeout) = unarchive_timeout {
+        if let Some(timeout) = unarchive_timeout.or(activation_timeout) {
             // The host bridge derives this per-request budget from the
             // absolute run-once deadline and reserves a bounded tail for a
             // mandatory readback. Applying it to both direct and mediated
@@ -1494,6 +1509,11 @@ impl N8nConnector {
     ) -> Result<Value, N8nError> {
         let typed = parse_workflow_activation_input(input)?;
         let server_id = self.configured_server_id()?;
+        if !matches!(server_id, "eec" | "hetzner") {
+            return Err(N8nError::CapabilityUnavailable(
+                "workflow activation is available only for EEC and Hetzner",
+            ));
+        }
         let lock_key = format!("activation:{server_id}:{}", typed.id);
         let Some(_lock) = self.try_resource_lock(lock_key)? else {
             return Err(N8nError::PreconditionFailed(
@@ -3542,6 +3562,9 @@ fn verify_workflow_lifecycle_readback(
     if provider.is_some_and(|provider| provider.draft != baseline.draft) {
         return Err(N8nError::UnknownOutcome);
     }
+    if readback.id != baseline.id || readback.draft != baseline.draft {
+        return Err(N8nError::UnknownOutcome);
+    }
     let mismatch = |provider_state: Option<&WorkflowStateView>| {
         if provider_state.is_some() {
             N8nError::ReadbackMismatch
@@ -3557,11 +3580,9 @@ fn verify_workflow_lifecycle_readback(
             if !readback.active
                 || readback.is_archived != baseline.is_archived
                 || readback.active_version_id.as_deref() != Some(target_version_id)
-                || readback
-                    .published
-                    .as_ref()
-                    .is_none_or(|published| published.version_id.as_str() != target_version_id)
-                || readback.draft != baseline.draft
+                || readback.published.as_ref().is_none_or(|published| {
+                    published.version_id != target_version_id || published.graph_digest.is_empty()
+                })
             {
                 return Err(mismatch(provider));
             }
@@ -3570,7 +3591,7 @@ fn verify_workflow_lifecycle_readback(
             if readback.active
                 || readback.active_version_id.is_some()
                 || readback.is_archived != baseline.is_archived
-                || readback.draft != baseline.draft
+                || readback.published.is_some()
             {
                 return Err(mismatch(provider));
             }
@@ -5165,7 +5186,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.activate",
-            "Activate or deactivate an exact n8n workflow through the canonical typed REST publish/unpublish routes with independent GET readback",
+            "Activate or deactivate an exact workflow through canonical REST publish/unpublish with independent GET readback",
             workflow_activation_input_schema(),
             workflow_activation_output_schema(),
             "n8n.workflows.write",
@@ -5173,9 +5194,10 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and a current-chat approval bound to this exact request.".into(),
+                when_to_use: "Use only with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval bound to this exact request.".into(),
                 common_mistakes: vec![
-                    "active=true uses only POST /workflows/{workflowId}/publish and active=false uses only POST /workflows/{workflowId}/unpublish; deprecated activate/deactivate routes and graph PUT are never used.".into(),
+                    "active=true maps only to POST /workflows/{workflowId}/publish and active=false only to POST /workflows/{workflowId}/unpublish; deprecated activate/deactivate routes are never used.".into(),
+                    "Do not use PUT /workflows/{id}: its active field is readOnly and the route updates workflow graphs.".into(),
                     "The full versionId, explicit activeVersionId (null or value), active, isArchived, stateDigest, UUID idempotencyKey, and matching approval are required.".into(),
                     "A timeout, conflict, malformed response, or readback mismatch is terminal/unknown and never retried automatically; success requires an independent GET preserving the draft and published invariants.".into(),
                 ],
@@ -6568,7 +6590,7 @@ mod tests {
             .into_iter()
             .find(|op| op.id.as_ref() == "n8n.workflows.activate")
             .expect("activation operation should be catalogued");
-        assert!(activation.summary.contains("canonical typed REST"));
+        assert!(activation.summary.contains("canonical REST"));
         assert_eq!(
             activation.requires_approval,
             Some(ApprovalMode::Interactive)

@@ -81,6 +81,8 @@ const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approve
 #[cfg(target_os = "linux")]
 const DELETE_DISPOSABLE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.delete_disposable"}"#;
 #[cfg(target_os = "linux")]
+const WORKFLOWS_ACTIVATE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.activate"}"#;
+#[cfg(target_os = "linux")]
 const WORKFLOWS_UNARCHIVE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.unarchive"}"#;
 #[cfg(target_os = "linux")]
 // The supervised host performs the side effect as this nested request.  The
@@ -328,6 +330,7 @@ fn process_spec(
     let owner_admission = match envelope.operation {
         super::HostRunOnceOperation::WorkflowsCreateDraft => Some(CREATE_DRAFT_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
+        super::HostRunOnceOperation::WorkflowsActivate => Some(WORKFLOWS_ACTIVATE_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsDeleteDisposable => {
             Some(DELETE_DISPOSABLE_OWNER_ADMISSION)
         }
@@ -2207,6 +2210,45 @@ mod tests {
         assert_eq!(admission["zone_id"], "z:work");
         assert_eq!(admission["connector_id"], "fcp.n8n");
         assert_eq!(admission["operation"], "n8n.workflows.create_draft");
+
+        let activate = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsActivate,
+                Value::Null,
+            ),
+        )
+        .expect("workflow activation write spec");
+        assert_eq!(
+            activate.fixed_args,
+            vec![OsString::from("n8n-write-run-once-supervised")]
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
+            Some(&OsString::from("/release/inventory/eec.json"))
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(WORKFLOWS_ACTIVATE_OWNER_ADMISSION))
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE")),
+            Some(&OsString::from("/etc/fwc-n8n/approval-public-key"))
+        );
+        let activation_admission: Value = serde_json::from_str(WORKFLOWS_ACTIVATE_OWNER_ADMISSION)
+            .expect("fixed activation owner admission must remain valid JSON");
+        assert_eq!(activation_admission["version"], 1);
+        assert_eq!(activation_admission["mode"], "owner-approved-single-host");
+        assert_eq!(activation_admission["zone_id"], "z:work");
+        assert_eq!(activation_admission["connector_id"], "fcp.n8n");
+        assert_eq!(activation_admission["operation"], "n8n.workflows.activate");
 
         let update = process_spec(
             &bundle,

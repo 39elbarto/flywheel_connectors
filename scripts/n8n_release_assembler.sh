@@ -555,9 +555,19 @@ for server in ("eec", "hetzner"):
     unarchive_network = dict(unarchive_network)
     unarchive_network["max_response_bytes"] = 1048576
     common["operation_network_constraints"][unarchive_operation] = dict(unarchive_network)
+    activation_operation = "n8n.workflows.activate"
+    if activation_operation not in common["allowed_operations"]:
+        common["allowed_operations"].append(activation_operation)
+    activation_network = common["operation_network_constraints"].get("n8n.workflows.get")
+    if not isinstance(activation_network, dict):
+        raise SystemExit(f"missing workflows.get network constraint for {server}")
+    activation_network = dict(activation_network)
+    activation_network["max_response_bytes"] = 1048576
+    common["operation_network_constraints"][activation_operation] = dict(activation_network)
     for bounded_operation in (
         "n8n.workflows.delete_disposable",
         "n8n.workflows.unarchive",
+        "n8n.workflows.activate",
     ):
         bounded_network = common["operation_network_constraints"].get(bounded_operation)
         if not isinstance(bounded_network, dict) or bounded_network.get("max_response_bytes") != 1048576:

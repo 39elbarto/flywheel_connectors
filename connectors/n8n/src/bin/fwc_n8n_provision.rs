@@ -166,7 +166,7 @@ const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
 const HETZNER_N8N_VERSION: &str = "2.34.6";
 pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
-const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
+const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -179,10 +179,11 @@ const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.workflows.create_draft",
     "n8n.workflows.get",
     "n8n.workflows.list",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
-const LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
+const LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
     "n8n.executions.get",
     "n8n.executions.list",
@@ -195,10 +196,11 @@ const LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS: [&str; 14] = [
     "n8n.workflows.delete_disposable",
     "n8n.workflows.get",
     "n8n.workflows.list",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
-const PREVIOUS_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
+const PREVIOUS_COMMON_ALLOWED_OPERATIONS: [&str; 16] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -212,6 +214,7 @@ const PREVIOUS_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.workflows.delete_disposable",
     "n8n.workflows.get",
     "n8n.workflows.list",
+    "n8n.workflows.activate",
     "n8n.workflows.lifecycle",
     "n8n.workflows.update_draft",
 ];
@@ -2177,10 +2180,13 @@ fn validate_common_inventory(
             schema_mode,
             CommonInventorySchemaMode::Current
                 | CommonInventorySchemaMode::Previous
+                | CommonInventorySchemaMode::Legacy
                 | CommonInventorySchemaMode::LegacyDisposable
         ) && matches!(
             *operation,
-            "n8n.workflows.delete_disposable" | "n8n.workflows.unarchive"
+            "n8n.workflows.activate"
+                | "n8n.workflows.delete_disposable"
+                | "n8n.workflows.unarchive"
         ) {
             &expected_bounded_network
         } else {

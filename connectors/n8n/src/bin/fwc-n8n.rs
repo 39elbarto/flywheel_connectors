@@ -30,6 +30,7 @@ use fcp_n8n::router::{
     TargetResolution, TargetResolver,
 };
 use fcp_n8n::update::{ComponentSnapshot, detect_update};
+use fcp_n8n::update_local_mcp::stage_exact_local_mcp;
 use fcp_n8n_broker_protocol::{BrokerClient, BrokerCredentialPurpose, BrokerRequest, BrokerServer};
 use fcp_prelude::ApprovalToken;
 use serde::{Deserialize, Serialize};
@@ -121,10 +122,13 @@ enum Command {
     Status,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Subcommand)]
 enum UpdateReviewCommand {
     /// Diff current and candidate safe capability snapshots without applying.
     Detect,
+    /// Owner-only fetch, stage, and strictly verify one exact n8n-mcp version.
+    #[command(name = "stage-local-mcp")]
+    StageLocalMcp { version: String },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
@@ -200,6 +204,8 @@ enum HostRunOnceOperation {
     WorkflowsCreateDraft,
     #[serde(rename = "n8n.workflows.update_draft")]
     WorkflowsUpdateDraft,
+    #[serde(rename = "n8n.workflows.activate")]
+    WorkflowsActivate,
     #[serde(rename = "n8n.workflows.lifecycle")]
     WorkflowsLifecycle,
     #[serde(rename = "n8n.workflows.archive")]
@@ -230,6 +236,7 @@ impl HostRunOnceOperation {
             Self::WorkflowsList => "n8n.workflows.list",
             Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
+            Self::WorkflowsActivate => "n8n.workflows.activate",
             Self::WorkflowsLifecycle => "n8n.workflows.lifecycle",
             Self::WorkflowsArchive => "n8n.workflows.archive",
             Self::WorkflowsUnarchive => "n8n.workflows.unarchive",
@@ -254,6 +261,7 @@ impl HostRunOnceOperation {
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
+            "n8n.workflows.activate" => Ok(Self::WorkflowsActivate),
             "n8n.workflows.lifecycle" => Ok(Self::WorkflowsLifecycle),
             "n8n.workflows.archive" => Ok(Self::WorkflowsArchive),
             "n8n.workflows.unarchive" => Ok(Self::WorkflowsUnarchive),
@@ -279,6 +287,7 @@ impl HostRunOnceOperation {
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
+            | Self::WorkflowsActivate
             | Self::McpAccessReconcile => BrokerCredentialPurpose::RestApi,
             Self::WorkflowsLifecycle | Self::WorkflowsArchive | Self::WorkflowsExecute => {
                 BrokerCredentialPurpose::OfficialMcp
@@ -501,7 +510,16 @@ fn run_update_review(command: UpdateReviewCommand) -> Result<Value, AppError> {
             let input: UpdateDetectInput = read_stdin_json()?;
             detect_update_input(input)
         }
+        UpdateReviewCommand::StageLocalMcp { version } => run_stage_local_mcp(&version),
     }
+}
+
+fn run_stage_local_mcp(version: &str) -> Result<Value, AppError> {
+    if !effective_uid_is_root() {
+        return Err(AppError::new("update_owner_required"));
+    }
+    let receipt = stage_exact_local_mcp(version).map_err(|error| AppError::new(error.code()))?;
+    serde_json::to_value(receipt).map_err(|_| AppError::new("output_encoding_failed"))
 }
 
 fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {
@@ -1311,6 +1329,19 @@ fn response_result(response: Value, unknown_code: &'static str) -> Result<Value,
         .cloned()
         .filter(Value::is_object)
         .ok_or_else(|| AppError::new(unknown_code))
+}
+
+fn normalize_workflow_activation_response(response: Value) -> Result<Value, AppError> {
+    let result = response_result(response, "unknown_outcome")?;
+    if result.get("operation").and_then(Value::as_str) != Some("n8n.workflows.activate")
+        || result.get("provider").and_then(Value::as_str) != Some("rest")
+    {
+        return Err(AppError::with_diagnostic(
+            "unknown_outcome",
+            Some("activation_response_shape"),
+        ));
+    }
+    Ok(result)
 }
 
 fn verify_lifecycle_baseline(input: &Value, state: &Value) -> Result<(), AppError> {
@@ -2235,6 +2266,15 @@ fn execute_host_run_once(
 
     let operation = envelope.operation;
     let server_id = envelope.server_id;
+    if operation == HostRunOnceOperation::WorkflowsActivate {
+        let response = run_host_bridge_once(
+            &bundle,
+            &envelope,
+            BrokerCredentialPurpose::RestApi,
+            request_deadline_at,
+        )?;
+        return normalize_workflow_activation_response(response);
+    }
     if operation == HostRunOnceOperation::WorkflowsLifecycle {
         return execute_workflow_lifecycle_official_mcp(&bundle, envelope, request_deadline_at);
     }
@@ -2649,6 +2689,10 @@ fn validate_host_run_once_input(
             &["project_id"],
         ),
         HostRunOnceOperation::WorkflowsGet => (&["id"], &["id"]),
+        HostRunOnceOperation::WorkflowsActivate => (
+            &["id", "active", "versionId", "guard"],
+            &["id", "active", "guard"],
+        ),
         HostRunOnceOperation::WorkflowsCreateDraft => (
             &["name", "project_id", "parent_folder_id", "graph", "guard"],
             &["name", "graph", "guard"],
@@ -2729,6 +2773,7 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
             validate_workflow_draft_input(operation, input, object)
         }
+        HostRunOnceOperation::WorkflowsActivate => validate_workflow_activation_input(object),
         HostRunOnceOperation::WorkflowsLifecycle => validate_workflow_lifecycle_input(object),
         HostRunOnceOperation::WorkflowsArchive => validate_workflow_archive_input(object),
         HostRunOnceOperation::WorkflowsUnarchive => validate_workflow_unarchive_input(object),
@@ -2738,6 +2783,105 @@ fn validate_host_run_once_input(
         }
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
+}
+
+fn validate_workflow_activation_input(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "id" | "active" | "versionId" | "guard"))
+        || !["id", "active", "guard"]
+            .iter()
+            .all(|field| object.contains_key(*field))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    host_run_once_input_id(&json!({"id": id}), "id")?;
+    let active = object
+        .get("active")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if let Some(version_id) = object.get("versionId") {
+        if !active
+            || version_id
+                .as_str()
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+    }
+    let guard = object
+        .get("guard")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if guard.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "approvalRef" | "idempotencyKey" | "precondition"
+        )
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let approval_ref = guard
+        .get("approvalRef")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if approval_ref.chars().any(char::is_control)
+        || guard
+            .get("idempotencyKey")
+            .and_then(Value::as_str)
+            .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let precondition = guard
+        .get("precondition")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    const REQUIRED: [&str; 5] = [
+        "versionId",
+        "activeVersionId",
+        "active",
+        "isArchived",
+        "stateDigest",
+    ];
+    if precondition
+        .keys()
+        .any(|key| !REQUIRED.contains(&key.as_str()))
+        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        || precondition
+            .get("versionId")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
+        || precondition
+            .get("active")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("isArchived")
+            .and_then(Value::as_bool)
+            .is_none()
+        || precondition
+            .get("stateDigest")
+            .and_then(Value::as_str)
+            .is_none_or(|value| !is_blake3_digest(value))
+        || precondition.get("activeVersionId").is_some_and(|value| {
+            value
+                .as_str()
+                .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
+                || !(value.is_null() || value.is_string())
+        })
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    Ok(())
 }
 
 fn validate_workflow_lifecycle_input(
@@ -3446,6 +3590,7 @@ fn expected_host_run_once_resource_uri(
             server_id.as_str()
         )),
         HostRunOnceOperation::WorkflowsGet
+        | HostRunOnceOperation::WorkflowsActivate
         | HostRunOnceOperation::WorkflowsUpdateDraft
         | HostRunOnceOperation::WorkflowsUnarchive
         | HostRunOnceOperation::WorkflowsDeleteDisposable => Ok(format!(
@@ -3534,7 +3679,9 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.workflows.create_draft" | "n8n.workflows.update_draft" => {
             OperationIntent::WorkflowDraftWrite
         }
-        "n8n.workflows.lifecycle" | "n8n.workflows.unarchive" => OperationIntent::Lifecycle,
+        "n8n.workflows.activate" | "n8n.workflows.lifecycle" | "n8n.workflows.unarchive" => {
+            OperationIntent::Lifecycle
+        }
         "n8n.workflows.execute" => OperationIntent::Execution,
         "n8n.credentials.list" => OperationIntent::CredentialMetadata,
         "n8n.data_tables.search" | "n8n.data_tables.mutate" => OperationIntent::DataTables,
@@ -4266,6 +4413,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workflow_activation_is_a_public_lifecycle_intent() {
+        assert_eq!(
+            public_operation_intent("n8n.workflows.activate").unwrap(),
+            OperationIntent::Lifecycle
+        );
+    }
+
     struct DelayedEof(std::time::Duration);
 
     impl std::io::Read for DelayedEof {
@@ -4505,6 +4660,23 @@ mod tests {
         )
     }
 
+    fn activation_host_input_for_version(
+        server_id: &str,
+        active: bool,
+        version_id: Option<&str>,
+    ) -> Vec<u8> {
+        let action = if active { "publish" } else { "unpublish" };
+        let mut envelope: Value = serde_json::from_slice(&lifecycle_host_input_for_version(
+            server_id, action, version_id,
+        ))
+        .expect("lifecycle host input JSON");
+        let input = envelope["input"].as_object_mut().expect("activation input");
+        input.remove("action");
+        input.insert("active".into(), Value::Bool(active));
+        envelope["deadline_ms"] = json!(30_000);
+        serde_json::to_vec(&envelope).expect("activation host input")
+    }
+
     fn lifecycle_host_input() -> Vec<u8> {
         lifecycle_host_input_for("eec", "publish")
     }
@@ -4598,6 +4770,107 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn public_workflow_activation_dispatches_exact_typed_rest_input() {
+        for (server_id, active, version_id) in
+            [("eec", true, Some("version-1")), ("hetzner", false, None)]
+        {
+            let bytes = activation_host_input_for_version(server_id, active, version_id);
+            let original: Value = serde_json::from_slice(&bytes).expect("activation host input");
+            let value = run_once_from_bytes_at(
+                "n8n.workflows.activate",
+                &bytes,
+                Instant::now(),
+                |envelope, _deadline| {
+                    assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsActivate);
+                    assert_eq!(
+                        envelope.resource_uri,
+                        format!("fwc-n8n://{server_id}/workflows/1001")
+                    );
+                    assert_eq!(envelope.input, original["input"]);
+                    Ok(json!({
+                        "status": "verified",
+                        "operation": "n8n.workflows.activate",
+                        "provider": "rest",
+                        "active": active,
+                        "retry": "never_automatic",
+                        "readback": "independent_get"
+                    }))
+                },
+            )
+            .expect("activation must dispatch through the direct REST operation");
+            assert_eq!(value["operation"], "n8n.workflows.activate");
+            assert_eq!(value["provider"], "rest");
+            assert_eq!(value["active"], active);
+        }
+    }
+
+    #[test]
+    fn public_workflow_activation_response_rejects_non_rest_provider() {
+        let response = json!({
+            "status": "ok",
+            "result": {
+                "status": "verified",
+                "operation": "n8n.workflows.activate",
+                "provider": "official_mcp"
+            }
+        });
+        let error = normalize_workflow_activation_response(response)
+            .expect_err("activation must expose the typed REST provider");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("activation_response_shape"));
+    }
+
+    #[test]
+    fn public_workflow_activation_preserves_direct_validation() {
+        let valid = activation_host_input_for_version("eec", true, Some("version-1"));
+        let mut unknown_field: Value = serde_json::from_slice(&valid).expect("activation input");
+        unknown_field["input"]["action"] = json!("publish");
+        let mut missing_active: Value = serde_json::from_slice(&valid).expect("activation input");
+        missing_active["input"]
+            .as_object_mut()
+            .expect("activation input object")
+            .remove("active");
+        let mut non_boolean_active: Value =
+            serde_json::from_slice(&valid).expect("activation input");
+        non_boolean_active["input"]["active"] = json!("true");
+        let invalid_inputs = [
+            unknown_field,
+            missing_active,
+            non_boolean_active,
+            serde_json::from_slice(&activation_host_input_for_version(
+                "eec",
+                false,
+                Some("version-1"),
+            ))
+            .expect("activation input"),
+        ];
+
+        for input in invalid_inputs {
+            let error = run_once_from_bytes_at(
+                "n8n.workflows.activate",
+                &serde_json::to_vec(&input).expect("activation input JSON"),
+                Instant::now(),
+                |_, _| panic!("invalid activation must fail before dispatch"),
+            )
+            .expect_err("invalid activation input");
+            assert_eq!(error.code, "invalid_operation_input");
+        }
+
+        let valid_input: Value = serde_json::from_slice(&valid).expect("activation input");
+        let dispatched = run_once_from_bytes_at(
+            "n8n.workflows.activate",
+            &valid,
+            Instant::now(),
+            |envelope, _| {
+                assert_eq!(envelope.input, valid_input["input"]);
+                Ok(json!({"provider": "rest"}))
+            },
+        )
+        .expect("valid activation must preserve its input");
+        assert_eq!(dispatched["provider"], "rest");
     }
 
     #[test]
@@ -6428,6 +6701,10 @@ mod tests {
             HostRunOnceOperation::WorkflowsGet.credential_purpose(),
             BrokerCredentialPurpose::RestApi
         );
+        assert_eq!(
+            HostRunOnceOperation::WorkflowsActivate.credential_purpose(),
+            BrokerCredentialPurpose::RestApi
+        );
     }
 
     struct FakeSecretGetProcess {
@@ -6893,9 +7170,24 @@ mod tests {
         let legacy = json!({"server_id": "legacy", "input": {}});
         assert!(parse_host_run_once_input(&legacy.to_string().into_bytes()).is_err());
 
-        let error = HostRunOnceOperation::parse("n8n.workflows.activate")
-            .expect_err("writes must be denied");
-        assert_eq!(error.code, "operation_not_allowed");
+        let activation = serde_json::from_slice::<Value>(&activation_host_input_for_version(
+            "eec",
+            true,
+            Some("version-1"),
+        ))
+        .expect("activation host input")
+        .get("input")
+        .cloned()
+        .expect("activation input");
+        let activation_operation = HostRunOnceOperation::parse("n8n.workflows.activate")
+            .expect("typed activation operation is admitted");
+        assert!(
+            build_host_run_once_envelope(
+                activation_operation,
+                host_input(HostRunOnceServerId::Eec, activation)
+            )
+            .is_ok()
+        );
 
         let lifecycle = json!({
             "id": "1001",

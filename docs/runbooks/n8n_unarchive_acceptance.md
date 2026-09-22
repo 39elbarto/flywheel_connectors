@@ -27,9 +27,115 @@ is a separate version-restore operation; this result does not repair or accept
 MCP `archive_workflow`. Earlier NO-GO comments and acceptance history remain
 historical records of their candidates/attempts, not the current verdict.
 
-The next order is `nqm81.24` activation capability decision, then `nqm81.25`
-guarded test/manual execution, then `nqm81.26` production gate. This closeout
-does not claim those follow-up gates are implemented or accepted.
+The typed REST activation source path is now implemented for EEC and Hetzner,
+but it is not live-accepted and no release or promotion is claimed. Follow
+the bounded activation procedure below only with a newly created disposable
+credential-free Webhook workflow; do not reuse this unarchive runner for a
+provider write and do not infer live acceptance from source or offline tests.
+
+## Activation acceptance (source implemented; live unaccepted)
+
+This is a separate, supervised EEC-then-Hetzner procedure for
+`n8n.workflows.activate`. It is deliberately bounded to one fresh disposable
+draft per server and never invokes its Webhook, archives it, deletes it, or
+performs generic cleanup. The procedure is reproducible through the existing
+`fwc-n8n run-once` envelope and the same fixed parent-binding and approval
+helpers; it is not a generic REST runner.
+
+Before any approval-request file or provider write, run the repository
+acceptance preflight and verify the candidate's source/inventory evidence.
+Stop before the first provider call if preflight, binary/manifest binding,
+server selection, credential-reference readiness, or evidence-directory
+checks fail. Use a unique UUID-v4 run ID and Webhook path/name for each server;
+the draft graph must contain one `n8n-nodes-base.webhook` node and no
+`credentials` field, with `availableInMCP` left at the connector's forced
+default `false`.
+
+For each server, in this exact order:
+
+1. Create the disposable draft with one fresh `create_draft` approval and
+   UUID idempotency key. Use only the bounded graph, no credential references,
+   and retain the redacted creation projection needed to identify the new
+   workflow; never persist the raw request, approval token, or provider body.
+2. Read the new workflow once and require inactive, unarchived,
+   `activeVersionId=null`, `published=null`, and a non-empty draft graph/state
+   digest. This is the baseline for the first transition.
+3. Build a fresh `n8n.workflows.activate` input with `active=true`, the exact
+   current `versionId` when available, the complete baseline precondition, a
+   fresh approval reference, and a fresh UUID. Bind the exact original input
+   and `fwc-n8n://SERVER/workflows/ID` resource, then perform exactly one
+   baseline GET, one `POST /api/v1/workflows/{id}/publish`, and one independent
+   GET. Success requires active=true, matching active/published version IDs,
+   matching published graph digest, and preserved ID, draft graph, and archive
+   state.
+4. Read back the active state before preparing deactivation. Build a second,
+   independently approved input with `active=false`, a fresh approval
+   reference and fresh UUID, and the exact active-state precondition. Perform
+   exactly one baseline GET, one no-body
+   `POST /api/v1/workflows/{id}/unpublish`, and one independent GET. Success
+   requires `active=false`, `activeVersionId=null`, `published=null`, and the
+   same ID, draft graph, and archive state.
+
+Run the complete sequence on EEC first, then repeat from a newly created draft
+on Hetzner. Never invoke the Webhook, call an execution operation, reuse an
+approval or UUID, retry a timeout/ambiguous response, or start the other
+server after an unresolved result. If any provider result is malformed,
+contradictory, times out, or has a readback mismatch, retain only the redacted
+projection, mark the run `unknown`/`STOP`, and stop; do not create a cleanup
+request. No automatic delete, archive, or generic cleanup is part of this
+acceptance—an operator must decide separately what to do with a disposable
+workflow after the evidence is reviewed.
+
+Retain only redacted baseline/invoke/readback projections and a summary with
+server, workflow ID, operation sequence, fresh correlation/approval reference
+hashes, statuses, postcondition verdicts, and
+`raw_provider_bodies_persisted=false`, `raw_request_bodies_persisted=false`,
+`tokens_persisted=false`, and `secrets_persisted=false`. A live acceptance
+claim requires both server runs and durable evidence; source implementation,
+focused WireMock/host tests, and an assembled candidate alone are insufficient.
+
+The executable activation runner is an activation-specific extension of this
+acceptance script; it is not a generic REST runner. Run its contract preflight
+and self-test before any live invocation:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh --activation-self-test
+```
+
+Then run exactly one server at a time, EEC first and Hetzner only after the EEC
+run is a verified `pass`:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh \
+  --activation --server eec \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/activation-eec-evidence
+
+scripts/n8n_unarchive_acceptance.sh \
+  --activation --server hetzner \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/activation-hetzner-evidence
+```
+
+Activation mode validates a closed plan before the first provider call: one
+credential-free Webhook draft with `availableInMCP=false`, one create/readback,
+one publish/readback, one active-state GET, and one unpublish/readback. It uses
+only `fwc-n8n run-once`, permits zero retries and zero execution/cleanup
+actions, and the self-test reports `provider_actions:0`; it does not invoke the
+Webhook, use credentials, or persist request/provider bodies, tokens, or
+secrets. The activation evidence directory is mandatory: an omitted,
+unavailable, or unwritable directory stops before the first provider call and
+can never produce `pass`. A timeout, malformed response, or readback mismatch returns
+`unknown`/`STOP`; do not retry or start the next server after an unresolved
+result.
+
+A live `pass` is emitted only after the runner has durably written, reread, and
+validated the complete redacted evidence bundle. It contains
+`activation-plan.json`, the five `activation-*.json` projections, three
+`transition-{create,publish,unpublish}.json` records, and `summary.json`; the
+summary's `evidence_complete` flag and all transition/projection postconditions
+must validate. Any missing file, failed write, metadata mismatch, or validation
+failure returns `STOP` rather than `pass`.
 
 ## Runner scope
 

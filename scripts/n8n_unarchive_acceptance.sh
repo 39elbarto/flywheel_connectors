@@ -29,6 +29,7 @@ readonly JQ_BIN="/usr/bin/jq"
 readonly STAT_BIN="/usr/bin/stat"
 readonly UUIDGEN_BIN="/usr/bin/uuidgen"
 readonly TIMEOUT_BIN="/usr/bin/timeout"
+readonly SYNC_BIN="/usr/bin/sync"
 readonly DEFAULT_LAUNCHER="/usr/local/bin/fwc-n8n"
 readonly DEFAULT_APPROVAL_HELPER="/home/ubuntu/Projects/flywheel_connectors/scripts/n8n_approval_once.sh"
 # This is the verified provisioned binary.  The similarly named path below
@@ -126,6 +127,10 @@ emit_activation_unknown() {
 }
 
 emit_activation_pass() {
+  validate_activation_evidence_bundle || {
+    emit_activation_stop evidence_validation_failed
+    return 10
+  }
   printf '{"schema":"%s","verdict":"pass","server":"%s","workflow_id":"%s","evidence_directory":%s}\n' \
     "$ACTIVATION_SCHEMA" "$SERVER" "$ACTIVATION_WORKFLOW_ID" \
     "$(if [[ -n "$EVIDENCE_DIR" ]]; then "$JQ_BIN" -Rn --arg value "$EVIDENCE_DIR" '$value'; else printf 'null'; fi)"
@@ -259,7 +264,7 @@ activation_preflight() {
     emit_activation_stop activation_server_not_allowed
     return 1
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
+  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
     emit_activation_stop dependency_missing
     return 1
   fi
@@ -287,22 +292,43 @@ activation_preflight() {
     emit_activation_stop activation_plan_contract_failed
     return 1
   fi
+  if ! persist_activation_plan; then
+    emit_activation_stop evidence_write_failed
+    return 1
+  fi
 }
 
 run_activation_self_test() {
   local base
   local fixture
+  local root
+  local output
   SELF_TEST=1
+  ACTIVATION_MODE=1
   SERVER="hetzner"
   base="$(build_activation_plan)" || return 1
   validate_activation_plan "$base" || return 1
+  ACTIVATION_PLAN="$base"
+  EVIDENCE_DIR=""
+  if persist_activation_plan; then return 1; fi
+  root="$(mktemp -d "${TMPDIR:-/tmp}/n8n-activation-evidence-self-test.XXXXXX")" || return 1
+  EVIDENCE_DIR="$root/evidence"
+  init_evidence || return 1
+  persist_activation_plan || return 1
+  validate_activation_record_file activation-plan || return 1
+  validate_activation_plan "$(read_activation_record activation-plan)" || return 1
+  if output="$(emit_activation_pass 2>/dev/null)"; then return 1; fi
+  [[ "$output" == *'"verdict":"STOP"'* ]] || return 1
+  EVIDENCE_DIR="$root/write-failure"
+  printf '%s\n' evidence-target-is-not-a-directory >"$EVIDENCE_DIR" || return 1
+  if persist_activation_plan 2>/dev/null; then return 1; fi
   fixture="$("$JQ_BIN" -c '.limits.publish_attempts = 2' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
   fixture="$("$JQ_BIN" -c '.draft.credentials_allowed = true' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
   fixture="$("$JQ_BIN" -c '.sequence[5] = "publish_once"' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
-  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":4}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":8}\n' \
     "$ACTIVATION_SCHEMA"
 }
 
@@ -355,9 +381,57 @@ project_one_response() {
 persist_projection() {
   local name="$1"
   local projection="$2"
+  if (( ACTIVATION_MODE == 1 )); then
+    persist_activation_record "$name" "$projection"
+    return $?
+  fi
   [[ -z "$EVIDENCE_DIR" ]] && return 0
   printf '%s\n' "$projection" >"$EVIDENCE_DIR/$name.json" || return 1
   chmod 600 "$EVIDENCE_DIR/$name.json" || return 1
+}
+
+persist_activation_record() {
+  local name="$1"
+  local record="$2"
+  local path
+  local persisted
+  local metadata
+
+  (( ACTIVATION_MODE == 1 )) || return 1
+  [[ -n "$EVIDENCE_DIR" ]] || return 1
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || return 1
+  [[ -n "$record" ]] || return 1
+  "$JQ_BIN" -e . <<<"$record" >/dev/null 2>&1 || return 1
+  path="$EVIDENCE_DIR/$name.json"
+  printf '%s\n' "$record" >"$path" || return 1
+  chmod 600 -- "$path" || return 1
+  "$SYNC_BIN" -d "$path" "$EVIDENCE_DIR" >/dev/null 2>&1 || return 1
+  metadata="$($STAT_BIN -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || return 1
+  [[ "$metadata" =~ ^[0-9]+:[0-9]+:600:1:regular\ file:[1-9][0-9]*$ ]] || return 1
+  persisted="$(cat -- "$path")" || return 1
+  [[ "$persisted" == "$record" ]] || return 1
+  "$JQ_BIN" -e . <<<"$persisted" >/dev/null 2>&1 || return 1
+}
+
+read_activation_record() {
+  local name="$1"
+  (( ACTIVATION_MODE == 1 )) || return 1
+  [[ -n "$EVIDENCE_DIR" ]] || return 1
+  [[ "$name" =~ ^[a-z0-9-]+$ ]] || return 1
+  cat -- "$EVIDENCE_DIR/$name.json"
+}
+
+validate_activation_record_file() {
+  local name="$1"
+  local path
+  local metadata
+  local record
+
+  path="$EVIDENCE_DIR/$name.json"
+  metadata="$($STAT_BIN -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || return 1
+  [[ "$metadata" =~ ^[0-9]+:[0-9]+:600:1:regular\ file:[1-9][0-9]*$ ]] || return 1
+  record="$(read_activation_record "$name")" || return 1
+  "$JQ_BIN" -e . <<<"$record" >/dev/null 2>&1
 }
 
 persist_summary() {
@@ -387,6 +461,16 @@ persist_summary() {
 }
 
 init_evidence() {
+  if (( ACTIVATION_MODE == 1 )); then
+    [[ -n "$EVIDENCE_DIR" && "$EVIDENCE_DIR" == /* ]] || return 1
+    if [[ -L "$EVIDENCE_DIR" || ( -e "$EVIDENCE_DIR" && ! -d "$EVIDENCE_DIR" ) ]]; then
+      return 1
+    fi
+    mkdir -p -- "$EVIDENCE_DIR" || return 1
+    chmod 700 -- "$EVIDENCE_DIR" || return 1
+    [[ "$($STAT_BIN -c '%a:%F' -- "$EVIDENCE_DIR" 2>/dev/null)" == "700:directory" ]] || return 1
+    return 0
+  fi
   [[ -z "$EVIDENCE_DIR" ]] && return 0
   [[ "$EVIDENCE_DIR" == /* ]] || return 1
   mkdir -p -- "$EVIDENCE_DIR" || return 1
@@ -743,6 +827,133 @@ validate_activation_unpublish() {
   ' <<<"$projection" >/dev/null 2>&1
 }
 
+persist_activation_plan() {
+  local persisted
+  persist_activation_record activation-plan "$ACTIVATION_PLAN" || return 1
+  persisted="$(read_activation_record activation-plan)" || return 1
+  validate_activation_plan "$persisted"
+}
+
+validate_activation_transition_record() {
+  local record="$1"
+  local transition="$2"
+  local operation="$3"
+  local workflow="$4"
+  local projection_file="$5"
+  "$JQ_BIN" -e \
+    --arg server "$SERVER" --arg run_id "$RUN_ID" \
+    --arg workflow "$workflow" --arg transition "$transition" \
+    --arg operation "$operation" --arg projection_file "$projection_file" '
+      .schema == "fwc.n8n.activation-transition.v1"
+      and .server == $server and .run_id == $run_id
+      and .workflow_id == $workflow and .transition == $transition
+      and .operation == $operation and .projection_file == $projection_file
+      and (.correlation_id | type) == "string"
+      and (.correlation_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"))
+      and .verdict == "verified"
+      and .raw_provider_bodies_persisted == false
+      and .raw_request_bodies_persisted == false
+      and .tokens_persisted == false and .secrets_persisted == false
+    ' <<<"$record" >/dev/null 2>&1
+}
+
+persist_activation_transition() {
+  local transition="$1"
+  local operation="$2"
+  local projection_file="$3"
+  local workflow="$4"
+  local record
+  local persisted
+
+  record="$($JQ_BIN -cn \
+    --arg server "$SERVER" --arg run_id "$RUN_ID" \
+    --arg workflow "$workflow" --arg transition "$transition" \
+    --arg operation "$operation" --arg projection_file "$projection_file" \
+    --arg correlation "$HANDOFF_CORRELATION_ID" \
+    '{schema:"fwc.n8n.activation-transition.v1",server:$server,
+      run_id:$run_id,workflow_id:$workflow,transition:$transition,
+      operation:$operation,projection_file:$projection_file,
+      correlation_id:$correlation,verdict:"verified",
+      raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
+      tokens_persisted:false,secrets_persisted:false}')" || return 1
+  persist_activation_record "transition-$transition" "$record" || return 1
+  persisted="$(read_activation_record "transition-$transition")" || return 1
+  validate_activation_transition_record \
+    "$persisted" "$transition" "$operation" "$workflow" "$projection_file"
+}
+
+validate_activation_summary() {
+  local summary="$1"
+  local verdict="$2"
+  "$JQ_BIN" -e \
+    --arg server "$SERVER" --arg run_id "$RUN_ID" \
+    --arg workflow "$ACTIVATION_WORKFLOW_ID" --arg verdict "$verdict" '
+      .schema == "fwc.n8n.activation-acceptance.v1"
+      and .server == $server and .run_id == $run_id
+      and .workflow_id == $workflow and .verdict == $verdict
+      and .sequence == ["create_draft_once","draft_readback_once",
+        "publish_once","publish_readback_once","active_readback_once",
+        "unpublish_once","unpublish_readback_once"]
+      and .evidence_files == ["activation-plan.json","activation-create.json",
+        "activation-baseline.json","activation-publish.json",
+        "activation-active.json","activation-unpublish.json"]
+      and .transition_records == ["transition-create.json",
+        "transition-publish.json","transition-unpublish.json"]
+      and .retries == 0 and .automatic_cleanup == false
+      and .webhook_invoked == false
+      and .raw_provider_bodies_persisted == false
+      and .raw_request_bodies_persisted == false
+      and .tokens_persisted == false and .secrets_persisted == false
+      and (if $verdict == "pass"
+           then .evidence_complete == true
+             and .create_status == 0 and .baseline_status == 0
+             and .publish_status == 0 and .active_status == 0
+             and .unpublish_status == 0
+           else true end)
+    ' <<<"$summary" >/dev/null 2>&1
+}
+
+validate_activation_evidence_bundle() {
+  local plan
+  local create
+  local baseline
+  local publish
+  local active
+  local unpublish
+  local summary
+
+  (( ACTIVATION_MODE == 1 )) || return 1
+  [[ -n "$EVIDENCE_DIR" ]] || return 1
+  for name in activation-plan activation-create activation-baseline \
+    activation-publish activation-active activation-unpublish \
+    transition-create transition-publish transition-unpublish summary; do
+    validate_activation_record_file "$name" || return 1
+  done
+  plan="$(read_activation_record activation-plan)" || return 1
+  create="$(read_activation_record activation-create)" || return 1
+  baseline="$(read_activation_record activation-baseline)" || return 1
+  publish="$(read_activation_record activation-publish)" || return 1
+  active="$(read_activation_record activation-active)" || return 1
+  unpublish="$(read_activation_record activation-unpublish)" || return 1
+  summary="$(read_activation_record summary)" || return 1
+  validate_activation_plan "$plan" || return 1
+  validate_activation_create "$create" || return 1
+  validate_activation_baseline "$baseline" || return 1
+  validate_activation_publish "$publish" || return 1
+  validate_activation_active_readback "$active" || return 1
+  validate_activation_unpublish "$unpublish" || return 1
+  validate_activation_transition_record \
+    "$(read_activation_record transition-create)" create \
+    "$ACTIVATION_CREATE_OPERATION" "$ACTIVATION_WORKFLOW_ID" activation-create || return 1
+  validate_activation_transition_record \
+    "$(read_activation_record transition-publish)" publish \
+    "$ACTIVATION_OPERATION" "$ACTIVATION_WORKFLOW_ID" activation-publish || return 1
+  validate_activation_transition_record \
+    "$(read_activation_record transition-unpublish)" unpublish \
+    "$ACTIVATION_OPERATION" "$ACTIVATION_WORKFLOW_ID" activation-unpublish || return 1
+  validate_activation_summary "$summary" pass
+}
+
 activation_invoke_step() {
   local operation="$1"
   local approval_operation="$2"
@@ -777,8 +988,15 @@ activation_invoke_step() {
 persist_activation_summary() {
   local verdict="$1"
   local code="${2:-null}"
-  [[ -z "$EVIDENCE_DIR" ]] && return 0
-  "$JQ_BIN" -cn \
+  local summary
+  local persisted
+
+  if (( ACTIVATION_MODE == 1 )); then
+    [[ -n "$EVIDENCE_DIR" ]] || return 1
+  else
+    [[ -z "$EVIDENCE_DIR" ]] && return 0
+  fi
+  summary="$($JQ_BIN -cn \
     --arg server "$SERVER" --arg workflow_id "$ACTIVATION_WORKFLOW_ID" \
     --arg verdict "$verdict" --argjson abort_code "$code" \
     --arg evidence_directory "$EVIDENCE_DIR" \
@@ -798,10 +1016,19 @@ persist_activation_summary() {
       publish_status:$publish_status,active_status:$active_status,
       unpublish_status:$unpublish_status,retries:0,
       automatic_cleanup:false,webhook_invoked:false,
+      evidence_complete:($verdict == "pass"),
+      evidence_files:["activation-plan.json","activation-create.json",
+        "activation-baseline.json","activation-publish.json",
+        "activation-active.json","activation-unpublish.json"],
+      transition_records:["transition-create.json","transition-publish.json",
+        "transition-unpublish.json"],
       raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
-      tokens_persisted:false,secrets_persisted:false}' \
-    >"$EVIDENCE_DIR/summary.json" || return 1
-  chmod 600 "$EVIDENCE_DIR/summary.json" || return 1
+      tokens_persisted:false,secrets_persisted:false}')" || return 1
+  persist_activation_record summary "$summary" || return 1
+  if [[ "$verdict" == pass ]]; then
+    persisted="$(read_activation_record summary)" || return 1
+    validate_activation_summary "$persisted" pass || return 1
+  fi
 }
 
 run_activation_acceptance() {
@@ -844,7 +1071,10 @@ run_activation_acceptance() {
   ACTIVATION_CREATE_STATUS="$INVOCATION_STATUS"
   raw_projection="$INVOKE_PROJECTION"
   if (( INVOCATION_STATUS != 0 )) || ! validate_activation_create "$raw_projection"; then
-    persist_projection activation-create "$raw_projection" || true
+    if ! persist_projection activation-create "$raw_projection"; then
+      emit_activation_stop evidence_write_failed
+      return 10
+    fi
     persist_activation_summary unknown '"create_unknown"' || true
     emit_activation_unknown create_unknown
     return 20
@@ -862,6 +1092,12 @@ run_activation_acceptance() {
     emit_activation_stop evidence_write_failed
     return 10
   }
+  if ! persist_activation_transition create "$ACTIVATION_CREATE_OPERATION" \
+    activation-create "$ACTIVATION_WORKFLOW_ID"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
+  fi
 
   baseline_input="$("$JQ_BIN" -cn --arg id "$ACTIVATION_WORKFLOW_ID" '{id:$id}')" || {
     emit_activation_stop baseline_input_failed
@@ -872,7 +1108,10 @@ run_activation_acceptance() {
   ACTIVATION_BASELINE_STATUS=$?
   if (( ACTIVATION_BASELINE_STATUS != 0 )) \
     || ! validate_activation_baseline "$ACTIVATION_BASELINE_PROJECTION"; then
-    persist_projection activation-baseline "$ACTIVATION_BASELINE_PROJECTION" || true
+    if ! persist_projection activation-baseline "$ACTIVATION_BASELINE_PROJECTION"; then
+      emit_activation_stop evidence_write_failed
+      return 10
+    fi
     persist_activation_summary unknown '"baseline_unknown"' || true
     emit_activation_unknown baseline_unknown
     return 20
@@ -931,21 +1170,43 @@ run_activation_acceptance() {
   fi
   ACTIVATION_PUBLISH_STATUS="$INVOCATION_STATUS"
   ACTIVATION_PUBLISH_PROJECTION="$INVOKE_PROJECTION"
-  persist_projection activation-publish "$ACTIVATION_PUBLISH_PROJECTION" || true
   if (( INVOCATION_STATUS != 0 )) || ! validate_activation_publish "$ACTIVATION_PUBLISH_PROJECTION"; then
+    if ! persist_projection activation-publish "$ACTIVATION_PUBLISH_PROJECTION"; then
+      emit_activation_stop evidence_write_failed
+      return 10
+    fi
     persist_activation_summary unknown '"publish_unknown"' || true
     emit_activation_unknown publish_unknown
     return 20
   fi
+  if ! persist_projection activation-publish "$ACTIVATION_PUBLISH_PROJECTION"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
+  fi
+  if ! persist_activation_transition publish "$ACTIVATION_OPERATION" \
+    activation-publish "$ACTIVATION_WORKFLOW_ID"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
+  fi
 
   ACTIVATION_ACTIVE_PROJECTION="$(run_read_once "$baseline_input")"
   ACTIVATION_ACTIVE_STATUS=$?
-  persist_projection activation-active "$ACTIVATION_ACTIVE_PROJECTION" || true
   if (( ACTIVATION_ACTIVE_STATUS != 0 )) \
     || ! validate_activation_active_readback "$ACTIVATION_ACTIVE_PROJECTION"; then
+    if ! persist_projection activation-active "$ACTIVATION_ACTIVE_PROJECTION"; then
+      emit_activation_stop evidence_write_failed
+      return 10
+    fi
     persist_activation_summary unknown '"active_readback_mismatch"' || true
     emit_activation_unknown active_readback_mismatch
     return 20
+  fi
+  if ! persist_projection activation-active "$ACTIVATION_ACTIVE_PROJECTION"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
   fi
   ACTIVATION_ACTIVE_VERSION_ID="$("$JQ_BIN" -er '.result.activeVersionId' \
     <<<"$ACTIVATION_ACTIVE_PROJECTION")" || {
@@ -979,11 +1240,25 @@ run_activation_acceptance() {
   fi
   ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
   ACTIVATION_UNPUBLISH_PROJECTION="$INVOKE_PROJECTION"
-  persist_projection activation-unpublish "$ACTIVATION_UNPUBLISH_PROJECTION" || true
   if (( INVOCATION_STATUS != 0 )) || ! validate_activation_unpublish "$ACTIVATION_UNPUBLISH_PROJECTION"; then
+    if ! persist_projection activation-unpublish "$ACTIVATION_UNPUBLISH_PROJECTION"; then
+      emit_activation_stop evidence_write_failed
+      return 10
+    fi
     persist_activation_summary unknown '"unpublish_unknown"' || true
     emit_activation_unknown unpublish_unknown
     return 20
+  fi
+  if ! persist_projection activation-unpublish "$ACTIVATION_UNPUBLISH_PROJECTION"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
+  fi
+  if ! persist_activation_transition unpublish "$ACTIVATION_OPERATION" \
+    activation-unpublish "$ACTIVATION_WORKFLOW_ID"; then
+    persist_activation_summary stop '"evidence_write_failed"' || true
+    emit_activation_stop evidence_write_failed
+    return 10
   fi
 
   persist_activation_summary pass null || {
@@ -991,7 +1266,6 @@ run_activation_acceptance() {
     return 10
   }
   emit_activation_pass
-  return 0
 }
 
 run_self_test() {

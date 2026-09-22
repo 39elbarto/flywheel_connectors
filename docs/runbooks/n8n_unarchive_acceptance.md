@@ -123,9 +123,19 @@ one publish/readback, one active-state GET, and one unpublish/readback. It uses
 only `fwc-n8n run-once`, permits zero retries and zero execution/cleanup
 actions, and the self-test reports `provider_actions:0`; it does not invoke the
 Webhook, use credentials, or persist request/provider bodies, tokens, or
-secrets. A timeout, malformed response, or readback mismatch returns
+secrets. The activation evidence directory is mandatory: an omitted,
+unavailable, or unwritable directory stops before the first provider call and
+can never produce `pass`. A timeout, malformed response, or readback mismatch returns
 `unknown`/`STOP`; do not retry or start the next server after an unresolved
 result.
+
+A live `pass` is emitted only after the runner has durably written, reread, and
+validated the complete redacted evidence bundle. It contains
+`activation-plan.json`, the five `activation-*.json` projections, three
+`transition-{create,publish,unpublish}.json` records, and `summary.json`; the
+summary's `evidence_complete` flag and all transition/projection postconditions
+must validate. Any missing file, failed write, metadata mismatch, or validation
+failure returns `STOP` rather than `pass`.
 
 ## Runner scope
 

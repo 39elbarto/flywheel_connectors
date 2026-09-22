@@ -347,7 +347,7 @@ fn installed_n8n_mcp_catalog_and_read_only_calls_run_through_supervisor() {
             "params": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {},
-                "clientInfo": {"name": "fcp-n8n-acceptance", "version": "0.1"}
+                "clientInfo": {"name": "fcp-local-provider", "version": "0.1.0"}
             }
         }),
     );

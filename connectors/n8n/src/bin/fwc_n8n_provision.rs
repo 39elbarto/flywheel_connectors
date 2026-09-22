@@ -3967,7 +3967,7 @@ mod tests {
             // Synthetic policy hashes test signed-tree validation, not a live provider.
             serde_json::to_vec(&serde_json::json!({
                 "package_id": "n8n-mcp",
-                "package_version": "2.84.4",
+                "package_version": "2.87.0",
                 "launcher_path": "/usr/bin/node",
                 "launcher_digest": "0".repeat(64),
                 "runtime_executable": "/usr/bin/node",

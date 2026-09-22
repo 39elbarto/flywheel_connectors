@@ -2624,12 +2624,12 @@ fn parse_npm_partial_version(value: &str) -> Option<NpmPartialVersion> {
     })
 }
 
-const fn npm_version(major: u64, minor: u64, patch: u64) -> NpmVersionParts {
+fn npm_prerelease_upper(major: u64, minor: u64, patch: u64) -> NpmVersionParts {
     NpmVersionParts {
         major,
         minor,
         patch,
-        prerelease: Vec::new(),
+        prerelease: vec![NpmPrereleaseIdentifier::Numeric(0)],
     }
 }
 
@@ -2645,10 +2645,10 @@ fn npm_partial_lower(partial: &NpmPartialVersion) -> NpmVersionParts {
 fn npm_partial_upper(partial: &NpmPartialVersion) -> Option<NpmVersionParts> {
     partial.major?;
     if partial.minor.is_none() {
-        return Some(npm_version(partial.major?.saturating_add(1), 0, 0));
+        return Some(npm_prerelease_upper(partial.major?.saturating_add(1), 0, 0));
     }
     if partial.patch.is_none() {
-        return Some(npm_version(
+        return Some(npm_prerelease_upper(
             partial.major?,
             partial.minor?.saturating_add(1),
             0,
@@ -2662,15 +2662,15 @@ fn npm_caret_upper(partial: &NpmPartialVersion) -> NpmVersionParts {
     let minor = partial.minor.unwrap_or(0);
     let patch = partial.patch.unwrap_or(0);
     if major > 0 {
-        npm_version(major.saturating_add(1), 0, 0)
+        npm_prerelease_upper(major.saturating_add(1), 0, 0)
     } else if partial.minor.is_none() {
-        npm_version(1, 0, 0)
+        npm_prerelease_upper(1, 0, 0)
     } else if minor > 0 {
-        npm_version(0, minor.saturating_add(1), 0)
+        npm_prerelease_upper(0, minor.saturating_add(1), 0)
     } else if partial.patch.is_none() {
-        npm_version(0, 1, 0)
+        npm_prerelease_upper(0, 1, 0)
     } else {
-        npm_version(0, 0, patch.saturating_add(1))
+        npm_prerelease_upper(0, 0, patch.saturating_add(1))
     }
 }
 
@@ -2744,9 +2744,9 @@ fn npm_add_partial_comparators(
             output.push(NpmComparator {
                 operator: NpmComparatorOperator::Less,
                 version: if partial.minor.is_none() {
-                    npm_version(partial.major?.saturating_add(1), 0, 0)
+                    npm_prerelease_upper(partial.major?.saturating_add(1), 0, 0)
                 } else {
-                    npm_version(partial.major?, partial.minor?.saturating_add(1), 0)
+                    npm_prerelease_upper(partial.major?, partial.minor?.saturating_add(1), 0)
                 },
             });
         }
@@ -5700,6 +5700,31 @@ mod tests {
                 "accepted {version}"
             );
         }
+    }
+
+    #[test]
+    fn npm_semver_excludes_prerelease_at_upper_bound_but_keeps_explicit_prereleases() {
+        for spec in ["^1.2.3", ">=1.2.3 <2.0.0"] {
+            assert!(
+                validate_registry_dependency_spec(spec).is_ok(),
+                "range syntax rejected: {spec}"
+            );
+            assert!(
+                !dependency_spec_allows_version(spec, "2.0.0-alpha.1"),
+                "{spec} must exclude a prerelease at its 2.0.0 upper boundary"
+            );
+        }
+
+        let caret = parse_npm_range("^1.2.3").expect("caret range");
+        assert_eq!(
+            caret[0][1].version,
+            npm_prerelease_upper(2, 0, 0),
+            "npm caret upper bounds use the lowest prerelease"
+        );
+        assert!(dependency_spec_allows_version(
+            "^1.2.3-beta.1",
+            "1.2.3-beta.2"
+        ));
     }
 
     #[test]

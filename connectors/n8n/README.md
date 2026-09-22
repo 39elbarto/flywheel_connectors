@@ -809,9 +809,11 @@ requested exact local `n8n-mcp` version:
   semver version; only the fixed registry metadata, per-package pack/cache-add,
   and offline install plans are generated internally. For each ordinary npm
   dependency range, the resolver accepts npm's object or array `view` output,
-  chooses the highest matching concrete version with stable SRI/tarball
-  tie-breakers, and records the complete selected registry-only closure in the
-  redacted receipt. File/link/git/ssh/http(s)/bundled/override and alias
+  evaluates npm-semver prerelease/build, partial, comparator, caret/tilde,
+  wildcard, OR, and hyphen forms, chooses the highest matching concrete
+  version with stable SRI/tarball tie-breakers, and records every selected
+  package plus frozen parent-edge target in the redacted receipt. Unsupported
+  range expressions and file/link/git/ssh/http(s)/bundled/override and alias
   sources across dependencies, optional dependencies, peer dependencies, and
   transitive edges are rejected before any package content fetch.
 - The command uses an empty inherited environment plus only fixed npm values,
@@ -822,12 +824,15 @@ requested exact local `n8n-mcp` version:
   root-gated, stages only below
   `/var/lib/fwc-n8n/update-staging/local-n8n-mcp`, creates an initially empty
   `.registry-cache` owned by that UUID-v4 stage, materializes every selected
-  exact tarball there, verifies each SHA-512 SRI, rejects package lockfiles,
-  bundles, aliases, and manifest disagreement before install, seeds only that
-  cache, and runs npm install with `--offline --cache <stage>/.registry-cache`.
-  npm may omit an optional package for the current platform; all selected
-  optional and peer artifacts are nevertheless resolved and cached, while every
-  package that npm records in the installed lock must belong to that closure.
+  exact tarball from its frozen validated registry URL there, verifies each
+  SHA-512 SRI, rejects package lockfiles, bundles, aliases, and manifest
+  disagreement before install, seeds only that cache, and runs npm install
+  with `--offline --cache <stage>/.registry-cache`. Optional dependencies may
+  be absent only when the selected package declares an incompatible `os`/`cpu`
+  constraint; optional peers may be absent by npm semantics. Required and
+  non-optional peer edges must be present, and every installed lock edge must
+  match the frozen selected manifest map and exact closure target rather than
+  merely satisfying a mutable range.
 - Before success, the command verifies registry metadata and every selected
   artifact SRI, performs a bounded archive-listing preflight, runs the strict
   package manifest, canonical registry-only lock closure (including exact

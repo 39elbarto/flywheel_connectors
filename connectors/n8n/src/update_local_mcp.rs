@@ -161,6 +161,23 @@ pub struct RegistryClosurePackage {
     dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
+    peer_dependencies_meta: BTreeMap<String, bool>,
+    os: Vec<String>,
+    cpu: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistryClosureEdge {
+    source_package_name: String,
+    source_version: String,
+    dependency_name: String,
+    dependency_spec: String,
+    dependency_kind: String,
+    optional: bool,
+    target_version: String,
+    target_integrity: String,
+    target_registry_tarball_url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +191,9 @@ struct RegistryPackageMetadata {
     dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
-    peer_dependencies_meta_digest: String,
+    peer_dependencies_meta: BTreeMap<String, bool>,
+    os: Vec<String>,
+    cpu: Vec<String>,
 }
 
 impl RegistryPackageMetadata {
@@ -187,20 +206,77 @@ impl RegistryPackageMetadata {
             dependencies: self.dependencies.clone(),
             optional_dependencies: self.optional_dependencies.clone(),
             peer_dependencies: self.peer_dependencies.clone(),
+            peer_dependencies_meta: self.peer_dependencies_meta.clone(),
+            os: self.os.clone(),
+            cpu: self.cpu.clone(),
         }
     }
 
-    fn edges(&self) -> impl Iterator<Item = (&String, &String)> {
-        self.dependencies
-            .iter()
-            .chain(self.optional_dependencies.iter())
-            .chain(self.peer_dependencies.iter())
+    fn dependency_edges(&self) -> Vec<RegistryDependencyEdgeSpec> {
+        let mut edges = Vec::new();
+        for (name, spec) in &self.dependencies {
+            if !self.optional_dependencies.contains_key(name) {
+                edges.push(RegistryDependencyEdgeSpec {
+                    name: name.clone(),
+                    spec: spec.clone(),
+                    kind: RegistryDependencyKind::Required,
+                    optional: false,
+                });
+            }
+        }
+        edges.extend(self.optional_dependencies.iter().map(|(name, spec)| {
+            RegistryDependencyEdgeSpec {
+                name: name.clone(),
+                spec: spec.clone(),
+                kind: RegistryDependencyKind::Optional,
+                optional: true,
+            }
+        }));
+        edges.extend(self.peer_dependencies.iter().map(|(name, spec)| {
+            RegistryDependencyEdgeSpec {
+                name: name.clone(),
+                spec: spec.clone(),
+                kind: RegistryDependencyKind::Peer,
+                optional: self
+                    .peer_dependencies_meta
+                    .get(name)
+                    .copied()
+                    .unwrap_or(false),
+            }
+        }));
+        edges
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryDependencyKind {
+    Required,
+    Optional,
+    Peer,
+}
+
+impl RegistryDependencyKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Required => "dependencies",
+            Self::Optional => "optionalDependencies",
+            Self::Peer => "peerDependencies",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryDependencyEdgeSpec {
+    name: String,
+    spec: String,
+    kind: RegistryDependencyKind,
+    optional: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryClosure {
     packages: Vec<RegistryPackageMetadata>,
+    edges: Vec<RegistryClosureEdge>,
     digest: String,
 }
 
@@ -281,6 +357,7 @@ pub struct LocalMcpVerificationReceipt {
     pub registry_tarball_url: String,
     pub registry_closure_digest: String,
     pub registry_closure_packages: Vec<RegistryClosurePackage>,
+    pub registry_closure_edges: Vec<RegistryClosureEdge>,
     pub artifact_binding_digest: String,
     pub stage_tree_digest: String,
     pub package_manifest_digest: String,
@@ -367,6 +444,8 @@ fn build_local_mcp_stage_plan(
     let stage_root = format!("{staging_root}/{version}/{stage_id}");
     let registry_cache_path = format!("{stage_root}/{STAGE_REGISTRY_CACHE}");
     let package_spec = format!("{PACKAGE_NAME}@{version}");
+    let package_tarball_url =
+        format!("https://registry.npmjs.org/{PACKAGE_NAME}/-/{PACKAGE_NAME}-{version}.tgz");
     Ok(LocalMcpStagePlan {
         component: UpdateComponent::LocalN8nMcp,
         exact_version: version.to_string(),
@@ -378,7 +457,7 @@ fn build_local_mcp_stage_plan(
             program: NPM_PROGRAM.to_string(),
             args: vec![
                 "pack".to_string(),
-                package_spec.clone(),
+                package_tarball_url,
                 "--ignore-scripts".to_string(),
                 "--no-audit".to_string(),
                 "--no-fund".to_string(),
@@ -519,6 +598,90 @@ fn registry_metadata_string<'a>(value: &'a Value, dotted_key: &str) -> Option<&'
         .or_else(|| value.pointer(pointer).and_then(Value::as_str))
 }
 
+fn parse_peer_dependencies_meta(
+    value: Option<&Value>,
+    peers: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, bool>, LocalMcpAdapterError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(BTreeMap::new());
+    };
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "peer_dependencies_meta_invalid",
+        ))?;
+    if object.len() > 512 {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "peer_dependencies_meta_oversized",
+        ));
+    }
+    object
+        .iter()
+        .map(|(name, entry)| {
+            validate_package_name(name)?;
+            if !peers.contains_key(name) {
+                return Err(LocalMcpAdapterError::InvalidMetadata(
+                    "peer_dependencies_meta_unknown",
+                ));
+            }
+            let entry = entry
+                .as_object()
+                .ok_or(LocalMcpAdapterError::InvalidMetadata(
+                    "peer_dependencies_meta_invalid",
+                ))?;
+            if entry.keys().any(|key| key != "optional") {
+                return Err(LocalMcpAdapterError::InvalidMetadata(
+                    "peer_dependencies_meta_invalid",
+                ));
+            }
+            let optional = entry.get("optional").map_or(Ok(false), |value| {
+                value.as_bool().ok_or(LocalMcpAdapterError::InvalidMetadata(
+                    "peer_dependencies_meta_invalid",
+                ))
+            })?;
+            Ok((name.clone(), optional))
+        })
+        .collect()
+}
+
+fn parse_platform_constraints(value: Option<&Value>) -> Result<Vec<String>, LocalMcpAdapterError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let values = match value {
+        Value::Array(values) => values.clone(),
+        Value::String(value) => vec![Value::String(value.clone())],
+        _ => {
+            return Err(LocalMcpAdapterError::InvalidMetadata(
+                "platform_constraints_invalid",
+            ));
+        }
+    };
+    if values.len() > 64 {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "platform_constraints_oversized",
+        ));
+    }
+    values
+        .iter()
+        .map(|value| {
+            let value = value.as_str().ok_or(LocalMcpAdapterError::InvalidMetadata(
+                "platform_constraints_invalid",
+            ))?;
+            if value.is_empty()
+                || value.len() > 32
+                || !value.is_ascii()
+                || value.chars().any(char::is_control)
+            {
+                return Err(LocalMcpAdapterError::InvalidMetadata(
+                    "platform_constraints_invalid",
+                ));
+            }
+            Ok(value.to_ascii_lowercase())
+        })
+        .collect()
+}
+
 fn registry_package_metadata(
     package_name: &str,
     value: &Value,
@@ -558,6 +721,17 @@ fn registry_package_metadata(
     let peer_dependencies = parse_dependencies(object.get("peerDependencies")).map_err(|_| {
         LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
     })?;
+    let peer_dependencies_meta =
+        parse_peer_dependencies_meta(object.get("peerDependenciesMeta"), &peer_dependencies)
+            .map_err(|_| {
+                LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+            })?;
+    let os = parse_platform_constraints(object.get("os")).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
+    let cpu = parse_platform_constraints(object.get("cpu")).map_err(|_| {
+        LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
+    })?;
     let engine_requirement = match object.get("engines").filter(|value| !value.is_null()) {
         None => None,
         Some(engines) => {
@@ -589,32 +763,6 @@ fn registry_package_metadata(
         ));
     }
     let lifecycle_scripts_digest = canonical_digest(&lifecycle_scripts)?;
-    if let Some(meta) = object
-        .get("peerDependenciesMeta")
-        .filter(|value| !value.is_null())
-    {
-        let meta = meta
-            .as_object()
-            .ok_or(LocalMcpAdapterError::InvalidMetadata(
-                "registry_dependency_closure_invalid",
-            ))?;
-        for (name, entry) in meta {
-            validate_package_name(name).map_err(|_| {
-                LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
-            })?;
-            if !entry.is_object() {
-                return Err(LocalMcpAdapterError::InvalidMetadata(
-                    "registry_dependency_closure_invalid",
-                ));
-            }
-        }
-    }
-    let peer_dependencies_meta = object
-        .get("peerDependenciesMeta")
-        .filter(|value| !value.is_null())
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let peer_dependencies_meta_digest = canonical_digest(&peer_dependencies_meta)?;
     // These fields can alter the package source or the selected tree and are
     // intentionally unsupported. Reject them before any tarball is fetched.
     for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
@@ -634,7 +782,9 @@ fn registry_package_metadata(
         dependencies,
         optional_dependencies,
         peer_dependencies,
-        peer_dependencies_meta_digest,
+        peer_dependencies_meta,
+        os,
+        cpu,
     })
 }
 
@@ -717,18 +867,31 @@ fn select_registry_view_value(
 
 fn registry_closure_digest(
     packages: &[RegistryPackageMetadata],
+    edges: &[RegistryClosureEdge],
 ) -> Result<String, LocalMcpAdapterError> {
     let safe = packages
         .iter()
         .map(RegistryPackageMetadata::closure_package)
         .collect::<Vec<_>>();
-    canonical_digest(&("fwc.n8n.registry-closure.v1", safe))
+    canonical_digest(&("fwc.n8n.registry-closure.v2", safe, edges))
 }
 
 fn registry_closure_receipt_digest(
     packages: &[RegistryClosurePackage],
+    edges: &[RegistryClosureEdge],
 ) -> Result<String, LocalMcpAdapterError> {
-    canonical_digest(&("fwc.n8n.registry-closure.v1", packages))
+    canonical_digest(&("fwc.n8n.registry-closure.v2", packages, edges))
+}
+
+fn closure_edge_sort_key(edge: &RegistryClosureEdge) -> (&str, &str, &str, &str, &str, &str) {
+    (
+        &edge.source_package_name,
+        &edge.source_version,
+        &edge.dependency_kind,
+        &edge.dependency_name,
+        &edge.dependency_spec,
+        &edge.target_version,
+    )
 }
 
 fn resolve_registry_dependency_closure<R: LocalMcpCommandRunner>(
@@ -746,6 +909,7 @@ fn resolve_registry_dependency_closure<R: LocalMcpCommandRunner>(
         ));
     }
     let mut packages = BTreeMap::<(String, String), RegistryPackageMetadata>::new();
+    let mut edges = Vec::new();
     packages.insert(
         (
             root_package.package_name.clone(),
@@ -753,47 +917,67 @@ fn resolve_registry_dependency_closure<R: LocalMcpCommandRunner>(
         ),
         root_package,
     );
+    let root_key = (PACKAGE_NAME.to_string(), root.version.clone());
     let mut pending = packages
-        .values()
-        .flat_map(|package| {
-            package
-                .edges()
-                .map(|(name, spec)| (name.clone(), spec.clone()))
-        })
+        .get(&root_key)
+        .expect("root package inserted")
+        .dependency_edges()
+        .into_iter()
+        .map(|edge| (root_key.clone(), edge))
         .collect::<Vec<_>>();
-    let mut inspected = BTreeSet::new();
     let mut edge_count = 0usize;
-    while let Some((package_name, spec)) = pending.pop() {
+    while let Some(((source_package_name, source_version), edge)) = pending.pop() {
         edge_count = edge_count
             .checked_add(1)
             .ok_or(LocalMcpAdapterError::StageBounds)?;
         if edge_count > MAX_REGISTRY_CLOSURE_EDGES {
             return Err(LocalMcpAdapterError::StageBounds);
         }
-        if !inspected.insert((package_name.clone(), spec.clone())) {
-            continue;
-        }
-        let plan = npm_dependency_metadata_plan(&package_name, &spec)?;
+        let plan = npm_dependency_metadata_plan(&edge.name, &edge.spec)?;
         let output = command_runner.run(&plan)?;
         let value: Value = serde_json::from_slice(&output).map_err(|_| {
             LocalMcpAdapterError::InvalidMetadata("registry_dependency_closure_invalid")
         })?;
-        let selected = resolve_registry_view_metadata(&package_name, &spec, &value)?;
+        let selected = resolve_registry_view_metadata(&edge.name, &edge.spec, &value)?;
         let key = (selected.package_name.clone(), selected.version.clone());
-        if packages.insert(key, selected.clone()).is_none() {
+        if let Some(previous) = packages.get(&key) {
+            if previous != &selected {
+                return Err(LocalMcpAdapterError::InvalidMetadata(
+                    "registry_dependency_closure_invalid",
+                ));
+            }
+        } else {
+            packages.insert(key.clone(), selected.clone());
             if packages.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
                 return Err(LocalMcpAdapterError::StageBounds);
             }
             pending.extend(
                 selected
-                    .edges()
-                    .map(|(name, child_spec)| (name.clone(), child_spec.clone())),
+                    .dependency_edges()
+                    .into_iter()
+                    .map(|child| (key.clone(), child)),
             );
         }
+        edges.push(RegistryClosureEdge {
+            source_package_name,
+            source_version,
+            dependency_name: edge.name,
+            dependency_spec: edge.spec,
+            dependency_kind: edge.kind.as_str().to_string(),
+            optional: edge.optional,
+            target_version: selected.version.clone(),
+            target_integrity: selected.integrity.clone(),
+            target_registry_tarball_url: selected.registry_tarball_url.clone(),
+        });
     }
     let packages = packages.into_values().collect::<Vec<_>>();
-    let digest = registry_closure_digest(&packages)?;
-    Ok(RegistryClosure { packages, digest })
+    edges.sort_by(|left, right| closure_edge_sort_key(left).cmp(&closure_edge_sort_key(right)));
+    let digest = registry_closure_digest(&packages, &edges)?;
+    Ok(RegistryClosure {
+        packages,
+        edges,
+        digest,
+    })
 }
 
 pub fn snapshot_from_registry_metadata(
@@ -1009,11 +1193,12 @@ where
         ) {
             return Err(cleanup(stage_io, error));
         }
-        let pack = if package.package_name == PACKAGE_NAME && package.version == metadata.version {
-            plan.pack().clone()
-        } else {
-            npm_registry_pack_plan(&plan, &package.package_name, &package.version)?
-        };
+        let pack = npm_registry_pack_plan(
+            &plan,
+            &package.package_name,
+            &package.version,
+            &package.registry_tarball_url,
+        )?;
         if let Err(error) = command_runner.run(&pack) {
             return Err(cleanup(stage_io, error));
         }
@@ -1041,10 +1226,14 @@ where
             };
             return Err(cleanup(stage_io, adapter_error));
         }
-        if let Some(manifest) = artifact.manifest.as_ref() {
-            if let Err(error) = validate_selected_registry_manifest(manifest, package) {
-                return Err(cleanup(stage_io, error));
-            }
+        let manifest = artifact.manifest.as_ref().ok_or_else(|| {
+            cleanup(
+                stage_io,
+                LocalMcpAdapterError::StageMismatch("registry_manifest_missing"),
+            )
+        })?;
+        if let Err(error) = validate_selected_registry_manifest(manifest, package) {
+            return Err(cleanup(stage_io, error));
         }
         let cache_add =
             npm_registry_cache_add_plan(&plan, &package.package_name, &package.version)?;
@@ -1089,6 +1278,7 @@ where
             .iter()
             .map(RegistryPackageMetadata::closure_package)
             .collect(),
+        registry_closure_edges: closure.edges.clone(),
         artifact_binding_digest: verified.snapshot().provenance.artifact_digest.clone(),
         stage_tree_digest: verified.stage_tree_digest.clone(),
         package_manifest_digest: verified.package_manifest_digest.clone(),
@@ -1433,14 +1623,37 @@ fn validate_installed_package_lock_with_closure(
             let resolved = record.get("resolved").and_then(Value::as_str).ok_or(
                 LocalMcpAdapterError::StageMismatch("lock_record_non_registry"),
             )?;
-            if !closure.packages.iter().any(|selected| {
-                selected.package_name == package_name
-                    && selected.version == version
-                    && selected.integrity == integrity
-                    && selected.registry_tarball_url == resolved
-            }) {
+            let selected =
+                closure_package_for_identity(closure, &package_name, version, integrity, resolved)
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "lock_registry_closure_mismatch",
+                    ))?;
+            if parse_lock_dependencies(record.get("dependencies"))? != selected.dependencies
+                || parse_lock_dependencies(record.get("optionalDependencies"))?
+                    != selected.optional_dependencies
+                || parse_lock_dependencies(record.get("peerDependencies"))?
+                    != selected.peer_dependencies
+            {
                 return Err(LocalMcpAdapterError::StageMismatch(
-                    "lock_registry_closure_mismatch",
+                    "lock_manifest_dependency_mismatch",
+                ));
+            }
+            let peer_meta = parse_lock_peer_dependencies_meta(
+                record.get("peerDependenciesMeta"),
+                &selected.peer_dependencies,
+            )?;
+            if peer_meta != selected.peer_dependencies_meta {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_manifest_dependency_mismatch",
+                ));
+            }
+            let os = parse_lock_platform_constraints(record.get("os"))?;
+            let cpu = parse_lock_platform_constraints(record.get("cpu"))?;
+            if (!selected.os.is_empty() && os != selected.os)
+                || (!selected.cpu.is_empty() && cpu != selected.cpu)
+            {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "lock_manifest_platform_mismatch",
                 ));
             }
         }
@@ -1465,27 +1678,102 @@ fn validate_installed_package_lock_with_closure(
             .ok_or(LocalMcpAdapterError::StageMismatch(
                 "lock_dependency_missing",
             ))?;
-        for (dependency_name, dependency_spec) in lock_record_dependencies(record)? {
-            let dependency_key =
-                resolve_lock_dependency_key(&package_key, &dependency_name, packages).ok_or(
-                    LocalMcpAdapterError::StageMismatch("lock_dependency_missing"),
-                )?;
-            let dependency_record = packages
-                .get(&dependency_key)
-                .and_then(Value::as_object)
-                .ok_or(LocalMcpAdapterError::StageMismatch(
-                    "lock_dependency_missing",
-                ))?;
-            let dependency_version = dependency_record
+        if let Some(closure) = expected_closure {
+            let source_name = validate_lock_package_key(&package_key)?;
+            let source_version = record
                 .get("version")
                 .and_then(Value::as_str)
                 .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
-            if !dependency_spec_allows_version(&dependency_spec, dependency_version) {
-                return Err(LocalMcpAdapterError::StageMismatch(
-                    "lock_dependency_version_mismatch",
-                ));
+            let source = closure
+                .packages
+                .iter()
+                .find(|selected| {
+                    selected.package_name == source_name && selected.version == source_version
+                })
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "lock_registry_closure_mismatch",
+                ))?;
+            for edge in closure.edges.iter().filter(|edge| {
+                edge.source_package_name == source.package_name
+                    && edge.source_version == source.version
+            }) {
+                let (_, target) = closure_package_for_edge(
+                    closure,
+                    &edge.source_package_name,
+                    &edge.source_version,
+                    &edge.dependency_name,
+                    &edge.dependency_kind,
+                )
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "registry_dependency_closure_invalid",
+                ))?;
+                let Some(dependency_key) =
+                    resolve_lock_dependency_key(&package_key, &edge.dependency_name, packages)
+                else {
+                    if optional_edge_omission_is_allowed(edge, target) {
+                        continue;
+                    }
+                    return Err(LocalMcpAdapterError::StageMismatch(
+                        "lock_dependency_missing",
+                    ));
+                };
+                let dependency_record = packages
+                    .get(&dependency_key)
+                    .and_then(Value::as_object)
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "lock_dependency_missing",
+                    ))?;
+                let dependency_version =
+                    dependency_record
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+                let dependency_integrity = dependency_record
+                    .get("integrity")
+                    .and_then(Value::as_str)
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "lock_record_integrity_missing",
+                    ))?;
+                let dependency_resolved = dependency_record
+                    .get("resolved")
+                    .and_then(Value::as_str)
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "lock_record_non_registry",
+                    ))?;
+                if dependency_version != target.version
+                    || dependency_integrity != target.integrity
+                    || dependency_resolved != target.registry_tarball_url
+                {
+                    return Err(LocalMcpAdapterError::StageMismatch(
+                        "lock_dependency_selection_mismatch",
+                    ));
+                }
+                pending.push(dependency_key);
             }
-            pending.push(dependency_key);
+        } else {
+            for (dependency_name, dependency_spec) in lock_record_dependencies(record)? {
+                let dependency_key =
+                    resolve_lock_dependency_key(&package_key, &dependency_name, packages).ok_or(
+                        LocalMcpAdapterError::StageMismatch("lock_dependency_missing"),
+                    )?;
+                let dependency_record = packages
+                    .get(&dependency_key)
+                    .and_then(Value::as_object)
+                    .ok_or(LocalMcpAdapterError::StageMismatch(
+                        "lock_dependency_missing",
+                    ))?;
+                let dependency_version =
+                    dependency_record
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .ok_or(LocalMcpAdapterError::StageMismatch("lock_record_malformed"))?;
+                if !dependency_spec_allows_version(&dependency_spec, dependency_version) {
+                    return Err(LocalMcpAdapterError::StageMismatch(
+                        "lock_dependency_version_mismatch",
+                    ));
+                }
+                pending.push(dependency_key);
+            }
         }
     }
     if reachable != lock_package_keys {
@@ -1666,6 +1954,29 @@ fn parse_lock_dependencies(
         .collect()
 }
 
+fn parse_lock_peer_dependencies_meta(
+    value: Option<&Value>,
+    peers: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, bool>, LocalMcpAdapterError> {
+    parse_peer_dependencies_meta(value, peers).map_err(|error| match error {
+        LocalMcpAdapterError::InvalidMetadata(_) => {
+            LocalMcpAdapterError::StageMismatch("lock_peer_dependencies_meta_invalid")
+        }
+        other => other,
+    })
+}
+
+fn parse_lock_platform_constraints(
+    value: Option<&Value>,
+) -> Result<Vec<String>, LocalMcpAdapterError> {
+    parse_platform_constraints(value).map_err(|error| match error {
+        LocalMcpAdapterError::InvalidMetadata(_) => {
+            LocalMcpAdapterError::StageMismatch("lock_platform_constraints_invalid")
+        }
+        other => other,
+    })
+}
+
 fn lock_record_dependencies(
     record: &serde_json::Map<String, Value>,
 ) -> Result<BTreeMap<String, String>, LocalMcpAdapterError> {
@@ -1708,17 +2019,109 @@ fn resolve_lock_dependency_key(
     }
 }
 
+fn closure_package_for_edge<'a>(
+    closure: &'a RegistryClosure,
+    source_package_name: &str,
+    source_version: &str,
+    dependency_name: &str,
+    dependency_kind: &str,
+) -> Option<(&'a RegistryClosureEdge, &'a RegistryPackageMetadata)> {
+    let edge = closure.edges.iter().find(|edge| {
+        edge.source_package_name == source_package_name
+            && edge.source_version == source_version
+            && edge.dependency_name == dependency_name
+            && edge.dependency_kind == dependency_kind
+    })?;
+    let package = closure.packages.iter().find(|package| {
+        package.package_name == dependency_name
+            && package.version == edge.target_version
+            && package.integrity == edge.target_integrity
+            && package.registry_tarball_url == edge.target_registry_tarball_url
+    })?;
+    Some((edge, package))
+}
+
+fn closure_package_for_identity<'a>(
+    closure: &'a RegistryClosure,
+    package_name: &str,
+    version: &str,
+    integrity: &str,
+    resolved: &str,
+) -> Option<&'a RegistryPackageMetadata> {
+    closure.packages.iter().find(|package| {
+        package.package_name == package_name
+            && package.version == version
+            && package.integrity == integrity
+            && package.registry_tarball_url == resolved
+    })
+}
+
+const fn current_npm_os() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "freebsd") {
+        "freebsd"
+    } else if cfg!(target_os = "openbsd") {
+        "openbsd"
+    } else if cfg!(target_os = "netbsd") {
+        "netbsd"
+    } else if cfg!(target_os = "solaris") {
+        "sunos"
+    } else {
+        "linux"
+    }
+}
+
+fn current_npm_cpu() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        "arm" => "arm",
+        "powerpc64" => "ppc64",
+        "s390x" => "s390x",
+        other => other,
+    }
+}
+
+fn platform_constraint_allows(values: &[String], current: &str) -> bool {
+    if values.is_empty() {
+        return true;
+    }
+    if values.iter().any(|value| value == &format!("!{current}")) {
+        return false;
+    }
+    let positive = values.iter().filter(|value| !value.starts_with('!'));
+    let has_positive = values.iter().any(|value| !value.starts_with('!'));
+    !has_positive || positive.into_iter().any(|value| value == current)
+}
+
+fn package_platform_allows_current(package: &RegistryPackageMetadata) -> bool {
+    platform_constraint_allows(&package.os, current_npm_os())
+        && platform_constraint_allows(&package.cpu, current_npm_cpu())
+}
+
+fn optional_edge_omission_is_allowed(
+    edge: &RegistryClosureEdge,
+    target: &RegistryPackageMetadata,
+) -> bool {
+    edge.optional
+        && (edge.dependency_kind == RegistryDependencyKind::Peer.as_str()
+            || !package_platform_allows_current(target))
+}
+
 fn validate_registry_package_tarball_url(
     value: &str,
     package_name: &str,
     version: &str,
 ) -> Result<(), LocalMcpAdapterError> {
     let basename = package_name.rsplit('/').next().unwrap_or(package_name);
-    let suffix = format!("/{package_name}/-/{basename}-{version}.tgz");
+    let expected = format!("https://registry.npmjs.org/{package_name}/-/{basename}-{version}.tgz");
     if value.len() > 1024
         || !value.is_ascii()
-        || !value.starts_with("https://registry.npmjs.org/")
-        || !value.ends_with(&suffix)
+        || value != expected
         || value.contains(['?', '#', '\\'])
         || value.chars().any(char::is_control)
     {
@@ -1729,212 +2132,6 @@ fn validate_registry_package_tarball_url(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct NpmVersionParts {
-    major: u64,
-    minor: u64,
-    patch: u64,
-}
-
-fn npm_version_parts(value: &str) -> Option<NpmVersionParts> {
-    let core = value.split(['-', '+']).next()?;
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(NpmVersionParts {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn dependency_spec_allows_version(spec: &str, version: &str) -> bool {
-    if version.contains('-') && !spec.contains('-') {
-        return false;
-    }
-    let Some(version) = npm_version_parts(version) else {
-        return false;
-    };
-    spec.split("||").any(|alternative| {
-        let tokens = alternative.split_ascii_whitespace().collect::<Vec<_>>();
-        if tokens.len() == 3 && tokens[1] == "-" {
-            let Some(lower) = npm_range_bound(tokens[0]) else {
-                return false;
-            };
-            let Some(upper) = npm_range_bound(tokens[2]) else {
-                return false;
-            };
-            return version >= lower && version <= upper;
-        }
-        tokens
-            .into_iter()
-            .all(|token| dependency_token_allows_version(token, version))
-    })
-}
-
-fn dependency_token_allows_version(token: &str, version: NpmVersionParts) -> bool {
-    let (operator, value) = dependency_token_parts(token);
-    if value.contains(['x', 'X', '*']) {
-        if operator != "=" {
-            return false;
-        }
-        if value == "*" || value.eq_ignore_ascii_case("x") {
-            return true;
-        }
-        let parts: Vec<_> = value.split('.').collect();
-        return match parts.as_slice() {
-            [major, "x" | "X"] => major.parse::<u64>().ok() == Some(version.major),
-            [major, minor, "x" | "X"] => {
-                major.parse::<u64>().ok() == Some(version.major)
-                    && minor.parse::<u64>().ok() == Some(version.minor)
-            }
-            _ => false,
-        };
-    }
-    let Some(bound) = npm_range_bound(value) else {
-        return false;
-    };
-    match operator {
-        "=" => {
-            let component_count = value
-                .split(['-', '+'])
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .count();
-            if component_count < 3 {
-                let upper = if component_count == 1 {
-                    NpmVersionParts {
-                        major: bound.major.saturating_add(1),
-                        minor: 0,
-                        patch: 0,
-                    }
-                } else {
-                    NpmVersionParts {
-                        major: bound.major,
-                        minor: bound.minor.saturating_add(1),
-                        patch: 0,
-                    }
-                };
-                version >= bound && version < upper
-            } else {
-                version == bound
-            }
-        }
-        ">=" => version >= bound,
-        "<=" => version <= bound,
-        ">" => version > bound,
-        "<" => version < bound,
-        "~" => {
-            let component_count = value
-                .split(['-', '+'])
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .count();
-            let upper = if component_count < 2 {
-                NpmVersionParts {
-                    major: bound.major.saturating_add(1),
-                    minor: 0,
-                    patch: 0,
-                }
-            } else {
-                NpmVersionParts {
-                    major: bound.major,
-                    minor: bound.minor.saturating_add(1),
-                    patch: 0,
-                }
-            };
-            version >= bound && version < upper
-        }
-        "^" => {
-            let component_count = value
-                .split(['-', '+'])
-                .next()
-                .unwrap_or_default()
-                .split('.')
-                .count();
-            let upper = if bound.major > 0 || component_count == 1 {
-                NpmVersionParts {
-                    major: bound.major.saturating_add(1),
-                    minor: 0,
-                    patch: 0,
-                }
-            } else if bound.minor > 0 {
-                NpmVersionParts {
-                    major: 0,
-                    minor: bound.minor.saturating_add(1),
-                    patch: 0,
-                }
-            } else {
-                NpmVersionParts {
-                    major: 0,
-                    minor: 0,
-                    patch: bound.patch.saturating_add(1),
-                }
-            };
-            version >= bound && version < upper
-        }
-        _ => false,
-    }
-}
-
-fn dependency_token_parts(token: &str) -> (&str, &str) {
-    if let Some(value) = token.strip_prefix(">=") {
-        (">=", value)
-    } else if let Some(value) = token.strip_prefix("<=") {
-        ("<=", value)
-    } else if let Some(value) = token.strip_prefix('>') {
-        (">", value)
-    } else if let Some(value) = token.strip_prefix('<') {
-        ("<", value)
-    } else if let Some(value) = token.strip_prefix('^') {
-        ("^", value)
-    } else if let Some(value) = token.strip_prefix('~') {
-        ("~", value)
-    } else {
-        ("=", token.strip_prefix('=').unwrap_or(token))
-    }
-}
-
-fn dependency_spec_syntax_is_valid(value: &str) -> bool {
-    value.split("||").all(|alternative| {
-        let tokens: Vec<_> = alternative.split_ascii_whitespace().collect();
-        !tokens.is_empty()
-            && (tokens.len() != 2 || tokens[0] != "-")
-            && (!tokens.contains(&"-") || (tokens.len() == 3 && tokens[1] == "-"))
-            && tokens.iter().all(|token| {
-                if *token == "-" {
-                    return true;
-                }
-                let (operator, version) = dependency_token_parts(token);
-                if version == "*" || version.eq_ignore_ascii_case("x") {
-                    return operator == "=";
-                }
-                if version.contains(['x', 'X', '*']) {
-                    if operator != "=" {
-                        return false;
-                    }
-                    let parts: Vec<_> = version.split('.').collect();
-                    match parts.as_slice() {
-                        [major, "x" | "X"] => major.bytes().all(|byte| byte.is_ascii_digit()),
-                        [major, minor, "x" | "X"] => {
-                            major.bytes().all(|byte| byte.is_ascii_digit())
-                                && minor.bytes().all(|byte| byte.is_ascii_digit())
-                        }
-                        _ => false,
-                    }
-                } else {
-                    npm_range_bound(version).is_some()
-                }
-            })
-    })
-}
-
 fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterError> {
     if value.is_empty()
         || value.len() > 256
@@ -1942,7 +2139,7 @@ fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterE
         || value.trim() != value
         || value.chars().any(char::is_control)
         || value.bytes().any(|byte| {
-            !(byte.is_ascii_digit()
+            !(byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
                     b'.' | b'-'
@@ -1961,7 +2158,7 @@ fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterE
         })
         || value.contains("..")
         || value.contains("|||")
-        || !dependency_spec_syntax_is_valid(value)
+        || parse_npm_range(value).is_none()
     {
         return Err(LocalMcpAdapterError::InvalidMetadata(
             "dependency_version_invalid",
@@ -1978,30 +2175,391 @@ fn validate_registry_dependency_spec(value: &str) -> Result<(), LocalMcpAdapterE
     Ok(())
 }
 
-fn npm_range_bound(value: &str) -> Option<NpmVersionParts> {
-    let value = value.split(['-', '+']).next()?;
-    if value.is_empty() || value == "*" || value.eq_ignore_ascii_case("x") {
-        return Some(NpmVersionParts {
-            major: 0,
-            minor: 0,
-            patch: 0,
-        });
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NpmPrereleaseIdentifier {
+    Numeric(u64),
+    Text(String),
+}
+
+impl Ord for NpmPrereleaseIdentifier {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Numeric(left), Self::Numeric(right)) => left.cmp(right),
+            (Self::Numeric(_), Self::Text(_)) => std::cmp::Ordering::Less,
+            (Self::Text(_), Self::Numeric(_)) => std::cmp::Ordering::Greater,
+            (Self::Text(left), Self::Text(right)) => left.cmp(right),
+        }
     }
-    let parts = value.split('.').collect::<Vec<_>>();
-    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+}
+
+impl PartialOrd for NpmPrereleaseIdentifier {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NpmVersionParts {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    prerelease: Vec<NpmPrereleaseIdentifier>,
+}
+
+impl Ord for NpmVersionParts {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.major
+            .cmp(&other.major)
+            .then_with(|| self.minor.cmp(&other.minor))
+            .then_with(|| self.patch.cmp(&other.patch))
+            .then_with(
+                || match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+                    (true, true) => std::cmp::Ordering::Equal,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => self.prerelease.cmp(&other.prerelease),
+                },
+            )
+    }
+}
+
+impl PartialOrd for NpmVersionParts {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NpmPartialVersion {
+    major: Option<u64>,
+    minor: Option<u64>,
+    patch: Option<u64>,
+    prerelease: Vec<NpmPrereleaseIdentifier>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NpmComparatorOperator {
+    Equal,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NpmComparator {
+    operator: NpmComparatorOperator,
+    version: NpmVersionParts,
+}
+
+fn npm_version_parts(value: &str) -> Option<NpmVersionParts> {
+    let parsed = parse_npm_partial_version(value)?;
+    Some(NpmVersionParts {
+        major: parsed.major?,
+        minor: parsed.minor?,
+        patch: parsed.patch?,
+        prerelease: parsed.prerelease,
+    })
+}
+
+fn parse_npm_partial_version(value: &str) -> Option<NpmPartialVersion> {
+    if value.is_empty() || !value.is_ascii() || value.chars().any(char::is_whitespace) {
         return None;
     }
-    let mut numbers = [0_u64; 3];
-    for (index, part) in parts.iter().enumerate() {
-        if part.eq_ignore_ascii_case("x") || *part == "*" {
-            break;
+    let (without_build, build) = match value.split_once('+') {
+        Some((core, build)) if !build.is_empty() && !build.contains('+') => (core, Some(build)),
+        Some(_) => return None,
+        None => (value, None),
+    };
+    if let Some(build) = build {
+        if build.split('.').any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        }) {
+            return None;
         }
-        numbers[index] = part.parse().ok()?;
     }
-    Some(NpmVersionParts {
+    let (core, prerelease) = match without_build.split_once('-') {
+        Some((core, prerelease)) if !prerelease.is_empty() && !prerelease.contains('-') => {
+            (core, Some(prerelease))
+        }
+        Some((core, prerelease)) if !prerelease.is_empty() => (core, Some(prerelease)),
+        Some(_) => return None,
+        None => (without_build, None),
+    };
+    let had_prerelease = prerelease.is_some();
+    let prerelease = match prerelease {
+        Some(value) => value
+            .split('.')
+            .map(|part| {
+                if part.is_empty()
+                    || !part
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                {
+                    return None;
+                }
+                if part.bytes().all(|byte| byte.is_ascii_digit()) {
+                    if part.len() > 1 && part.starts_with('0') {
+                        return None;
+                    }
+                    Some(NpmPrereleaseIdentifier::Numeric(part.parse().ok()?))
+                } else {
+                    Some(NpmPrereleaseIdentifier::Text(part.to_string()))
+                }
+            })
+            .collect::<Option<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    let parts = core.split('.').collect::<Vec<_>>();
+    if parts.is_empty() || parts.len() > 3 {
+        return None;
+    }
+    let mut numbers = [None; 3];
+    let mut wildcard_seen = false;
+    for (index, part) in parts.iter().enumerate() {
+        let wildcard = *part == "*" || part.eq_ignore_ascii_case("x");
+        if wildcard {
+            wildcard_seen = true;
+            continue;
+        }
+        if wildcard_seen || part.is_empty() || part.bytes().any(|byte| !byte.is_ascii_digit()) {
+            return None;
+        }
+        if part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        numbers[index] = Some(part.parse().ok()?);
+    }
+    if had_prerelease && numbers.iter().any(Option::is_none) {
+        return None;
+    }
+    Some(NpmPartialVersion {
         major: numbers[0],
         minor: numbers[1],
         patch: numbers[2],
+        prerelease,
+    })
+}
+
+const fn npm_version(major: u64, minor: u64, patch: u64) -> NpmVersionParts {
+    NpmVersionParts {
+        major,
+        minor,
+        patch,
+        prerelease: Vec::new(),
+    }
+}
+
+fn npm_partial_lower(partial: &NpmPartialVersion) -> NpmVersionParts {
+    NpmVersionParts {
+        major: partial.major.unwrap_or(0),
+        minor: partial.minor.unwrap_or(0),
+        patch: partial.patch.unwrap_or(0),
+        prerelease: partial.prerelease.clone(),
+    }
+}
+
+fn npm_partial_upper(partial: &NpmPartialVersion) -> Option<NpmVersionParts> {
+    partial.major?;
+    if partial.minor.is_none() {
+        return Some(npm_version(partial.major?.saturating_add(1), 0, 0));
+    }
+    if partial.patch.is_none() {
+        return Some(npm_version(
+            partial.major?,
+            partial.minor?.saturating_add(1),
+            0,
+        ));
+    }
+    None
+}
+
+fn npm_caret_upper(partial: &NpmPartialVersion) -> NpmVersionParts {
+    let major = partial.major.unwrap_or(0);
+    let minor = partial.minor.unwrap_or(0);
+    let patch = partial.patch.unwrap_or(0);
+    if major > 0 {
+        npm_version(major.saturating_add(1), 0, 0)
+    } else if partial.minor.is_none() {
+        npm_version(1, 0, 0)
+    } else if minor > 0 {
+        npm_version(0, minor.saturating_add(1), 0)
+    } else if partial.patch.is_none() {
+        npm_version(0, 1, 0)
+    } else {
+        npm_version(0, 0, patch.saturating_add(1))
+    }
+}
+
+fn npm_add_partial_comparators(
+    output: &mut Vec<NpmComparator>,
+    operator: &str,
+    partial: &NpmPartialVersion,
+) -> Option<()> {
+    let lower = npm_partial_lower(partial);
+    let upper = npm_partial_upper(partial);
+    let full = partial.major.is_some() && partial.minor.is_some() && partial.patch.is_some();
+    match operator {
+        "=" => {
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::GreaterOrEqual,
+                version: lower.clone(),
+            });
+            if let Some(upper) = upper {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::Less,
+                    version: upper,
+                });
+            } else if full {
+                output.push(NpmComparator {
+                    operator: NpmComparatorOperator::LessOrEqual,
+                    version: lower,
+                });
+            }
+        }
+        ">=" => output.push(NpmComparator {
+            operator: NpmComparatorOperator::GreaterOrEqual,
+            version: lower,
+        }),
+        ">" => {
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::GreaterOrEqual,
+                version: upper?,
+            });
+        }
+        "<" => output.push(NpmComparator {
+            operator: NpmComparatorOperator::Less,
+            version: lower,
+        }),
+        "<=" => output.push(NpmComparator {
+            operator: NpmComparatorOperator::Less,
+            version: upper?,
+        }),
+        "~" => {
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::GreaterOrEqual,
+                version: lower,
+            });
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::Less,
+                version: if partial.minor.is_none() {
+                    npm_version(partial.major?.saturating_add(1), 0, 0)
+                } else {
+                    npm_version(partial.major?, partial.minor?.saturating_add(1), 0)
+                },
+            });
+        }
+        "^" => {
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::GreaterOrEqual,
+                version: lower,
+            });
+            output.push(NpmComparator {
+                operator: NpmComparatorOperator::Less,
+                version: npm_caret_upper(partial),
+            });
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+fn parse_npm_comparator_token(token: &str, output: &mut Vec<NpmComparator>) -> Option<()> {
+    let (operator, value) = if let Some(value) = token.strip_prefix(">=") {
+        (">=", value)
+    } else if let Some(value) = token.strip_prefix("<=") {
+        ("<=", value)
+    } else if let Some(value) = token.strip_prefix('>') {
+        (">", value)
+    } else if let Some(value) = token.strip_prefix('<') {
+        ("<", value)
+    } else if let Some(value) = token.strip_prefix('^') {
+        ("^", value)
+    } else if let Some(value) = token.strip_prefix('~') {
+        ("~", value)
+    } else {
+        ("=", token.strip_prefix('=').unwrap_or(token))
+    };
+    let partial = parse_npm_partial_version(value)?;
+    npm_add_partial_comparators(output, operator, &partial)
+}
+
+fn parse_npm_hyphen_range(lower: &str, upper: &str, output: &mut Vec<NpmComparator>) -> Option<()> {
+    let lower = parse_npm_partial_version(lower)?;
+    let upper = parse_npm_partial_version(upper)?;
+    output.push(NpmComparator {
+        operator: NpmComparatorOperator::GreaterOrEqual,
+        version: npm_partial_lower(&lower),
+    });
+    if let Some(upper) = npm_partial_upper(&upper) {
+        output.push(NpmComparator {
+            operator: NpmComparatorOperator::Less,
+            version: upper,
+        });
+    } else {
+        output.push(NpmComparator {
+            operator: NpmComparatorOperator::LessOrEqual,
+            version: npm_partial_lower(&upper),
+        });
+    }
+    Some(())
+}
+
+fn parse_npm_range(value: &str) -> Option<Vec<Vec<NpmComparator>>> {
+    value
+        .split("||")
+        .map(|alternative| {
+            let tokens = alternative.split_ascii_whitespace().collect::<Vec<_>>();
+            if tokens.is_empty() {
+                return None;
+            }
+            let mut output = Vec::new();
+            if tokens.len() == 3 && tokens[1] == "-" {
+                parse_npm_hyphen_range(tokens[0], tokens[2], &mut output)?;
+            } else {
+                if tokens.contains(&"-") {
+                    return None;
+                }
+                for token in tokens {
+                    parse_npm_comparator_token(token, &mut output)?;
+                }
+            }
+            Some(output)
+        })
+        .collect()
+}
+
+fn npm_comparator_matches(comparator: &NpmComparator, version: &NpmVersionParts) -> bool {
+    match comparator.operator {
+        NpmComparatorOperator::Equal => version == &comparator.version,
+        NpmComparatorOperator::Greater => version > &comparator.version,
+        NpmComparatorOperator::GreaterOrEqual => version >= &comparator.version,
+        NpmComparatorOperator::Less => version < &comparator.version,
+        NpmComparatorOperator::LessOrEqual => version <= &comparator.version,
+    }
+}
+
+fn dependency_spec_allows_version(spec: &str, version: &str) -> bool {
+    let Some(version) = npm_version_parts(version) else {
+        return false;
+    };
+    let Some(alternatives) = parse_npm_range(spec) else {
+        return false;
+    };
+    alternatives.into_iter().any(|comparators| {
+        (version.prerelease.is_empty()
+            || comparators.iter().any(|comparator| {
+                comparator.version.major == version.major
+                    && comparator.version.minor == version.minor
+                    && comparator.version.patch == version.patch
+                    && !comparator.version.prerelease.is_empty()
+            }))
+            && comparators
+                .iter()
+                .all(|comparator| npm_comparator_matches(comparator, &version))
     })
 }
 fn validate_safe_relative_path(value: &str) -> Result<(), LocalMcpAdapterError> {
@@ -2499,6 +3057,8 @@ fn npm_view_plan(version: &str) -> FixedCommandSpec {
             "optionalDependencies".to_string(),
             "peerDependencies".to_string(),
             "peerDependenciesMeta".to_string(),
+            "os".to_string(),
+            "cpu".to_string(),
             "bundleDependencies".to_string(),
             "bundledDependencies".to_string(),
             "overrides".to_string(),
@@ -2545,6 +3105,8 @@ fn npm_dependency_metadata_plan_for_cache(
             "optionalDependencies".to_string(),
             "peerDependencies".to_string(),
             "peerDependenciesMeta".to_string(),
+            "os".to_string(),
+            "cpu".to_string(),
             "bundleDependencies".to_string(),
             "bundledDependencies".to_string(),
             "overrides".to_string(),
@@ -2582,6 +3144,7 @@ fn npm_registry_pack_plan(
     plan: &LocalMcpStagePlan,
     package_name: &str,
     version: &str,
+    registry_tarball_url: &str,
 ) -> Result<FixedCommandSpec, LocalMcpAdapterError> {
     let package_key = registry_package_key(package_name)?;
     let destination = Path::new(plan.registry_cache_path()).join(package_key);
@@ -2589,11 +3152,12 @@ fn npm_registry_pack_plan(
         .to_str()
         .ok_or(LocalMcpAdapterError::StageLayout)?;
     validate_exact_npm_version(version)?;
+    validate_registry_package_tarball_url(registry_tarball_url, package_name, version)?;
     Ok(FixedCommandSpec {
         program: NPM_PROGRAM.to_string(),
         args: vec![
             "pack".to_string(),
-            format!("{package_name}@{version}"),
+            registry_tarball_url.to_string(),
             "--ignore-scripts".to_string(),
             "--no-audit".to_string(),
             "--no-fund".to_string(),
@@ -2665,28 +3229,7 @@ fn fixed_npm_environment_for(cache: &str) -> BTreeMap<String, String> {
 }
 
 fn validate_exact_npm_version(version: &str) -> Result<(), LocalMcpAdapterError> {
-    if version.is_empty()
-        || version.len() > MAX_VERSION_BYTES
-        || !version.is_ascii()
-        || version
-            .as_bytes()
-            .first()
-            .is_none_or(|byte| !byte.is_ascii_digit())
-        || version
-            .bytes()
-            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+')))
-        || version.contains("..")
-    {
-        return Err(LocalMcpAdapterError::InvalidVersion);
-    }
-    let core = version.split(['-', '+']).next().unwrap_or_default();
-    let mut parts = core.split('.');
-    let valid_core = (0..3).all(|_| {
-        parts
-            .next()
-            .is_some_and(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-    }) && parts.next().is_none();
-    if !valid_core {
+    if version.len() > MAX_VERSION_BYTES || npm_version_parts(version).is_none() {
         return Err(LocalMcpAdapterError::InvalidVersion);
     }
     Ok(())
@@ -2791,11 +3334,11 @@ fn valid_integrity(value: &str) -> bool {
 }
 
 fn validate_registry_tarball_url(value: &str, version: &str) -> Result<(), LocalMcpAdapterError> {
-    let suffix = format!("/{PACKAGE_NAME}/-/{PACKAGE_NAME}-{version}.tgz");
+    let expected =
+        format!("https://registry.npmjs.org/{PACKAGE_NAME}/-/{PACKAGE_NAME}-{version}.tgz");
     if value.len() > 512
         || !value.is_ascii()
-        || !value.starts_with("https://registry.npmjs.org")
-        || !value.ends_with(&suffix)
+        || value != expected
         || value.contains(['?', '#', '\\'])
         || value.chars().any(char::is_control)
     {
@@ -3045,8 +3588,17 @@ fn validate_selected_registry_manifest(
         .filter(|value| !value.is_null())
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if !peer_dependencies_meta.is_object()
-        || canonical_digest(&peer_dependencies_meta)? != metadata.peer_dependencies_meta_digest
+    let peer_dependencies_meta =
+        parse_peer_dependencies_meta(Some(&peer_dependencies_meta), &peer_dependencies).map_err(
+            |_| LocalMcpAdapterError::StageMismatch("registry_manifest_dependencies_invalid"),
+        )?;
+    let os = parse_platform_constraints(object.get("os"))
+        .map_err(|_| LocalMcpAdapterError::StageMismatch("registry_manifest_invalid"))?;
+    let cpu = parse_platform_constraints(object.get("cpu"))
+        .map_err(|_| LocalMcpAdapterError::StageMismatch("registry_manifest_invalid"))?;
+    if peer_dependencies_meta != metadata.peer_dependencies_meta
+        || os != metadata.os
+        || cpu != metadata.cpu
     {
         return Err(LocalMcpAdapterError::StageMismatch(
             "registry_manifest_mismatch",
@@ -4113,8 +4665,10 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         {
             return Err(LocalMcpAdapterError::StageMismatch("receipt_invalid"));
         }
-        if registry_closure_receipt_digest(&receipt.registry_closure_packages)?
-            != receipt.registry_closure_digest
+        if registry_closure_receipt_digest(
+            &receipt.registry_closure_packages,
+            &receipt.registry_closure_edges,
+        )? != receipt.registry_closure_digest
         {
             return Err(LocalMcpAdapterError::StageMismatch(
                 "registry_dependency_closure_invalid",
@@ -4369,7 +4923,7 @@ mod tests {
             &plan.pack.args[..],
             [
                 "pack",
-                "n8n-mcp@2.69.2",
+                "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
                 "--ignore-scripts",
                 "--no-audit",
                 "--no-fund",
@@ -4538,6 +5092,74 @@ mod tests {
         }
     }
 
+    #[test]
+    fn npm_semver_handles_prerelease_build_partial_and_hyphen_ranges() {
+        for (spec, version, expected) in [
+            ("^1.2.3-beta.1", "1.2.3-beta.2", true),
+            ("^1.2.3-beta.1", "1.2.4-alpha.1", false),
+            ("1.2.3+build.7", "1.2.3+build.99", true),
+            ("1.2.3 - 2.0", "2.0.9", true),
+            ("1.2.3 - 2.0", "2.1.0", false),
+            (">=1.2.3-beta.1 <2.0.0", "1.2.3-beta.2", true),
+            (">=1.2.3-beta.1 <2.0.0", "1.2.4-alpha.1", false),
+            ("^0.0.3", "0.0.3", true),
+            ("^0.0.3", "0.0.4", false),
+        ] {
+            assert!(
+                validate_registry_dependency_spec(spec).is_ok(),
+                "range syntax rejected: {spec}"
+            );
+            assert_eq!(
+                dependency_spec_allows_version(spec, version),
+                expected,
+                "unexpected npm range result for {spec} / {version}"
+            );
+        }
+        for version in ["1.2.3-01", "01.2.3", "1.2.3+", "1.2.3-"] {
+            assert!(
+                validate_exact_npm_version(version).is_err(),
+                "accepted {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_peer_metadata_is_normalized_and_platform_constraints_are_bound() {
+        let mut raw = json!({
+            "version": "3.25.0",
+            "dist.integrity": INTEGRITY,
+            "dist.tarball": "https://registry.npmjs.org/optional-package/-/optional-package-3.25.0.tgz",
+            "dependencies": {},
+            "optionalDependencies": {"platform-only": "1.0.0"},
+            "peerDependencies": {"peer-package": "^2.0.0", "optional-peer": "^3.0.0"},
+            "peerDependenciesMeta": {"optional-peer": {"optional": true}},
+            "os": ["darwin"],
+            "cpu": ["x64"]
+        });
+        let metadata = registry_package_metadata("optional-package", &raw)
+            .expect("optional and peer metadata");
+        assert_eq!(
+            metadata.peer_dependencies_meta.get("optional-peer"),
+            Some(&true)
+        );
+        assert!(!metadata.peer_dependencies_meta.contains_key("peer-package"));
+        assert_eq!(metadata.os, vec!["darwin"]);
+        assert_eq!(metadata.cpu, vec!["x64"]);
+        assert!(metadata.dependency_edges().iter().any(|edge| {
+            edge.name == "optional-peer"
+                && edge.kind == RegistryDependencyKind::Peer
+                && edge.optional
+        }));
+        assert!(metadata.dependency_edges().iter().any(|edge| {
+            edge.name == "platform-only"
+                && edge.kind == RegistryDependencyKind::Optional
+                && edge.optional
+        }));
+
+        raw["peerDependenciesMeta"]["peer-package"] = json!({"optional": "yes"});
+        assert!(registry_package_metadata("optional-package", &raw).is_err());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn staged_plan_returns_redacted_receipt_through_command_and_stage_seams() {
@@ -4556,12 +5178,16 @@ mod tests {
         let verified =
             verify_local_mcp_stage_for_owner(&fixture_plan, &fixture_metadata, Vec::new(), owner)
                 .expect("verified fixture");
+        let mut root_manifest = raw.clone();
+        root_manifest["name"] = Value::String(PACKAGE_NAME.to_string());
+        root_manifest["bin"] = json!({PACKAGE_NAME: "./dist/mcp/stdio-wrapper.js"});
         let mut stage_io = MockStageIo {
             verified: Some(verified),
-            packed_artifact: Some(
-                TrustedLocalMcpArtifact::from_registry_bytes("2.69.2", artifact_bytes)
-                    .expect("trusted artifact"),
-            ),
+            packed_artifact: Some(TrustedLocalMcpArtifact {
+                version: "2.69.2".to_string(),
+                bytes: artifact_bytes,
+                manifest: Some(root_manifest),
+            }),
             ..MockStageIo::default()
         };
         let mut command_runner = MockCommandRunner {
@@ -4646,7 +5272,7 @@ mod tests {
         let metadata_value = metadata_value("2.69.2");
         let metadata = registry_package_metadata(PACKAGE_NAME, &metadata_value)
             .expect("selected registry metadata");
-        let mut manifest = metadata_value.clone();
+        let mut manifest = metadata_value;
         manifest["name"] = Value::String(PACKAGE_NAME.to_string());
         assert!(validate_selected_registry_manifest(&manifest, &metadata).is_ok());
 
@@ -4930,6 +5556,171 @@ mod tests {
         }
     }
 
+    #[test]
+    fn frozen_closure_rejects_nested_lock_edge_retargeting() {
+        let root_metadata =
+            parse_registry_metadata(&metadata_value("2.69.2")).expect("root metadata");
+        let root = registry_package_metadata(PACKAGE_NAME, &metadata_value("2.69.2"))
+            .expect("root selected metadata");
+        let zod_value = json!({
+            "version": "3.25.0",
+            "dist.integrity": INTEGRITY,
+            "dist.tarball": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+            "dependencies": {"evil": "^1.0.0"}
+        });
+        let evil_value = |version: &str| {
+            json!({
+                "version": version,
+                "dist.integrity": INTEGRITY,
+                "dist.tarball": format!(
+                    "https://registry.npmjs.org/evil/-/evil-{version}.tgz"
+                ),
+                "dependencies": {}
+            })
+        };
+        let zod = registry_package_metadata("zod", &zod_value).expect("zod metadata");
+        let evil_selected =
+            registry_package_metadata("evil", &evil_value("1.0.0")).expect("evil metadata");
+        let evil_retarget =
+            registry_package_metadata("evil", &evil_value("1.1.0")).expect("retarget metadata");
+        let root_zod = RegistryClosureEdge {
+            source_package_name: PACKAGE_NAME.to_string(),
+            source_version: root.version.clone(),
+            dependency_name: "zod".to_string(),
+            dependency_spec: "^3.25.0".to_string(),
+            dependency_kind: "dependencies".to_string(),
+            optional: false,
+            target_version: zod.version.clone(),
+            target_integrity: zod.integrity.clone(),
+            target_registry_tarball_url: zod.registry_tarball_url.clone(),
+        };
+        let zod_evil = RegistryClosureEdge {
+            source_package_name: "zod".to_string(),
+            source_version: zod.version.clone(),
+            dependency_name: "evil".to_string(),
+            dependency_spec: "^1.0.0".to_string(),
+            dependency_kind: "dependencies".to_string(),
+            optional: false,
+            target_version: evil_selected.version.clone(),
+            target_integrity: evil_selected.integrity.clone(),
+            target_registry_tarball_url: evil_selected.registry_tarball_url.clone(),
+        };
+        let closure = RegistryClosure {
+            packages: vec![root, zod, evil_selected, evil_retarget],
+            edges: vec![root_zod, zod_evil],
+            digest: "blake3-256:test".to_string(),
+        };
+        let lock = json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies": {"n8n-mcp": "2.69.2"}},
+                "node_modules/n8n-mcp": {
+                    "version": "2.69.2",
+                    "resolved": "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.69.2.tgz",
+                    "integrity": INTEGRITY,
+                    "dependencies": {"zod": "^3.25.0"}
+                },
+                "node_modules/zod": {
+                    "version": "3.25.0",
+                    "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+                    "integrity": INTEGRITY,
+                    "dependencies": {"evil": "^1.0.0"}
+                },
+                "node_modules/evil": {
+                    "version": "1.1.0",
+                    "resolved": "https://registry.npmjs.org/evil/-/evil-1.1.0.tgz",
+                    "integrity": INTEGRITY
+                }
+            }
+        });
+        let tree = StageTreeDigest {
+            digest: "blake3-256:tree".to_string(),
+            entry_count: 0,
+            total_bytes: 0,
+            directories: BTreeSet::from([
+                "node_modules".to_string(),
+                "node_modules/n8n-mcp".to_string(),
+                "node_modules/zod".to_string(),
+                "node_modules/evil".to_string(),
+            ]),
+            files: BTreeMap::new(),
+        };
+        assert!(matches!(
+            validate_installed_package_lock_with_closure(
+                &lock,
+                &root_metadata,
+                "2.69.2",
+                &tree,
+                Some(&closure),
+            ),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "lock_dependency_selection_mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn optional_dependency_omission_requires_platform_or_optional_peer_justification() {
+        let target_value = json!({
+            "version": "1.0.0",
+            "dist.integrity": INTEGRITY,
+            "dist.tarball": "https://registry.npmjs.org/platform-only/-/platform-only-1.0.0.tgz",
+            "dependencies": {},
+            "os": ["darwin"]
+        });
+        let target = registry_package_metadata("platform-only", &target_value)
+            .expect("platform target metadata");
+        let optional_edge = RegistryClosureEdge {
+            source_package_name: PACKAGE_NAME.to_string(),
+            source_version: "2.69.2".to_string(),
+            dependency_name: "platform-only".to_string(),
+            dependency_spec: "1.0.0".to_string(),
+            dependency_kind: "optionalDependencies".to_string(),
+            optional: true,
+            target_version: "1.0.0".to_string(),
+            target_integrity: INTEGRITY.to_string(),
+            target_registry_tarball_url:
+                "https://registry.npmjs.org/platform-only/-/platform-only-1.0.0.tgz".to_string(),
+        };
+        assert!(optional_edge_omission_is_allowed(&optional_edge, &target));
+        let required_edge = RegistryClosureEdge {
+            optional: false,
+            dependency_kind: "dependencies".to_string(),
+            ..optional_edge.clone()
+        };
+        assert!(!optional_edge_omission_is_allowed(&required_edge, &target));
+        let optional_peer_edge = RegistryClosureEdge {
+            dependency_kind: "peerDependencies".to_string(),
+            ..optional_edge
+        };
+        assert!(optional_edge_omission_is_allowed(
+            &optional_peer_edge,
+            &target
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cold_cache_stage_rejects_missing_or_tampered_frozen_artifact_before_install() {
+        let mut command_runner = MockCommandRunner {
+            metadata: serde_json::to_vec(&metadata_value("2.69.2")).expect("metadata output"),
+            ..MockCommandRunner::default()
+        };
+        let mut stage_io = MockStageIo::default();
+        let result = stage_exact_local_mcp_with("2.69.2", &mut command_runner, &mut stage_io);
+        assert!(matches!(
+            result,
+            Err(LocalMcpAdapterError::StageMismatch("missing_mock_artifact"))
+        ));
+        assert_eq!(stage_io.calls, ["create", "pack", "discard"]);
+        assert!(
+            !command_runner
+                .calls
+                .iter()
+                .any(|args| args.first().map(String::as_str) == Some("install"))
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn staged_registry_receipt_mismatch_never_creates_candidate() {
@@ -5044,11 +5835,16 @@ mod tests {
                     .take()
                     .ok_or(LocalMcpAdapterError::StageMismatch("missing_mock_artifact"));
             }
-            TrustedLocalMcpArtifact::from_registry_bytes(
-                version,
-                b"bounded test tarball bytes".to_vec(),
-            )
-            .map_err(|_| LocalMcpAdapterError::StageMismatch("missing_mock_artifact"))
+            Ok(TrustedLocalMcpArtifact {
+                version: version.to_string(),
+                bytes: b"bounded test tarball bytes".to_vec(),
+                manifest: Some(json!({
+                    "name": package_name,
+                    "version": version,
+                    "dependencies": {},
+                    "scripts": {}
+                })),
+            })
         }
 
         fn reverify(

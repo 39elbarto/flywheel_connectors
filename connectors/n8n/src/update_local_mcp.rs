@@ -1169,8 +1169,15 @@ fn preflight_npm_command_with_global_config(
 }
 
 fn reject_unsafe_npm_global_config(path: &Path) -> Result<(), LocalMcpAdapterError> {
+    validate_npm_existing_parent_ancestry(path)?;
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => Ok(()),
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && metadata.len() == 0
+                && npm_path_metadata_is_trusted(&metadata) =>
+        {
+            Ok(())
+        }
         Ok(_) => Err(LocalMcpAdapterError::StageLayout),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err(LocalMcpAdapterError::StageIo),
@@ -1189,9 +1196,7 @@ fn reject_ambient_npm_markers_from(
     path: &Path,
     allow_generated_prefix_markers: bool,
 ) -> Result<(), LocalMcpAdapterError> {
-    if !path.is_absolute() {
-        return Err(LocalMcpAdapterError::StageLayout);
-    }
+    validate_npm_directory_ancestry(path)?;
     let prefix = path;
     let mut ancestor = Some(path);
     while let Some(path) = ancestor {
@@ -1224,6 +1229,72 @@ fn reject_ambient_npm_markers_from(
         ancestor = path.parent();
     }
     Ok(())
+}
+
+fn validate_npm_existing_parent_ancestry(path: &Path) -> Result<(), LocalMcpAdapterError> {
+    if !is_absolute_normalized_npm_path(path) {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    let mut current = path.parent();
+    while let Some(candidate) = current {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(_) => return validate_npm_directory_ancestry(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                current = candidate.parent();
+            }
+            Err(_) => return Err(LocalMcpAdapterError::StageIo),
+        }
+    }
+    Err(LocalMcpAdapterError::StageLayout)
+}
+
+fn validate_npm_directory_ancestry(path: &Path) -> Result<(), LocalMcpAdapterError> {
+    if !is_absolute_normalized_npm_path(path) {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let metadata = match std::fs::symlink_metadata(candidate) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(LocalMcpAdapterError::StageLayout);
+            }
+            Err(_) => return Err(LocalMcpAdapterError::StageIo),
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_dir()
+            || !npm_path_metadata_is_trusted(&metadata)
+        {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        if candidate == Path::new("/") {
+            return Ok(());
+        }
+        current = candidate.parent();
+    }
+    Err(LocalMcpAdapterError::StageLayout)
+}
+
+fn is_absolute_normalized_npm_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .all(|component| !matches!(component, Component::CurDir | Component::ParentDir))
+}
+
+#[cfg(unix)]
+fn npm_path_metadata_is_trusted(metadata: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let effective_uid = rustix::process::geteuid().as_raw();
+    (metadata.uid() == 0 || metadata.uid() == effective_uid)
+        && metadata.mode() & 0o022 == 0
+        && metadata.mode() & 0o7000 == 0
+}
+
+#[cfg(not(unix))]
+const fn npm_path_metadata_is_trusted(_metadata: &Metadata) -> bool {
+    false
 }
 
 fn npm_prefix(command: &FixedCommandSpec) -> Option<&str> {
@@ -5411,6 +5482,11 @@ mod tests {
     }
 
     fn npm_command_builder_suite(root: &Path) -> Vec<FixedCommandSpec> {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700))
+            .expect("private synthetic preflight root");
         let plan =
             build_local_mcp_stage_plan("2.69.2", STAGE_ID, root).expect("synthetic staging plan");
         let mut root_view = npm_latest_metadata_plan();
@@ -5439,14 +5515,51 @@ mod tests {
         pack.working_directory = root.to_string_lossy().into_owned();
         let mut install = plan.install().clone();
         install.working_directory = root.to_string_lossy().into_owned();
-        vec![
+        let mut commands = vec![
             root_view,
             dependency_view,
             pack,
             dependency_pack,
             install,
             cache_add,
-        ]
+        ];
+        for command in &mut commands {
+            if let Some(prefix_argument) = command
+                .args
+                .windows(2)
+                .position(|window| window[0] == "--prefix")
+            {
+                command.args[prefix_argument + 1] = root.to_string_lossy().into_owned();
+            }
+        }
+        commands
+    }
+
+    #[cfg(unix)]
+    fn synthetic_preflight_root() -> tempfile::TempDir {
+        let effective_uid = rustix::process::geteuid().as_raw();
+        let candidates = [
+            std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+            Some(PathBuf::from(format!("/run/user/{effective_uid}"))),
+            Some(PathBuf::from("/run")),
+            std::env::var_os("HOME").map(PathBuf::from),
+        ];
+        for candidate in candidates.into_iter().flatten() {
+            if validate_npm_directory_ancestry(&candidate).is_ok() {
+                if let Ok(root) = tempfile::tempdir_in(&candidate) {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+                        .expect("private synthetic preflight root");
+                    return root;
+                }
+            }
+        }
+        panic!("no trusted directory available for synthetic npm preflight root");
+    }
+
+    #[cfg(not(unix))]
+    fn synthetic_preflight_root() -> tempfile::TempDir {
+        tempfile::tempdir().expect("synthetic preflight root")
     }
 
     fn run_npm_preflight_with_spawn_for_test(
@@ -5469,13 +5582,20 @@ mod tests {
         (result, spawn_calls)
     }
 
+    #[cfg(unix)]
     #[test]
     fn npm_preflight_accepts_clean_synthetic_layouts_and_empty_global_config() {
         for config_state in ["missing", "empty"] {
-            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let root = synthetic_preflight_root();
             let global_config = root.path().join("global.npmrc");
             if config_state == "empty" {
                 fs::write(&global_config, b"").expect("empty global config");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&global_config, fs::Permissions::from_mode(0o600))
+                        .expect("private empty global config");
+                }
             }
             for command in npm_command_builder_suite(root.path()) {
                 let (result, spawn_calls) =
@@ -5491,10 +5611,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn npm_preflight_rejects_unsafe_global_config_across_all_command_builders() {
         for config_state in ["nonempty", "directory"] {
-            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let root = synthetic_preflight_root();
             let global_config = root.path().join("global.npmrc");
             if config_state == "nonempty" {
                 fs::write(&global_config, b"registry=https://example.invalid\n")
@@ -5516,6 +5637,135 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn npm_preflight_rejects_untrusted_cwd_and_prefix_ancestry_before_spawn() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = synthetic_preflight_root();
+        let global_config = root.path().join("global.npmrc");
+
+        let writable_parent = root.path().join("writable-parent");
+        let writable_cwd = writable_parent.join("cwd");
+        fs::create_dir_all(&writable_cwd).expect("writable cwd");
+        fs::set_permissions(&writable_cwd, fs::Permissions::from_mode(0o700))
+            .expect("private writable cwd");
+        fs::set_permissions(&writable_parent, fs::Permissions::from_mode(0o777))
+            .expect("writable cwd ancestor");
+        for command in npm_command_builder_suite(root.path()) {
+            let mut command = command;
+            command.working_directory = writable_cwd.to_string_lossy().into_owned();
+            let (result, spawn_calls) =
+                run_npm_preflight_with_spawn_for_test(&command, &global_config, &writable_cwd);
+            assert_eq!(result, Err(LocalMcpAdapterError::StageLayout));
+            assert_eq!(spawn_calls, 0, "writable cwd ancestry reached npm spawn");
+        }
+
+        let real_cwd = root.path().join("real-cwd");
+        fs::create_dir_all(real_cwd.join("child")).expect("real cwd");
+        fs::set_permissions(&real_cwd, fs::Permissions::from_mode(0o700))
+            .expect("private real cwd");
+        fs::set_permissions(real_cwd.join("child"), fs::Permissions::from_mode(0o700))
+            .expect("private real cwd child");
+        let symlink_cwd_parent = root.path().join("symlink-cwd-parent");
+        symlink(&real_cwd, &symlink_cwd_parent).expect("symlink cwd ancestor");
+        let symlink_cwd = symlink_cwd_parent.join("child");
+        for command in npm_command_builder_suite(root.path()) {
+            let mut command = command;
+            command.working_directory = symlink_cwd.to_string_lossy().into_owned();
+            let (result, spawn_calls) =
+                run_npm_preflight_with_spawn_for_test(&command, &global_config, &symlink_cwd);
+            assert_eq!(result, Err(LocalMcpAdapterError::StageLayout));
+            assert_eq!(spawn_calls, 0, "symlinked cwd ancestry reached npm spawn");
+        }
+
+        let writable_prefix_parent = root.path().join("writable-prefix-parent");
+        let writable_prefix = writable_prefix_parent.join("prefix");
+        fs::create_dir_all(&writable_prefix).expect("writable prefix");
+        fs::set_permissions(&writable_prefix, fs::Permissions::from_mode(0o700))
+            .expect("private writable prefix");
+        fs::set_permissions(&writable_prefix_parent, fs::Permissions::from_mode(0o777))
+            .expect("writable prefix ancestor");
+        let real_prefix = root.path().join("real-prefix");
+        fs::create_dir_all(real_prefix.join("prefix")).expect("real prefix");
+        fs::set_permissions(&real_prefix, fs::Permissions::from_mode(0o700))
+            .expect("private real prefix");
+        fs::set_permissions(
+            real_prefix.join("prefix"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("private real prefix child");
+        let symlink_prefix_parent = root.path().join("symlink-prefix-parent");
+        symlink(&real_prefix, &symlink_prefix_parent).expect("symlink prefix ancestor");
+        let symlink_prefix = symlink_prefix_parent.join("prefix");
+        for (prefix, label) in [
+            (&writable_prefix, "writable prefix ancestry"),
+            (&symlink_prefix, "symlinked prefix ancestry"),
+        ] {
+            let mut install = npm_command_builder_suite(root.path())
+                .into_iter()
+                .find(|command| command.args().first().is_some_and(|arg| arg == "ci"))
+                .expect("ci command");
+            let prefix_argument = install
+                .args
+                .windows(2)
+                .position(|window| window[0] == "--prefix")
+                .expect("ci prefix argument");
+            install.args[prefix_argument + 1] = prefix.to_string_lossy().into_owned();
+            let (result, spawn_calls) =
+                run_npm_preflight_with_spawn_for_test(&install, &global_config, root.path());
+            assert_eq!(result, Err(LocalMcpAdapterError::StageLayout), "{label}");
+            assert_eq!(spawn_calls, 0, "{label} reached npm spawn");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_preflight_rejects_untrusted_global_config_before_spawn() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let root = synthetic_preflight_root();
+        let commands = npm_command_builder_suite(root.path());
+        let writable_file = root.path().join("writable.npmrc");
+        fs::write(&writable_file, b"").expect("writable global config");
+        fs::set_permissions(&writable_file, fs::Permissions::from_mode(0o666))
+            .expect("writable global config mode");
+
+        let writable_parent = root.path().join("writable-parent");
+        fs::create_dir(&writable_parent).expect("writable global config parent");
+        fs::set_permissions(&writable_parent, fs::Permissions::from_mode(0o777))
+            .expect("writable global config parent mode");
+        let writable_parent_config = writable_parent.join("global.npmrc");
+
+        let real_parent = root.path().join("real-parent");
+        fs::create_dir(&real_parent).expect("real global config parent");
+        fs::set_permissions(&real_parent, fs::Permissions::from_mode(0o700))
+            .expect("private real global config parent");
+        let symlink_parent = root.path().join("symlink-parent");
+        symlink(&real_parent, &symlink_parent).expect("symlink global config parent");
+        let symlink_parent_config = symlink_parent.join("global.npmrc");
+
+        let real_config = root.path().join("real-global.npmrc");
+        fs::write(&real_config, b"").expect("real global config");
+        let symlink_config = root.path().join("symlink-global.npmrc");
+        symlink(&real_config, &symlink_config).expect("symlink global config");
+
+        for (global_config, label) in [
+            (&writable_file, "writable global config"),
+            (&writable_parent_config, "writable global config ancestry"),
+            (&symlink_parent_config, "symlinked global config ancestry"),
+            (&symlink_config, "symlinked global config"),
+        ] {
+            for command in &commands {
+                let (result, spawn_calls) =
+                    run_npm_preflight_with_spawn_for_test(command, global_config, root.path());
+                assert_eq!(result, Err(LocalMcpAdapterError::StageLayout), "{label}");
+                assert_eq!(spawn_calls, 0, "{label} reached npm spawn");
+            }
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
     fn npm_preflight_rejects_each_ambient_marker_across_all_command_builders() {
         for marker in [
@@ -5524,7 +5774,7 @@ mod tests {
             "package-lock.json",
             "node_modules",
         ] {
-            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let root = synthetic_preflight_root();
             let marker_path = root.path().join(marker);
             if marker == "node_modules" {
                 fs::create_dir(&marker_path).expect("node_modules marker");
@@ -5546,13 +5796,20 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn npm_preflight_accepts_ci_generated_prefix_markers_before_spawn() {
-        let root = tempfile::tempdir().expect("synthetic preflight root");
+        let root = synthetic_preflight_root();
         let prefix = root.path().join("prefix");
         fs::create_dir_all(prefix.join("node_modules")).expect("generated node_modules");
         fs::write(prefix.join("package.json"), b"{}").expect("generated package manifest");
         fs::write(prefix.join("package-lock.json"), b"{}").expect("generated package lock");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&prefix, fs::Permissions::from_mode(0o700))
+                .expect("private generated prefix");
+        }
         let global_config = root.path().join("global.npmrc");
         let install = npm_command_builder_suite(root.path())
             .into_iter()
@@ -5571,10 +5828,11 @@ mod tests {
         assert_eq!(spawn_calls, 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn npm_preflight_rejects_stage_npmrc_and_ambient_prefix_ancestry_before_ci_spawn() {
         for rejection in ["stage_npmrc", "ancestor_package_json"] {
-            let root = tempfile::tempdir().expect("synthetic preflight root");
+            let root = synthetic_preflight_root();
             let prefix_parent = root.path().join("prefix-parent");
             let prefix = prefix_parent.join("prefix");
             fs::create_dir_all(&prefix).expect("prefix");

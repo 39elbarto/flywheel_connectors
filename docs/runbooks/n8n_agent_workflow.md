@@ -32,20 +32,26 @@ runner fix: `4ef0578dc`, with retained evidence at:
 - EEC: `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1`;
 - Hetzner: `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85`.
 
-The next sequence is `.24` source/capability triage before any bounded,
-authorized implementation, then `.25`, then `.26`.
+At that handoff, the planned sequence was `.24` source/capability triage before
+any bounded, authorized implementation, then `.25`, then `.26`.
 
 ## Default owner and authority
 
 These role and model assignments are defaults for this workflow; direct user
 instructions prevail.
 
-| Role | Model | Authority and responsibility |
+| Role | Default launch | Responsibility |
 | --- | --- | --- |
-| Terra | medium | Coordinator. Frames the task, assigns the current owner, records evidence, accepts results, manages handoffs, and may run read-only or integration commands without directing implementer shell commands. |
-| Luna | xhigh | Implementer when assigned. Produces the bounded change and tests for the files assigned to the current task. |
-| Sol | medium | Reviewer when assigned. Checks the diff and evidence read-only and separates blockers from nonblocking findings. |
-| Astra | consultant | Answers a specific question after repeated identical blockers. The consultation is advisory; it does not transfer live authority. |
+| Coordinator | Current user-selected session (currently `gpt-6-luna`, high) | Defines bounded tasks, assigns ownership, accepts evidence-backed results, and coordinates handoffs. It does not micromanage each implementer shell command. |
+| Implementer | New Codex worker: `gpt-6-luna`, high effort | Owns assigned files and produces the observable change and tests in the specified checkout. |
+| Reviewer | `gpt-6-sol`, medium effort | Reviews the diff and evidence read-only, separating blockers from nonblocking findings. |
+| Consultant | Retained Astra/SilverDune session when requested | Gives advisory input when consulted; does not take coordinator authority or live-operation permission. |
+
+These are role defaults, not permanent agent identities. Reuse the already
+assigned coordinator/reviewer sessions; do not create duplicates merely to
+match a model label. For launches, check that `launch.requested` matches
+`launch.effective`; `--terminal` cannot be combined with `--model` or
+`--effort`. A user instruction can change the assignment or scope.
 
 Each bounded task designates one live writer, and one shared build runs globally;
 assignments may change only through the handoff below. Worktrees isolate Git
@@ -58,12 +64,12 @@ approval path, provider interaction, release candidate, or acceptance evidence.
 Before work begins, confirm all of the following in the task record:
 
 - the exact `cwd`, task branch, verified integration base, and task identifier;
-- the exact files or globs Luna owns, the read-only reviewer, and the coordinator;
+- the exact files or globs the implementer owns, the read-only reviewer, and the coordinator;
 - invariants, stop conditions, and tests stated as observable outcomes;
 - whether the task is offline, provider-backed, or live, and the exact target if
   it is provider-backed;
 - an Agent Mail project, registered handles, and exclusive reservations for
-  every file Luna will edit;
+  every file the implementer will edit;
 - the approval TTL beside the planned invoke when an approval is required;
 - a redaction-safe evidence location; no secret or raw provider/request body may
   be persisted there.
@@ -72,7 +78,7 @@ Before work begins, confirm all of the following in the task record:
 
 ### Step 1: Frame a bounded task
 
-Terra records one concrete deliverable and its acceptance evidence. The task
+The coordinator records one concrete deliverable and its acceptance evidence. The task
 must name its `cwd`, branch, base revision, file ownership, invariants, tests,
 provider target (if any), and stop conditions. A valid task can be checked from
 the resulting diff, command output, test result, or redacted provider evidence;
@@ -80,8 +86,8 @@ it cannot depend on an informal claim that work was done.
 
 ### Step 2: Establish ownership and execution order
 
-Terra records the current writer and reserves the exact files before editing.
-Terra accepts results rather than prescribing shell commands; the implementer
+The coordinator records the current writer and reserves the exact files before editing.
+It accepts results rather than prescribing shell commands; the implementer
 chooses the commands needed to satisfy the recorded tests and reports commands
 and outputs. The reviewer works read-only, and no second build starts while the
 one shared global build is in flight.
@@ -99,8 +105,10 @@ handle. The worker sends `worker_done` exactly once, with the matching
 `taskId`, `dispatchId`, and `outcome`. After the durable `worker_done` receipt
 succeeds, the worker has one narrow exception to the immediate-stop rule: it
 sends exactly one terminal wake to that coordinator handle using
-`orca terminal send --enter --wait-submit 10` with the message `Task/Dispatch
-settled`, then observes that terminal-send receipt and stops. The coordinator
+`orca terminal send --enter --wait-submit 10` with a message containing the
+actual `taskId` and `dispatchId` (for example,
+`worker_done taskId=<id> dispatchId=<id>`), then observes that terminal-send
+receipt and stops. The coordinator
 consumes, validates, and acknowledges its own Orca delivery.
 
 The wake is only a notification and receipt observation. The worker must not
@@ -119,7 +127,7 @@ and delivery state, and never repeats provider calls.
 
 ### Step 3: Implement and verify the bounded change
 
-Luna works only in the recorded `cwd` and branch, edits only owned files, and
+The implementer works only in the recorded `cwd` and branch, edits only owned files, and
 keeps the procedure reproducible in tracked files. Before any provider invoke:
 
 - do not persist secrets, tokens, raw request/response bodies, or private
@@ -131,25 +139,51 @@ keeps the procedure reproducible in tracked files. Before any provider invoke:
 - do not add new cryptography; use the existing FCP authority and capability
   contracts.
 
-Build a new RC only after evidence proves a binary change, the dependency
-closure is checked, and the public owner-key binding matches the intended
-binary and release identity. Record those results and the one build result
-without recording secrets.
+### Owner-key discovery and release signing
+
+For release preparation, obtain the public owner key from the existing
+`fwc-n8n-owner-signing` mapping's `public_key_hex` metadata and verify its key
+ID against the trusted current release's signed `provision-receipt.json` using
+the existing verifier. The current mapping and trusted signer verification
+are required. The historical
+`/etc/fwc-n8n/approval-public-key.owner-signing-backup-20260914` may corroborate
+that binding when available, but its absence is not a blocker. Investigate any
+available backup mismatch without changing trust. If the mapping or trusted
+receipt is unavailable, ambiguous, or disagrees, fail closed; classify inability
+to verify as `verification_error`, not as a key mismatch, and do not change
+keys or ask the user to re-approve a known same-key operation.
+
+`fwc-n8n-approval-signing` is a separate approval-signing mapping.
+`/etc/fwc-n8n/approval-public-key` is the approval verifier key, not the owner
+trust root. Do not substitute one for the other. The owner signing seed is
+handled only by the existing protected-FD/stdin signing path; never place it in
+arguments, environment, files, logs, or evidence. Store only public identifiers
+and paths in tracked material, not key bytes.
+
+Within a task already authorized by the user, routine build/signing with the
+same verified owner key does not require another confirmation. User authority
+and the task's existing scope still govern; this procedure grants no blanket
+permission for provider/live operations, deployment or promotion, or key
+rotation. Build a new RC only after evidence proves a binary change, the
+dependency closure is checked, and the public owner-key binding matches the
+intended binary and release identity. Record those results and the one build
+result without recording secrets.
 
 ### Step 4: Handle blockers without creating authority drift
 
 Stop at the first invariant violation or unverified provider state and preserve
 the redacted evidence. If the same blocker occurs twice with no new evidence,
-Terra asks Astra one specific, answerable question containing the blocker and
-the evidence already checked. Astra advises only; Terra still owns acceptance,
-and Luna still owns implementation. A new fact or new evidence must be
-recorded before treating the blocker as changed.
+the coordinator asks a consultant one specific, answerable question containing
+the blocker and the evidence already checked. Consultation is advisory; the
+coordinator still owns acceptance and the implementer still owns
+implementation. A new fact or new evidence must be recorded before treating
+the blocker as changed.
 
 ### Step 5: Review and accept
 
-Sol reviews the owned diff, task record, tests, and evidence read-only, and
-reports **blockers** separately from **nonblocking** follow-up. Terra accepts
-the result when blockers are resolved, the recorded observable tests pass, and
+The reviewer checks the owned diff, task record, tests, and evidence read-only,
+and reports **blockers** separately from **nonblocking** follow-up. The
+coordinator accepts the result when blockers are resolved, the recorded observable tests pass, and
 the evidence is redaction-safe; acceptance is not an ad hoc shell instruction
 stream.
 
@@ -169,9 +203,9 @@ owner. Preserve Agent Mail history and the tracked task record.
 
 ## Verification
 
-Terra records the task's `cwd`, branch, owned files, invariants, tests, and
+The coordinator records the task's `cwd`, branch, owned files, invariants, tests, and
 redaction-safe outputs. A live task records one known outcome; an unknown
-outcome is a stop state, not a retry. Sol's blocker/nonblocking review, the
+outcome is a stop state, not a retry. The reviewer's blocker/nonblocking findings, the
 RC evidence when applicable, and the dated handoff markers are retained with
 the Agent Mail history.
 

@@ -2657,6 +2657,12 @@ fn npm_partial_upper(partial: &NpmPartialVersion) -> Option<NpmVersionParts> {
     None
 }
 
+fn npm_partial_greater_lower(partial: &NpmPartialVersion) -> Option<NpmVersionParts> {
+    let mut lower = npm_partial_upper(partial)?;
+    lower.prerelease.clear();
+    Some(lower)
+}
+
 fn npm_caret_upper(partial: &NpmPartialVersion) -> NpmVersionParts {
     let major = partial.major.unwrap_or(0);
     let minor = partial.minor.unwrap_or(0);
@@ -2715,7 +2721,7 @@ fn npm_add_partial_comparators(
             } else {
                 output.push(NpmComparator {
                     operator: NpmComparatorOperator::GreaterOrEqual,
-                    version: upper?,
+                    version: npm_partial_greater_lower(partial)?,
                 });
             }
         }
@@ -5747,6 +5753,22 @@ mod tests {
                 validate_registry_dependency_spec(spec).is_ok(),
                 "range syntax rejected: {spec}"
             );
+            assert_eq!(
+                dependency_spec_allows_version(spec, version),
+                expected,
+                "unexpected npm range result for {spec} / {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn npm_semver_partial_greater_ranges_exclude_boundary_prereleases() {
+        for (spec, version, expected) in [
+            (">1", "2.0.0-alpha.1", false),
+            (">1", "2.0.0", true),
+            (">1.2", "1.3.0-alpha.1", false),
+            (">1.2", "1.3.0", true),
+        ] {
             assert_eq!(
                 dependency_spec_allows_version(spec, version),
                 expected,

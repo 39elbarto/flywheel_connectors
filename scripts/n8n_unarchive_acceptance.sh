@@ -26,6 +26,7 @@ readonly APPROVAL_TTL_MS=45000
 readonly APPROVAL_TIMEOUT_SECONDS=40
 readonly DEADLINE_MS=30000
 readonly JQ_BIN="/usr/bin/jq"
+readonly AWK_BIN="/usr/bin/awk"
 readonly STAT_BIN="/usr/bin/stat"
 readonly UUIDGEN_BIN="/usr/bin/uuidgen"
 readonly TIMEOUT_BIN="/usr/bin/timeout"
@@ -300,7 +301,7 @@ activation_preflight() {
     emit_activation_stop activation_server_not_allowed
     return 1
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
+  if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
     emit_activation_stop dependency_missing
     return 1
   fi
@@ -340,6 +341,7 @@ run_activation_self_test() {
   local create_input
   local root
   local output
+  local diagnostics
   SELF_TEST=1
   ACTIVATION_MODE=1
   SERVER="hetzner"
@@ -350,6 +352,13 @@ run_activation_self_test() {
     "00000000-0000-4000-8000-000000000001" \
     "n8n-activation-self-test")" || return 1
   validate_activation_create_input "$create_input" || return 1
+  diagnostics="$(printf '%s\n' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' \
+    'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 bearer-secret-marker' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network token=PRIVATE-CANARY' \
+    'raw provider response must not pass' | filter_n8n_run_once_diagnostics)" || return 1
+  [[ "$diagnostics" == $'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' ]] || return 1
   ACTIVATION_PLAN="$base"
   EVIDENCE_DIR=""
   if persist_activation_plan; then return 1; fi
@@ -370,7 +379,7 @@ run_activation_self_test() {
   if validate_activation_plan "$fixture"; then return 1; fi
   fixture="$("$JQ_BIN" -c '.sequence[5] = "publish_once"' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
-  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":9}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":10}\n' \
     "$ACTIVATION_SCHEMA"
 }
 
@@ -589,7 +598,8 @@ run_read_once() {
   raw="$(printf '%s\n' "$input_json" | "$JQ_BIN" -cn \
     --arg server "$SERVER" --argjson input "$input_json" --arg correlation "$(uuid)" \
     '{server_id:$server,input:$input,correlation_id:$correlation}' |
-    "$LAUNCHER_PATH" run-once n8n.workflows.get 2>/dev/null)"
+    "$LAUNCHER_PATH" run-once n8n.workflows.get \
+      2> >(filter_n8n_run_once_diagnostics >&2))"
   status=$?
   if [[ -z "$raw" ]]; then
     printf '%s' ""
@@ -599,6 +609,21 @@ run_read_once() {
   projection_status=$?
   (( projection_status == 0 )) || return 1
   return "$status"
+}
+
+# The launcher can emit only stable, redacted diagnostic labels through these
+# prefixes. Do not forward arbitrary stderr: it may contain provider data,
+# request details, or secrets from child processes.
+filter_n8n_run_once_diagnostics() {
+  "$AWK_BIN" '
+    /^FCP-N8N-HOST-ERROR-DETAIL\/v1 policy\.(approval|capability|deployment|network|lease|binding|decision|other)$/ ||
+    /^FCP-N8N-HOST-ERROR-DETAIL\/v1 host\.other$/ ||
+    /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 dispatch_(4xx|5xx|other)$/ ||
+    /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 response_(protocol|auth|rate_limited|capability|zone|connector|resource|external_(4xx|5xx|other|unknown)|upstream_timeout|dependency_unavailable|internal)$/ {
+      print
+      fflush()
+    }
+  '
 }
 
 approval_fd3_handoff() {
@@ -723,7 +748,8 @@ run_unarchive_once() {
       --arg correlation "$INVOKE_CORRELATION_ID" --argjson deadline "$DEADLINE_MS" \
       '{server_id:$server,input:$input,approval_token:$approval[0],
         deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
-    "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null
+    "$LAUNCHER_PATH" run-once "$OPERATION" \
+      2> >(filter_n8n_run_once_diagnostics >&2)
 }
 
 run_activation_once() {
@@ -733,7 +759,8 @@ run_activation_once() {
       --arg correlation "$HANDOFF_CORRELATION_ID" --argjson deadline "$HANDOFF_DEADLINE_MS" \
       '{server_id:$server,input:$input,approval_token:$approval[0],
         deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
-    "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" 2>/dev/null
+    "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" \
+      2> >(filter_n8n_run_once_diagnostics >&2)
 }
 
 build_approval_request_json() {
@@ -1622,7 +1649,7 @@ main() {
     run_activation_acceptance
     return $?
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
+  if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
     emit_stop dependency_missing
     return 10
   fi

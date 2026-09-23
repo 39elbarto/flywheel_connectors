@@ -4684,7 +4684,7 @@ mod tests {
                 "approvalRef": "chat-approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000004",
                 "precondition": {
-                    "versionId": "draft-v1",
+                    "versionId": "version-1",
                     "activeVersionId": null,
                     "active": false,
                     "isArchived": false,

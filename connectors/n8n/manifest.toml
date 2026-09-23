@@ -1210,6 +1210,10 @@ revocation_freshness = "safe"
 
 [provides.operations."n8n.workflows.activate".input_schema]
 additionalProperties = false
+allOf = [
+    { if = { properties = { active = { const = true } }, required = ["active"] }, then = { required = ["versionId"] } },
+    { if = { properties = { active = { const = false } }, required = ["active"] }, then = { not = { required = ["versionId"] } } },
+]
 required = [
     "id",
     "guard",
@@ -1484,6 +1488,10 @@ revocation_freshness = "safe"
 
 [provides.operations."n8n.workflows.lifecycle".input_schema]
 additionalProperties = false
+allOf = [
+    { if = { properties = { action = { const = "publish" } }, required = ["action"] }, then = { required = ["versionId"] } },
+    { if = { properties = { action = { const = "unpublish" } }, required = ["action"] }, then = { not = { required = ["versionId"] } } },
+]
 required = ["id", "action", "guard"]
 type = "object"
 

@@ -7215,7 +7215,7 @@ mod tests {
         let lifecycle = json!({
             "id": "1001",
             "action": "publish",
-            "versionId": "version-1",
+            "versionId": "draft-v1",
             "guard": {
                 "approvalRef": "approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -7247,7 +7247,7 @@ mod tests {
                 lifecycle_operation,
                 host_input(HostRunOnceServerId::Eec, missing_version)
             )
-            .is_ok()
+            .is_err()
         );
         let mut missing_pointer = lifecycle;
         missing_pointer["guard"]["precondition"]

@@ -960,7 +960,7 @@ impl N8nConnector {
                 .await
             }
             "n8n.workflows.lifecycle" => {
-                self.invoke_workflow_lifecycle(client, &input, Some(context))
+                self.invoke_workflow_lifecycle(client, &input, Some(context), true)
                     .await
             }
             "n8n.workflows.activate" => {
@@ -1540,7 +1540,7 @@ impl N8nConnector {
         );
 
         let mut result = self
-            .invoke_workflow_lifecycle(client, &lifecycle_input, context)
+            .invoke_workflow_lifecycle(client, &lifecycle_input, context, false)
             .await?;
         let result_object = result
             .as_object_mut()
@@ -1559,8 +1559,12 @@ impl N8nConnector {
         client: &N8nClient,
         input: &Value,
         context: Option<HostEgressContext>,
+        require_publish_version_match: bool,
     ) -> Result<Value, N8nError> {
-        let typed = parse_workflow_lifecycle_input(input)?;
+        let typed = parse_workflow_lifecycle_input_with_version_binding(
+            input,
+            require_publish_version_match,
+        )?;
         let baseline_workflow = client
             .get_workflow_typed(&typed.id, context.clone())
             .await?;
@@ -3210,6 +3214,7 @@ fn parse_workflow_activation_input(input: &Value) -> N8nResult<WorkflowActivatio
         } else {
             WorkflowLifecycleAction::Unpublish
         },
+        false,
     )?;
     if !typed.active && typed.version_id.is_some() {
         return Err(N8nError::InvalidInput(
@@ -3220,6 +3225,13 @@ fn parse_workflow_activation_input(input: &Value) -> N8nResult<WorkflowActivatio
 }
 
 fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleInput> {
+    parse_workflow_lifecycle_input_with_version_binding(input, true)
+}
+
+fn parse_workflow_lifecycle_input_with_version_binding(
+    input: &Value,
+    require_publish_version_match: bool,
+) -> N8nResult<WorkflowLifecycleInput> {
     let typed: WorkflowLifecycleInput = serde_json::from_value(input.clone()).map_err(|_| {
         N8nError::InvalidInput(
             "workflow lifecycle input requires id, action, and exact guard precondition".into(),
@@ -3235,6 +3247,7 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
         &typed.guard,
         typed.version_id.as_deref(),
         typed.action,
+        require_publish_version_match,
     )?;
     Ok(typed)
 }
@@ -3244,6 +3257,7 @@ fn validate_workflow_lifecycle_guard(
     guard: &WorkflowLifecycleGuard,
     version_id: Option<&str>,
     action: WorkflowLifecycleAction,
+    require_publish_version_match: bool,
 ) -> N8nResult<()> {
     sanitize_path_segment(workflow_id, "workflow id")?;
     if guard.approval_ref.is_empty()
@@ -3286,7 +3300,7 @@ fn validate_workflow_lifecycle_guard(
             let selected_version = version_id.ok_or_else(|| {
                 N8nError::InvalidInput("publish requires an explicit versionId".into())
             })?;
-            if selected_version != precondition.version_id {
+            if require_publish_version_match && selected_version != precondition.version_id {
                 return Err(N8nError::InvalidInput(
                     "publish versionId must match the approval precondition versionId".into(),
                 ));
@@ -4663,6 +4677,20 @@ fn workflow_activation_input_schema() -> serde_json::Value {
         .expect("workflow lifecycle input schema required must be an array");
     required.retain(|field| field.as_str() != Some("action"));
     required.push(Value::String("active".into()));
+    object.remove("allOf");
+    object.insert(
+        "allOf".into(),
+        json!([
+            {
+                "if": {"properties": {"active": {"const": true}}, "required": ["active"]},
+                "then": {"required": ["versionId"]}
+            },
+            {
+                "if": {"properties": {"active": {"const": false}}, "required": ["active"]},
+                "then": {"not": {"required": ["versionId"]}}
+            }
+        ]),
+    );
     let properties = object
         .get_mut("properties")
         .and_then(Value::as_object_mut)
@@ -7953,6 +7981,19 @@ mod tests {
         assert!(input["properties"]["guard"].is_object());
         assert!(input["properties"]["active"].is_object());
         assert!(input["properties"].get("action").is_none());
+        assert_eq!(
+            input["allOf"][0]["if"]["properties"]["active"]["const"],
+            json!(true)
+        );
+        assert_eq!(input["allOf"][0]["then"]["required"], json!(["versionId"]));
+        assert_eq!(
+            input["allOf"][1]["if"]["properties"]["active"]["const"],
+            json!(false)
+        );
+        assert_eq!(
+            input["allOf"][1]["then"]["not"]["required"],
+            json!(["versionId"])
+        );
 
         let output = workflow_activation_output_schema();
         assert_eq!(

@@ -3225,6 +3225,11 @@ fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleI
             "workflow lifecycle input requires id, action, and exact guard precondition".into(),
         )
     })?;
+    if typed.action == WorkflowLifecycleAction::Unpublish && input.get("versionId").is_some() {
+        return Err(N8nError::InvalidInput(
+            "unpublish must not include a versionId".into(),
+        ));
+    }
     validate_workflow_lifecycle_guard(
         &typed.id,
         &typed.guard,
@@ -3276,10 +3281,23 @@ fn validate_workflow_lifecycle_guard(
             "workflow lifecycle versionId is invalid".into(),
         ));
     }
-    if action == WorkflowLifecycleAction::Unpublish && version_id.is_some() {
-        return Err(N8nError::InvalidInput(
-            "unpublish must not include a versionId".into(),
-        ));
+    match action {
+        WorkflowLifecycleAction::Publish => {
+            let selected_version = version_id.ok_or_else(|| {
+                N8nError::InvalidInput("publish requires an explicit versionId".into())
+            })?;
+            if selected_version != precondition.version_id {
+                return Err(N8nError::InvalidInput(
+                    "publish versionId must match the approval precondition versionId".into(),
+                ));
+            }
+        }
+        WorkflowLifecycleAction::Unpublish if version_id.is_some() => {
+            return Err(N8nError::InvalidInput(
+                "unpublish must not include a versionId".into(),
+            ));
+        }
+        WorkflowLifecycleAction::Unpublish => {}
     }
     Ok(())
 }
@@ -3571,9 +3589,7 @@ fn verify_workflow_lifecycle_readback(
     };
     match action {
         WorkflowLifecycleAction::Publish => {
-            let target_version_id = requested_version_id
-                .or(readback.active_version_id.as_deref())
-                .ok_or_else(|| mismatch(provider))?;
+            let target_version_id = requested_version_id.ok_or_else(|| mismatch(provider))?;
             if !readback.active
                 || readback.is_archived != baseline.is_archived
                 || readback.active_version_id.as_deref() != Some(target_version_id)
@@ -4597,6 +4613,16 @@ fn workflow_lifecycle_input_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "action", "guard"],
+        "allOf": [
+            {
+                "if": {"properties": {"action": {"const": "publish"}}, "required": ["action"]},
+                "then": {"required": ["versionId"]}
+            },
+            {
+                "if": {"properties": {"action": {"const": "unpublish"}}, "required": ["action"]},
+                "then": {"not": {"required": ["versionId"]}}
+            }
+        ],
         "properties": {
             "id": {"type": "string", "minLength": 1, "maxLength": 256},
             "action": {"type": "string", "enum": ["publish", "unpublish"]},
@@ -7723,6 +7749,7 @@ mod tests {
         let input = json!({
             "id": "1001",
             "action": "publish",
+            "versionId": "draft-v1",
             "guard": {
                 "approvalRef": "approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -7737,6 +7764,7 @@ mod tests {
         });
         let parsed = parse_workflow_lifecycle_input(&input).expect("valid lifecycle input");
         assert_eq!(parsed.action.as_str(), "publish");
+        assert_eq!(parsed.version_id.as_deref(), Some("draft-v1"));
         assert!(matches!(
             parsed.guard.precondition.active_version_id,
             crate::types::RequiredNullable::Null
@@ -7752,6 +7780,91 @@ mod tests {
         let mut bad_uuid = input;
         bad_uuid["guard"]["idempotencyKey"] = json!("not-a-uuid");
         assert!(parse_workflow_lifecycle_input(&bad_uuid).is_err());
+    }
+
+    #[test]
+    fn lifecycle_parser_requires_exact_selected_publish_version_and_versionless_unpublish() {
+        let valid = json!({
+            "id": "1001",
+            "action": "publish",
+            "versionId": "draft-v1",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let parsed = parse_workflow_lifecycle_input(&valid).expect("selected version is valid");
+        assert_eq!(parsed.version_id.as_deref(), Some("draft-v1"));
+
+        let hash = approval_binding_hash(
+            "eec",
+            "fwc-mcp-bridge://eec/tools/publish_workflow",
+            "n8n.workflows.lifecycle",
+            &valid,
+        )
+        .expect("approval binding hash");
+        let mut changed_after_approval = valid.clone();
+        changed_after_approval["versionId"] = json!("different-version");
+        assert_ne!(
+            approval_binding_hash(
+                "eec",
+                "fwc-mcp-bridge://eec/tools/publish_workflow",
+                "n8n.workflows.lifecycle",
+                &changed_after_approval,
+            ),
+            Some(hash),
+            "approval binding must include the selected versionId",
+        );
+
+        let mut missing = valid.clone();
+        missing
+            .as_object_mut()
+            .expect("input object")
+            .remove("versionId");
+        let mut null = valid.clone();
+        null["versionId"] = Value::Null;
+        let mut empty = valid.clone();
+        empty["versionId"] = json!("");
+        let mut padded = valid.clone();
+        padded["versionId"] = json!(" draft-v1");
+        let mut too_long = valid.clone();
+        too_long["versionId"] = json!("v".repeat(257));
+        let mut mismatch = valid;
+        mismatch["versionId"] = json!("other-version");
+        for invalid in [missing, null, empty, padded, too_long, mismatch] {
+            assert!(parse_workflow_lifecycle_input(&invalid).is_err());
+        }
+
+        let unpublish = json!({
+            "id": "1001",
+            "action": "unpublish",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": "published-v1",
+                    "active": true,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let parsed_unpublish =
+            parse_workflow_lifecycle_input(&unpublish).expect("unpublish remains versionless");
+        assert_eq!(parsed_unpublish.version_id, None);
+        for version_id in [Value::Null, json!("published-v1")] {
+            let mut invalid = unpublish.clone();
+            invalid["versionId"] = version_id;
+            assert!(parse_workflow_lifecycle_input(&invalid).is_err());
+        }
     }
 
     #[test]

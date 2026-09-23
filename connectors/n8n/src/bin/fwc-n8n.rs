@@ -1248,6 +1248,11 @@ fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceE
 
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "lifecycle_provider_rejected",
+    "lifecycle_provider_status_rejected",
+    "lifecycle_provider_error_field",
+    "lifecycle_provider_result_is_error",
+    "lifecycle_provider_result_success_false",
+    "lifecycle_provider_result_error_field",
     "provider_unauthorized",
     "provider_forbidden",
     "provider_not_found",
@@ -1390,9 +1395,15 @@ fn decode_official_mcp_lifecycle_result(
     if response.get("status").and_then(Value::as_str) != Some("ok")
         || response.get("error").is_some_and(|value| !value.is_null())
     {
-        return Err(rejection_error(Some(
-            lifecycle_provider_error_diagnostic(&response).unwrap_or("lifecycle_provider_rejected"),
-        )));
+        // Report only which fixed envelope slot rejected; provider text and keys stay private.
+        let diagnostic = lifecycle_provider_error_diagnostic(&response).unwrap_or_else(|| {
+            if response.get("status").and_then(Value::as_str) != Some("ok") {
+                "lifecycle_provider_status_rejected"
+            } else {
+                "lifecycle_provider_error_field"
+            }
+        });
+        return Err(rejection_error(Some(diagnostic)));
     }
     let Some(result) = response.get("result") else {
         return Err(shape_error());
@@ -1416,14 +1427,21 @@ const MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES: usize = 4096;
 fn lifecycle_provider_result_rejection_diagnostic(result: &Value) -> Option<&'static str> {
     match result {
         Value::Object(object) => {
-            let rejected = object.get("isError").and_then(Value::as_bool) == Some(true)
-                || object.get("success").and_then(Value::as_bool) == Some(false)
-                || object.get("error").is_some_and(|value| !value.is_null());
-            if rejected {
-                return Some(
-                    lifecycle_provider_error_diagnostic(result)
-                        .unwrap_or("lifecycle_provider_rejected"),
-                );
+            let is_error = object.get("isError").and_then(Value::as_bool) == Some(true);
+            let success_false = object.get("success").and_then(Value::as_bool) == Some(false);
+            let has_error = object.get("error").is_some_and(|value| !value.is_null());
+            if is_error || success_false || has_error {
+                if let Some(diagnostic) = lifecycle_provider_error_diagnostic(result) {
+                    return Some(diagnostic);
+                }
+                // Distinguish MCP's fixed rejection markers without forwarding provider payload.
+                if is_error {
+                    return Some("lifecycle_provider_result_is_error");
+                }
+                if success_false {
+                    return Some("lifecycle_provider_result_success_false");
+                }
+                return Some("lifecycle_provider_result_error_field");
             }
             object
                 .get("structuredContent")
@@ -5608,19 +5626,19 @@ mod tests {
         for (response, diagnostic) in [
             (
                 json!({"status": "ok", "result": {"success": false, "error": private}}),
-                "lifecycle_provider_rejected",
+                "lifecycle_provider_result_success_false",
             ),
             (
                 json!({"status": "ok", "result": {"isError": true, "message": private}}),
-                "lifecycle_provider_rejected",
+                "lifecycle_provider_result_is_error",
             ),
             (
                 json!({"status": private, "error": private}),
-                "lifecycle_provider_rejected",
+                "lifecycle_provider_status_rejected",
             ),
             (
                 json!({"status": "ok", "error": private, "result": {}}),
-                "lifecycle_provider_rejected",
+                "lifecycle_provider_error_field",
             ),
             (json!({"status": "ok"}), "lifecycle_response_shape"),
             (
@@ -5642,6 +5660,25 @@ mod tests {
             .expect("safe error envelope");
             assert!(!encoded.contains(private));
         }
+        let result_error = decode_official_mcp_lifecycle_result(
+            json!({"status": "ok", "result": {"error": {"private": private}}}),
+            "publish",
+            "1001",
+        )
+        .expect_err("unclassified result error must be distinguished without exposing it");
+        assert_eq!(
+            result_error.diagnostic,
+            Some("lifecycle_provider_result_error_field")
+        );
+        let encoded = serde_json::to_string(&ErrorEnvelope {
+            schema: "fwc.n8n.error.v1",
+            status: "error",
+            code: result_error.code.to_string(),
+            diagnostic: result_error.diagnostic,
+            correlation_id: "test".to_string(),
+        })
+        .expect("safe error envelope");
+        assert!(!encoded.contains(private));
     }
 
     #[test]
@@ -5768,7 +5805,7 @@ mod tests {
         )
         .expect_err("provider rejection remains a fixed advisory diagnostic");
         assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
+        assert_eq!(error.diagnostic, Some("lifecycle_provider_result_is_error"));
         assert!(!format!("{error:?}").contains("private provider error"));
     }
 
@@ -5796,7 +5833,7 @@ mod tests {
             ),
             (
                 "provider rejected for an undisclosed reason: private-unknown",
-                "lifecycle_provider_rejected",
+                "lifecycle_provider_result_success_false",
             ),
         ];
         for (message, diagnostic) in cases {
@@ -5880,6 +5917,8 @@ mod tests {
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "reason": null}),
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": ""}),
             json!({"success": true, "workflowId": "1001", "activeVersionId": null, "workflowReviewRequestId": 1}),
+            json!({"success": true, "status": 503, "code": "403", "workflowId": "1001"}),
+            json!({"success": true, "message": "not allowed", "workflowId": "1001"}),
             json!({"success": true, "workflowId": "other", "activeVersionId": 7, "secret": "ignored"}),
             json!({"structuredContent": ["version-specific"]}),
             json!({"content": [{"type": "text", "text": "plain provider acknowledgement"}]}),
@@ -5892,10 +5931,19 @@ mod tests {
             .expect("provider fields must not gate readback");
             assert_eq!(safe, json!({"delivered": true}));
         }
-        for result in [
-            json!({"success": false, "workflowId": "1001"}),
-            json!({"isError": true, "structuredContent": {"success": true}}),
-            json!({"error": "provider failure"}),
+        for (result, expected) in [
+            (
+                json!({"success": false, "workflowId": "1001"}),
+                "lifecycle_provider_result_success_false",
+            ),
+            (
+                json!({"isError": true, "structuredContent": {"success": true}}),
+                "lifecycle_provider_result_is_error",
+            ),
+            (
+                json!({"error": "provider failure"}),
+                "lifecycle_provider_result_error_field",
+            ),
         ] {
             let error = decode_official_mcp_lifecycle_result(
                 json!({"status": "ok", "result": result}),
@@ -5904,7 +5952,7 @@ mod tests {
             )
             .expect_err("explicit provider rejection should remain advisory");
             assert_eq!(error.code, "unknown_outcome");
-            assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
+            assert_eq!(error.diagnostic, Some(expected));
         }
     }
 
@@ -6050,7 +6098,7 @@ mod tests {
         )
         .expect_err("outer rejection must retain a bounded advisory error");
         assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(error.diagnostic, Some("lifecycle_provider_rejected"));
+        assert_eq!(error.diagnostic, Some("lifecycle_provider_status_rejected"));
     }
 
     #[test]

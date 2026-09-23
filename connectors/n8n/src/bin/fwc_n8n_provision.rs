@@ -159,12 +159,9 @@ const PREVIOUS_HETZNER_EXECUTE_OUTPUT: &str =
 const EEC_MCP_URL: &str = "https://n8n.europeaneyecenter.com/mcp-server/http";
 const EEC_MCP_HOST: &str = "n8n.europeaneyecenter.com";
 const EEC_API_URL: &str = "https://n8n.europeaneyecenter.com/api/v1";
-const EEC_N8N_VERSION: &str = "2.38.4";
-const PREVIOUS_EEC_N8N_VERSION: &str = "2.34.4";
 const HETZNER_MCP_URL: &str = "https://n8nhet.levilaser.com:8443/mcp-server/http";
 const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
-const HETZNER_N8N_VERSION: &str = "2.34.6";
 pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
 const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
@@ -2228,20 +2225,15 @@ fn expected_n8n_network_constraint_with_limit(
     })
 }
 
-fn expected_inventory_n8n_version(
-    server: ServerId,
-    lifecycle_schema_mode: LifecycleSchemaMode,
-) -> &'static str {
-    match (server, lifecycle_schema_mode) {
-        // The current staged candidate is the only path that admits the new
-        // EEC generation. LegacyCommon deliberately keeps its historical
-        // version semantics; it is not a predecessor-policy alias.
-        (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer)
-        | (ServerId::Eec, LifecycleSchemaMode::LegacyCommon) => EEC_N8N_VERSION,
-        (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer) => PREVIOUS_EEC_N8N_VERSION,
-        // Hetzner's current and predecessor pins are intentionally unchanged.
-        (ServerId::Hetzner, _) => HETZNER_N8N_VERSION,
-    }
+fn valid_n8n_version_diagnostic(policy: &serde_json::Map<String, Value>) -> bool {
+    policy
+        .get("n8n_version")
+        .and_then(Value::as_str)
+        .is_some_and(|version| {
+            !version.trim().is_empty()
+                && version.len() <= 128
+                && !version.chars().any(char::is_control)
+        })
 }
 
 #[cfg(unix)]
@@ -2439,7 +2431,6 @@ fn validate_inventory(
         ServerId::Eec => (EEC_MCP_URL, EEC_MCP_HOST, 443_u64),
         ServerId::Hetzner => (HETZNER_MCP_URL, HETZNER_MCP_HOST, 8443_u64),
     };
-    let expected_version = expected_inventory_n8n_version(server, lifecycle_schema_mode);
     let config = entry
         .get("config")
         .and_then(Value::as_object)
@@ -2489,7 +2480,7 @@ fn validate_inventory(
         || !policy
             .keys()
             .all(|key| expected_policy.contains(key.as_str()))
-        || policy.get("n8n_version").and_then(Value::as_str) != Some(expected_version)
+        || !valid_n8n_version_diagnostic(policy)
         || policy.get("auth_mode").and_then(Value::as_str) != Some("access_token")
         || !policy
             .get("api_scope_digest")
@@ -3836,14 +3827,9 @@ mod tests {
                 |relative: &str| release_root.join(relative).to_string_lossy().to_string();
             for server in ["eec", "hetzner"] {
                 let (mcp_url, mcp_host, mcp_port, n8n_version) = if server == "eec" {
-                    (EEC_MCP_URL, EEC_MCP_HOST, 443_u64, EEC_N8N_VERSION)
+                    (EEC_MCP_URL, EEC_MCP_HOST, 443_u64, "2.38.4")
                 } else {
-                    (
-                        HETZNER_MCP_URL,
-                        HETZNER_MCP_HOST,
-                        8443_u64,
-                        HETZNER_N8N_VERSION,
-                    )
+                    (HETZNER_MCP_URL, HETZNER_MCP_HOST, 8443_u64, "2.34.6")
                 };
                 let server_id = if server == "eec" {
                     ServerId::Eec
@@ -4166,8 +4152,7 @@ mod tests {
             let path = root.join("inventory/eec-official-mcp.json");
             let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
                 .expect("inventory JSON");
-            value[0]["config"]["capability_policy"]["n8n_version"] =
-                json!(PREVIOUS_EEC_N8N_VERSION);
+            value[0]["config"]["capability_policy"]["n8n_version"] = json!("2.34.4");
             for tool in value[0]["config"]["capability_policy"]["approved_tools"]
                 .as_array_mut()
                 .expect("approved tools")
@@ -4228,8 +4213,7 @@ mod tests {
                     }
                 }
                 if server == "eec" {
-                    value[0]["config"]["capability_policy"]["n8n_version"] =
-                        json!(PREVIOUS_EEC_N8N_VERSION);
+                    value[0]["config"]["capability_policy"]["n8n_version"] = json!("2.34.4");
                 }
                 fs::write(&path, serde_json::to_vec(&value).expect("inventory JSON"))
                     .expect("previous inventory");
@@ -5941,6 +5925,42 @@ mod tests {
                 .expect_err("secret value")
                 .code(),
             ProvisionErrorCode::SecretMaterial
+        );
+    }
+
+    #[test]
+    fn n8n_version_drift_is_diagnostic_while_schema_binding_stays_exact() {
+        let fixture = Fixture::new();
+        let path = fixture.stage.join("inventory/eec-official-mcp.json");
+        let mut inventory: Value =
+            serde_json::from_slice(&fs::read(&path).expect("inventory")).expect("inventory json");
+        inventory[0]["config"]["capability_policy"]["n8n_version"] = json!("99.0.0-beta.1");
+        fs::write(
+            &path,
+            serde_json::to_vec(&inventory).expect("inventory bytes"),
+        )
+        .expect("version-drift inventory");
+        fixture.write_receipt_after_inventory_change(&path);
+        fixture
+            .request()
+            .validate()
+            .expect("a new n8n version alone must not block an unchanged provider schema");
+
+        inventory[0]["config"]["capability_policy"]["approved_tools"][0]["input_schema_digest"] =
+            json!("sha256:aaaaaaaa");
+        fs::write(
+            &path,
+            serde_json::to_vec(&inventory).expect("inventory bytes"),
+        )
+        .expect("schema-drift inventory");
+        fixture.write_receipt_after_inventory_change(&path);
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("schema drift remains fail-closed")
+                .code(),
+            ProvisionErrorCode::Policy
         );
     }
 

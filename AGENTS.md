@@ -65,14 +65,21 @@ holder. Do not bypass the conflict by creating an untracked parallel copy.
 
 ## n8n-Specific Coordination
 
-n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the default Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions; direct user instructions prevail.
+n8n work uses coordinator, implementer, and reviewer roles; follow the single
+[n8n workflow runbook](docs/runbooks/n8n_agent_workflow.md). New implementers
+default to Codex `gpt-6-luna` at high effort and reviewers to `gpt-6-sol` at
+medium effort. Reuse the already assigned coordinator/reviewer sessions; check
+`launch.requested` against `launch.effective`. `--terminal` cannot be combined
+with `--model` or `--effort`. Direct user instructions retain authority; these
+defaults do not grant live-operation or key-rotation scope.
 
 For every new Dispatch, include the current coordinator terminal handle in the
 spec. The worker sends `worker_done` exactly once with the matching `taskId`,
 `dispatchId`, and `outcome`; only after its durable receipt succeeds, it makes
 the one narrow post-settlement action: exactly one `orca terminal send` to that
-handle with `--enter --wait-submit 10` saying `Task/Dispatch settled`, then
-observes that terminal-send receipt and stops. The coordinator consumes,
+handle with `--enter --wait-submit 10` and a message containing the actual
+`taskId` and `dispatchId`, then observes that terminal-send receipt and stops.
+The coordinator consumes,
 validates, and acknowledges its own Orca delivery. This is only a wake and
 receipt observation: never
 create tasks, poll, resend `worker_done`, or mutate lifecycle; `input_accepted`

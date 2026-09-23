@@ -1724,16 +1724,12 @@ fn verify_lifecycle_readback(
         return Err(AppError::new("readback_mismatch"));
     }
     if action == "publish" {
-        let requested_version = match input.get("versionId") {
-            Some(value) => Some(
-                value
-                    .as_str()
-                    .filter(|version| !version.is_empty())
-                    .ok_or_else(|| AppError::new("invalid_operation_input"))?
-                    .to_owned(),
-            ),
-            None => None,
-        };
+        let expected_version = input
+            .get("versionId")
+            .and_then(Value::as_str)
+            .filter(|version| !version.is_empty() && version.trim() == *version)
+            .map(str::to_owned)
+            .ok_or_else(|| AppError::new("invalid_operation_input"))?;
         let readback_active_version = readback
             .get("activeVersionId")
             .and_then(Value::as_str)
@@ -1753,17 +1749,6 @@ fn verify_lifecycle_readback(
         {
             return Err(AppError::new("readback_mismatch"));
         }
-        let expected_version = match requested_version {
-            Some(version) => version,
-            None => {
-                if readback_active_version != readback_published_version {
-                    return Err(AppError::new("readback_mismatch"));
-                }
-                readback_active_version
-                    .ok_or_else(|| AppError::new("readback_mismatch"))?
-                    .to_owned()
-            }
-        };
         if readback_active_version != Some(expected_version.as_str())
             || readback_published_version != Some(expected_version.as_str())
         {
@@ -2893,21 +2878,27 @@ fn validate_workflow_lifecycle_input(
         .filter(|value| !value.is_empty() && value.len() <= 256)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
     host_run_once_input_id(&json!({"id": id}), "id")?;
-    if !matches!(
-        object.get("action").and_then(Value::as_str),
-        Some("publish" | "unpublish")
-    ) {
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if !matches!(action, "publish" | "unpublish") {
         return Err(AppError::new("invalid_operation_input"));
     }
-    if let Some(version_id) = object.get("versionId") {
-        if object.get("action").and_then(Value::as_str) == Some("unpublish")
-            || version_id
-                .as_str()
-                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
-        {
+    let selected_version = match action {
+        "publish" => Some(
+            object
+                .get("versionId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
+                .ok_or_else(|| AppError::new("invalid_operation_input"))?,
+        ),
+        "unpublish" if object.contains_key("versionId") => {
             return Err(AppError::new("invalid_operation_input"));
         }
-    }
+        "unpublish" => None,
+        _ => return Err(AppError::new("invalid_operation_input")),
+    };
     let guard = object
         .get("guard")
         .and_then(Value::as_object)
@@ -2970,6 +2961,11 @@ fn validate_workflow_lifecycle_input(
                 .is_some_and(|id| id.is_empty() || id.len() > 256 || id.trim() != id)
                 || !(value.is_null() || value.is_string())
         })
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if let Some(selected_version) = selected_version
+        && precondition.get("versionId").and_then(Value::as_str) != Some(selected_version)
     {
         return Err(AppError::new("invalid_operation_input"));
     }
@@ -4633,7 +4629,7 @@ mod tests {
                 "approvalRef": "chat-approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000003",
                 "precondition": {
-                    "versionId": "draft-v1",
+                    "versionId": "version-1",
                     "activeVersionId": if action == "publish" { Value::Null } else { json!("version-1") },
                     "active": action != "publish",
                     "isArchived": false,
@@ -4688,7 +4684,7 @@ mod tests {
                 "approvalRef": "chat-approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000004",
                 "precondition": {
-                    "versionId": "draft-v1",
+                    "versionId": "version-1",
                     "activeVersionId": null,
                     "active": false,
                     "isArchived": false,
@@ -4770,6 +4766,44 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn public_lifecycle_parser_requires_the_approved_publish_version() {
+        let bytes = lifecycle_host_input_for_version("eec", "publish", Some("version-1"));
+        let envelope: Value = serde_json::from_slice(&bytes).expect("lifecycle host input");
+        let valid = envelope["input"].as_object().expect("lifecycle input");
+        validate_workflow_lifecycle_input(valid).expect("explicit approved version is valid");
+
+        let mut missing = valid.clone();
+        missing.remove("versionId");
+        let mut null = valid.clone();
+        null.insert("versionId".into(), Value::Null);
+        let mut empty = valid.clone();
+        empty.insert("versionId".into(), json!(""));
+        let mut padded = valid.clone();
+        padded.insert("versionId".into(), json!(" version-1"));
+        let mut too_long = valid.clone();
+        too_long.insert("versionId".into(), json!("v".repeat(257)));
+        let mut mismatched = valid.clone();
+        mismatched.insert("versionId".into(), json!("other-version"));
+        for invalid in [missing, null, empty, padded, too_long, mismatched] {
+            assert!(
+                validate_workflow_lifecycle_input(&invalid).is_err(),
+                "invalid publish version input must be rejected: {invalid:?}"
+            );
+        }
+
+        let unpublish_bytes = lifecycle_host_input_for_version("eec", "unpublish", None);
+        let unpublish: Value =
+            serde_json::from_slice(&unpublish_bytes).expect("unpublish host input");
+        let unpublish = unpublish["input"].as_object().expect("unpublish input");
+        validate_workflow_lifecycle_input(unpublish).expect("versionless unpublish is valid");
+        for version_id in [Value::Null, json!("version-1")] {
+            let mut invalid = unpublish.clone();
+            invalid.insert("versionId".into(), version_id);
+            assert!(validate_workflow_lifecycle_input(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -4877,10 +4911,8 @@ mod tests {
     fn host_run_once_lifecycle_covers_eec_and_hetzner_without_duplicate_writes() {
         for (server_id, action, version_id) in [
             ("eec", "publish", Some("version-1")),
-            ("eec", "publish", None),
             ("eec", "unpublish", None),
             ("hetzner", "publish", Some("version-1")),
-            ("hetzner", "publish", None),
             ("hetzner", "unpublish", None),
         ] {
             let mut bridge = LifecycleBridgeProbe::default();
@@ -5422,7 +5454,7 @@ mod tests {
 
     #[test]
     fn official_mcp_lifecycle_boundary_reconciles_ambiguous_provider_error_once() {
-        let envelope = lifecycle_envelope_for_version("hetzner", "publish", None);
+        let envelope = lifecycle_envelope_for_version("hetzner", "publish", Some("version-1"));
         let mut bridge = LifecycleSequenceProbe::new([
             Ok(lifecycle_response(lifecycle_state(
                 false,
@@ -5537,7 +5569,7 @@ mod tests {
             "name": null,
             "projectId": null,
             "folderId": null,
-            "versionId": "draft-v1",
+            "versionId": "version-1",
             "active": active,
             "activeVersionId": active_version_id,
             "isArchived": is_archived,
@@ -5907,7 +5939,7 @@ mod tests {
     }
 
     #[test]
-    fn official_mcp_lifecycle_publish_without_version_requires_unambiguous_readback() {
+    fn official_mcp_lifecycle_publish_without_version_is_rejected() {
         let input = json!({"id": "1001", "action": "publish"});
         let baseline = lifecycle_state(false, Value::Null, false);
         let provider = json!({
@@ -5915,19 +5947,10 @@ mod tests {
             "success": true,
             "workflowId": "1001"
         });
-        let mut after = lifecycle_state(true, json!("provider-version"), false);
-        after["published"]["versionId"] = json!("provider-version");
-        assert_eq!(
-            verify_lifecycle_readback(&input, &baseline, &provider, &after)
-                .expect("independent readback selects the provider version"),
-            "provider-version"
-        );
-
-        let mut contradictory = after;
-        contradictory["published"]["versionId"] = json!("different-version");
-        let error = verify_lifecycle_readback(&input, &baseline, &provider, &contradictory)
-            .expect_err("contradictory active and published versions must remain unknown");
-        assert_eq!(error.code, "readback_mismatch");
+        let after = lifecycle_state(true, json!("version-1"), false);
+        let error = verify_lifecycle_readback(&input, &baseline, &provider, &after)
+            .expect_err("publish readback must not select a version on the caller's behalf");
+        assert_eq!(error.code, "invalid_operation_input");
     }
 
     #[test]
@@ -7192,7 +7215,7 @@ mod tests {
         let lifecycle = json!({
             "id": "1001",
             "action": "publish",
-            "versionId": "version-1",
+            "versionId": "draft-v1",
             "guard": {
                 "approvalRef": "approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -7224,7 +7247,7 @@ mod tests {
                 lifecycle_operation,
                 host_input(HostRunOnceServerId::Eec, missing_version)
             )
-            .is_ok()
+            .is_err()
         );
         let mut missing_pointer = lifecycle;
         missing_pointer["guard"]["precondition"]

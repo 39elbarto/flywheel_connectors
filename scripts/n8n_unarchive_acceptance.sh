@@ -1782,6 +1782,11 @@ EOF
   cat >"$mock_parent" <<'EOF'
 #!/usr/bin/env bash
 set -u
+[[ "$#" == 4 && -n "${EXISTING_TEST_PARENT_ARGS:-}" ]] || exit 92
+/usr/bin/jq -cn --arg server "$1" --arg resource_uri "$2" \
+  --arg operation "$3" --argjson input "$4" \
+  '{server:$server,resource_uri:$resource_uri,operation:$operation,input:$input}' \
+  >>"$EXISTING_TEST_PARENT_ARGS" || exit 93
 printf '%064d\n' 1
 EOF
   cat >"$mock_launcher" <<'EOF'
@@ -1902,8 +1907,10 @@ EOF
     EXISTING_TEST_GET_COUNT="$root/$scenario-get-count"
     EXISTING_TEST_PUBLISH_COUNT="$root/$scenario-publish-count"
     EXISTING_TEST_UNPUBLISH_COUNT="$root/$scenario-unpublish-count"
+    EXISTING_TEST_PARENT_ARGS="$root/$scenario-parent-args"
     export EXISTING_TEST_APPROVAL_COUNT EXISTING_TEST_GET_COUNT \
-      EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT
+      EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT \
+      EXISTING_TEST_PARENT_ARGS
     EVIDENCE_DIR="$root/evidence-$scenario"
     REQUEST_ROOT="$root/approval-requests"
     ACTIVATION_PUBLISH_STATUS=125
@@ -1996,6 +2003,29 @@ EOF
       "$JQ_BIN" -e '.verdict == "pass" and .evidence_complete == true
         and .publish_attempts == 1 and .unpublish_attempts == 1' \
         "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -s -e --arg resource_uri \
+        "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" \
+        --arg workflow "$WORKFLOW_ID" --arg operation "$ACTIVATION_OPERATION" '
+        length == 2
+        and all(.[]; .server == "eec" and .resource_uri == $resource_uri
+          and .operation == $operation and .input.id == $workflow
+          and (.input.guard.precondition | keys_unsorted | sort) ==
+            ["active","activeVersionId","isArchived","stateDigest","versionId"]
+          and (.input.guard.precondition.stateDigest |
+            test("^blake3-256:[0-9A-Fa-f]{64}$"))
+          and .input.guard.precondition.isArchived == false)
+        and .[0].input.active == true
+        and .[0].input.versionId == "selected-version"
+        and .[0].input.guard.precondition.active == false
+        and .[0].input.guard.precondition.activeVersionId == null
+        and (.[0].input | keys_unsorted | sort) ==
+          ["active","guard","id","versionId"]
+        and .[1].input.active == false
+        and (.[1].input | has("versionId") | not)
+        and .[1].input.guard.precondition.active == true
+        and .[1].input.guard.precondition.activeVersionId == "selected-version"
+        and (.[1].input | keys_unsorted | sort) == ["active","guard","id"]
+      ' "$EXISTING_TEST_PARENT_ARGS" >/dev/null || return 1
     fi
     if rg -q 'offline-stub-token|PRIVATE-CANARY|raw provider body' "$evidence" \
       "$root/$scenario-output"; then return 1; fi

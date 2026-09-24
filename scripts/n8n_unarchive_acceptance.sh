@@ -799,6 +799,35 @@ validate_digest() {
   [[ "$1" =~ ^blake3-256:[0-9a-f]{64}$ ]]
 }
 
+validate_existing_state_digest() {
+  [[ "$1" =~ ^blake3-256:[0-9A-Fa-f]{64}$ ]]
+}
+
+validate_production_evidence_path() {
+  local root="/srv/dev-ssd/fcp/nqm81.24"
+  local relative component current
+  local IFS=/
+
+  (( SELF_TEST == 1 )) && return 0
+  [[ "$EVIDENCE_DIR" == "$root"/* ]] || return 1
+  relative="${EVIDENCE_DIR#"$root"/}"
+  [[ "$relative" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]] || return 1
+  [[ -x /usr/bin/mountpoint ]] || return 1
+  /usr/bin/mountpoint -q /srv/dev-ssd || return 1
+
+  for current in /srv /srv/dev-ssd /srv/dev-ssd/fcp "$root"; do
+    [[ -d "$current" && ! -L "$current" ]] || return 1
+  done
+  current="$root"
+  for component in $relative; do
+    current="$current/$component"
+    [[ ! -L "$current" ]] || return 1
+    if [[ -e "$current" ]]; then
+      [[ -d "$current" ]] || return 1
+    fi
+  done
+}
+
 validate_expiry() {
   local expiry="$1"
   local current="$2"
@@ -1330,6 +1359,10 @@ existing_version_preflight() {
     emit_existing_stop invalid_target
     return 1
   fi
+  if ! validate_production_evidence_path; then
+    emit_existing_stop evidence_directory_not_durable
+    return 1
+  fi
   if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" \
     || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
     emit_existing_stop dependency_missing
@@ -1409,6 +1442,10 @@ run_existing_version_acceptance() {
     persist_existing_summary stop baseline_state_missing || true
     emit_existing_stop baseline_state_missing; return 10;
   }
+  validate_existing_state_digest "$EXISTING_STATE_DIGEST" || {
+    persist_existing_summary stop baseline_state_invalid || true
+    emit_existing_stop baseline_state_invalid; return 10;
+  }
   baseline_state="$EXISTING_STATE_DIGEST"
 
   publish_ref="n8n-existing-$SERVER-publish-$(uuid)" || {
@@ -1476,6 +1513,10 @@ run_existing_version_acceptance() {
   fi
   active_state="$("$JQ_BIN" -er '.result.stateDigest' \
     <<<"$EXISTING_PUBLISH_READBACK")" || {
+    persist_existing_summary unknown publish_readback_inconclusive || true
+    emit_existing_unknown publish_readback_inconclusive; return 20;
+  }
+  validate_existing_state_digest "$active_state" || {
     persist_existing_summary unknown publish_readback_inconclusive || true
     emit_existing_unknown publish_readback_inconclusive; return 20;
   }
@@ -1553,13 +1594,22 @@ run_existing_version_acceptance() {
 run_existing_version_self_test() {
   local root mock_sudo mock_approval mock_parent mock_launcher
   local scenario status get_count publish_count unpublish_count approval_count
-  local evidence
+  local evidence rejected_evidence
   SELF_TEST=1
   ACTIVATION_MODE=1
   EXISTING_VERSION_MODE=1
   SERVER="eec"
   WORKFLOW_ID="syntheticworkflow"
   VERSION_ID="selected-version"
+  validate_existing_state_digest \
+    "blake3-256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    || return 1
+  validate_existing_state_digest \
+    "blake3-256:GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" \
+    && return 1
+  validate_existing_state_digest \
+    "BLAKE3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    && return 1
   root="$(mktemp -d "${TMPDIR:-/tmp}/n8n-existing-version-self-test.XXXXXX")" || return 1
   REQUEST_ROOT="$root/approval-requests"
   mkdir -m 700 -- "$REQUEST_ROOT" || return 1
@@ -1579,7 +1629,19 @@ EOF
   cat >"$mock_approval" <<'EOF'
 #!/usr/bin/env bash
 set -u
-[[ "${1:-}" == "--request-file" && -e "/proc/$$/fd/3" ]] || exit 70
+[[ "${1:-}" == "--request-file" ]] || exit 75
+[[ -n "${2:-}" ]] || exit 74
+[[ -e "/proc/$$/fd/3" ]] || exit 77
+request="$EXISTING_TEST_REQUEST_ROOT/$2"
+[[ -f "$request" ]] || exit 72
+/usr/bin/jq -e '
+  (.input.guard.precondition | keys_unsorted | sort) ==
+    ["active","activeVersionId","isArchived","stateDigest","versionId"]
+  and (.input.guard.precondition.stateDigest |
+    test("^blake3-256:[0-9A-Fa-f]{64}$"))
+  and ((.input.active == true and .input.guard.precondition.active == false)
+    or (.input.active == false and .input.guard.precondition.active == true))
+' "$request" >/dev/null || exit 73
 count=0
 [[ -f "$EXISTING_TEST_APPROVAL_COUNT" ]] && count="$(cat "$EXISTING_TEST_APPROVAL_COUNT")"
 printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_APPROVAL_COUNT" || exit 71
@@ -1603,22 +1665,42 @@ if [[ "$op" == "n8n.workflows.get" ]]; then
   state=inactive
   if [[ "$EXISTING_TEST_SCENARIO" == baseline_bad && "$count" == 1 ]]; then state=active; fi
   if [[ "$EXISTING_TEST_SCENARIO" == publish_readback_bad && "$count" == 2 ]]; then state=inactive; fi
+  inactive_digest=blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  missing_digest=false
+  if [[ "$EXISTING_TEST_SCENARIO" == baseline_digest_missing && "$count" == 1 ]] \
+    || [[ "$EXISTING_TEST_SCENARIO" == publish_readback_digest_missing && "$count" == 2 ]]; then
+    missing_digest=true
+  fi
   if [[ "$EXISTING_TEST_SCENARIO" == unpublish_readback_bad && "$count" == 3 ]]; then state=active; fi
   if [[ "$EXISTING_TEST_SCENARIO" == unpublish_unknown && "$count" -gt 1 ]]; then state=active; fi
   if [[ "$count" == 2 && "$state" == inactive && "$EXISTING_TEST_SCENARIO" != publish_readback_bad ]]; then state=active; fi
-  active=false active_version=null published=null digest=state-inactive
+  active=false active_version=null published=null digest="$inactive_digest"
   if [[ "$state" == active ]]; then
     active=true active_version='"selected-version"'
     published='{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-    digest=state-active
+    digest=blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   fi
-  /usr/bin/jq -cn --arg active "$active" --argjson active_version "$active_version" \
-    --argjson published "$published" --arg digest "$digest" \
-    '{type:"response",status:"ok",result:{id:"syntheticworkflow",
-      versionId:"selected-version",active:($active=="true"),
-      activeVersionId:$active_version,isArchived:false,stateDigest:$digest,
-      draft:{versionId:"selected-version",graphDigest:"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-      published:$published}}'
+  if [[ "$EXISTING_TEST_SCENARIO" == baseline_digest_bad && "$count" == 1 ]] \
+    || [[ "$EXISTING_TEST_SCENARIO" == publish_readback_digest_bad && "$count" == 2 ]]; then
+    digest=invalid-state-digest
+  fi
+  if [[ "$missing_digest" == true ]]; then
+    /usr/bin/jq -cn --arg active "$active" --argjson active_version "$active_version" \
+      --argjson published "$published" \
+      '{type:"response",status:"ok",result:{id:"syntheticworkflow",
+        versionId:"selected-version",active:($active=="true"),
+        activeVersionId:$active_version,isArchived:false,
+        draft:{versionId:"selected-version",graphDigest:"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        published:$published}}'
+  else
+    /usr/bin/jq -cn --arg active "$active" --argjson active_version "$active_version" \
+      --argjson published "$published" --arg digest "$digest" \
+      '{type:"response",status:"ok",result:{id:"syntheticworkflow",
+        versionId:"selected-version",active:($active=="true"),
+        activeVersionId:$active_version,isArchived:false,stateDigest:$digest,
+        draft:{versionId:"selected-version",graphDigest:"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        published:$published}}'
+  fi
   exit 0
 fi
 [[ "$op" == "n8n.workflows.activate" ]] || exit 82
@@ -1626,6 +1708,11 @@ active="$(/usr/bin/jq -r '.input.active' <<<"$envelope")" || exit 83
 approval="$(/usr/bin/jq -er '.approval_token' <<<"$envelope")" || exit 84
 [[ "$approval" == "offline-stub-token" ]] || exit 85
 if [[ "$active" == true ]]; then
+  /usr/bin/jq -e '.input.guard.precondition |
+    (keys_unsorted | sort) == ["active","activeVersionId","isArchived","stateDigest","versionId"]
+    and (.stateDigest | test("^blake3-256:[0-9A-Fa-f]{64}$"))
+    and .active == false and .activeVersionId == null
+    and .isArchived == false' <<<"$envelope" >/dev/null || exit 90
   count=0
   [[ -f "$EXISTING_TEST_PUBLISH_COUNT" ]] && count="$(cat "$EXISTING_TEST_PUBLISH_COUNT")"
   printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_PUBLISH_COUNT" || exit 86
@@ -1634,9 +1721,14 @@ if [[ "$active" == true ]]; then
     and .input.guard.precondition.active == false
     and .input.guard.precondition.isArchived == false' <<<"$envelope" >/dev/null || exit 87
   [[ "$EXISTING_TEST_SCENARIO" != publish_unknown ]] || exit 42
-  after='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"state-active","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
-  before='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"state-inactive","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
+  after='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+  before='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
 else
+  /usr/bin/jq -e '.input.guard.precondition |
+    (keys_unsorted | sort) == ["active","activeVersionId","isArchived","stateDigest","versionId"]
+    and (.stateDigest | test("^blake3-256:[0-9A-Fa-f]{64}$"))
+    and .active == true and .activeVersionId == "selected-version"
+    and .isArchived == false' <<<"$envelope" >/dev/null || exit 91
   count=0
   [[ -f "$EXISTING_TEST_UNPUBLISH_COUNT" ]] && count="$(cat "$EXISTING_TEST_UNPUBLISH_COUNT")"
   printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_UNPUBLISH_COUNT" || exit 88
@@ -1646,8 +1738,8 @@ else
     and .input.guard.precondition.activeVersionId == "selected-version"' \
     <<<"$envelope" >/dev/null || exit 89
   [[ "$EXISTING_TEST_SCENARIO" != unpublish_unknown ]] || exit 43
-  before='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"state-active","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
-  after='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"state-inactive-final","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
+  before='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+  after='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
 fi
 /usr/bin/jq -cn --argjson before "$before" --argjson after "$after" \
   '{type:"response",status:"ok",result:{status:"verified",
@@ -1663,9 +1755,12 @@ EOF
   export EXISTING_TEST_GET_COUNT="$root/get-count"
   export EXISTING_TEST_PUBLISH_COUNT="$root/publish-count"
   export EXISTING_TEST_UNPUBLISH_COUNT="$root/unpublish-count"
+  export EXISTING_TEST_REQUEST_ROOT="$REQUEST_ROOT"
 
-  for scenario in baseline_bad publish_unknown publish_readback_bad \
-    unpublish_unknown unpublish_readback_bad success; do
+  for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
+    publish_unknown publish_readback_bad publish_readback_digest_bad \
+    publish_readback_digest_missing unpublish_unknown \
+    unpublish_readback_bad success; do
     EXISTING_TEST_SCENARIO="$scenario"
     export EXISTING_TEST_SCENARIO
     EXISTING_TEST_APPROVAL_COUNT="$root/$scenario-approval-count"
@@ -1685,13 +1780,18 @@ EOF
     approval_count="$(cat "$EXISTING_TEST_APPROVAL_COUNT" 2>/dev/null || printf 0)"
     evidence="$EVIDENCE_DIR"
     [[ -f "$evidence/summary.json" ]] || return 1
-    if [[ "$scenario" == baseline_bad ]]; then
+    if [[ "$scenario" == baseline_bad || "$scenario" == baseline_digest_bad \
+      || "$scenario" == baseline_digest_missing ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
         && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
     elif [[ "$scenario" == publish_unknown ]]; then
       [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
         && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
     elif [[ "$scenario" == publish_readback_bad ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+    elif [[ "$scenario" == publish_readback_digest_bad \
+      || "$scenario" == publish_readback_digest_missing ]]; then
       [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
         && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
     elif [[ "$scenario" == unpublish_unknown ]]; then
@@ -1709,7 +1809,33 @@ EOF
     fi
     if rg -q 'offline-stub-token|PRIVATE-CANARY|raw provider body' "$evidence"; then return 1; fi
   done
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":6}\n' \
+
+  rejected_evidence="/tmp/${root##*/}-production-reject"
+  [[ ! -e "$rejected_evidence" && ! -L "$rejected_evidence" ]] || return 1
+  EXISTING_TEST_SCENARIO=production_tmp_rejected
+  export EXISTING_TEST_SCENARIO
+  EXISTING_TEST_APPROVAL_COUNT="$root/preflight-approval-count"
+  EXISTING_TEST_GET_COUNT="$root/preflight-get-count"
+  EXISTING_TEST_PUBLISH_COUNT="$root/preflight-publish-count"
+  EXISTING_TEST_UNPUBLISH_COUNT="$root/preflight-unpublish-count"
+  export EXISTING_TEST_APPROVAL_COUNT EXISTING_TEST_GET_COUNT \
+    EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT
+  EVIDENCE_DIR="$rejected_evidence"
+  SELF_TEST=0
+  if run_existing_version_acceptance >"$root/production-preflight.json"; then
+    SELF_TEST=1
+    return 1
+  else
+    status=$?
+  fi
+  SELF_TEST=1
+  [[ "$status" == 10 && ! -e "$rejected_evidence" ]] || return 1
+  rg -q 'evidence_directory_not_durable' "$root/production-preflight.json" || return 1
+  [[ ! -e "$EXISTING_TEST_APPROVAL_COUNT" && ! -e "$EXISTING_TEST_GET_COUNT" \
+    && ! -e "$EXISTING_TEST_PUBLISH_COUNT" \
+    && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
+
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":11}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

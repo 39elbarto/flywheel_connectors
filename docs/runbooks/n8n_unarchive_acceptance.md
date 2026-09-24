@@ -155,6 +155,13 @@ scripts/n8n_unarchive_acceptance.sh \
   --evidence-dir /srv/dev-ssd/fcp/nqm81.24/existing-version-evidence
 ```
 
+Production evidence must be a fresh directory below the mounted persistent
+`/srv/dev-ssd/fcp/nqm81.24` root. The runner rejects `/tmp`, path traversal,
+symlinked path components, or an absent SSD mount before approval or provider
+calls; it does not fall back to another location. Offline self-tests use their
+private temporary fixture directory only while explicit `SELF_TEST` mode is
+active.
+
 Before approval, the runner performs one independent GET and stops unless that
 exact workflow is inactive, unarchived, unpublished, has no active version,
 and its current draft version equals `--version-id`. It binds a fresh
@@ -181,17 +188,22 @@ secret/body persistence flags. Do not reuse an approval request or evidence
 directory for another run.
 
 The focused offline regression exercises the production acceptance runner
-through local launcher, parent-binding, and approval-helper stubs. It does not
-call the approval issuer or provider:
+through local launcher, parent-binding, and approval-helper stubs. The stubs
+check the exact production precondition fields and BLAKE3 state-digest format
+(lowercase `blake3-256:` prefix and 64 ASCII hexadecimal characters, either
+case). Regression cases include malformed and missing baseline and publish
+readback state digests, plus rejection of a production `/tmp` evidence path
+before any approval or provider call. It does not call the approval issuer or
+provider:
 
 ```sh
 scripts/n8n_unarchive_acceptance.sh --existing-version-self-test
 ```
 
-The test covers successful publish/readback/unpublish/readback, a failing
-baseline precondition, ambiguous publish and unpublish results, and mismatched
-publish/final readbacks. Passing this offline test is implementation evidence,
-not live provider acceptance or approval.
+The test also preserves successful publish/readback/unpublish/readback, a
+failing baseline precondition, ambiguous publish and unpublish results, and
+mismatched publish/final readbacks. Passing this offline test is implementation
+evidence, not live provider acceptance or approval.
 
 ## Runner scope
 

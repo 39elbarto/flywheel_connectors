@@ -113,6 +113,7 @@ EXISTING_RUN_ID=""
 EXISTING_PUBLISH_HELPER_STATUS=125
 EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
 EXISTING_UNPUBLISH_HELPER_STATUS=125
+EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
 
 emit_stop() {
   local code="${1:-${LAST_ERROR:-unknown_stop}}"
@@ -443,6 +444,7 @@ persist_existing_summary() {
     --arg version "$VERSION_ID" --arg run_id "$EXISTING_RUN_ID" \
     --arg verdict "$verdict" --arg code "$code" \
     --arg publish_approval_abort_code "$EXISTING_PUBLISH_APPROVAL_ABORT_CODE" \
+    --arg unpublish_approval_abort_code "$EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE" \
     --argjson publish_status "$ACTIVATION_PUBLISH_STATUS" \
     --argjson unpublish_status "$ACTIVATION_UNPUBLISH_STATUS" \
     --argjson baseline_status "$ACTIVATION_BASELINE_STATUS" \
@@ -473,7 +475,9 @@ persist_existing_summary() {
       raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
       tokens_persisted:false,secrets_persisted:false}
       + (if $publish_approval_abort_code == "" then {}
-         else {publish_approval_abort_code:$publish_approval_abort_code} end)')" || return 1
+         else {publish_approval_abort_code:$publish_approval_abort_code} end)
+      + (if $unpublish_approval_abort_code == "" then {}
+         else {unpublish_approval_abort_code:$unpublish_approval_abort_code} end)')" || return 1
   persist_activation_record summary "$summary"
 }
 
@@ -1490,6 +1494,7 @@ run_existing_version_acceptance() {
   EXISTING_PUBLISH_HELPER_STATUS=125
   EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
   EXISTING_UNPUBLISH_HELPER_STATUS=125
+  EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
   if ! existing_version_preflight; then return 10; fi
   EXISTING_RUN_ID="$(uuid)" || { emit_existing_stop run_id_failed; return 10; }
   RUN_ID="$EXISTING_RUN_ID"
@@ -1551,7 +1556,7 @@ run_existing_version_acceptance() {
     EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
     EXISTING_PUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
     if (( HANDOFF_INVOKE_STARTED == 0 )); then
-      preinvoke_code="${APPROVAL_ABORT_CODE:-parent_helper_unavailable}"
+      preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
       persist_existing_summary stop "$preinvoke_code" || true
       emit_existing_stop "$preinvoke_code"
       return 10
@@ -1630,6 +1635,13 @@ run_existing_version_acceptance() {
     "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" existing-unpublish; then
     ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
     EXISTING_UNPUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+    EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( HANDOFF_INVOKE_STARTED == 0 )); then
+      preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
+      persist_existing_summary stop "$preinvoke_code" || true
+      emit_existing_stop "$preinvoke_code"
+      return 10
+    fi
     persist_existing_summary unknown unpublish_outcome_unknown || true
     emit_existing_unknown unpublish_outcome_unknown
     return 20
@@ -1726,11 +1738,18 @@ request="$EXISTING_TEST_REQUEST_ROOT/$2"
   and ((.input.active == true and .input.guard.precondition.active == false)
     or (.input.active == false and .input.guard.precondition.active == true))
 ' "$request" >/dev/null || exit 73
-if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed ]]; then
+request_active="$(/usr/bin/jq -r '.input.active' "$request")" || exit 73
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed \
+    && "$request_active" == true ]] \
+  || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_failed \
+    && "$request_active" == false ]]; then
   printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"issuer_failed"}' >&2
   exit 76
 fi
-if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized ]]; then
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized \
+    && "$request_active" == true ]] \
+  || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_unrecognized \
+    && "$request_active" == false ]]; then
   printf '%s\n' 'PRIVATE-CANARY-UNRECOGNIZED approval helper diagnostic' >&2
   exit 76
 fi
@@ -1852,7 +1871,8 @@ EOF
   for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
     publish_approval_failed publish_approval_unrecognized \
     publish_unknown publish_readback_bad publish_readback_digest_bad \
-    publish_readback_digest_missing unpublish_unknown \
+    publish_readback_digest_missing unpublish_approval_failed \
+    unpublish_approval_unrecognized unpublish_unknown \
     unpublish_readback_bad success; do
     EXISTING_TEST_SCENARIO="$scenario"
     export EXISTING_TEST_SCENARIO
@@ -1889,11 +1909,36 @@ EOF
     elif [[ "$scenario" == publish_approval_unrecognized ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
         && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
-      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "parent_helper_unavailable"
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "preinvoke_failed"
         and (has("publish_approval_abort_code") | not)
         and .publish_attempts == 0 and .retries == 0' \
         "$evidence/summary.json" >/dev/null || return 1
-      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "parent_helper_unavailable"' \
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "preinvoke_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY-UNRECOGNIZED' "$root/$scenario-output" "$evidence"; then
+        return 1
+      fi
+    elif [[ "$scenario" == unpublish_approval_failed ]]; then
+      [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "issuer_failed"
+        and .unpublish_approval_abort_code == "issuer_failed"
+        and (has("publish_approval_abort_code") | not)
+        and .publish_status == 0 and .publish_readback_status == 0
+        and .publish_attempts == 1 and .unpublish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "issuer_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == unpublish_approval_unrecognized ]]; then
+      [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "preinvoke_failed"
+        and (has("publish_approval_abort_code") | not)
+        and (has("unpublish_approval_abort_code") | not)
+        and .publish_status == 0 and .publish_readback_status == 0
+        and .publish_attempts == 1 and .unpublish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "preinvoke_failed"' \
         "$root/$scenario-output" >/dev/null || return 1
       if rg -q 'PRIVATE-CANARY-UNRECOGNIZED' "$root/$scenario-output" "$evidence"; then
         return 1
@@ -1950,7 +1995,7 @@ EOF
     && ! -e "$EXISTING_TEST_PUBLISH_COUNT" \
     && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
 
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":13}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":15}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

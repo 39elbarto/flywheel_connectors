@@ -67,6 +67,8 @@ INVOCATION_STATUS=125
 FINAL_GET_STATUS=125
 APPROVAL_HELPER_STATUS=125
 APPROVAL_READER_STATUS=125
+APPROVAL_ABORT_CODE=""
+HANDOFF_INVOKE_STARTED=0
 HANDOFF_TEST_SUDO=""
 HANDOFF_OPERATION=""
 HANDOFF_INPUT=""
@@ -109,6 +111,7 @@ EXISTING_STATE_DIGEST=""
 EXISTING_GRAPH_DIGEST=""
 EXISTING_RUN_ID=""
 EXISTING_PUBLISH_HELPER_STATUS=125
+EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
 EXISTING_UNPUBLISH_HELPER_STATUS=125
 
 emit_stop() {
@@ -439,6 +442,7 @@ persist_existing_summary() {
   summary="$("$JQ_BIN" -cn --arg server "$SERVER" --arg workflow "$WORKFLOW_ID" \
     --arg version "$VERSION_ID" --arg run_id "$EXISTING_RUN_ID" \
     --arg verdict "$verdict" --arg code "$code" \
+    --arg publish_approval_abort_code "$EXISTING_PUBLISH_APPROVAL_ABORT_CODE" \
     --argjson publish_status "$ACTIVATION_PUBLISH_STATUS" \
     --argjson unpublish_status "$ACTIVATION_UNPUBLISH_STATUS" \
     --argjson baseline_status "$ACTIVATION_BASELINE_STATUS" \
@@ -467,7 +471,9 @@ persist_existing_summary() {
         "existing-unpublish.json","existing-final-readback.json",
         "transition-publish.json","transition-unpublish.json"],
       raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
-      tokens_persisted:false,secrets_persisted:false}')" || return 1
+      tokens_persisted:false,secrets_persisted:false}
+      + (if $publish_approval_abort_code == "" then {}
+         else {publish_approval_abort_code:$publish_approval_abort_code} end)')" || return 1
   persist_activation_record summary "$summary"
 }
 
@@ -909,12 +915,41 @@ filter_n8n_run_once_diagnostics() {
   '
 }
 
+capture_approval_abort_code() {
+  local helper_status="$1"
+  APPROVAL_ABORT_CODE=""
+  case "$helper_status" in
+    201) APPROVAL_ABORT_CODE=clock_failed ;;
+    202) APPROVAL_ABORT_CODE=clock_invalid ;;
+    203) APPROVAL_ABORT_CODE=expiry_not_13_digits ;;
+    204) APPROVAL_ABORT_CODE=expiry_not_integer ;;
+    205) APPROVAL_ABORT_CODE=expiry_over_60s ;;
+    206) APPROVAL_ABORT_CODE=expiry_stale ;;
+    207) APPROVAL_ABORT_CODE=invalid_request_file ;;
+    208) APPROVAL_ABORT_CODE=invalid_request_json ;;
+    209) APPROVAL_ABORT_CODE=issuer_failed ;;
+    210) APPROVAL_ABORT_CODE=issuer_unavailable ;;
+    211) APPROVAL_ABORT_CODE=public_key_unavailable ;;
+    212) APPROVAL_ABORT_CODE=request_busy ;;
+    213) APPROVAL_ABORT_CODE=request_changed ;;
+    214) APPROVAL_ABORT_CODE=request_digest_failed ;;
+    215) APPROVAL_ABORT_CODE=request_unreadable ;;
+    216) APPROVAL_ABORT_CODE=safe_plan_mismatch ;;
+    217) APPROVAL_ABORT_CODE=secret_reader_unavailable ;;
+    218) APPROVAL_ABORT_CODE=invalid_arguments ;;
+    219) APPROVAL_ABORT_CODE=internal_error ;;
+    *) return 1 ;;
+  esac
+}
+
 approval_fd3_handoff() {
   local basename="$1"
   local reader_fd
+  local reader_pipe_fd
   local writer_fd
   local reader_pid
   local helper_status
+  local helper_status_for_abort
   local reader_status
   local invoke_fd
   local invoke_pid
@@ -926,6 +961,8 @@ approval_fd3_handoff() {
 
   APPROVAL_HELPER_STATUS=125
   APPROVAL_READER_STATUS=125
+  APPROVAL_ABORT_CODE=""
+  HANDOFF_INVOKE_STARTED=0
   sudo_bin="/usr/bin/sudo"
   if (( SELF_TEST == 1 )); then
     sudo_bin="$HANDOFF_TEST_SUDO"
@@ -937,21 +974,56 @@ approval_fd3_handoff() {
   # root bash maps the helper's FD3 to stdout and this parent maps stdout back
   # to the already-open FD3 pipe.
   coproc FWC_APPROVAL_READER { cat; }
-  reader_fd="${FWC_APPROVAL_READER[0]}"
+  reader_pipe_fd="${FWC_APPROVAL_READER[0]}"
   writer_fd="${FWC_APPROVAL_READER[1]}"
   reader_pid="$FWC_APPROVAL_READER_PID"
+  exec {reader_fd}<&"$reader_pipe_fd"
+  exec {reader_pipe_fd}<&-
   exec 3>&"$writer_fd"
   exec {writer_fd}>&-
 
   if "$sudo_bin" -n /usr/bin/bash -c '
+      set -o pipefail
       exec 3>&1
-      exec "$1" --signal=TERM --kill-after=2s "$2" "$3" \
-        --request-file "$4" 2>/dev/null
+      if diagnostic_code=$("$1" --signal=TERM --kill-after=2s "$2" "$3" \
+          --request-file "$4" 2>&1 1>&3 | "$5" "$6"); then
+        exit 0
+      else
+        helper_status=$?
+      fi
+      case "$diagnostic_code" in
+        clock_failed) exit 201 ;;
+        clock_invalid) exit 202 ;;
+        expiry_not_13_digits) exit 203 ;;
+        expiry_not_integer) exit 204 ;;
+        expiry_over_60s) exit 205 ;;
+        expiry_stale) exit 206 ;;
+        invalid_request_file) exit 207 ;;
+        invalid_request_json) exit 208 ;;
+        issuer_failed) exit 209 ;;
+        issuer_unavailable) exit 210 ;;
+        public_key_unavailable) exit 211 ;;
+        request_busy) exit 212 ;;
+        request_changed) exit 213 ;;
+        request_digest_failed) exit 214 ;;
+        request_unreadable) exit 215 ;;
+        safe_plan_mismatch) exit 216 ;;
+        secret_reader_unavailable) exit 217 ;;
+        invalid_arguments) exit 218 ;;
+        internal_error) exit 219 ;;
+        *) exit "$helper_status" ;;
+      esac
     ' _ "$TIMEOUT_BIN" "${APPROVAL_TIMEOUT_SECONDS}s" \
-    "$APPROVAL_HELPER_PATH" "$basename" 1>&3 2>/dev/null; then
+    "$APPROVAL_HELPER_PATH" "$basename" "$AWK_BIN" \
+    'NR == 1 && $0 ~ /^\{"schema":"fwc\.n8n\.approval-once\.v1","verdict":"stop","abort_code":"(clock_failed|clock_invalid|expiry_not_13_digits|expiry_not_integer|expiry_over_60s|expiry_stale|invalid_request_file|invalid_request_json|issuer_failed|issuer_unavailable|public_key_unavailable|request_busy|request_changed|request_digest_failed|request_unreadable|safe_plan_mismatch|secret_reader_unavailable|invalid_arguments|internal_error)"\}$/ { code=$0; sub(/^.*"abort_code":"/, "", code); sub(/"}$/, "", code) } END { if (NR == 1 && code != "") print code }' \
+    1>&3 2>/dev/null; then
     helper_status=0
   else
     helper_status=$?
+    helper_status_for_abort="$helper_status"
+    if capture_approval_abort_code "$helper_status_for_abort"; then
+      helper_status=1
+    fi
   fi
   APPROVAL_HELPER_STATUS="$helper_status"
   exec 3>&-
@@ -985,12 +1057,14 @@ approval_fd3_handoff() {
     return 1
   fi
   if (( ACTIVATION_MODE == 1 )); then
+    HANDOFF_INVOKE_STARTED=1
     coproc FWC_ACTIVATION_INVOKE {
       run_activation_once "$invoke_reader_fd";
     }
     invoke_fd="${FWC_ACTIVATION_INVOKE[0]}"
     invoke_pid="$FWC_ACTIVATION_INVOKE_PID"
   else
+    HANDOFF_INVOKE_STARTED=1
     coproc FWC_UNARCHIVE_INVOKE {
       run_unarchive_once "$invoke_reader_fd";
     }
@@ -1331,6 +1405,7 @@ activation_invoke_step() {
   local expiry_ms
   local request_json
 
+  HANDOFF_INVOKE_STARTED=0
   correlation_id="$(uuid)" || return 1
   HANDOFF_OPERATION="$operation"
   HANDOFF_INPUT="$input_json"
@@ -1401,6 +1476,7 @@ existing_version_preflight() {
 
 run_existing_version_acceptance() {
   local baseline_input publish_ref publish_key unpublish_ref unpublish_key
+  local preinvoke_code
   local baseline_state active_state
   EXISTING_VERSION_MODE=1
   ACTIVATION_MODE=1
@@ -1412,6 +1488,7 @@ run_existing_version_acceptance() {
   ACTIVATION_ACTIVE_STATUS=125
   FINAL_GET_STATUS=125
   EXISTING_PUBLISH_HELPER_STATUS=125
+  EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
   EXISTING_UNPUBLISH_HELPER_STATUS=125
   if ! existing_version_preflight; then return 10; fi
   EXISTING_RUN_ID="$(uuid)" || { emit_existing_stop run_id_failed; return 10; }
@@ -1472,6 +1549,13 @@ run_existing_version_acceptance() {
     "$ACTIVATION_PUBLISH_INPUT" "$WORKFLOW_ID" \
     "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" existing-publish; then
     EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+    EXISTING_PUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( HANDOFF_INVOKE_STARTED == 0 )); then
+      preinvoke_code="${APPROVAL_ABORT_CODE:-parent_helper_unavailable}"
+      persist_existing_summary stop "$preinvoke_code" || true
+      emit_existing_stop "$preinvoke_code"
+      return 10
+    fi
     persist_existing_summary unknown publish_outcome_unknown || true
     emit_existing_unknown publish_outcome_unknown
     return 20
@@ -1642,6 +1726,14 @@ request="$EXISTING_TEST_REQUEST_ROOT/$2"
   and ((.input.active == true and .input.guard.precondition.active == false)
     or (.input.active == false and .input.guard.precondition.active == true))
 ' "$request" >/dev/null || exit 73
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed ]]; then
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"issuer_failed"}' >&2
+  exit 76
+fi
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized ]]; then
+  printf '%s\n' 'PRIVATE-CANARY-UNRECOGNIZED approval helper diagnostic' >&2
+  exit 76
+fi
 count=0
 [[ -f "$EXISTING_TEST_APPROVAL_COUNT" ]] && count="$(cat "$EXISTING_TEST_APPROVAL_COUNT")"
 printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_APPROVAL_COUNT" || exit 71
@@ -1758,6 +1850,7 @@ EOF
   export EXISTING_TEST_REQUEST_ROOT="$REQUEST_ROOT"
 
   for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
+    publish_approval_failed publish_approval_unrecognized \
     publish_unknown publish_readback_bad publish_readback_digest_bad \
     publish_readback_digest_missing unpublish_unknown \
     unpublish_readback_bad success; do
@@ -1773,7 +1866,7 @@ EOF
     REQUEST_ROOT="$root/approval-requests"
     ACTIVATION_PUBLISH_STATUS=125
     ACTIVATION_UNPUBLISH_STATUS=125
-    if run_existing_version_acceptance >/dev/null; then status=0; else status=$?; fi
+    if run_existing_version_acceptance >"$root/$scenario-output"; then status=0; else status=$?; fi
     get_count="$(cat "$EXISTING_TEST_GET_COUNT" 2>/dev/null || printf 0)"
     publish_count="$(cat "$EXISTING_TEST_PUBLISH_COUNT" 2>/dev/null || printf 0)"
     unpublish_count="$(cat "$EXISTING_TEST_UNPUBLISH_COUNT" 2>/dev/null || printf 0)"
@@ -1784,6 +1877,27 @@ EOF
       || "$scenario" == baseline_digest_missing ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
         && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+    elif [[ "$scenario" == publish_approval_failed ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "issuer_failed"
+        and .publish_approval_abort_code == "issuer_failed"
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "issuer_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == publish_approval_unrecognized ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "parent_helper_unavailable"
+        and (has("publish_approval_abort_code") | not)
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "parent_helper_unavailable"' \
+        "$root/$scenario-output" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY-UNRECOGNIZED' "$root/$scenario-output" "$evidence"; then
+        return 1
+      fi
     elif [[ "$scenario" == publish_unknown ]]; then
       [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
         && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
@@ -1807,7 +1921,8 @@ EOF
         and .publish_attempts == 1 and .unpublish_attempts == 1' \
         "$evidence/summary.json" >/dev/null || return 1
     fi
-    if rg -q 'offline-stub-token|PRIVATE-CANARY|raw provider body' "$evidence"; then return 1; fi
+    if rg -q 'offline-stub-token|PRIVATE-CANARY|raw provider body' "$evidence" \
+      "$root/$scenario-output"; then return 1; fi
   done
 
   rejected_evidence="/tmp/${root##*/}-production-reject"
@@ -1835,7 +1950,7 @@ EOF
     && ! -e "$EXISTING_TEST_PUBLISH_COUNT" \
     && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
 
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":11}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":13}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

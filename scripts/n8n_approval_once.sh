@@ -33,6 +33,10 @@ export LC_ALL=C
 
 LAST_ERROR=""
 SELF_TEST_MODE=0
+PIPELINE_TEST_MODE=0
+PIPELINE_TEST_READER_FAILURE=0
+PIPELINE_TEST_DECODER_FAILURE=0
+PIPELINE_TEST_ISSUER_CODE=""
 TEST_REQUEST_JSON=""
 TEST_FINAL_REQUEST_JSON=""
 TEST_FINAL_NOW_MS=""
@@ -168,11 +172,50 @@ strict_decode_seed() {
 
 filter_issuer_diagnostic() {
   "$AWK_PATH" '
-    $0 ~ /^fcp-n8n-approval-issue: (invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)$/ {
+    $0 ~ /^fcp-n8n-approval-issue: (invalid_arguments|invalid_request|request_changed|clock_failed|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)$/ {
       sub(/^fcp-n8n-approval-issue: /, "")
       print
     }
   '
+}
+
+pipeline_secret_reader() {
+  if (( PIPELINE_TEST_MODE == 1 )); then
+    (( PIPELINE_TEST_READER_FAILURE == 0 )) || return 1
+    printf '%s\n' 'synthetic-encoded-seed'
+    return 0
+  fi
+  HOME=/home/ubuntu "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null
+}
+
+pipeline_seed_decoder() {
+  if (( PIPELINE_TEST_MODE == 1 )); then
+    (( PIPELINE_TEST_DECODER_FAILURE == 0 )) || return 1
+    "$CAT_PATH" >/dev/null || return 1
+    if [[ -n "$PIPELINE_TEST_ISSUER_CODE" ]]; then
+      # The test issuer exits without consuming stdin. Keep writing until its
+      # closed pipe gives this synthetic decoder SIGPIPE.
+      while :; do printf 'synthetic-decoded-seed'; done
+    fi
+    printf '%s' 'synthetic-decoded-seed'
+  else
+    strict_decode_seed 2>/dev/null
+  fi
+}
+
+pipeline_issuer() {
+  if (( PIPELINE_TEST_MODE == 1 )); then
+    if [[ -n "$PIPELINE_TEST_ISSUER_CODE" ]]; then
+      printf 'fcp-n8n-approval-issue: %s\n' "$PIPELINE_TEST_ISSUER_CODE" >&2
+      printf '%s\n' 'raw issuer diagnostic PRIVATE-CANARY' >&2
+      return 1
+    fi
+    "$CAT_PATH" >/dev/null || return 1
+    printf '%s\n' 'synthetic-token'
+    return 0
+  fi
+  FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
+    --request-file "$1" --expected-request-sha256 "$2"
 }
 
 validate_now_ms() {
@@ -356,7 +399,7 @@ issue_once() {
   local request_basename="$1"
   local request_digest="$2"
 
-  if (( SELF_TEST_MODE == 1 )); then
+  if (( SELF_TEST_MODE == 1 && PIPELINE_TEST_MODE == 0 )); then
     local encoded_seed
     local raw_seed
     token_consumer_is_safe || return 1
@@ -393,11 +436,9 @@ issue_once() {
   # seed bytes are captured in a variable.
   pipeline_output="$(
     set +e
-    HOME=/home/ubuntu "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
-      | strict_decode_seed 2>/dev/null \
-      | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
-          --request-file "$request_basename" \
-          --expected-request-sha256 "$request_digest" 2>&1 >&3 \
+    pipeline_secret_reader \
+      | pipeline_seed_decoder \
+      | pipeline_issuer "$request_basename" "$request_digest" 2>&1 >&3 \
       | filter_issuer_diagnostic
     pipeline_status=("${PIPESTATUS[@]}")
     printf 'STATUS:%s:%s:%s:%s\n' "${pipeline_status[0]:-1}" \
@@ -413,22 +454,22 @@ issue_once() {
   decode_status="${BASH_REMATCH[2]}"
   issuer_status="${BASH_REMATCH[3]}"
   filter_status="${BASH_REMATCH[4]}"
+  if [[ "$issuer_status" != 0 ]]; then
+    issuer_code="${pipeline_output%$'\n'STATUS:*}"
+    case "$issuer_code" in
+      invalid_arguments|invalid_request|request_changed|clock_failed|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)
+        fail "$issuer_code"
+        ;;
+      *) fail issuer_failed ;;
+    esac
+    return 1
+  fi
   if [[ "$secret_status" != 0 ]]; then
     fail secret_reader_failed
     return 1
   fi
   if [[ "$decode_status" != 0 ]]; then
     fail seed_decode_failed
-    return 1
-  fi
-  if [[ "$issuer_status" != 0 ]]; then
-    issuer_code="${pipeline_output%$'\n'STATUS:*}"
-    case "$issuer_code" in
-      invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)
-        fail "$issuer_code"
-        ;;
-      *) fail issuer_failed ;;
-    esac
     return 1
   fi
   if [[ "$filter_status" != 0 ]]; then
@@ -708,6 +749,58 @@ expect_issue_stage_classification() {
   [[ "$filtered" == invalid_seed ]] || return 1
 }
 
+expect_production_pipeline_seam() {
+  local pipeline_output
+
+  PIPELINE_TEST_MODE=1
+  PIPELINE_TEST_ISSUER_CODE=""
+  PIPELINE_TEST_READER_FAILURE=0
+  PIPELINE_TEST_DECODER_FAILURE=0
+  LAST_ERROR=""
+  run_with_fake_token_pipe issue_once synthetic-request synthetic-digest || return 1
+  [[ "$LAST_ERROR" == "" && "$FAKE_PIPE_TOKEN" == synthetic-token ]] || return 1
+
+  PIPELINE_TEST_ISSUER_CODE=invalid_request
+  reset_fake_state
+  if run_with_fake_token_pipe issue_once synthetic-request synthetic-digest; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == invalid_request && "$FAKE_PIPE_TOKEN" == "" ]] || return 1
+
+  PIPELINE_TEST_ISSUER_CODE=""
+  PIPELINE_TEST_READER_FAILURE=1
+  LAST_ERROR=""
+  if run_with_fake_token_pipe issue_once synthetic-request synthetic-digest; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == secret_reader_failed ]] || return 1
+
+  PIPELINE_TEST_READER_FAILURE=0
+  PIPELINE_TEST_DECODER_FAILURE=1
+  LAST_ERROR=""
+  if run_with_fake_token_pipe issue_once synthetic-request synthetic-digest; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == seed_decode_failed ]] || return 1
+
+  PIPELINE_TEST_DECODER_FAILURE=0
+  PIPELINE_TEST_ISSUER_CODE=clock_failed
+  LAST_ERROR=""
+  if run_with_fake_token_pipe issue_once synthetic-request synthetic-digest; then
+    return 1
+  fi
+  [[ "$LAST_ERROR" == clock_failed ]] || return 1
+
+  PIPELINE_TEST_ISSUER_CODE=""
+  pipeline_output="$(printf '%s\n' \
+    'fcp-n8n-approval-issue: request_changed' \
+    'raw issuer diagnostic PRIVATE-CANARY' | filter_issuer_diagnostic)" || return 1
+  [[ "$pipeline_output" == request_changed ]] || return 1
+  PIPELINE_TEST_MODE=0
+  LAST_ERROR=""
+  return 0
+}
+
 run_self_test() {
   local now_ms=1700000000000
   local valid
@@ -761,6 +854,7 @@ run_self_test() {
   expect_non_pipe_fd3_stops "$valid" "$now_ms" || return 1
   expect_issuer_error_is_single_attempt "$valid" "$now_ms" || return 1
   expect_issue_stage_classification "$valid" "$now_ms" || return 1
+  expect_production_pipeline_seam || return 1
 
   printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":25}'
 }

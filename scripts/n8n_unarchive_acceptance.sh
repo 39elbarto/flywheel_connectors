@@ -1762,6 +1762,11 @@ if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed \
   printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"invalid_seed"}' >&2
   exit 76
 fi
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_code_propagated \
+    && "$request_active" == true ]]; then
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"clock_failed"}' >&2
+  exit 76
+fi
 if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized \
     && "$request_active" == true ]] \
   || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_unrecognized \
@@ -1885,7 +1890,8 @@ EOF
   export EXISTING_TEST_REQUEST_ROOT="$REQUEST_ROOT"
 
   for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
-    publish_approval_failed publish_approval_unrecognized \
+    publish_approval_failed publish_approval_code_propagated \
+    publish_approval_unrecognized \
     publish_unknown publish_readback_bad publish_readback_digest_bad \
     publish_readback_digest_missing unpublish_approval_failed \
     unpublish_approval_unrecognized unpublish_unknown \
@@ -1921,6 +1927,15 @@ EOF
         and .publish_attempts == 0 and .retries == 0' \
         "$evidence/summary.json" >/dev/null || return 1
       "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "invalid_seed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == publish_approval_code_propagated ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "clock_failed"
+        and .publish_approval_abort_code == "clock_failed"
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "clock_failed"' \
         "$root/$scenario-output" >/dev/null || return 1
     elif [[ "$scenario" == publish_approval_unrecognized ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
@@ -2011,7 +2026,7 @@ EOF
     && ! -e "$EXISTING_TEST_PUBLISH_COUNT" \
     && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
 
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":15}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":16}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

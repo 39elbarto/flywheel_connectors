@@ -6872,8 +6872,14 @@ mod tests {
     fn operations_and_rate_pools_match_parsed_manifest() {
         use std::collections::BTreeSet;
 
-        let manifest = fcp_manifest::ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
-            .expect("embedded n8n manifest should parse");
+        let manifest_toml = match std::env::var_os("FCP_N8N_STAGED_MANIFEST_PATH") {
+            Some(path) => {
+                std::fs::read_to_string(path).expect("staged n8n manifest should be readable")
+            }
+            None => MANIFEST_TOML.to_owned(),
+        };
+        let manifest = fcp_manifest::ConnectorManifest::parse_str(&manifest_toml)
+            .expect("n8n manifest should parse and validate");
         let runtime_operations = operations_info();
         let manifest_ids = manifest
             .provides

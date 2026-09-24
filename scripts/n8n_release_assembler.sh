@@ -753,6 +753,9 @@ main() {
   hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
 
   copy_templates "$source_release" "$stage_root"
+  echo "[test] staged n8n manifest production validation" >&2
+  FCP_N8N_STAGED_MANIFEST_PATH="$stage_root/manifests/fcp-n8n.toml" \
+    bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test -p fcp-n8n operations_and_rate_pools_match_parsed_manifest
   write_local_mcp_policy "$stage_root" "$hash_helper"
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"

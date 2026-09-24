@@ -463,18 +463,26 @@ fn main() {
     }
 }
 
-fn print_error(code: &str, diagnostic: Option<&'static str>, correlation_id: &str) {
-    let envelope = ErrorEnvelope {
-        schema: "fwc.n8n.error.v1",
-        status: "error",
-        code: code.to_string(),
-        diagnostic,
-        correlation_id: correlation_id.to_string(),
-    };
+fn print_error(code: &'static str, diagnostic: Option<&'static str>, correlation_id: &str) {
+    let envelope = error_envelope(&AppError::with_diagnostic(code, diagnostic), correlation_id);
     let encoded = serde_json::to_string(&envelope).unwrap_or_else(|_| {
         "{\"schema\":\"fwc.n8n.error.v1\",\"status\":\"error\",\"code\":\"output_encoding_failed\"}".to_string()
     });
     println!("{encoded}");
+}
+
+fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
+    ErrorEnvelope {
+        schema: "fwc.n8n.error.v1",
+        status: "error",
+        code: error.code.to_string(),
+        diagnostic: error.diagnostic,
+        correlation_id: error
+            .correlation_id
+            .as_deref()
+            .unwrap_or(correlation_id)
+            .to_string(),
+    }
 }
 
 fn execute(cli: Cli) -> Result<Value, AppError> {
@@ -1189,22 +1197,46 @@ fn run_host_bridge_once(
                         | HostRunOnceOperation::WorkflowsArchive
                         | HostRunOnceOperation::WorkflowsExecute
                 );
-            let code = if lifecycle {
-                official_mcp_workflow_bridge_error_code(error.code())
-            } else {
-                error.code()
-            };
-            let diagnostic = (lifecycle
-                && matches!(code, "unknown_outcome" | "official_mcp_plan_failed"))
-            .then(|| error.diagnostic())
-            .flatten();
-            AppError::with_diagnostic(code, diagnostic).with_correlation_id(
-                error
-                    .correlation_id()
-                    .map(|correlation_id| correlation_id.to_string()),
-            )
+            map_host_bridge_error(error, lifecycle)
         },
     )
+}
+
+fn map_host_bridge_error(error: fwc_n8n_bridge::BridgeError, lifecycle: bool) -> AppError {
+    let code = if lifecycle {
+        official_mcp_workflow_bridge_error_code(error.code())
+    } else {
+        error.code()
+    };
+    let diagnostic = if lifecycle {
+        (matches!(code, "unknown_outcome" | "official_mcp_plan_failed"))
+            .then(|| error.diagnostic())
+            .flatten()
+    } else {
+        owned_egress_stage_diagnostic(error.diagnostic())
+    };
+    AppError::with_diagnostic(code, diagnostic).with_correlation_id(
+        error
+            .correlation_id()
+            .map(|correlation_id| correlation_id.to_string()),
+    )
+}
+
+fn owned_egress_stage_diagnostic(value: Option<&str>) -> Option<&'static str> {
+    value.and_then(|value| match value {
+        "owned.egress_stage.host_authorization_binding" => {
+            Some("owned.egress_stage.host_authorization_binding")
+        }
+        "owned.egress_stage.credential_lease" => Some("owned.egress_stage.credential_lease"),
+        "owned.egress_stage.policy_preflight" => Some("owned.egress_stage.policy_preflight"),
+        "owned.egress_stage.dns_resolution" => Some("owned.egress_stage.dns_resolution"),
+        "owned.egress_stage.tls_policy_validation" => {
+            Some("owned.egress_stage.tls_policy_validation")
+        }
+        "owned.egress_stage.outbound_transport" => Some("owned.egress_stage.outbound_transport"),
+        "owned.egress_stage.response_body_read" => Some("owned.egress_stage.response_body_read"),
+        _ => None,
+    })
 }
 
 fn official_mcp_workflow_bridge_error_code(code: &str) -> &'static str {
@@ -1261,6 +1293,13 @@ const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "provider_unavailable",
     "validation_failed",
     "invoke_unknown",
+    "owned.egress_stage.host_authorization_binding",
+    "owned.egress_stage.credential_lease",
+    "owned.egress_stage.policy_preflight",
+    "owned.egress_stage.dns_resolution",
+    "owned.egress_stage.tls_policy_validation",
+    "owned.egress_stage.outbound_transport",
+    "owned.egress_stage.response_body_read",
     "lifecycle_response_shape",
     "lifecycle_provider_field_mismatch",
     "lifecycle_readback_precondition_mismatch",
@@ -5730,6 +5769,80 @@ mod tests {
         assert_eq!(error.code, "unknown_outcome");
         assert_eq!(error.diagnostic, Some("response_capability"));
         assert_eq!(error.correlation_id.as_deref(), Some(correlation_id));
+    }
+
+    #[test]
+    fn typed_rest_error_envelope_preserves_owned_stage_and_strips_unknown_text() {
+        let owned_stage = "owned.egress_stage.response_body_read";
+        let error = response_result(
+            json!({
+                "schema": ERROR_ENVELOPE_SCHEMA,
+                "status": "error",
+                "code": "host_n8n_invoke_failed",
+                "diagnostic": owned_stage,
+                "correlationId": "00000000-0000-4000-8000-000000000001"
+            }),
+            "unknown_outcome",
+        )
+        .expect_err("typed REST failure remains an error");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some(owned_stage));
+
+        for unknown in [
+            "dns failed for https://private.example/path token=PRIVATE-CANARY",
+            "owned.egress_stage.response_body_read_PRIVATE",
+        ] {
+            let error = response_result(
+                json!({
+                    "schema": ERROR_ENVELOPE_SCHEMA,
+                    "status": "error",
+                    "code": "host_n8n_invoke_failed",
+                    "diagnostic": unknown
+                }),
+                "unknown_outcome",
+            )
+            .expect_err("unknown diagnostic remains an error");
+            assert_eq!(error.diagnostic, None);
+            let encoded = serde_json::to_string(&ErrorEnvelope {
+                schema: ERROR_ENVELOPE_SCHEMA,
+                status: "error",
+                code: error.code.to_owned(),
+                diagnostic: error.diagnostic,
+                correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+            })
+            .expect("general error envelope remains redacted");
+            assert!(!encoded.contains("private.example"));
+            assert!(!encoded.contains("PRIVATE-CANARY"));
+            assert!(!encoded.contains("owned.egress_stage.response_body_read_PRIVATE"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_stage_reaches_typed_rest_error_through_child_failure_and_redacts_text() {
+        let stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"invoke_unknown"}"#;
+        let stderr = b"FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied\nFCP-N8N-HOST-ERROR-DETAIL/v1 policy.network\nFCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.response_body_read\nFCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.response_body_read https://private.example/path token=PRIVATE-CANARY\n";
+        let bridge_error = fwc_n8n_bridge::child_failure_with_stderr(stdout, stderr, None);
+        assert_eq!(bridge_error.code(), "host_n8n_invoke_failed");
+        assert_eq!(
+            bridge_error.diagnostic(),
+            Some("owned.egress_stage.response_body_read")
+        );
+
+        let app_error = map_host_bridge_error(bridge_error, false);
+        let emitted = error_envelope(&app_error, "00000000-0000-4000-8000-000000000001");
+        let encoded = serde_json::to_string(&emitted).expect("typed FWC error envelope");
+        assert!(!encoded.contains("private.example"));
+        assert!(!encoded.contains("PRIVATE-CANARY"));
+
+        let response: Value = serde_json::from_str(&encoded).expect("encoded envelope JSON");
+        let parsed = response_result(response, "unknown_outcome")
+            .expect_err("typed REST response remains an error");
+        assert_eq!(parsed.code, "unknown_outcome");
+        assert_eq!(
+            parsed.diagnostic,
+            Some("owned.egress_stage.response_body_read")
+        );
     }
 
     #[test]

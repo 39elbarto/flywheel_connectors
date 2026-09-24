@@ -169,6 +169,14 @@ dependency closure is checked, and the public owner-key binding matches the
 intended binary and release identity. Record those results and the one build
 result without recording secrets.
 
+For an artifact replacement already authorized in that task, installing the
+exact SHA-256-verified binary at its fixed destination with
+`install --backup=numbered` is a reversible in-scope step: no second owner
+confirmation is required. Verify the installed digest and owner/group/mode and
+the numbered backup's digest afterward. This does not authorize a different
+artifact or destination, release promotion, key change, or additional provider
+operation.
+
 ### Step 4: Handle blockers without creating authority drift
 
 Stop at the first invariant violation or unverified provider state and preserve

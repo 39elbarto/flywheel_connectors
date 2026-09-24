@@ -178,14 +178,17 @@ final independent GET. Success requires the same selected draft version and
 graph, `active=false`, `activeVersionId=null`, `published=null`, and
 `isArchived=false`.
 
-An unknown or ambiguous publish result, mismatched readback, unknown unpublish
-result, or inconclusive final GET is terminal: the runner records only redacted
-projections and statuses, returns `unknown`/`STOP`, and performs no retry,
-unpublish-after-uncertain-publish, delete, or workflow invocation. The durable
-evidence includes the explicit target/version plan, baseline, mutation
-projections, independent readbacks, transition records, and a summary with
-secret/body persistence flags. Do not reuse an approval request or evidence
-directory for another run.
+An unknown or ambiguous publish result without a matching active-state
+readback, any mismatched readback, unknown unpublish result, or inconclusive
+final GET is terminal: record only redacted projections/statuses and return
+`unknown`/`STOP`; never retry a mutation, delete, or invoke the workflow. The
+sole bounded continuation for the known historical flat-response projection
+case is described below: it requires the durable independent GET to prove the
+exact published state, performs a new GET and approval, and sends at most one
+unpublish. The durable evidence includes the explicit target/version plan,
+baseline, mutation projections, independent readbacks, transition records,
+and a summary with secret/body persistence flags. Do not reuse an approval
+request or evidence directory for another run.
 
 The focused offline regression exercises the production acceptance runner
 through local launcher, parent-binding, and approval-helper stubs. The stubs
@@ -204,6 +207,44 @@ The test also preserves successful publish/readback/unpublish/readback, a
 failing baseline precondition, ambiguous publish and unpublish results, and
 mismatched publish/final readbacks. Passing this offline test is implementation
 evidence, not live provider acceptance or approval.
+
+### Continue only the unpublish after a confirmed publish readback
+
+Do not rerun `--existing-version` against a workflow that is already published:
+that mode expects an inactive baseline and would stop. Never repeat its publish.
+For the specific historical case where the runner recorded
+`publish_outcome_unknown` because it did not recognize the flat activation
+response, continuation is allowed only when the durable independent
+`existing-publish-readback.json` proves the selected workflow/version is active
+and published with the original draft graph, and the prior summary proves one
+publish attempt, successful publish/readback process statuses, zero unpublish
+attempts, and zero retries. The historical redacted invoke projection must be
+the known flat-response projection; any other source evidence is rejected.
+
+Use a new durable output directory and name the exact source evidence directory:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh \
+  --continue-unpublish \
+  --server eec \
+  --workflow-id WORKFLOW_ID \
+  --version-id DRAFT_VERSION_ID \
+  --source-evidence-dir /srv/dev-ssd/fcp/nqm81.24/PRIOR-PUBLISH-EVIDENCE \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/UNPUBLISH-CONTINUATION-EVIDENCE
+```
+
+Continuation performs one fresh GET and proceeds only if the workflow remains
+active/published at that exact version, with the same state digest and draft
+graph as the saved publish readback. It then creates a fresh short-lived
+approval and idempotency key, durably claims the source run's one unpublish
+attempt immediately before dispatch, sends at most one unpublish, and performs
+one independent GET. An existing claim blocks every replay. A pre-dispatch
+approval failure has no claim and no provider mutation; a claimed invocation
+with an unknown response, mismatched state, or inconclusive final GET is
+terminal, requires no retry, and must not be followed by another provider
+write. The mode never republishes, invokes a Webhook/workflow, or deletes the
+workflow.
 
 ## Runner scope
 

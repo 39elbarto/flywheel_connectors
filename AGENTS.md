@@ -115,11 +115,13 @@ The `am serve-http` process is a **shared singleton** that all agents depend on.
 
 ## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
-1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
+1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or irreversibly overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences. The reversible artifact-install exception below is not covered by this prohibition.
 2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
 3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
-4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
+4. **Mandatory explicit plan:** For destructive or irreversible actions, even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
+
+**Scoped reversible artifact-install exception:** When an already-authorized task calls for installing or updating one exact artifact at its fixed, in-scope destination, the agent may proceed without asking the owner to repeat the authorization or retype the command if all of these hold: verify the candidate's exact SHA-256 immediately before installation; preserve the current destination using `install --backup=numbered`; and verify the installed SHA-256, owner, group, mode, and numbered backup's digest afterward. Stop on any digest, destination, metadata, or backup discrepancy. This exception covers only that previously authorized artifact replacement; it grants no blanket deployment or live-operation authority and does not cover deletion, data loss, signing/trust-key changes, access expansion, or a new target/scope.
 
 ---
 

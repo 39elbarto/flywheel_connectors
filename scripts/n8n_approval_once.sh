@@ -40,8 +40,11 @@ FAKE_SEED_CALLS=0
 FAKE_ISSUER_CALLS=0
 FAKE_ISSUER_FAILURE=0
 FAKE_SECRET_CALLS=0
+FAKE_SECRET_FAILURE=0
+FAKE_DECODE_FAILURE=0
 FAKE_TOKEN_CONSUMER_CALLS=0
 FAKE_TOKEN_CAPTURE=""
+FAKE_ISSUER_DIAGNOSTIC=""
 REQUEST_LOCK_FD=""
 REQUEST_DIGEST=""
 FAKE_PIPE_TOKEN=""
@@ -161,6 +164,15 @@ strict_decode_seed() {
       printf "%s", encoded
     }
   ' | "$BASE64_PATH" --decode 2>/dev/null
+}
+
+filter_issuer_diagnostic() {
+  "$AWK_PATH" '
+    $0 ~ /^fcp-n8n-approval-issue: (invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)$/ {
+      sub(/^fcp-n8n-approval-issue: /, "")
+      print
+    }
+  '
 }
 
 validate_now_ms() {
@@ -292,12 +304,14 @@ request_guard() {
 }
 
 fake_secret_reader() {
+  (( FAKE_SECRET_FAILURE == 0 )) || return 1
   printf '%s\n' "$TEST_SEED_B64"
 }
 
 fake_decode_seed() {
   local encoded
   local decoded_size
+  (( FAKE_DECODE_FAILURE == 0 )) || return 1
   encoded="$($CAT_PATH)"
   decoded_size="$(printf '%s' "$encoded" | strict_decode_seed | "$WC_PATH" -c)" || return 1
   [[ "$decoded_size" =~ ^32[[:space:]]*$ ]] || return 1
@@ -320,6 +334,12 @@ fake_issuer() {
   token_consumer_is_safe || return 1
   FAKE_ISSUER_CALLS=$((FAKE_ISSUER_CALLS + 1))
   if (( FAKE_ISSUER_FAILURE != 0 )); then
+    case "$FAKE_ISSUER_DIAGNOSTIC" in
+      invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)
+        fail "$FAKE_ISSUER_DIAGNOSTIC"
+        ;;
+      *) fail issuer_failed ;;
+    esac
     return 1
   fi
   fake_token_consumer fake-token
@@ -340,9 +360,15 @@ issue_once() {
     local encoded_seed
     local raw_seed
     token_consumer_is_safe || return 1
-    encoded_seed="$(fake_secret_reader)" || return 1
+    encoded_seed="$(fake_secret_reader)" || {
+      fail secret_reader_failed
+      return 1
+    }
     FAKE_SECRET_CALLS=$((FAKE_SECRET_CALLS + 1))
-    raw_seed="$(fake_decode_seed <<<"$encoded_seed")" || return 1
+    raw_seed="$(fake_decode_seed <<<"$encoded_seed")" || {
+      fail seed_decode_failed
+      return 1
+    }
     FAKE_SEED_CALLS=$((FAKE_SEED_CALLS + 1))
     fake_issuer "$request_basename" "$request_digest" "$raw_seed"
     return $?
@@ -354,11 +380,62 @@ issue_once() {
   # attempt.  The base64 field and decoded seed are streamed through fixed
   # processes; neither enters a shell variable, argv, environment, file, or
   # report.  The signed token is handed to the already-open protected FD 3.
-  HOME=/home/ubuntu "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
-    | strict_decode_seed \
-    | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
-        --request-file "$request_basename" \
-        --expected-request-sha256 "$request_digest" >&3 2>/dev/null
+  local pipeline_output
+  local pipeline_status_line
+  local issuer_code=""
+  local secret_status
+  local decode_status
+  local issuer_status
+  local filter_status
+
+  # The issuer writes its signed token only to FD3.  Its stderr is filtered
+  # through a strict fixed-prefix/code allowlist; neither child stderr nor
+  # seed bytes are captured in a variable.
+  pipeline_output="$(
+    set +e
+    HOME=/home/ubuntu "$SECRET_GET_PATH" fwc-n8n-approval-signing private_key_b64 2>/dev/null \
+      | strict_decode_seed 2>/dev/null \
+      | FCP_HOST_APPROVAL_PUBLIC_KEY_FILE="$PUBLIC_KEY_FILE" "$ISSUER_PATH" \
+          --request-file "$request_basename" \
+          --expected-request-sha256 "$request_digest" 2>&1 >&3 \
+      | filter_issuer_diagnostic
+    pipeline_status=("${PIPESTATUS[@]}")
+    printf 'STATUS:%s:%s:%s:%s\n' "${pipeline_status[0]:-1}" \
+      "${pipeline_status[1]:-1}" "${pipeline_status[2]:-1}" \
+      "${pipeline_status[3]:-1}"
+  )" || return 1
+  pipeline_status_line="${pipeline_output##*$'\n'}"
+  [[ "$pipeline_status_line" =~ ^STATUS:([0-9]+):([0-9]+):([0-9]+):([0-9]+)$ ]] || {
+    fail issuer_failed
+    return 1
+  }
+  secret_status="${BASH_REMATCH[1]}"
+  decode_status="${BASH_REMATCH[2]}"
+  issuer_status="${BASH_REMATCH[3]}"
+  filter_status="${BASH_REMATCH[4]}"
+  if [[ "$secret_status" != 0 ]]; then
+    fail secret_reader_failed
+    return 1
+  fi
+  if [[ "$decode_status" != 0 ]]; then
+    fail seed_decode_failed
+    return 1
+  fi
+  if [[ "$issuer_status" != 0 ]]; then
+    issuer_code="${pipeline_output%$'\n'STATUS:*}"
+    case "$issuer_code" in
+      invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed)
+        fail "$issuer_code"
+        ;;
+      *) fail issuer_failed ;;
+    esac
+    return 1
+  fi
+  if [[ "$filter_status" != 0 ]]; then
+    fail issuer_failed
+    return 1
+  fi
+  return 0
 }
 
 token_consumer_is_safe() {
@@ -376,7 +453,7 @@ run_once() {
   LAST_ERROR=""
   request_guard "$request_basename" "$expected_plan_digest" "$now_ms" || return 1
   issue_once "$request_basename" "$REQUEST_DIGEST" || {
-    fail issuer_failed
+    [[ -n "$LAST_ERROR" ]] || fail issuer_failed
     return 1
   }
 }
@@ -386,8 +463,11 @@ reset_fake_state() {
   FAKE_ISSUER_CALLS=0
   FAKE_ISSUER_FAILURE=0
   FAKE_SECRET_CALLS=0
+  FAKE_SECRET_FAILURE=0
+  FAKE_DECODE_FAILURE=0
   FAKE_TOKEN_CONSUMER_CALLS=0
   FAKE_TOKEN_CAPTURE=""
+  FAKE_ISSUER_DIAGNOSTIC=""
   FAKE_PIPE_TOKEN=""
   REQUEST_DIGEST=""
   TEST_FINAL_REQUEST_JSON=""
@@ -592,6 +672,42 @@ expect_issuer_error_is_single_attempt() {
     && "$FAKE_PIPE_TOKEN" == "" ]]
 }
 
+expect_issue_stage_classification() {
+  local request_json="$1"
+  local now_ms="$2"
+  local filtered
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  FAKE_SECRET_FAILURE=1
+  if run_with_fake_token_pipe run_once self-test.json "" "$now_ms"; then return 1; fi
+  [[ "$LAST_ERROR" == secret_reader_failed \
+    && "$FAKE_SEED_CALLS" == 0 && "$FAKE_ISSUER_CALLS" == 0 ]] || return 1
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  FAKE_DECODE_FAILURE=1
+  if run_with_fake_token_pipe run_once self-test.json "" "$now_ms"; then return 1; fi
+  [[ "$LAST_ERROR" == seed_decode_failed \
+    && "$FAKE_SECRET_CALLS" == 1 && "$FAKE_SEED_CALLS" == 0 \
+    && "$FAKE_ISSUER_CALLS" == 0 ]] || return 1
+
+  reset_fake_state
+  TEST_REQUEST_JSON="$request_json"
+  FAKE_ISSUER_FAILURE=1
+  FAKE_ISSUER_DIAGNOSTIC=trusted_key_unavailable
+  if run_with_fake_token_pipe run_once self-test.json "" "$now_ms"; then return 1; fi
+  [[ "$LAST_ERROR" == trusted_key_unavailable \
+    && "$FAKE_ISSUER_CALLS" == 1 && "$FAKE_PIPE_TOKEN" == "" ]] || return 1
+
+  filtered="$(printf '%s\n' \
+    'fcp-n8n-approval-issue: invalid_seed' \
+    'arbitrary stderr PRIVATE-CANARY-ARBITRARY-ISSUER-DETAIL' \
+    'fcp-n8n-approval-issue: invalid_seed extra' \
+    | filter_issuer_diagnostic)" || return 1
+  [[ "$filtered" == invalid_seed ]] || return 1
+}
+
 run_self_test() {
   local now_ms=1700000000000
   local valid
@@ -644,8 +760,9 @@ run_self_test() {
   expect_missing_fd3_stops "$valid" "$now_ms" || return 1
   expect_non_pipe_fd3_stops "$valid" "$now_ms" || return 1
   expect_issuer_error_is_single_attempt "$valid" "$now_ms" || return 1
+  expect_issue_stage_classification "$valid" "$now_ms" || return 1
 
-  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":24}'
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"pass","mode":"self-test","acceptance":false,"cases":25}'
 }
 
 main() {

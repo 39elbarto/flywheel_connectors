@@ -942,6 +942,14 @@ capture_approval_abort_code() {
     217) APPROVAL_ABORT_CODE=secret_reader_unavailable ;;
     218) APPROVAL_ABORT_CODE=invalid_arguments ;;
     219) APPROVAL_ABORT_CODE=internal_error ;;
+    220) APPROVAL_ABORT_CODE=secret_reader_failed ;;
+    221) APPROVAL_ABORT_CODE=seed_decode_failed ;;
+    222) APPROVAL_ABORT_CODE=invalid_request ;;
+    223) APPROVAL_ABORT_CODE=invalid_seed ;;
+    224) APPROVAL_ABORT_CODE=trusted_key_unavailable ;;
+    225) APPROVAL_ABORT_CODE=untrusted_seed ;;
+    226) APPROVAL_ABORT_CODE=signing_failed ;;
+    227) APPROVAL_ABORT_CODE=output_failed ;;
     *) return 1 ;;
   esac
 }
@@ -1015,11 +1023,19 @@ approval_fd3_handoff() {
         secret_reader_unavailable) exit 217 ;;
         invalid_arguments) exit 218 ;;
         internal_error) exit 219 ;;
+        secret_reader_failed) exit 220 ;;
+        seed_decode_failed) exit 221 ;;
+        invalid_request) exit 222 ;;
+        invalid_seed) exit 223 ;;
+        trusted_key_unavailable) exit 224 ;;
+        untrusted_seed) exit 225 ;;
+        signing_failed) exit 226 ;;
+        output_failed) exit 227 ;;
         *) exit "$helper_status" ;;
       esac
     ' _ "$TIMEOUT_BIN" "${APPROVAL_TIMEOUT_SECONDS}s" \
     "$APPROVAL_HELPER_PATH" "$basename" "$AWK_BIN" \
-    'NR == 1 && $0 ~ /^\{"schema":"fwc\.n8n\.approval-once\.v1","verdict":"stop","abort_code":"(clock_failed|clock_invalid|expiry_not_13_digits|expiry_not_integer|expiry_over_60s|expiry_stale|invalid_request_file|invalid_request_json|issuer_failed|issuer_unavailable|public_key_unavailable|request_busy|request_changed|request_digest_failed|request_unreadable|safe_plan_mismatch|secret_reader_unavailable|invalid_arguments|internal_error)"\}$/ { code=$0; sub(/^.*"abort_code":"/, "", code); sub(/"}$/, "", code) } END { if (NR == 1 && code != "") print code }' \
+    'NR == 1 && $0 ~ /^\{"schema":"fwc\.n8n\.approval-once\.v1","verdict":"stop","abort_code":"(clock_failed|clock_invalid|expiry_not_13_digits|expiry_not_integer|expiry_over_60s|expiry_stale|invalid_request_file|invalid_request_json|issuer_failed|issuer_unavailable|public_key_unavailable|request_busy|request_changed|request_digest_failed|request_unreadable|safe_plan_mismatch|secret_reader_unavailable|secret_reader_failed|seed_decode_failed|invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed|invalid_arguments|internal_error)"\}$/ { code=$0; sub(/^.*"abort_code":"/, "", code); sub(/"}$/, "", code) } END { if (NR == 1 && code != "") print code }' \
     1>&3 2>/dev/null; then
     helper_status=0
   else
@@ -1743,7 +1759,7 @@ if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed \
     && "$request_active" == true ]] \
   || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_failed \
     && "$request_active" == false ]]; then
-  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"issuer_failed"}' >&2
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"invalid_seed"}' >&2
   exit 76
 fi
 if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized \
@@ -1900,11 +1916,11 @@ EOF
     elif [[ "$scenario" == publish_approval_failed ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
         && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
-      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "issuer_failed"
-        and .publish_approval_abort_code == "issuer_failed"
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "invalid_seed"
+        and .publish_approval_abort_code == "invalid_seed"
         and .publish_attempts == 0 and .retries == 0' \
         "$evidence/summary.json" >/dev/null || return 1
-      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "issuer_failed"' \
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "invalid_seed"' \
         "$root/$scenario-output" >/dev/null || return 1
     elif [[ "$scenario" == publish_approval_unrecognized ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
@@ -1921,13 +1937,13 @@ EOF
     elif [[ "$scenario" == unpublish_approval_failed ]]; then
       [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \
         && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
-      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "issuer_failed"
-        and .unpublish_approval_abort_code == "issuer_failed"
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "invalid_seed"
+        and .unpublish_approval_abort_code == "invalid_seed"
         and (has("publish_approval_abort_code") | not)
         and .publish_status == 0 and .publish_readback_status == 0
         and .publish_attempts == 1 and .unpublish_attempts == 0 and .retries == 0' \
         "$evidence/summary.json" >/dev/null || return 1
-      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "issuer_failed"' \
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "invalid_seed"' \
         "$root/$scenario-output" >/dev/null || return 1
     elif [[ "$scenario" == unpublish_approval_unrecognized ]]; then
       [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \

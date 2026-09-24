@@ -4620,7 +4620,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
         "activeVersion": null
     });
     let published = json!({
-        "versionId": "published-v1",
+        "versionId": "draft-v1",
         "nodes": [{"id": "draft-node"}],
         "connections": {}
     });
@@ -4629,7 +4629,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
         "name": "Lifecycle test",
         "active": true,
         "versionId": "draft-v1",
-        "activeVersionId": "published-v1",
+        "activeVersionId": "draft-v1",
         "isArchived": false,
         "nodes": [{"id": "draft-node"}],
         "connections": {},
@@ -4645,7 +4645,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
         .await;
     Mock::given(method("POST"))
         .and(path("/api/v1/workflows/1001/publish"))
-        .and(body_json(json!({"versionId": "published-v1"})))
+        .and(body_json(json!({"versionId": "draft-v1"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(readback))
         .mount(&server)
         .await;
@@ -4654,7 +4654,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
     let input = json!({
         "id": "1001",
         "action": "publish",
-        "versionId": "published-v1",
+        "versionId": "draft-v1",
         "guard": {
             "approvalRef": "approval-test",
             "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -4672,7 +4672,7 @@ async fn workflows_lifecycle_publishes_with_exact_route_and_readback() {
         .expect("publish should succeed");
     assert_eq!(result["status"], "verified");
     assert_eq!(result["after"]["active"], true);
-    assert_eq!(result["after"]["activeVersionId"], "published-v1");
+    assert_eq!(result["after"]["activeVersionId"], "draft-v1");
     assert_eq!(result["after"]["draft"]["versionId"], "draft-v1");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3, "baseline GET, one publish, readback GET");
@@ -4770,7 +4770,7 @@ async fn workflows_lifecycle_unpublishes_without_a_request_body() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn workflows_lifecycle_publish_uses_provider_version_when_omitted() {
+async fn workflows_lifecycle_rejects_publish_without_explicit_version() {
     let server = MockServer::start().await;
     let baseline = json!({
         "id": "1001",
@@ -4830,10 +4830,11 @@ async fn workflows_lifecycle_publish_uses_provider_version_when_omitted() {
             }
         }
     });
-    let result = invoke(&c, "n8n.workflows.lifecycle", input)
+    let error = invoke(&c, "n8n.workflows.lifecycle", input)
         .await
-        .expect("omitted version publish should succeed");
-    assert_eq!(result["after"]["activeVersionId"], "published-v2");
+        .expect_err("publish must require an explicitly selected version");
+    assert!(error.to_string().contains("explicit versionId"));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -4859,6 +4860,7 @@ async fn workflows_lifecycle_stale_precondition_makes_no_write() {
     let input = json!({
         "id": "1001",
         "action": "publish",
+        "versionId": "draft-v1",
         "guard": {
             "approvalRef": "approval-stale",
             "idempotencyKey": "00000000-0000-4000-8000-000000000007",
@@ -4908,6 +4910,7 @@ async fn workflows_lifecycle_conflict_is_unknown_without_retry() {
     let input = json!({
         "id": "1001",
         "action": "publish",
+        "versionId": "draft-v1",
         "guard": {
             "approvalRef": "approval-conflict",
             "idempotencyKey": "00000000-0000-4000-8000-000000000008",
@@ -4963,7 +4966,7 @@ async fn workflows_lifecycle_timeout_is_unknown_without_retry() {
     )
     .await;
     let input = json!({
-        "id": "1001", "action": "publish",
+        "id": "1001", "action": "publish", "versionId": "draft-v1",
         "guard": {"approvalRef": "approval-timeout", "idempotencyKey": "00000000-0000-4000-8000-000000000011",
             "precondition": {"versionId": "draft-v1", "activeVersionId": null, "active": false,
                 "isArchived": false, "stateDigest": workflow_state_digest_for_fixture(&baseline)}}
@@ -4988,11 +4991,11 @@ async fn workflows_lifecycle_readback_mismatch_does_not_repeat_write() {
         "nodes": [{"id": "draft"}], "connections": {}, "activeVersion": null
     });
     let published = json!({
-        "versionId": "published-v1", "nodes": [{"id": "published"}], "connections": {}
+        "versionId": "draft-v1", "nodes": [{"id": "published"}], "connections": {}
     });
     let post_response = json!({
         "id": "1001", "name": "Mismatch lifecycle", "active": true,
-        "versionId": "draft-v1", "activeVersionId": "published-v1", "isArchived": false,
+        "versionId": "draft-v1", "activeVersionId": "draft-v1", "isArchived": false,
         "nodes": [{"id": "draft"}], "connections": {}, "activeVersion": published
     });
     let mismatched = baseline.clone();
@@ -5011,7 +5014,7 @@ async fn workflows_lifecycle_readback_mismatch_does_not_repeat_write() {
         .await;
     let c = setup_connector(&server.uri()).await;
     let input = json!({
-        "id": "1001", "action": "publish", "versionId": "published-v1",
+        "id": "1001", "action": "publish", "versionId": "draft-v1",
         "guard": {"approvalRef": "approval-mismatch", "idempotencyKey": "00000000-0000-4000-8000-000000000009",
             "precondition": {"versionId": "draft-v1", "activeVersionId": null, "active": false,
                 "isArchived": false, "stateDigest": workflow_state_digest_for_fixture(&baseline)}}

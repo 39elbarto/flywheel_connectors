@@ -896,6 +896,20 @@ requested exact local `n8n-mcp` version:
 - Registry lifecycle scripts are never executed and are represented only by a
   digest. Release notes are discarded. Neither registry content nor package
   content can authorize an update or directly edit documentation or skills.
+- For `n8n-mcp@2.87.0`, `better-sqlite3@11.10.0` is optional and its registry
+  tarball has source files but no prebuilt `.node`; the packaged runtime catches
+  native-adapter initialization failure and uses its required `sql.js` adapter.
+  The published npm tarball SRI was independently matched to registry metadata,
+  and a read-only trace with native loading forced unavailable returned the
+  `SQLJSAdapter`. Keep lifecycle scripts disabled and do not copy a
+  host-global addon into the stage; a future package version must prove its own
+  fallback or bind a separately verified native artifact before staging.
+- Official-MCP `n8n_version` is a bounded diagnostic snapshot, not a supported-
+  version allowlist: release assembly and verification do not compare it to a
+  hard-coded server version. Exact server URL/network constraints and
+  owner-bound operation schema digests remain enforced, so a schema mismatch
+  blocks only the affected binding instead of being approved from a version
+  number.
 - Dependency updates and discovery cannot expand the public FWC function set;
   any new capability requires an explicit, separately reviewed implementation
   with its own contract and authorization evidence.

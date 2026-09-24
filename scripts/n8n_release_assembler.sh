@@ -40,7 +40,6 @@ readonly EEC_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_INPUT_SCHEMA_DIG
 readonly EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
-readonly EEC_N8N_VERSION="2.38.4"
 readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
 readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
 readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
@@ -50,7 +49,7 @@ readonly HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_OUTPUT_
 readonly HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
-readonly LOCAL_MCP_PACKAGE_VERSION="2.84.4"
+readonly LOCAL_MCP_PACKAGE_VERSION="2.87.0"
 readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
 readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
 readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
@@ -471,7 +470,6 @@ write_inventory_and_request() {
   bridge_digest="$($hash_helper "$stage_root/bin/fcp-mcp-bridge")"
 
   python3 - "$stage_root" "$source_release" "$new_root" "$n8n_digest" "$bridge_digest" "$request_path" "$PROVISION_REQUEST_SCHEMA" "$git_revision" \
-    "$EEC_N8N_VERSION" \
     "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_ARCHIVE_INPUT_SCHEMA_DIGEST" "$EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
@@ -493,7 +491,6 @@ import sys
     request_path,
     request_schema,
     git_revision,
-    eec_n8n_version,
     eec_publish_input,
     eec_publish_output,
     eec_unpublish_input,
@@ -590,8 +587,6 @@ for server in ("eec", "hetzner"):
             "execute_workflow": (hetzner_execute_input, hetzner_execute_output),
         },
     }
-    if server == "eec":
-        official["config"]["capability_policy"]["n8n_version"] = eec_n8n_version
     for tool in official["config"]["capability_policy"]["approved_tools"]:
         schema = lifecycle[server].get(tool["name"])
         if schema is not None:

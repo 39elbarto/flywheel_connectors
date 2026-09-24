@@ -137,6 +137,74 @@ summary's `evidence_complete` flag and all transition/projection postconditions
 must validate. Any missing file, failed write, metadata mismatch, or validation
 failure returns `STOP` rather than `pass`.
 
+## Explicit existing workflow/version acceptance (operator invoked)
+
+This mode is only for an operator who has already selected one workflow and
+one exact draft version. It never searches for a target, creates a workflow,
+invokes a workflow or Webhook, retries a mutation, deletes anything, or runs
+automatically as part of the disposable-workflow acceptance above. The server,
+workflow ID, version ID, and durable evidence directory are all mandatory.
+
+```sh
+scripts/n8n_unarchive_acceptance.sh \
+  --existing-version \
+  --server eec \
+  --workflow-id WORKFLOW_ID \
+  --version-id DRAFT_VERSION_ID \
+  --parent-helper /srv/dev-ssd/fcp/targets/nqm81-cbor-helper-rc20/release/nqm81-cbor-helper \
+  --evidence-dir /srv/dev-ssd/fcp/nqm81.24/existing-version-evidence
+```
+
+Production evidence must be a fresh directory below the mounted persistent
+`/srv/dev-ssd/fcp/nqm81.24` root. The runner rejects `/tmp`, path traversal,
+symlinked path components, or an absent SSD mount before approval or provider
+calls; it does not fall back to another location. Offline self-tests use their
+private temporary fixture directory only while explicit `SELF_TEST` mode is
+active.
+
+Before approval, the runner performs one independent GET and stops unless that
+exact workflow is inactive, unarchived, unpublished, has no active version,
+and its current draft version equals `--version-id`. It binds a fresh
+`n8n.workflows.activate` approval request to the selected version and full
+current lifecycle precondition, then issues at most one publish. A publish is
+accepted only after an independent GET proves that the same workflow and exact
+version are active and published, the draft graph is unchanged, and the
+workflow remains unarchived.
+
+Only after that readback passes does the runner construct a new unpublish input
+with a separate approval reference, UUID idempotency key, and the newly read
+active-state precondition. It issues at most one unpublish and performs one
+final independent GET. Success requires the same selected draft version and
+graph, `active=false`, `activeVersionId=null`, `published=null`, and
+`isArchived=false`.
+
+An unknown or ambiguous publish result, mismatched readback, unknown unpublish
+result, or inconclusive final GET is terminal: the runner records only redacted
+projections and statuses, returns `unknown`/`STOP`, and performs no retry,
+unpublish-after-uncertain-publish, delete, or workflow invocation. The durable
+evidence includes the explicit target/version plan, baseline, mutation
+projections, independent readbacks, transition records, and a summary with
+secret/body persistence flags. Do not reuse an approval request or evidence
+directory for another run.
+
+The focused offline regression exercises the production acceptance runner
+through local launcher, parent-binding, and approval-helper stubs. The stubs
+check the exact production precondition fields and BLAKE3 state-digest format
+(lowercase `blake3-256:` prefix and 64 ASCII hexadecimal characters, either
+case). Regression cases include malformed and missing baseline and publish
+readback state digests, plus rejection of a production `/tmp` evidence path
+before any approval or provider call. It does not call the approval issuer or
+provider:
+
+```sh
+scripts/n8n_unarchive_acceptance.sh --existing-version-self-test
+```
+
+The test also preserves successful publish/readback/unpublish/readback, a
+failing baseline precondition, ambiguous publish and unpublish results, and
+mismatched publish/final readbacks. Passing this offline test is implementation
+evidence, not live provider acceptance or approval.
+
 ## Runner scope
 
 This runner proves one bounded unarchive of one already-existing archived

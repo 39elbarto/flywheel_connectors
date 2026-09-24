@@ -14,6 +14,7 @@ export LC_ALL=C
 readonly SCHEMA="fwc.n8n.unarchive-acceptance.v1"
 readonly OPERATION="n8n.workflows.unarchive"
 readonly ACTIVATION_SCHEMA="fwc.n8n.activation-acceptance.v1"
+readonly EXISTING_VERSION_SCHEMA="fwc.n8n.existing-version-acceptance.v1"
 readonly ACTIVATION_CREATE_OPERATION="n8n.workflows.create_draft"
 readonly ACTIVATION_OPERATION="n8n.workflows.activate"
 # The FCP launcher/parent-binding operation and the owner-approval request
@@ -26,6 +27,7 @@ readonly APPROVAL_TTL_MS=45000
 readonly APPROVAL_TIMEOUT_SECONDS=40
 readonly DEADLINE_MS=30000
 readonly JQ_BIN="/usr/bin/jq"
+readonly AWK_BIN="/usr/bin/awk"
 readonly STAT_BIN="/usr/bin/stat"
 readonly UUIDGEN_BIN="/usr/bin/uuidgen"
 readonly TIMEOUT_BIN="/usr/bin/timeout"
@@ -44,8 +46,10 @@ EVIDENCE_DIR="${N8N_UNARCHIVE_EVIDENCE_DIR:-}"
 
 SELF_TEST=0
 ACTIVATION_MODE=0
+EXISTING_VERSION_MODE=0
 SERVER=""
 WORKFLOW_ID=""
+VERSION_ID=""
 RUN_ID=""
 RESOURCE_URI=""
 REQUEST_BASENAME=""
@@ -63,6 +67,8 @@ INVOCATION_STATUS=125
 FINAL_GET_STATUS=125
 APPROVAL_HELPER_STATUS=125
 APPROVAL_READER_STATUS=125
+APPROVAL_ABORT_CODE=""
+HANDOFF_INVOKE_STARTED=0
 HANDOFF_TEST_SUDO=""
 HANDOFF_OPERATION=""
 HANDOFF_INPUT=""
@@ -95,6 +101,19 @@ ACTIVATION_BASELINE_STATUS=125
 ACTIVATION_ACTIVE_STATUS=125
 ACTIVATION_PUBLISH_STATUS=125
 ACTIVATION_UNPUBLISH_STATUS=125
+
+EXISTING_BASELINE_PROJECTION=""
+EXISTING_PUBLISH_PROJECTION=""
+EXISTING_PUBLISH_READBACK=""
+EXISTING_UNPUBLISH_PROJECTION=""
+EXISTING_FINAL_READBACK=""
+EXISTING_STATE_DIGEST=""
+EXISTING_GRAPH_DIGEST=""
+EXISTING_RUN_ID=""
+EXISTING_PUBLISH_HELPER_STATUS=125
+EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
+EXISTING_UNPUBLISH_HELPER_STATUS=125
+EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
 
 emit_stop() {
   local code="${1:-${LAST_ERROR:-unknown_stop}}"
@@ -136,22 +155,103 @@ emit_activation_pass() {
     "$(if [[ -n "$EVIDENCE_DIR" ]]; then "$JQ_BIN" -Rn --arg value "$EVIDENCE_DIR" '$value'; else printf 'null'; fi)"
 }
 
+emit_existing_stop() {
+  printf '{"schema":"%s","verdict":"STOP","abort_code":"%s","server":"%s","workflow_id":"%s","version_id":"%s"}\n' \
+    "$EXISTING_VERSION_SCHEMA" "${1:-unknown_stop}" "$SERVER" "$WORKFLOW_ID" "$VERSION_ID"
+}
+
+emit_existing_unknown() {
+  printf '{"schema":"%s","verdict":"unknown","abort_code":"%s","server":"%s","workflow_id":"%s","version_id":"%s"}\n' \
+    "$EXISTING_VERSION_SCHEMA" "${1:-unknown_outcome}" "$SERVER" "$WORKFLOW_ID" "$VERSION_ID"
+}
+
+emit_existing_pass() {
+  local summary plan baseline publish publish_readback unpublish final_readback
+  for name in existing-version-plan existing-baseline existing-publish \
+    existing-publish-readback existing-unpublish existing-final-readback \
+    transition-publish transition-unpublish summary; do
+    validate_activation_record_file "$name" || {
+      emit_existing_stop evidence_validation_failed
+      return 10
+    }
+  done
+  summary="$(read_activation_record summary)" || {
+    emit_existing_stop evidence_validation_failed
+    return 10
+  }
+  plan="$(read_activation_record existing-version-plan)" || return 10
+  baseline="$(read_activation_record existing-baseline)" || return 10
+  publish="$(read_activation_record existing-publish)" || return 10
+  publish_readback="$(read_activation_record existing-publish-readback)" || return 10
+  unpublish="$(read_activation_record existing-unpublish)" || return 10
+  final_readback="$(read_activation_record existing-final-readback)" || return 10
+  validate_existing_version_plan "$plan" \
+    && validate_existing_baseline "$baseline" \
+    && validate_existing_publish_invoke "$publish" \
+    && validate_existing_publish_readback "$publish_readback" \
+    && validate_existing_unpublish_invoke "$unpublish" \
+    && validate_existing_final_readback "$final_readback" \
+    && validate_activation_transition_record \
+      "$(read_activation_record transition-publish)" publish \
+      "$ACTIVATION_OPERATION" "$WORKFLOW_ID" existing-publish \
+    && validate_activation_transition_record \
+      "$(read_activation_record transition-unpublish)" unpublish \
+      "$ACTIVATION_OPERATION" "$WORKFLOW_ID" existing-unpublish \
+    || {
+      emit_existing_stop evidence_validation_failed
+      return 10
+    }
+  "$JQ_BIN" -e --arg server "$SERVER" --arg workflow "$WORKFLOW_ID" \
+    --arg version "$VERSION_ID" \
+    '.schema == "fwc.n8n.existing-version-acceptance.v1"
+      and .verdict == "pass" and .evidence_complete == true
+      and .server == $server and .workflow_id == $workflow
+      and .version_id == $version and .publish_attempts == 1
+      and .unpublish_attempts == 1 and .retries == 0
+      and .baseline_status == 0 and .publish_status == 0
+      and .publish_readback_status == 0 and .unpublish_status == 0
+      and .final_readback_status == 0
+      and .sequence == ["baseline_get_once","publish_approval_once",
+        "publish_once","publish_independent_get_once",
+        "unpublish_approval_once","unpublish_once",
+        "unpublish_independent_get_once"]
+      and .evidence_files == ["existing-version-plan.json",
+        "existing-baseline.json","existing-publish.json",
+        "existing-publish-readback.json","existing-unpublish.json",
+        "existing-final-readback.json","transition-publish.json",
+        "transition-unpublish.json"]
+      and .automatic_cleanup == false and .workflow_creation == false
+      and .raw_provider_bodies_persisted == false
+      and .raw_request_bodies_persisted == false
+      and .tokens_persisted == false and .secrets_persisted == false' \
+    <<<"$summary" >/dev/null 2>&1 || {
+      emit_existing_stop evidence_validation_failed
+      return 10
+    }
+  printf '{"schema":"%s","verdict":"pass","server":"%s","workflow_id":"%s","version_id":"%s","evidence_directory":%s}\n' \
+    "$EXISTING_VERSION_SCHEMA" "$SERVER" "$WORKFLOW_ID" "$VERSION_ID" \
+    "$("$JQ_BIN" -Rn --arg value "$EVIDENCE_DIR" '$value')"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
   n8n_unarchive_acceptance.sh --server eec|hetzner --workflow-id ID [options]
   n8n_unarchive_acceptance.sh eec ID [options]
   n8n_unarchive_acceptance.sh --activation --server eec|hetzner [options]
+  n8n_unarchive_acceptance.sh --existing-version --server eec|hetzner \
+    --workflow-id ID --version-id VERSION --evidence-dir DIR [options]
   n8n_unarchive_acceptance.sh --self-test
   n8n_unarchive_acceptance.sh --handoff-self-test
   n8n_unarchive_acceptance.sh --activation-self-test
   n8n_unarchive_acceptance.sh --activation-create-input-self-test
+  n8n_unarchive_acceptance.sh --existing-version-self-test
 
 Options:
   --launcher PATH         fwc-n8n launcher (default: /usr/local/bin/fwc-n8n)
   --approval-helper PATH  n8n_approval_once.sh (default: /home/ubuntu/Projects/flywheel_connectors/scripts/n8n_approval_once.sh)
   --parent-helper PATH    verified rc20 parent-binding path (exact path required)
-  --evidence-dir DIR      redaction-safe evidence directory (optional)
+  --evidence-dir DIR      redaction-safe evidence directory (required for acceptance modes)
   --help                  show this help
 
 Production writes one short-lived approval request below the fixed
@@ -160,6 +260,8 @@ The parent helper is invoked exactly once; no fallback or crypto is embedded.
 Activation mode creates one disposable credential-free Webhook draft, then
 performs one publish and one unpublish transition with independent readbacks;
 it never invokes the Webhook or performs cleanup.
+Existing-version mode explicitly publishes the selected existing draft version
+once, then unpublishes only after exact independent readback and a fresh approval.
 EOF
 }
 
@@ -188,6 +290,14 @@ valid_workflow_id() {
   [[ "$1" =~ ^[A-Za-z0-9]{1,256}$ ]]
 }
 
+valid_version_id() {
+  local trimmed="$1"
+  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+  [[ -n "$1" && ${#1} -le 256 && "$trimmed" == "$1" \
+    && "$1" != *[[:cntrl:]]* ]]
+}
+
 valid_executable() {
   [[ -n "$1" && -x "$1" ]]
 }
@@ -196,7 +306,11 @@ valid_parent_helper() {
   # The parent-binding contract is provided only by the provisioned rc20
   # binary.  Do not allow an arbitrary executable override, even when it is
   # a regular non-symlink file; the guard must fail before any provider call.
-  [[ "$1" == "$DEFAULT_PARENT_HELPER" && -x "$1" && ! -L "$1" ]]
+  if (( SELF_TEST == 1 )); then
+    [[ -x "$1" ]]
+  else
+    [[ "$1" == "$DEFAULT_PARENT_HELPER" && -x "$1" && ! -L "$1" ]]
+  fi
 }
 
 build_activation_plan() {
@@ -219,6 +333,157 @@ build_activation_plan() {
         provider_action_in_self_test:false},
       evidence:{raw_provider_bodies:false,raw_request_bodies:false,
         tokens:false,secrets:false}}'
+}
+
+build_existing_version_plan() {
+  "$JQ_BIN" -cn --arg server "$SERVER" --arg workflow "$WORKFLOW_ID" \
+    --arg version "$VERSION_ID" \
+    '{schema:"fwc.n8n.existing-version-acceptance-plan.v1",
+      mode:"explicit-existing-workflow-version",server:$server,
+      workflow_id:$workflow,version_id:$version,
+      sequence:["baseline_get_once","publish_approval_once",
+        "publish_once","publish_independent_get_once",
+        "unpublish_approval_once","unpublish_once",
+        "unpublish_independent_get_once"],
+      precondition:{active:false,activeVersionId:null,isArchived:false,
+        published:null,draftVersionId:$version},
+      limits:{publish_attempts:1,unpublish_attempts:1,retries:0,
+        automatic_cleanup:false,workflow_creation:false,execution_attempts:0},
+      evidence:{raw_provider_bodies:false,raw_request_bodies:false,
+        tokens:false,secrets:false}}'
+}
+
+validate_existing_version_plan() {
+  "$JQ_BIN" -e --arg server "$SERVER" --arg workflow "$WORKFLOW_ID" \
+    --arg version "$VERSION_ID" '
+      ((keys_unsorted | sort) ==
+        ["evidence","limits","mode","precondition","schema","sequence",
+         "server","version_id","workflow_id"])
+      and .schema == "fwc.n8n.existing-version-acceptance-plan.v1"
+      and .mode == "explicit-existing-workflow-version"
+      and .server == $server and .workflow_id == $workflow
+      and .version_id == $version
+      and .sequence == ["baseline_get_once","publish_approval_once",
+        "publish_once","publish_independent_get_once",
+        "unpublish_approval_once","unpublish_once",
+        "unpublish_independent_get_once"]
+      and .precondition == {active:false,activeVersionId:null,
+        isArchived:false,published:null,draftVersionId:$version}
+      and .limits.publish_attempts == 1 and .limits.unpublish_attempts == 1
+      and .limits.retries == 0 and .limits.automatic_cleanup == false
+      and .limits.workflow_creation == false and .limits.execution_attempts == 0
+      and (all(.evidence[]; . == false))
+    ' <<<"$1" >/dev/null 2>&1
+}
+
+validate_existing_baseline() {
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" --arg version "$VERSION_ID" '
+    .status == "ok" and .result.id == $workflow
+    and .result.active == false and .result.activeVersionId == null
+    and .result.isArchived == false and .result.published == null
+    and .result.versionId == $version and .result.draft.versionId == $version
+    and (.result.draft.graphDigest | type) == "string"
+    and (.result.stateDigest | type) == "string"
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+validate_existing_publish_invoke() {
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" --arg version "$VERSION_ID" '
+    .type == "response" and .status == "ok"
+    and .result.status == "verified"
+    and .result.operation == "n8n.workflows.activate"
+    and .result.before.id == $workflow and .result.after.id == $workflow
+    and .result.after.active == true
+    and .result.after.activeVersionId == $version
+    and .result.after.published.versionId == $version
+    and .result.after.isArchived == false
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+validate_existing_publish_readback() {
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" --arg version "$VERSION_ID" \
+    --arg graph "$EXISTING_GRAPH_DIGEST" '
+    .status == "ok" and .result.id == $workflow
+    and .result.active == true and .result.activeVersionId == $version
+    and .result.published.versionId == $version
+    and .result.versionId == $version and .result.draft.versionId == $version
+    and .result.draft.graphDigest == $graph
+    and .result.published.graphDigest == $graph
+    and .result.isArchived == false
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+validate_existing_unpublish_invoke() {
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" '
+    .type == "response" and .status == "ok"
+    and .result.status == "verified"
+    and .result.operation == "n8n.workflows.activate"
+    and .result.before.id == $workflow and .result.after.id == $workflow
+    and .result.after.active == false
+    and .result.after.activeVersionId == null
+    and .result.after.published == null
+    and .result.after.isArchived == false
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+validate_existing_final_readback() {
+  "$JQ_BIN" -e --arg workflow "$WORKFLOW_ID" --arg version "$VERSION_ID" \
+    --arg graph "$EXISTING_GRAPH_DIGEST" '
+    .status == "ok" and .result.id == $workflow
+    and .result.active == false and .result.activeVersionId == null
+    and .result.published == null and .result.isArchived == false
+    and .result.versionId == $version and .result.draft.versionId == $version
+    and .result.draft.graphDigest == $graph
+  ' <<<"$1" >/dev/null 2>&1
+}
+
+persist_existing_summary() {
+  local verdict="$1" code="$2"
+  local summary
+  summary="$("$JQ_BIN" -cn --arg server "$SERVER" --arg workflow "$WORKFLOW_ID" \
+    --arg version "$VERSION_ID" --arg run_id "$EXISTING_RUN_ID" \
+    --arg verdict "$verdict" --arg code "$code" \
+    --arg publish_approval_abort_code "$EXISTING_PUBLISH_APPROVAL_ABORT_CODE" \
+    --arg unpublish_approval_abort_code "$EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE" \
+    --argjson publish_status "$ACTIVATION_PUBLISH_STATUS" \
+    --argjson unpublish_status "$ACTIVATION_UNPUBLISH_STATUS" \
+    --argjson baseline_status "$ACTIVATION_BASELINE_STATUS" \
+    --argjson publish_readback_status "$ACTIVATION_ACTIVE_STATUS" \
+    --argjson final_readback_status "$FINAL_GET_STATUS" \
+    --argjson publish_helper_status "$EXISTING_PUBLISH_HELPER_STATUS" \
+    --argjson unpublish_helper_status "$EXISTING_UNPUBLISH_HELPER_STATUS" \
+    '{schema:"fwc.n8n.existing-version-acceptance.v1",server:$server,
+      workflow_id:$workflow,version_id:$version,run_id:$run_id,
+      verdict:$verdict,abort_code:$code,
+      sequence:["baseline_get_once","publish_approval_once","publish_once",
+        "publish_independent_get_once","unpublish_approval_once",
+        "unpublish_once","unpublish_independent_get_once"],
+      publish_status:$publish_status,unpublish_status:$unpublish_status,
+      baseline_status:$baseline_status,
+      publish_readback_status:$publish_readback_status,
+      final_readback_status:$final_readback_status,
+      publish_helper_status:$publish_helper_status,
+      unpublish_helper_status:$unpublish_helper_status,
+      publish_attempts:(if $publish_helper_status == 0 then 1 else 0 end),
+      unpublish_attempts:(if $unpublish_helper_status == 0 then 1 else 0 end),
+      retries:0,automatic_cleanup:false,workflow_creation:false,
+      execution_attempts:0,evidence_complete:($verdict == "pass"),
+      evidence_files:["existing-version-plan.json","existing-baseline.json",
+        "existing-publish.json","existing-publish-readback.json",
+        "existing-unpublish.json","existing-final-readback.json",
+        "transition-publish.json","transition-unpublish.json"],
+      raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
+      tokens_persisted:false,secrets_persisted:false}
+      + (if $publish_approval_abort_code == "" then {}
+         else {publish_approval_abort_code:$publish_approval_abort_code} end)
+      + (if $unpublish_approval_abort_code == "" then {}
+         else {unpublish_approval_abort_code:$unpublish_approval_abort_code} end)')" || return 1
+  persist_activation_record summary "$summary"
+}
+
+persist_existing_projection() {
+  local name="$1" projection="$2"
+  persist_activation_record "existing-$name" "$projection"
 }
 
 build_activation_create_input() {
@@ -300,7 +565,7 @@ activation_preflight() {
     emit_activation_stop activation_server_not_allowed
     return 1
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
+  if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
     emit_activation_stop dependency_missing
     return 1
   fi
@@ -340,6 +605,7 @@ run_activation_self_test() {
   local create_input
   local root
   local output
+  local diagnostics
   SELF_TEST=1
   ACTIVATION_MODE=1
   SERVER="hetzner"
@@ -350,6 +616,13 @@ run_activation_self_test() {
     "00000000-0000-4000-8000-000000000001" \
     "n8n-activation-self-test")" || return 1
   validate_activation_create_input "$create_input" || return 1
+  diagnostics="$(printf '%s\n' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' \
+    'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 bearer-secret-marker' \
+    'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network token=PRIVATE-CANARY' \
+    'raw provider response must not pass' | filter_n8n_run_once_diagnostics)" || return 1
+  [[ "$diagnostics" == $'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network\nFCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' ]] || return 1
   ACTIVATION_PLAN="$base"
   EVIDENCE_DIR=""
   if persist_activation_plan; then return 1; fi
@@ -370,7 +643,7 @@ run_activation_self_test() {
   if validate_activation_plan "$fixture"; then return 1; fi
   fixture="$("$JQ_BIN" -c '.sequence[5] = "publish_once"' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
-  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":9}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":10}\n' \
     "$ACTIVATION_SCHEMA"
 }
 
@@ -536,6 +809,35 @@ validate_digest() {
   [[ "$1" =~ ^blake3-256:[0-9a-f]{64}$ ]]
 }
 
+validate_existing_state_digest() {
+  [[ "$1" =~ ^blake3-256:[0-9A-Fa-f]{64}$ ]]
+}
+
+validate_production_evidence_path() {
+  local root="/srv/dev-ssd/fcp/nqm81.24"
+  local relative component current
+  local IFS=/
+
+  (( SELF_TEST == 1 )) && return 0
+  [[ "$EVIDENCE_DIR" == "$root"/* ]] || return 1
+  relative="${EVIDENCE_DIR#"$root"/}"
+  [[ "$relative" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$ ]] || return 1
+  [[ -x /usr/bin/mountpoint ]] || return 1
+  /usr/bin/mountpoint -q /srv/dev-ssd || return 1
+
+  for current in /srv /srv/dev-ssd /srv/dev-ssd/fcp "$root"; do
+    [[ -d "$current" && ! -L "$current" ]] || return 1
+  done
+  current="$root"
+  for component in $relative; do
+    current="$current/$component"
+    [[ ! -L "$current" ]] || return 1
+    if [[ -e "$current" ]]; then
+      [[ -d "$current" ]] || return 1
+    fi
+  done
+}
+
 validate_expiry() {
   local expiry="$1"
   local current="$2"
@@ -589,7 +891,8 @@ run_read_once() {
   raw="$(printf '%s\n' "$input_json" | "$JQ_BIN" -cn \
     --arg server "$SERVER" --argjson input "$input_json" --arg correlation "$(uuid)" \
     '{server_id:$server,input:$input,correlation_id:$correlation}' |
-    "$LAUNCHER_PATH" run-once n8n.workflows.get 2>/dev/null)"
+    "$LAUNCHER_PATH" run-once n8n.workflows.get \
+      2> >(filter_n8n_run_once_diagnostics >&2))"
   status=$?
   if [[ -z "$raw" ]]; then
     printf '%s' ""
@@ -601,12 +904,64 @@ run_read_once() {
   return "$status"
 }
 
+# The launcher can emit only stable, redacted diagnostic labels through these
+# prefixes. Do not forward arbitrary stderr: it may contain provider data,
+# request details, or secrets from child processes.
+filter_n8n_run_once_diagnostics() {
+  "$AWK_BIN" '
+    /^FCP-N8N-HOST-ERROR-DETAIL\/v1 policy\.(approval|capability|deployment|network|lease|binding|decision|other)$/ ||
+    /^FCP-N8N-HOST-ERROR-DETAIL\/v1 host\.other$/ ||
+    /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 dispatch_(4xx|5xx|other)$/ ||
+    /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 response_(protocol|auth|rate_limited|capability|zone|connector|resource|external_(4xx|5xx|other|unknown)|upstream_timeout|dependency_unavailable|internal)$/ {
+      print
+      fflush()
+    }
+  '
+}
+
+capture_approval_abort_code() {
+  local helper_status="$1"
+  APPROVAL_ABORT_CODE=""
+  case "$helper_status" in
+    201) APPROVAL_ABORT_CODE=clock_failed ;;
+    202) APPROVAL_ABORT_CODE=clock_invalid ;;
+    203) APPROVAL_ABORT_CODE=expiry_not_13_digits ;;
+    204) APPROVAL_ABORT_CODE=expiry_not_integer ;;
+    205) APPROVAL_ABORT_CODE=expiry_over_60s ;;
+    206) APPROVAL_ABORT_CODE=expiry_stale ;;
+    207) APPROVAL_ABORT_CODE=invalid_request_file ;;
+    208) APPROVAL_ABORT_CODE=invalid_request_json ;;
+    209) APPROVAL_ABORT_CODE=issuer_failed ;;
+    210) APPROVAL_ABORT_CODE=issuer_unavailable ;;
+    211) APPROVAL_ABORT_CODE=public_key_unavailable ;;
+    212) APPROVAL_ABORT_CODE=request_busy ;;
+    213) APPROVAL_ABORT_CODE=request_changed ;;
+    214) APPROVAL_ABORT_CODE=request_digest_failed ;;
+    215) APPROVAL_ABORT_CODE=request_unreadable ;;
+    216) APPROVAL_ABORT_CODE=safe_plan_mismatch ;;
+    217) APPROVAL_ABORT_CODE=secret_reader_unavailable ;;
+    218) APPROVAL_ABORT_CODE=invalid_arguments ;;
+    219) APPROVAL_ABORT_CODE=internal_error ;;
+    220) APPROVAL_ABORT_CODE=secret_reader_failed ;;
+    221) APPROVAL_ABORT_CODE=seed_decode_failed ;;
+    222) APPROVAL_ABORT_CODE=invalid_request ;;
+    223) APPROVAL_ABORT_CODE=invalid_seed ;;
+    224) APPROVAL_ABORT_CODE=trusted_key_unavailable ;;
+    225) APPROVAL_ABORT_CODE=untrusted_seed ;;
+    226) APPROVAL_ABORT_CODE=signing_failed ;;
+    227) APPROVAL_ABORT_CODE=output_failed ;;
+    *) return 1 ;;
+  esac
+}
+
 approval_fd3_handoff() {
   local basename="$1"
   local reader_fd
+  local reader_pipe_fd
   local writer_fd
   local reader_pid
   local helper_status
+  local helper_status_for_abort
   local reader_status
   local invoke_fd
   local invoke_pid
@@ -618,6 +973,8 @@ approval_fd3_handoff() {
 
   APPROVAL_HELPER_STATUS=125
   APPROVAL_READER_STATUS=125
+  APPROVAL_ABORT_CODE=""
+  HANDOFF_INVOKE_STARTED=0
   sudo_bin="/usr/bin/sudo"
   if (( SELF_TEST == 1 )); then
     sudo_bin="$HANDOFF_TEST_SUDO"
@@ -629,21 +986,64 @@ approval_fd3_handoff() {
   # root bash maps the helper's FD3 to stdout and this parent maps stdout back
   # to the already-open FD3 pipe.
   coproc FWC_APPROVAL_READER { cat; }
-  reader_fd="${FWC_APPROVAL_READER[0]}"
+  reader_pipe_fd="${FWC_APPROVAL_READER[0]}"
   writer_fd="${FWC_APPROVAL_READER[1]}"
   reader_pid="$FWC_APPROVAL_READER_PID"
+  exec {reader_fd}<&"$reader_pipe_fd"
+  exec {reader_pipe_fd}<&-
   exec 3>&"$writer_fd"
   exec {writer_fd}>&-
 
   if "$sudo_bin" -n /usr/bin/bash -c '
+      set -o pipefail
       exec 3>&1
-      exec "$1" --signal=TERM --kill-after=2s "$2" "$3" \
-        --request-file "$4" 2>/dev/null
+      if diagnostic_code=$("$1" --signal=TERM --kill-after=2s "$2" "$3" \
+          --request-file "$4" 2>&1 1>&3 | "$5" "$6"); then
+        exit 0
+      else
+        helper_status=$?
+      fi
+      case "$diagnostic_code" in
+        clock_failed) exit 201 ;;
+        clock_invalid) exit 202 ;;
+        expiry_not_13_digits) exit 203 ;;
+        expiry_not_integer) exit 204 ;;
+        expiry_over_60s) exit 205 ;;
+        expiry_stale) exit 206 ;;
+        invalid_request_file) exit 207 ;;
+        invalid_request_json) exit 208 ;;
+        issuer_failed) exit 209 ;;
+        issuer_unavailable) exit 210 ;;
+        public_key_unavailable) exit 211 ;;
+        request_busy) exit 212 ;;
+        request_changed) exit 213 ;;
+        request_digest_failed) exit 214 ;;
+        request_unreadable) exit 215 ;;
+        safe_plan_mismatch) exit 216 ;;
+        secret_reader_unavailable) exit 217 ;;
+        invalid_arguments) exit 218 ;;
+        internal_error) exit 219 ;;
+        secret_reader_failed) exit 220 ;;
+        seed_decode_failed) exit 221 ;;
+        invalid_request) exit 222 ;;
+        invalid_seed) exit 223 ;;
+        trusted_key_unavailable) exit 224 ;;
+        untrusted_seed) exit 225 ;;
+        signing_failed) exit 226 ;;
+        output_failed) exit 227 ;;
+        *) exit "$helper_status" ;;
+      esac
     ' _ "$TIMEOUT_BIN" "${APPROVAL_TIMEOUT_SECONDS}s" \
-    "$APPROVAL_HELPER_PATH" "$basename" 1>&3 2>/dev/null; then
+    "$APPROVAL_HELPER_PATH" "$basename" "$AWK_BIN" \
+    'NR == 1 && $0 ~ /^\{"schema":"fwc\.n8n\.approval-once\.v1","verdict":"stop","abort_code":"(clock_failed|clock_invalid|expiry_not_13_digits|expiry_not_integer|expiry_over_60s|expiry_stale|invalid_request_file|invalid_request_json|issuer_failed|issuer_unavailable|public_key_unavailable|request_busy|request_changed|request_digest_failed|request_unreadable|safe_plan_mismatch|secret_reader_unavailable|secret_reader_failed|seed_decode_failed|invalid_request|invalid_seed|trusted_key_unavailable|untrusted_seed|signing_failed|output_failed|invalid_arguments|internal_error)"\}$/ { code=$0; sub(/^.*"abort_code":"/, "", code); sub(/"}$/, "", code) } END { if (NR == 1 && code != "") print code }' \
+    1>&3 2>/dev/null; then
     helper_status=0
   else
     helper_status=$?
+    helper_status_for_abort="$helper_status"
+    if capture_approval_abort_code "$helper_status_for_abort"; then
+      helper_status=1
+    fi
   fi
   APPROVAL_HELPER_STATUS="$helper_status"
   exec 3>&-
@@ -677,12 +1077,14 @@ approval_fd3_handoff() {
     return 1
   fi
   if (( ACTIVATION_MODE == 1 )); then
+    HANDOFF_INVOKE_STARTED=1
     coproc FWC_ACTIVATION_INVOKE {
       run_activation_once "$invoke_reader_fd";
     }
     invoke_fd="${FWC_ACTIVATION_INVOKE[0]}"
     invoke_pid="$FWC_ACTIVATION_INVOKE_PID"
   else
+    HANDOFF_INVOKE_STARTED=1
     coproc FWC_UNARCHIVE_INVOKE {
       run_unarchive_once "$invoke_reader_fd";
     }
@@ -723,7 +1125,8 @@ run_unarchive_once() {
       --arg correlation "$INVOKE_CORRELATION_ID" --argjson deadline "$DEADLINE_MS" \
       '{server_id:$server,input:$input,approval_token:$approval[0],
         deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
-    "$LAUNCHER_PATH" run-once "$OPERATION" 2>/dev/null
+    "$LAUNCHER_PATH" run-once "$OPERATION" \
+      2> >(filter_n8n_run_once_diagnostics >&2)
 }
 
 run_activation_once() {
@@ -733,7 +1136,8 @@ run_activation_once() {
       --arg correlation "$HANDOFF_CORRELATION_ID" --argjson deadline "$HANDOFF_DEADLINE_MS" \
       '{server_id:$server,input:$input,approval_token:$approval[0],
         deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
-    "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" 2>/dev/null
+    "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" \
+      2> >(filter_n8n_run_once_diagnostics >&2)
 }
 
 build_approval_request_json() {
@@ -1021,6 +1425,7 @@ activation_invoke_step() {
   local expiry_ms
   local request_json
 
+  HANDOFF_INVOKE_STARTED=0
   correlation_id="$(uuid)" || return 1
   HANDOFF_OPERATION="$operation"
   HANDOFF_INPUT="$input_json"
@@ -1038,6 +1443,591 @@ activation_invoke_step() {
   write_request_file "$request_json" || return 1
   read_request_metadata "$REQUEST_PATH" || return 1
   bounded_approval_and_invoke
+}
+
+existing_version_preflight() {
+  if ! valid_server "$SERVER" || ! valid_workflow_id "$WORKFLOW_ID" \
+    || [[ -z "$VERSION_ID" || ${#VERSION_ID} -gt 256 ]] \
+    || ! "$JQ_BIN" -en --arg value "$VERSION_ID" \
+      '$value == ($value | gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+       and ($value | test("[[:cntrl:]]") | not)' >/dev/null; then
+    emit_existing_stop invalid_target
+    return 1
+  fi
+  if ! validate_production_evidence_path; then
+    emit_existing_stop evidence_directory_not_durable
+    return 1
+  fi
+  if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" \
+    || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" || ! -x "$SYNC_BIN" ]]; then
+    emit_existing_stop dependency_missing
+    return 1
+  fi
+  if ! valid_executable "$LAUNCHER_PATH"; then
+    emit_existing_stop launcher_unavailable
+    return 1
+  fi
+  if ! valid_executable "$APPROVAL_HELPER_PATH"; then
+    emit_existing_stop approval_helper_unavailable
+    return 1
+  fi
+  if ! valid_parent_helper "$PARENT_HELPER_PATH"; then
+    emit_existing_stop parent_helper_unavailable
+    return 1
+  fi
+  if [[ -e "$EVIDENCE_DIR" || -L "$EVIDENCE_DIR" ]]; then
+    emit_existing_stop evidence_directory_not_fresh
+    return 1
+  fi
+  if ! init_evidence; then
+    emit_existing_stop evidence_directory_unavailable
+    return 1
+  fi
+  ACTIVATION_PLAN="$(build_existing_version_plan)" || {
+    emit_existing_stop plan_build_failed
+    return 1
+  }
+  if ! validate_existing_version_plan "$ACTIVATION_PLAN" \
+    || ! persist_activation_record existing-version-plan "$ACTIVATION_PLAN"; then
+    emit_existing_stop plan_contract_failed
+    return 1
+  fi
+}
+
+run_existing_version_acceptance() {
+  local baseline_input publish_ref publish_key unpublish_ref unpublish_key
+  local preinvoke_code
+  local baseline_state active_state
+  EXISTING_VERSION_MODE=1
+  ACTIVATION_MODE=1
+  ACTIVATION_BASELINE_STATUS=125
+  ACTIVATION_ACTIVE_STATUS=125
+  ACTIVATION_PUBLISH_STATUS=125
+  ACTIVATION_UNPUBLISH_STATUS=125
+  ACTIVATION_BASELINE_STATUS=125
+  ACTIVATION_ACTIVE_STATUS=125
+  FINAL_GET_STATUS=125
+  EXISTING_PUBLISH_HELPER_STATUS=125
+  EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
+  EXISTING_UNPUBLISH_HELPER_STATUS=125
+  EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
+  if ! existing_version_preflight; then return 10; fi
+  EXISTING_RUN_ID="$(uuid)" || { emit_existing_stop run_id_failed; return 10; }
+  RUN_ID="$EXISTING_RUN_ID"
+  ACTIVATION_WORKFLOW_ID="$WORKFLOW_ID"
+  baseline_input="$("$JQ_BIN" -cn --arg id "$WORKFLOW_ID" '{id:$id}')" || {
+    emit_existing_stop baseline_input_failed; return 10;
+  }
+
+  EXISTING_BASELINE_PROJECTION="$(run_read_once "$baseline_input")"
+  ACTIVATION_BASELINE_STATUS=$?
+  if ! persist_existing_projection baseline "$EXISTING_BASELINE_PROJECTION"; then
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  if (( ACTIVATION_BASELINE_STATUS != 0 )) \
+    || ! validate_existing_baseline "$EXISTING_BASELINE_PROJECTION"; then
+    persist_existing_summary stop baseline_precondition_failed || true
+    emit_existing_stop baseline_precondition_failed
+    return 10
+  fi
+  EXISTING_GRAPH_DIGEST="$("$JQ_BIN" -er '.result.draft.graphDigest' \
+    <<<"$EXISTING_BASELINE_PROJECTION")" || {
+    persist_existing_summary stop baseline_graph_missing || true
+    emit_existing_stop baseline_graph_missing; return 10;
+  }
+  EXISTING_STATE_DIGEST="$("$JQ_BIN" -er '.result.stateDigest' \
+    <<<"$EXISTING_BASELINE_PROJECTION")" || {
+    persist_existing_summary stop baseline_state_missing || true
+    emit_existing_stop baseline_state_missing; return 10;
+  }
+  validate_existing_state_digest "$EXISTING_STATE_DIGEST" || {
+    persist_existing_summary stop baseline_state_invalid || true
+    emit_existing_stop baseline_state_invalid; return 10;
+  }
+  baseline_state="$EXISTING_STATE_DIGEST"
+
+  publish_ref="n8n-existing-$SERVER-publish-$(uuid)" || {
+    persist_existing_summary stop approval_reference_failed || true
+    emit_existing_stop approval_reference_failed; return 10;
+  }
+  APPROVAL_HELPER_STATUS=125
+  publish_key="$(uuid)" || {
+    persist_existing_summary stop idempotency_failed || true
+    emit_existing_stop idempotency_failed; return 10;
+  }
+  ACTIVATION_PUBLISH_INPUT="$("$JQ_BIN" -cn \
+    --arg id "$WORKFLOW_ID" --arg version "$VERSION_ID" \
+    --arg state "$baseline_state" \
+    --arg approval "$publish_ref" --arg key "$publish_key" \
+    '{id:$id,active:true,versionId:$version,
+      guard:{approvalRef:$approval,idempotencyKey:$key,
+        precondition:{versionId:$version,activeVersionId:null,
+          active:false,isArchived:false,stateDigest:$state}}}')" || {
+    persist_existing_summary stop publish_input_failed || true
+    emit_existing_stop publish_input_failed; return 10;
+  }
+  if ! activation_invoke_step "$ACTIVATION_OPERATION" "activate" \
+    "$ACTIVATION_PUBLISH_INPUT" "$WORKFLOW_ID" \
+    "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" existing-publish; then
+    EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+    EXISTING_PUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( HANDOFF_INVOKE_STARTED == 0 )); then
+      preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
+      persist_existing_summary stop "$preinvoke_code" || true
+      emit_existing_stop "$preinvoke_code"
+      return 10
+    fi
+    persist_existing_summary unknown publish_outcome_unknown || true
+    emit_existing_unknown publish_outcome_unknown
+    return 20
+  fi
+  EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+  ACTIVATION_PUBLISH_STATUS="$INVOCATION_STATUS"
+  EXISTING_PUBLISH_PROJECTION="$INVOKE_PROJECTION"
+  if (( INVOCATION_STATUS != 0 )) \
+    || ! validate_existing_publish_invoke "$EXISTING_PUBLISH_PROJECTION"; then
+    persist_existing_projection publish "$EXISTING_PUBLISH_PROJECTION" || true
+    EXISTING_PUBLISH_READBACK="$(run_read_once "$baseline_input")"
+    ACTIVATION_ACTIVE_STATUS=$?
+    persist_existing_projection publish-readback "$EXISTING_PUBLISH_READBACK" || true
+    persist_existing_summary unknown publish_outcome_unknown || true
+    emit_existing_unknown publish_outcome_unknown
+    return 20
+  fi
+  if ! persist_existing_projection publish "$EXISTING_PUBLISH_PROJECTION"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+
+  EXISTING_PUBLISH_READBACK="$(run_read_once "$baseline_input")"
+  ACTIVATION_ACTIVE_STATUS=$?
+  if ! persist_existing_projection publish-readback "$EXISTING_PUBLISH_READBACK"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  if (( ACTIVATION_ACTIVE_STATUS != 0 )) \
+    || ! validate_existing_publish_readback "$EXISTING_PUBLISH_READBACK"; then
+    persist_existing_summary unknown publish_readback_inconclusive || true
+    emit_existing_unknown publish_readback_inconclusive
+    return 20
+  fi
+  if ! persist_activation_transition publish "$ACTIVATION_OPERATION" \
+    existing-publish "$WORKFLOW_ID"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  active_state="$("$JQ_BIN" -er '.result.stateDigest' \
+    <<<"$EXISTING_PUBLISH_READBACK")" || {
+    persist_existing_summary unknown publish_readback_inconclusive || true
+    emit_existing_unknown publish_readback_inconclusive; return 20;
+  }
+  validate_existing_state_digest "$active_state" || {
+    persist_existing_summary unknown publish_readback_inconclusive || true
+    emit_existing_unknown publish_readback_inconclusive; return 20;
+  }
+
+  unpublish_ref="n8n-existing-$SERVER-unpublish-$(uuid)" || {
+    persist_existing_summary stop unpublish_approval_reference_failed || true
+    emit_existing_stop unpublish_approval_reference_failed; return 10;
+  }
+  APPROVAL_HELPER_STATUS=125
+  unpublish_key="$(uuid)" || {
+    persist_existing_summary stop unpublish_idempotency_failed || true
+    emit_existing_stop unpublish_idempotency_failed; return 10;
+  }
+  ACTIVATION_UNPUBLISH_INPUT="$("$JQ_BIN" -cn \
+    --arg id "$WORKFLOW_ID" --arg version "$VERSION_ID" \
+    --arg state "$active_state" \
+    --arg approval "$unpublish_ref" --arg key "$unpublish_key" \
+    '{id:$id,active:false,
+      guard:{approvalRef:$approval,idempotencyKey:$key,
+        precondition:{versionId:$version,activeVersionId:$version,
+          active:true,isArchived:false,stateDigest:$state}}}')" || {
+    persist_existing_summary stop unpublish_input_failed || true
+    emit_existing_stop unpublish_input_failed; return 10;
+  }
+  if ! activation_invoke_step "$ACTIVATION_OPERATION" "activate" \
+    "$ACTIVATION_UNPUBLISH_INPUT" "$WORKFLOW_ID" \
+    "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" existing-unpublish; then
+    ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
+    EXISTING_UNPUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+    EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( HANDOFF_INVOKE_STARTED == 0 )); then
+      preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
+      persist_existing_summary stop "$preinvoke_code" || true
+      emit_existing_stop "$preinvoke_code"
+      return 10
+    fi
+    persist_existing_summary unknown unpublish_outcome_unknown || true
+    emit_existing_unknown unpublish_outcome_unknown
+    return 20
+  fi
+  EXISTING_UNPUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
+  ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
+  EXISTING_UNPUBLISH_PROJECTION="$INVOKE_PROJECTION"
+  if (( INVOCATION_STATUS != 0 )) \
+    || ! validate_existing_unpublish_invoke "$EXISTING_UNPUBLISH_PROJECTION"; then
+    persist_existing_projection unpublish "$EXISTING_UNPUBLISH_PROJECTION" || true
+    EXISTING_FINAL_READBACK="$(run_read_once "$baseline_input")"
+    FINAL_GET_STATUS=$?
+    persist_existing_projection final-readback "$EXISTING_FINAL_READBACK" || true
+    persist_existing_summary unknown unpublish_outcome_unknown || true
+    emit_existing_unknown unpublish_outcome_unknown
+    return 20
+  fi
+  if ! persist_existing_projection unpublish "$EXISTING_UNPUBLISH_PROJECTION"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  if ! persist_activation_transition unpublish "$ACTIVATION_OPERATION" \
+    existing-unpublish "$WORKFLOW_ID"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+
+  EXISTING_FINAL_READBACK="$(run_read_once "$baseline_input")"
+  FINAL_GET_STATUS=$?
+  if ! persist_existing_projection final-readback "$EXISTING_FINAL_READBACK"; then
+    persist_existing_summary stop evidence_write_failed || true
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  if (( FINAL_GET_STATUS != 0 )) \
+    || ! validate_existing_final_readback "$EXISTING_FINAL_READBACK"; then
+    persist_existing_summary unknown unpublish_readback_inconclusive || true
+    emit_existing_unknown unpublish_readback_inconclusive
+    return 20
+  fi
+  if ! persist_existing_summary pass none; then
+    emit_existing_stop evidence_write_failed; return 10
+  fi
+  emit_existing_pass
+}
+
+run_existing_version_self_test() {
+  local root mock_sudo mock_approval mock_parent mock_launcher
+  local scenario status get_count publish_count unpublish_count approval_count
+  local evidence rejected_evidence
+  SELF_TEST=1
+  ACTIVATION_MODE=1
+  EXISTING_VERSION_MODE=1
+  SERVER="eec"
+  WORKFLOW_ID="syntheticworkflow"
+  VERSION_ID="selected-version"
+  validate_existing_state_digest \
+    "blake3-256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+    || return 1
+  validate_existing_state_digest \
+    "blake3-256:GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" \
+    && return 1
+  validate_existing_state_digest \
+    "BLAKE3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    && return 1
+  root="$(mktemp -d "${TMPDIR:-/tmp}/n8n-existing-version-self-test.XXXXXX")" || return 1
+  REQUEST_ROOT="$root/approval-requests"
+  mkdir -m 700 -- "$REQUEST_ROOT" || return 1
+  mock_sudo="$root/sudo"
+  mock_approval="$root/approval-helper"
+  mock_parent="$root/parent-helper"
+  mock_launcher="$root/launcher"
+  cat >"$mock_sudo" <<'EOF'
+#!/usr/bin/env bash
+set -u
+[[ "${1:-}" == "-n" ]] || exit 64
+shift
+[[ "${1:-}" == "/usr/bin/bash" && "${2:-}" == "-c" ]] || exit 64
+shift 2
+exec /usr/bin/bash -c "$@"
+EOF
+  cat >"$mock_approval" <<'EOF'
+#!/usr/bin/env bash
+set -u
+[[ "${1:-}" == "--request-file" ]] || exit 75
+[[ -n "${2:-}" ]] || exit 74
+[[ -e "/proc/$$/fd/3" ]] || exit 77
+request="$EXISTING_TEST_REQUEST_ROOT/$2"
+[[ -f "$request" ]] || exit 72
+/usr/bin/jq -e '
+  (.input.guard.precondition | keys_unsorted | sort) ==
+    ["active","activeVersionId","isArchived","stateDigest","versionId"]
+  and (.input.guard.precondition.stateDigest |
+    test("^blake3-256:[0-9A-Fa-f]{64}$"))
+  and ((.input.active == true and .input.guard.precondition.active == false)
+    or (.input.active == false and .input.guard.precondition.active == true))
+' "$request" >/dev/null || exit 73
+request_active="$(/usr/bin/jq -r '.input.active' "$request")" || exit 73
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_failed \
+    && "$request_active" == true ]] \
+  || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_failed \
+    && "$request_active" == false ]]; then
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"invalid_seed"}' >&2
+  exit 76
+fi
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_code_propagated \
+    && "$request_active" == true ]]; then
+  printf '%s\n' '{"schema":"fwc.n8n.approval-once.v1","verdict":"stop","abort_code":"clock_failed"}' >&2
+  exit 76
+fi
+if [[ "$EXISTING_TEST_SCENARIO" == publish_approval_unrecognized \
+    && "$request_active" == true ]] \
+  || [[ "$EXISTING_TEST_SCENARIO" == unpublish_approval_unrecognized \
+    && "$request_active" == false ]]; then
+  printf '%s\n' 'PRIVATE-CANARY-UNRECOGNIZED approval helper diagnostic' >&2
+  exit 76
+fi
+count=0
+[[ -f "$EXISTING_TEST_APPROVAL_COUNT" ]] && count="$(cat "$EXISTING_TEST_APPROVAL_COUNT")"
+printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_APPROVAL_COUNT" || exit 71
+printf '%s\n' '"offline-stub-token"' >&3
+EOF
+  cat >"$mock_parent" <<'EOF'
+#!/usr/bin/env bash
+set -u
+printf '%064d\n' 1
+EOF
+  cat >"$mock_launcher" <<'EOF'
+#!/usr/bin/env bash
+set -u
+op="${2:-}"
+envelope="$(cat)" || exit 80
+if [[ "$op" == "n8n.workflows.get" ]]; then
+  count=0
+  [[ -f "$EXISTING_TEST_GET_COUNT" ]] && count="$(cat "$EXISTING_TEST_GET_COUNT")"
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$EXISTING_TEST_GET_COUNT" || exit 81
+  state=inactive
+  if [[ "$EXISTING_TEST_SCENARIO" == baseline_bad && "$count" == 1 ]]; then state=active; fi
+  if [[ "$EXISTING_TEST_SCENARIO" == publish_readback_bad && "$count" == 2 ]]; then state=inactive; fi
+  inactive_digest=blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  missing_digest=false
+  if [[ "$EXISTING_TEST_SCENARIO" == baseline_digest_missing && "$count" == 1 ]] \
+    || [[ "$EXISTING_TEST_SCENARIO" == publish_readback_digest_missing && "$count" == 2 ]]; then
+    missing_digest=true
+  fi
+  if [[ "$EXISTING_TEST_SCENARIO" == unpublish_readback_bad && "$count" == 3 ]]; then state=active; fi
+  if [[ "$EXISTING_TEST_SCENARIO" == unpublish_unknown && "$count" -gt 1 ]]; then state=active; fi
+  if [[ "$count" == 2 && "$state" == inactive && "$EXISTING_TEST_SCENARIO" != publish_readback_bad ]]; then state=active; fi
+  active=false active_version=null published=null digest="$inactive_digest"
+  if [[ "$state" == active ]]; then
+    active=true active_version='"selected-version"'
+    published='{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+    digest=blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  fi
+  if [[ "$EXISTING_TEST_SCENARIO" == baseline_digest_bad && "$count" == 1 ]] \
+    || [[ "$EXISTING_TEST_SCENARIO" == publish_readback_digest_bad && "$count" == 2 ]]; then
+    digest=invalid-state-digest
+  fi
+  if [[ "$missing_digest" == true ]]; then
+    /usr/bin/jq -cn --arg active "$active" --argjson active_version "$active_version" \
+      --argjson published "$published" \
+      '{type:"response",status:"ok",result:{id:"syntheticworkflow",
+        versionId:"selected-version",active:($active=="true"),
+        activeVersionId:$active_version,isArchived:false,
+        draft:{versionId:"selected-version",graphDigest:"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        published:$published}}'
+  else
+    /usr/bin/jq -cn --arg active "$active" --argjson active_version "$active_version" \
+      --argjson published "$published" --arg digest "$digest" \
+      '{type:"response",status:"ok",result:{id:"syntheticworkflow",
+        versionId:"selected-version",active:($active=="true"),
+        activeVersionId:$active_version,isArchived:false,stateDigest:$digest,
+        draft:{versionId:"selected-version",graphDigest:"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        published:$published}}'
+  fi
+  exit 0
+fi
+[[ "$op" == "n8n.workflows.activate" ]] || exit 82
+active="$(/usr/bin/jq -r '.input.active' <<<"$envelope")" || exit 83
+approval="$(/usr/bin/jq -er '.approval_token' <<<"$envelope")" || exit 84
+[[ "$approval" == "offline-stub-token" ]] || exit 85
+if [[ "$active" == true ]]; then
+  /usr/bin/jq -e '.input.guard.precondition |
+    (keys_unsorted | sort) == ["active","activeVersionId","isArchived","stateDigest","versionId"]
+    and (.stateDigest | test("^blake3-256:[0-9A-Fa-f]{64}$"))
+    and .active == false and .activeVersionId == null
+    and .isArchived == false' <<<"$envelope" >/dev/null || exit 90
+  count=0
+  [[ -f "$EXISTING_TEST_PUBLISH_COUNT" ]] && count="$(cat "$EXISTING_TEST_PUBLISH_COUNT")"
+  printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_PUBLISH_COUNT" || exit 86
+  /usr/bin/jq -e '.input.versionId == "selected-version"
+    and .input.guard.precondition.versionId == "selected-version"
+    and .input.guard.precondition.active == false
+    and .input.guard.precondition.isArchived == false' <<<"$envelope" >/dev/null || exit 87
+  [[ "$EXISTING_TEST_SCENARIO" != publish_unknown ]] || exit 42
+  after='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+  before='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
+else
+  /usr/bin/jq -e '.input.guard.precondition |
+    (keys_unsorted | sort) == ["active","activeVersionId","isArchived","stateDigest","versionId"]
+    and (.stateDigest | test("^blake3-256:[0-9A-Fa-f]{64}$"))
+    and .active == true and .activeVersionId == "selected-version"
+    and .isArchived == false' <<<"$envelope" >/dev/null || exit 91
+  count=0
+  [[ -f "$EXISTING_TEST_UNPUBLISH_COUNT" ]] && count="$(cat "$EXISTING_TEST_UNPUBLISH_COUNT")"
+  printf '%s\n' "$((count + 1))" >"$EXISTING_TEST_UNPUBLISH_COUNT" || exit 88
+  /usr/bin/jq -e '.input.versionId == null
+    and .input.guard.precondition.versionId == "selected-version"
+    and .input.guard.precondition.active == true
+    and .input.guard.precondition.activeVersionId == "selected-version"' \
+    <<<"$envelope" >/dev/null || exit 89
+  [[ "$EXISTING_TEST_SCENARIO" != unpublish_unknown ]] || exit 43
+  before='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
+  after='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"blake3-256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
+fi
+/usr/bin/jq -cn --argjson before "$before" --argjson after "$after" \
+  '{type:"response",status:"ok",result:{status:"verified",
+    operation:"n8n.workflows.activate",active:$after.active,
+    before:$before,after:$after}}'
+EOF
+  chmod 700 -- "$mock_sudo" "$mock_approval" "$mock_parent" "$mock_launcher" || return 1
+  HANDOFF_TEST_SUDO="$mock_sudo"
+  APPROVAL_HELPER_PATH="$mock_approval"
+  PARENT_HELPER_PATH="$mock_parent"
+  LAUNCHER_PATH="$mock_launcher"
+  export EXISTING_TEST_APPROVAL_COUNT="$root/approval-count"
+  export EXISTING_TEST_GET_COUNT="$root/get-count"
+  export EXISTING_TEST_PUBLISH_COUNT="$root/publish-count"
+  export EXISTING_TEST_UNPUBLISH_COUNT="$root/unpublish-count"
+  export EXISTING_TEST_REQUEST_ROOT="$REQUEST_ROOT"
+
+  for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
+    publish_approval_failed publish_approval_code_propagated \
+    publish_approval_unrecognized \
+    publish_unknown publish_readback_bad publish_readback_digest_bad \
+    publish_readback_digest_missing unpublish_approval_failed \
+    unpublish_approval_unrecognized unpublish_unknown \
+    unpublish_readback_bad success; do
+    EXISTING_TEST_SCENARIO="$scenario"
+    export EXISTING_TEST_SCENARIO
+    EXISTING_TEST_APPROVAL_COUNT="$root/$scenario-approval-count"
+    EXISTING_TEST_GET_COUNT="$root/$scenario-get-count"
+    EXISTING_TEST_PUBLISH_COUNT="$root/$scenario-publish-count"
+    EXISTING_TEST_UNPUBLISH_COUNT="$root/$scenario-unpublish-count"
+    export EXISTING_TEST_APPROVAL_COUNT EXISTING_TEST_GET_COUNT \
+      EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT
+    EVIDENCE_DIR="$root/evidence-$scenario"
+    REQUEST_ROOT="$root/approval-requests"
+    ACTIVATION_PUBLISH_STATUS=125
+    ACTIVATION_UNPUBLISH_STATUS=125
+    if run_existing_version_acceptance >"$root/$scenario-output"; then status=0; else status=$?; fi
+    get_count="$(cat "$EXISTING_TEST_GET_COUNT" 2>/dev/null || printf 0)"
+    publish_count="$(cat "$EXISTING_TEST_PUBLISH_COUNT" 2>/dev/null || printf 0)"
+    unpublish_count="$(cat "$EXISTING_TEST_UNPUBLISH_COUNT" 2>/dev/null || printf 0)"
+    approval_count="$(cat "$EXISTING_TEST_APPROVAL_COUNT" 2>/dev/null || printf 0)"
+    evidence="$EVIDENCE_DIR"
+    [[ -f "$evidence/summary.json" ]] || return 1
+    if [[ "$scenario" == baseline_bad || "$scenario" == baseline_digest_bad \
+      || "$scenario" == baseline_digest_missing ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+    elif [[ "$scenario" == publish_approval_failed ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "invalid_seed"
+        and .publish_approval_abort_code == "invalid_seed"
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "invalid_seed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == publish_approval_code_propagated ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "clock_failed"
+        and .publish_approval_abort_code == "clock_failed"
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "clock_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == publish_approval_unrecognized ]]; then
+      [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "preinvoke_failed"
+        and (has("publish_approval_abort_code") | not)
+        and .publish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "preinvoke_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY-UNRECOGNIZED' "$root/$scenario-output" "$evidence"; then
+        return 1
+      fi
+    elif [[ "$scenario" == unpublish_approval_failed ]]; then
+      [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "invalid_seed"
+        and .unpublish_approval_abort_code == "invalid_seed"
+        and (has("publish_approval_abort_code") | not)
+        and .publish_status == 0 and .publish_readback_status == 0
+        and .publish_attempts == 1 and .unpublish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "invalid_seed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+    elif [[ "$scenario" == unpublish_approval_unrecognized ]]; then
+      [[ "$status" == 10 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "preinvoke_failed"
+        and (has("publish_approval_abort_code") | not)
+        and (has("unpublish_approval_abort_code") | not)
+        and .publish_status == 0 and .publish_readback_status == 0
+        and .publish_attempts == 1 and .unpublish_attempts == 0 and .retries == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.verdict == "STOP" and .abort_code == "preinvoke_failed"' \
+        "$root/$scenario-output" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY-UNRECOGNIZED' "$root/$scenario-output" "$evidence"; then
+        return 1
+      fi
+    elif [[ "$scenario" == publish_unknown ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+    elif [[ "$scenario" == publish_readback_bad ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+    elif [[ "$scenario" == publish_readback_digest_bad \
+      || "$scenario" == publish_readback_digest_missing ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+    elif [[ "$scenario" == unpublish_unknown ]]; then
+      [[ "$status" == 20 && "$get_count" == 3 && "$publish_count" == 1 \
+        && "$unpublish_count" == 1 && "$approval_count" == 2 ]] || return 1
+    elif [[ "$scenario" == unpublish_readback_bad ]]; then
+      [[ "$status" == 20 && "$get_count" == 3 && "$publish_count" == 1 \
+        && "$unpublish_count" == 1 && "$approval_count" == 2 ]] || return 1
+    else
+      [[ "$status" == 0 && "$get_count" == 3 && "$publish_count" == 1 \
+        && "$unpublish_count" == 1 && "$approval_count" == 2 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "pass" and .evidence_complete == true
+        and .publish_attempts == 1 and .unpublish_attempts == 1' \
+        "$evidence/summary.json" >/dev/null || return 1
+    fi
+    if rg -q 'offline-stub-token|PRIVATE-CANARY|raw provider body' "$evidence" \
+      "$root/$scenario-output"; then return 1; fi
+  done
+
+  rejected_evidence="/tmp/${root##*/}-production-reject"
+  [[ ! -e "$rejected_evidence" && ! -L "$rejected_evidence" ]] || return 1
+  EXISTING_TEST_SCENARIO=production_tmp_rejected
+  export EXISTING_TEST_SCENARIO
+  EXISTING_TEST_APPROVAL_COUNT="$root/preflight-approval-count"
+  EXISTING_TEST_GET_COUNT="$root/preflight-get-count"
+  EXISTING_TEST_PUBLISH_COUNT="$root/preflight-publish-count"
+  EXISTING_TEST_UNPUBLISH_COUNT="$root/preflight-unpublish-count"
+  export EXISTING_TEST_APPROVAL_COUNT EXISTING_TEST_GET_COUNT \
+    EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT
+  EVIDENCE_DIR="$rejected_evidence"
+  SELF_TEST=0
+  if run_existing_version_acceptance >"$root/production-preflight.json"; then
+    SELF_TEST=1
+    return 1
+  else
+    status=$?
+  fi
+  SELF_TEST=1
+  [[ "$status" == 10 && ! -e "$rejected_evidence" ]] || return 1
+  rg -q 'evidence_directory_not_durable' "$root/production-preflight.json" || return 1
+  [[ ! -e "$EXISTING_TEST_APPROVAL_COUNT" && ! -e "$EXISTING_TEST_GET_COUNT" \
+    && ! -e "$EXISTING_TEST_PUBLISH_COUNT" \
+    && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
+
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":16}\n' \
+    "$EXISTING_VERSION_SCHEMA"
 }
 
 persist_activation_summary() {
@@ -1499,17 +2489,33 @@ EOF
 
 parse_args() {
   local positional=()
+  local server_option_set=0
+  local workflow_option_set=0
+  local version_option_set=0
+  local evidence_option_set=0
   while (( $# > 0 )); do
     case "$1" in
       --server)
         (( $# >= 2 )) || return 1
         SERVER="$2"
+        server_option_set=1
         shift 2
         ;;
       --workflow-id)
         (( $# >= 2 )) || return 1
         WORKFLOW_ID="$2"
+        workflow_option_set=1
         shift 2
+        ;;
+      --version-id)
+        (( $# >= 2 )) || return 1
+        VERSION_ID="$2"
+        version_option_set=1
+        shift 2
+        ;;
+      --existing-version)
+        EXISTING_VERSION_MODE=1
+        shift
         ;;
       --activation)
         ACTIVATION_MODE=1
@@ -1533,6 +2539,7 @@ parse_args() {
       --evidence-dir)
         (( $# >= 2 )) || return 1
         EVIDENCE_DIR="$2"
+        evidence_option_set=1
         shift 2
         ;;
       --help|-h)
@@ -1548,11 +2555,19 @@ parse_args() {
         ;;
     esac
   done
-  local server_option_set=0
-  [[ -n "$SERVER" ]] && server_option_set=1
+  if (( EXISTING_VERSION_MODE == 1 )); then
+    (( ACTIVATION_MODE == 0 && server_option_set == 1 \
+      && workflow_option_set == 1 && version_option_set == 1 \
+      && evidence_option_set == 1 )) || return 1
+    [[ "${#positional[@]}" -eq 0 && "$EVIDENCE_DIR" == /* ]] || return 1
+    valid_server "$SERVER" && valid_workflow_id "$WORKFLOW_ID" \
+      && valid_version_id "$VERSION_ID"
+    return $?
+  fi
   [[ -n "$SERVER" ]] || [[ "${#positional[@]}" -ge 1 ]] || return 1
   [[ -n "$SERVER" ]] || SERVER="${positional[0]}"
   if (( ACTIVATION_MODE == 1 )); then
+    (( version_option_set == 0 && EXISTING_VERSION_MODE == 0 )) || return 1
     [[ -z "$WORKFLOW_ID" ]] || return 1
     if (( server_option_set == 1 )); then
       [[ "${#positional[@]}" -eq 0 ]] || return 1
@@ -1561,6 +2576,7 @@ parse_args() {
     fi
     valid_server "$SERVER"
   else
+    (( version_option_set == 0 )) || return 1
     [[ -n "$WORKFLOW_ID" ]] || [[ "${#positional[@]}" -ge 2 ]] || return 1
     [[ -n "$WORKFLOW_ID" ]] || WORKFLOW_ID="${positional[1]}"
     [[ "${#positional[@]}" -le 2 ]] || return 1
@@ -1613,6 +2629,14 @@ main() {
     }
     return 0
   fi
+  if [[ "${1:-}" == --existing-version-self-test && "$#" -eq 1 ]]; then
+    run_existing_version_self_test || {
+      printf '{"schema":"%s","verdict":"STOP","mode":"existing-version-self-test","abort_code":"self_test_failed"}\n' \
+        "$EXISTING_VERSION_SCHEMA"
+      return 1
+    }
+    return 0
+  fi
   if ! parse_args "$@"; then
     usage >&2
     emit_stop invalid_arguments
@@ -1622,7 +2646,11 @@ main() {
     run_activation_acceptance
     return $?
   fi
-  if [[ ! -x "$JQ_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
+  if (( EXISTING_VERSION_MODE == 1 )); then
+    run_existing_version_acceptance
+    return $?
+  fi
+  if [[ ! -x "$JQ_BIN" || ! -x "$AWK_BIN" || ! -x "$STAT_BIN" || ! -x "$UUIDGEN_BIN" || ! -x "$TIMEOUT_BIN" ]]; then
     emit_stop dependency_missing
     return 10
   fi

@@ -1853,6 +1853,11 @@ struct FwcN8nErrorEnvelope {
 #[cfg(target_os = "linux")]
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "lifecycle_provider_rejected",
+    "lifecycle_provider_status_rejected",
+    "lifecycle_provider_error_field",
+    "lifecycle_provider_result_is_error",
+    "lifecycle_provider_result_success_false",
+    "lifecycle_provider_result_error_field",
     "provider_unauthorized",
     "provider_forbidden",
     "provider_not_found",
@@ -2524,6 +2529,22 @@ mod tests {
         assert_eq!(error.code(), "child_failed");
         assert_eq!(error.diagnostic(), Some("response_capability"));
         assert_eq!(error.correlation_id(), Uuid::parse_str(correlation_id).ok());
+
+        for diagnostic in [
+            "lifecycle_provider_status_rejected",
+            "lifecycle_provider_error_field",
+            "lifecycle_provider_result_is_error",
+            "lifecycle_provider_result_success_false",
+            "lifecycle_provider_result_error_field",
+        ] {
+            let encoded = format!(
+                r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"{diagnostic}","correlationId":"{correlation_id}"}}"#
+            );
+            let error = child_failure(encoded.as_bytes());
+            assert_eq!(error.code(), "child_failed");
+            assert_eq!(error.diagnostic(), Some(diagnostic));
+            assert_eq!(error.correlation_id(), Uuid::parse_str(correlation_id).ok());
+        }
 
         let private = "PRIVATE-PROVIDER-DETAIL";
         let encoded = format!(

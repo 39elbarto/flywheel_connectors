@@ -119,23 +119,50 @@ scripts/n8n_unarchive_acceptance.sh \
 
 Activation mode validates a closed plan before the first provider call: one
 credential-free Webhook draft with `availableInMCP=false`, one create/readback,
-one publish/readback, one active-state GET, and one unpublish/readback. It uses
-only `fwc-n8n run-once`, permits zero retries and zero execution/cleanup
-actions, and the self-test reports `provider_actions:0`; it does not invoke the
-Webhook, use credentials, or persist request/provider bodies, tokens, or
-secrets. The activation evidence directory is mandatory: an omitted,
-unavailable, or unwritable directory stops before the first provider call and
-can never produce `pass`. A timeout, malformed response, or readback mismatch returns
-`unknown`/`STOP`; do not retry or start the next server after an unresolved
-result.
+one publish/readback, one active-state GET, one unpublish, and one final
+independent GET. The final GET must prove the same workflow ID and selected
+draft version and graph, `active=false`, `activeVersionId=null`,
+`published=null`, and `isArchived=false`; missing, malformed, or mismatched
+state is `unknown` and can never produce `pass`. It uses only
+`fwc-n8n run-once`, permits zero retries and zero execution/cleanup actions,
+and the self-test reports `provider_actions:0`; it does not invoke the Webhook,
+use credentials, or persist request/provider bodies, tokens, or secrets. The
+activation evidence directory is mandatory, must be below the persistent SSD
+root, and must be new for each run. The runner creates it with an exclusive
+`mkdir`; a reused directory or existing claim refuses before a provider
+mutation. Immediately after approval is available and before each create,
+publish, or unpublish handoff, the runner atomically creates and syncs one
+mode-0600 claim file with the operation, server, run and correlation IDs, and
+bounded target. Claims are never replaced or erased. Approval or setup failure
+before the first invocation handoff is `STOP`; once a create, publish, or
+unpublish handoff may have started, any nonzero result, missing or invalid
+create ID, empty/malformed projection, uncertain readback, timeout, or evidence
+write/validation failure is terminal `unknown`. The runner emits `unknown`
+even if it cannot persist a redacted projection or summary, so durable evidence
+is not guaranteed for that outcome. It makes no further provider calls after
+that result. Do not retry or start the next server; reconcile the workflow's
+current provider state before any new invocation.
 
 A live `pass` is emitted only after the runner has durably written, reread, and
 validated the complete redacted evidence bundle. It contains
-`activation-plan.json`, the five `activation-*.json` projections, three
-`transition-{create,publish,unpublish}.json` records, and `summary.json`; the
-summary's `evidence_complete` flag and all transition/projection postconditions
-must validate. Any missing file, failed write, metadata mismatch, or validation
-failure returns `STOP` rather than `pass`.
+`activation-plan.json`, six `activation-*.json` projections (including
+`activation-final-readback.json`), three
+`activation-claim-{create,publish,unpublish}.json` receipts, three
+`transition-{create,publish,unpublish}.json` records, and `summary.json`. The
+summary lists the final GET and every mutation claim; its `evidence_complete`
+flag and all claim, transition, and projection postconditions must validate.
+After a mutation may have started, any missing file, failed write, metadata
+mismatch, or validation failure returns `unknown`, never `pass` or a retry-
+inviting `STOP`; the `unknown` result is emitted even when evidence cannot be
+persisted. Before the first mutation, setup or evidence failures remain `STOP`.
+
+The offline activation self-test drives this same production runner through
+local launcher, approval, and parent-binding stubs. It checks the successful
+sequence, one-shot unknown outcomes for each ambiguous mutation, invalid
+create ID after handoff, evidence persistence failure after create,
+pre-handoff approval failure, final-GET failure and mismatch, reused evidence
+and claim refusal, and that raw/secret sentinels do not enter evidence. All
+stubs are local and never call an issuer or provider.
 
 ## Explicit existing workflow/version acceptance (operator invoked)
 

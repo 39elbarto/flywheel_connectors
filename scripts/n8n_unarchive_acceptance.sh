@@ -158,7 +158,7 @@ emit_activation_stop() {
 
 emit_activation_unknown() {
   local code="${1:-unknown_outcome}"
-  printf '{"schema":"%s","verdict":"unknown","abort_code":"%s","server":"%s","workflow_id":"%s"}\n' \
+  printf '{"schema":"%s","verdict":"unknown","abort_code":"%s","server":"%s","workflow_id":"%s","evidence_complete":false}\n' \
     "$ACTIVATION_SCHEMA" "$code" "$SERVER" "$ACTIVATION_WORKFLOW_ID"
 }
 
@@ -859,6 +859,35 @@ if [[ "$op" == n8n.workflows.get ]]; then
 fi
 if [[ "$op" == n8n.workflows.create_draft ]]; then
   printf_line create
+  if [[ "$ACTIVATION_TEST_SCENARIO" == diagnostic_persist_failure ]]; then
+    printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' \
+      'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network token=PRIVATE-CANARY' >&2
+    exit 42
+  fi
+  if [[ "$ACTIVATION_TEST_SCENARIO" == create_diagnostic ]]; then
+    i=0
+    while (( i < 128 )); do
+      printf '%s\n' 'unrecognized diagnostic filler line that must be drained' >&2
+      ((i += 1))
+    done
+    printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' \
+      'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network token=PRIVATE-CANARY' >&2
+    exit 42
+  fi
+  if [[ "$ACTIVATION_TEST_SCENARIO" == create_diagnostic_cap ]]; then
+    i=0
+    while (( i < 40 )); do
+      printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' >&2
+      ((i += 1))
+    done
+    i=0
+    while (( i < 2048 )); do
+      printf '%s\n' 'unrecognized diagnostic filler line that must be drained' >&2
+      ((i += 1))
+    done
+    printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network secret=PRIVATE-CANARY' >&2
+    exit 42
+  fi
   [[ "$ACTIVATION_TEST_SCENARIO" != create_ambiguous ]] || { printf '%s\n' '{"private_canary":"PRIVATE-CANARY"}'; exit 42; }
   if [[ "$ACTIVATION_TEST_SCENARIO" == evidence_persist_failure ]]; then
     mkdir -m 700 -- "$ACTIVATION_TEST_EVIDENCE/activation-create.json" || exit 84
@@ -886,7 +915,7 @@ EOF
   PARENT_HELPER_PATH="$root/parent"
   LAUNCHER_PATH="$root/launcher"
   export ACTIVATION_TEST_REQUESTS="$REQUEST_ROOT"
-  for scenario in success create_ambiguous publish_ambiguous unpublish_ambiguous \
+  for scenario in success create_ambiguous create_diagnostic create_diagnostic_cap diagnostic_persist_failure publish_ambiguous unpublish_ambiguous \
     invalid_create_id evidence_persist_failure approval_failure \
     final_get_failure final_get_mismatch preexisting_claim; do
     evidence="$root/evidence-$scenario"; log="$root/$scenario.log"
@@ -917,6 +946,24 @@ EOF
       "$JQ_BIN" -e '.final_status == 0 and .mutation_claims == ["activation-claim-create.json","activation-claim-publish.json","activation-claim-unpublish.json"]' "$evidence/summary.json" >/dev/null || return 1
     elif [[ "$scenario" == create_ambiguous ]]; then
       [[ "$status" == 20 && "$output" == *'"verdict":"unknown"'* && "$(cat "$log")" == create ]] || return 1
+    elif [[ "$scenario" == create_diagnostic ]]; then
+      [[ "$status" == 20 && "$output" == *'"verdict":"unknown"'* \
+        && "$(cat "$log")" == create ]] || return 1
+      "$JQ_BIN" -e '.labels == ["FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network"]' \
+        "$evidence/activation-create-diagnostics.json" >/dev/null || return 1
+      "$JQ_BIN" -e '.evidence_files | index("activation-create-diagnostics.json") != null' \
+        "$evidence/summary.json" >/dev/null || return 1
+      ! rg -q 'PRIVATE-CANARY|token=' "$evidence/activation-create-diagnostics.json" || return 1
+    elif [[ "$scenario" == create_diagnostic_cap ]]; then
+      [[ "$status" == 20 && "$(cat "$log")" == create ]] || return 1
+      "$JQ_BIN" -e '.labels | length == 32 and all(.[]; . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network")' \
+        "$evidence/activation-create-diagnostics.json" >/dev/null || return 1
+      ! rg -q 'PRIVATE-CANARY|secret=' "$evidence/activation-create-diagnostics.json" || return 1
+    elif [[ "$scenario" == diagnostic_persist_failure ]]; then
+      [[ "$status" == 125 && "$output" == *'"verdict":"unknown"'* \
+        && "$output" == *'"evidence_complete":false'* \
+        && "$(cat "$log")" == create && ! -e "$evidence/activation-create.json" \
+        && ! -e "$evidence/summary.json" ]] || return 1
     elif [[ "$scenario" == invalid_create_id || "$scenario" == evidence_persist_failure ]]; then
       [[ "$status" == 20 && "$output" == *'"verdict":"unknown"'* \
         && "$output" != *'"verdict":"pass"'* && "$(cat "$log")" == create ]] || return 1
@@ -993,7 +1040,7 @@ run_activation_self_test() {
   fixture="$("$JQ_BIN" -c '.sequence[5] = "publish_once"' <<<"$base")" || return 1
   if validate_activation_plan "$fixture"; then return 1; fi
   run_activation_runner_self_test || return 1
-  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":21}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"activation-self-test","acceptance":false,"provider_actions":0,"cases":23}\n' \
     "$ACTIVATION_SCHEMA"
 }
 
@@ -1278,6 +1325,43 @@ filter_n8n_run_once_diagnostics() {
       fflush()
     }
   '
+}
+
+capture_activation_create_diagnostics() {
+  local path="$EVIDENCE_DIR/activation-create-diagnostics.json"
+  [[ -n "$EVIDENCE_DIR" && ! -e "$path" ]] || return 125
+  (
+    set -o noclobber
+    exec 3>"$path" || exit 125
+    "$AWK_BIN" '
+      function allowed(line) {
+        return line ~ /^FCP-N8N-HOST-ERROR-DETAIL\/v1 policy\.(approval|capability|deployment|network|lease|binding|decision|other)$/ ||
+          line ~ /^FCP-N8N-HOST-ERROR-DETAIL\/v1 host\.other$/ ||
+          line ~ /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 dispatch_(4xx|5xx|other)$/ ||
+          line ~ /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 response_(protocol|auth|rate_limited|capability|zone|connector|resource|external_(4xx|5xx|other|unknown)|upstream_timeout|dependency_unavailable|internal)$/
+      }
+      BEGIN {
+        count = 0
+        printf "{\"schema\":\"fwc.n8n.activation-diagnostics.v1\",\"operation\":\"create_draft\",\"labels\":["
+      }
+      {
+        if (count < 32 && allowed($0)) {
+          if (count > 0) printf ","
+          printf "\"%s\"", $0
+          count++
+        }
+      }
+      END { printf "]}\n" }
+    ' <&0 >&3 || exit 125
+    exec 3>&-
+    chmod 600 -- "$path" || exit 125
+    "$SYNC_BIN" -d "$path" "$EVIDENCE_DIR" >/dev/null 2>&1 || exit 125
+    if [[ "${ACTIVATION_TEST_SCENARIO:-}" == diagnostic_persist_failure ]]; then
+      "$SYNC_BIN" -d "$EVIDENCE_DIR/.missing-diagnostic-sync-target" \
+        >/dev/null 2>&1 || exit 125
+      exit 125
+    fi
+  )
 }
 
 capture_approval_abort_code() {
@@ -1601,6 +1685,21 @@ run_unarchive_once() {
 
 run_activation_once() {
   local approval_reader_fd="$1"
+  local status
+  if [[ "$HANDOFF_EVIDENCE_NAME" == create ]]; then
+    exec 3>&1 || return 125
+    "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
+      --arg server "$SERVER" --argjson input "$HANDOFF_INPUT" \
+      --arg correlation "$HANDOFF_CORRELATION_ID" --argjson deadline "$HANDOFF_DEADLINE_MS" \
+      '{server_id:$server,input:$input,approval_token:$approval[0],
+        deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
+      "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" \
+        4>&3 2>&1 1>&4 |
+      capture_activation_create_diagnostics
+    status=$?
+    exec 3>&-
+    return "$status"
+  fi
   "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
       --arg server "$SERVER" --argjson input "$HANDOFF_INPUT" \
       --arg correlation "$HANDOFF_CORRELATION_ID" --argjson deadline "$HANDOFF_DEADLINE_MS" \
@@ -1864,7 +1963,7 @@ validate_activation_summary() {
       and .evidence_files == ["activation-plan.json","activation-create.json",
         "activation-baseline.json","activation-publish.json",
         "activation-active.json","activation-unpublish.json",
-        "activation-final-readback.json"]
+        "activation-final-readback.json","activation-create-diagnostics.json"]
       and .transition_records == ["transition-create.json",
         "transition-publish.json","transition-unpublish.json"]
       and .mutation_claims == ["activation-claim-create.json",
@@ -1893,11 +1992,12 @@ validate_activation_evidence_bundle() {
   local final_readback
   local claim_create claim_publish claim_unpublish
   local transition_create transition_publish transition_unpublish
+  local create_diagnostics
   local summary
 
   (( ACTIVATION_MODE == 1 )) || return 1
   [[ -n "$EVIDENCE_DIR" ]] || return 1
-  for name in activation-plan activation-create activation-baseline \
+  for name in activation-plan activation-create activation-create-diagnostics activation-baseline \
     activation-publish activation-active activation-unpublish \
     activation-final-readback activation-claim-create \
     activation-claim-publish activation-claim-unpublish \
@@ -1917,6 +2017,7 @@ validate_activation_evidence_bundle() {
   transition_create="$(read_activation_record transition-create)" || return 1
   transition_publish="$(read_activation_record transition-publish)" || return 1
   transition_unpublish="$(read_activation_record transition-unpublish)" || return 1
+  create_diagnostics="$(read_activation_record activation-create-diagnostics)" || return 1
   summary="$(read_activation_record summary)" || return 1
   validate_activation_plan "$plan" || return 1
   validate_activation_create "$create" || return 1
@@ -1925,6 +2026,38 @@ validate_activation_evidence_bundle() {
   validate_activation_active_readback "$active" || return 1
   validate_activation_unpublish "$unpublish" || return 1
   validate_activation_final_readback "$final_readback" || return 1
+  "$JQ_BIN" -e '
+    .schema == "fwc.n8n.activation-diagnostics.v1"
+    and .operation == "create_draft"
+    and (.labels | type) == "array" and (.labels | length) <= 32
+    and all(.labels[];
+      . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.approval"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.capability"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.deployment"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.lease"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.binding"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.decision"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.other"
+      or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 host.other"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_4xx"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_5xx"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_other"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_protocol"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_auth"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_rate_limited"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_capability"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_zone"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_connector"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_resource"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_4xx"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_other"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_unknown"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_upstream_timeout"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_dependency_unavailable"
+      or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_internal")
+  ' <<<"$create_diagnostics" >/dev/null || return 1
   validate_activation_transition_record \
     "$transition_create" create \
     "$ACTIVATION_CREATE_OPERATION" "$ACTIVATION_WORKFLOW_ID" activation-create || return 1
@@ -3056,7 +3189,7 @@ persist_activation_summary() {
       evidence_files:["activation-plan.json","activation-create.json",
         "activation-baseline.json","activation-publish.json",
         "activation-active.json","activation-unpublish.json",
-        "activation-final-readback.json"],
+        "activation-final-readback.json","activation-create-diagnostics.json"],
       transition_records:["transition-create.json","transition-publish.json",
         "transition-unpublish.json"],
       mutation_claims:["activation-claim-create.json",
@@ -3099,6 +3232,10 @@ run_activation_acceptance() {
   if ! activation_invoke_step "$ACTIVATION_CREATE_OPERATION" "create_draft" \
     "$ACTIVATION_CREATE_INPUT" "" "fwc-n8n://$SERVER" create; then
     ACTIVATION_CREATE_STATUS="$INVOCATION_STATUS"
+    if (( HANDOFF_INVOKE_STARTED == 1 && INVOCATION_STATUS == 125 )); then
+      emit_activation_unknown diagnostic_capture_failed
+      return 125
+    fi
     raw_projection="${INVOKE_PROJECTION:-{\"type\":null,\"status\":\"unknown\",\"error_code\":\"handoff_failed\"}}"
     persist_projection activation-create "$raw_projection" || true
     activation_finish_failure create_unknown
@@ -3107,6 +3244,10 @@ run_activation_acceptance() {
   ACTIVATION_CREATE_STATUS="$INVOCATION_STATUS"
   raw_projection="$INVOKE_PROJECTION"
   if (( INVOCATION_STATUS != 0 )) || ! validate_activation_create "$raw_projection"; then
+    if (( HANDOFF_INVOKE_STARTED == 1 && INVOCATION_STATUS == 125 )); then
+      emit_activation_unknown diagnostic_capture_failed
+      return 125
+    fi
     if ! persist_projection activation-create "$raw_projection"; then
       activation_finish_failure evidence_write_failed
       return $?

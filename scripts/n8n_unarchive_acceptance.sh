@@ -126,6 +126,7 @@ EXISTING_PUBLISH_HELPER_STATUS=125
 EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
 EXISTING_UNPUBLISH_HELPER_STATUS=125
 EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
+EXISTING_DIAGNOSTIC_CAPTURE_FAILED=0
 EXISTING_CONTINUATION_BASELINE=""
 EXISTING_PRIOR_SUMMARY=""
 EXISTING_PRIOR_PUBLISH_STATE_DIGEST=""
@@ -196,8 +197,10 @@ emit_existing_unknown() {
 
 emit_existing_pass() {
   local summary plan baseline publish publish_readback unpublish final_readback
+  local publish_diagnostics unpublish_diagnostics
   for name in existing-version-plan existing-baseline existing-publish \
-    existing-publish-readback existing-unpublish existing-final-readback \
+    existing-publish-diagnostics existing-publish-readback existing-unpublish \
+    existing-unpublish-diagnostics existing-final-readback \
     transition-publish transition-unpublish summary; do
     validate_activation_record_file "$name" || {
       emit_existing_stop evidence_validation_failed
@@ -213,12 +216,16 @@ emit_existing_pass() {
   publish="$(read_activation_record existing-publish)" || return 10
   publish_readback="$(read_activation_record existing-publish-readback)" || return 10
   unpublish="$(read_activation_record existing-unpublish)" || return 10
+  publish_diagnostics="$(read_activation_record existing-publish-diagnostics)" || return 10
+  unpublish_diagnostics="$(read_activation_record existing-unpublish-diagnostics)" || return 10
   final_readback="$(read_activation_record existing-final-readback)" || return 10
   validate_existing_version_plan "$plan" \
     && validate_existing_baseline "$baseline" \
     && validate_existing_publish_invoke "$publish" \
+    && validate_existing_invoke_diagnostics "$publish_diagnostics" existing-publish \
     && validate_existing_publish_readback "$publish_readback" \
     && validate_existing_unpublish_invoke "$unpublish" \
+    && validate_existing_invoke_diagnostics "$unpublish_diagnostics" existing-unpublish \
     && validate_existing_final_readback "$final_readback" \
     && validate_activation_transition_record \
       "$(read_activation_record transition-publish)" publish \
@@ -246,7 +253,8 @@ emit_existing_pass() {
         "unpublish_independent_get_once"]
       and .evidence_files == ["existing-version-plan.json",
         "existing-baseline.json","existing-publish.json",
-        "existing-publish-readback.json","existing-unpublish.json",
+        "existing-publish-diagnostics.json","existing-publish-readback.json",
+        "existing-unpublish.json","existing-unpublish-diagnostics.json",
         "existing-final-readback.json","transition-publish.json",
         "transition-unpublish.json"]
       and .automatic_cleanup == false and .workflow_creation == false
@@ -665,8 +673,9 @@ persist_existing_summary() {
       retries:0,automatic_cleanup:false,workflow_creation:false,
       execution_attempts:0,evidence_complete:($verdict == "pass"),
       evidence_files:["existing-version-plan.json","existing-baseline.json",
-        "existing-publish.json","existing-publish-readback.json",
-        "existing-unpublish.json","existing-final-readback.json",
+        "existing-publish.json","existing-publish-diagnostics.json",
+        "existing-publish-readback.json","existing-unpublish.json",
+        "existing-unpublish-diagnostics.json","existing-final-readback.json",
         "transition-publish.json","transition-unpublish.json"],
       raw_provider_bodies_persisted:false,raw_request_bodies_persisted:false,
       tokens_persisted:false,secrets_persisted:false}
@@ -1327,6 +1336,99 @@ filter_n8n_run_once_diagnostics() {
   '
 }
 
+capture_existing_invoke_diagnostics() {
+  local action="$1"
+  local path
+  local metadata
+  local persisted
+  case "$action" in
+    existing-publish|existing-unpublish) ;;
+    *) return 125 ;;
+  esac
+  [[ -n "$EVIDENCE_DIR" ]] || return 125
+  path="$EVIDENCE_DIR/$action-diagnostics.json"
+  [[ ! -e "$path" && ! -L "$path" ]] || return 125
+  (
+    umask 077
+    set -o noclobber
+    exec 3>"$path" || exit 125
+    "$AWK_BIN" -v action="$action" '
+      function allowed(line) {
+        return line ~ /^FCP-N8N-HOST-ERROR-DETAIL\/v1 policy\.(approval|capability|deployment|network|lease|binding|decision|other)$/ ||
+          line ~ /^FCP-N8N-HOST-ERROR-DETAIL\/v1 host\.other$/ ||
+          line ~ /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 dispatch_(4xx|5xx|other)$/ ||
+          line ~ /^FCP-N8N-INVOKE-DIAGNOSTIC\/v1 response_(protocol|auth|rate_limited|capability|zone|connector|resource|external_(4xx|5xx|other|unknown)|upstream_timeout|dependency_unavailable|internal)$/
+      }
+      BEGIN {
+        count = 0
+        printf "{\"schema\":\"fwc.n8n.existing-version-diagnostics.v1\",\"operation\":\"%s\",\"labels\":[", action
+      }
+      {
+        if (count < 32 && allowed($0)) {
+          if (count > 0) printf ","
+          printf "\"%s\"", $0
+          count++
+        }
+      }
+      END { printf "]}\n" }
+    ' <&0 >&3 || exit 125
+    exec 3>&-
+    chmod 600 -- "$path" || exit 125
+    "$SYNC_BIN" -d "$path" "$EVIDENCE_DIR" >/dev/null 2>&1 || exit 125
+    metadata="$("$STAT_BIN" -c '%u:%g:%a:%h:%F:%s' -- "$path" 2>/dev/null)" || exit 125
+    [[ "$metadata" =~ ^[0-9]+:[0-9]+:600:1:regular\ file:[1-9][0-9]*$ ]] || exit 125
+    persisted="$(cat -- "$path")" || exit 125
+    "$JQ_BIN" -e --arg action "$action" '
+      .schema == "fwc.n8n.existing-version-diagnostics.v1"
+      and .operation == $action and (.labels | length) <= 32
+      and all(.labels[]; . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.approval"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.capability"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.deployment"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.lease"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.binding"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.decision"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.other"
+        or . == "FCP-N8N-HOST-ERROR-DETAIL/v1 host.other"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_4xx"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_5xx"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_other"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_protocol"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_auth"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_rate_limited"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_capability"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_zone"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_connector"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_resource"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_4xx"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_other"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_unknown"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_upstream_timeout"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_dependency_unavailable"
+        or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_internal")
+    ' <<<"$persisted" >/dev/null 2>&1 || exit 125
+    if (( SELF_TEST == 1 )) \
+      && [[ "${EXISTING_TEST_SCENARIO:-}" == publish_diagnostic_persist_failure ]] \
+      && [[ "$action" == existing-publish ]]; then
+      "$SYNC_BIN" -d "$EVIDENCE_DIR/.missing-diagnostic-sync-target" \
+        >/dev/null 2>&1 || exit 125
+      exit 125
+    fi
+  )
+}
+
+validate_existing_invoke_diagnostics() {
+  local record="$1"
+  local action="$2"
+  "$JQ_BIN" -e --arg action "$action" '
+    .schema == "fwc.n8n.existing-version-diagnostics.v1"
+    and .operation == $action and (.labels | type) == "array"
+    and (.labels | length) <= 32
+    and all(.labels[]; test("^(FCP-N8N-HOST-ERROR-DETAIL/v1 policy\\.(approval|capability|deployment|network|lease|binding|decision|other)|FCP-N8N-HOST-ERROR-DETAIL/v1 host\\.other|FCP-N8N-INVOKE-DIAGNOSTIC/v1 dispatch_(4xx|5xx|other)|FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_(protocol|auth|rate_limited|capability|zone|connector|resource|external_(4xx|5xx|other|unknown)|upstream_timeout|dependency_unavailable|internal))$"))
+  ' <<<"$record" >/dev/null 2>&1
+}
+
 capture_activation_create_diagnostics() {
   local path="$EVIDENCE_DIR/activation-create-diagnostics.json"
   [[ -n "$EVIDENCE_DIR" && ! -e "$path" ]] || return 125
@@ -1663,6 +1765,13 @@ approval_fd3_handoff() {
   fi
   APPROVAL_READER_STATUS="$reader_status"
   (( output_status == 0 && reader_status == 0 )) || invoke_status=125
+  if (( EXISTING_VERSION_MODE == 1 && CONTINUE_UNPUBLISH_MODE == 0 )) \
+    && [[ "$HANDOFF_EVIDENCE_NAME" == existing-publish \
+      || "$HANDOFF_EVIDENCE_NAME" == existing-unpublish ]] \
+    && (( invoke_status == 124 )); then
+    EXISTING_DIAGNOSTIC_CAPTURE_FAILED=1
+    invoke_status=125
+  fi
   INVOCATION_STATUS="$invoke_status"
   if [[ -z "$invoke_output" ]]; then
     INVOKE_PROJECTION='{"type":null,"status":"unknown","error_code":"empty_response"}'
@@ -1686,6 +1795,7 @@ run_unarchive_once() {
 run_activation_once() {
   local approval_reader_fd="$1"
   local status
+  local -a pipeline_status=()
   if [[ "$HANDOFF_EVIDENCE_NAME" == create ]]; then
     exec 3>&1 || return 125
     "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
@@ -1698,6 +1808,29 @@ run_activation_once() {
       capture_activation_create_diagnostics
     status=$?
     exec 3>&-
+    return "$status"
+  fi
+  if (( EXISTING_VERSION_MODE == 1 && CONTINUE_UNPUBLISH_MODE == 0 )) \
+    && [[ "$HANDOFF_EVIDENCE_NAME" == existing-publish \
+      || "$HANDOFF_EVIDENCE_NAME" == existing-unpublish ]]; then
+    exec 3>&1 || return 124
+    "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
+        --arg server "$SERVER" --argjson input "$HANDOFF_INPUT" \
+        --arg correlation "$HANDOFF_CORRELATION_ID" --argjson deadline "$HANDOFF_DEADLINE_MS" \
+        '{server_id:$server,input:$input,approval_token:$approval[0],
+          deadline_ms:$deadline,correlation_id:$correlation}' <&"$approval_reader_fd" |
+      "$LAUNCHER_PATH" run-once "$HANDOFF_OPERATION" \
+        4>&3 2>&1 1>&4 |
+      capture_existing_invoke_diagnostics "$HANDOFF_EVIDENCE_NAME"
+    pipeline_status=("${PIPESTATUS[@]}")
+    exec 3>&-
+    if (( ${pipeline_status[2]:-125} != 0 )); then
+      return 124
+    fi
+    status="${pipeline_status[1]:-125}"
+    # Reserve 124 for diagnostic capture failure and normalize colliding
+    # launcher exits so the parent can distinguish the sticky stop condition.
+    (( status == 124 || status == 125 )) && status=1
     return "$status"
   fi
   "$JQ_BIN" -cn --slurpfile approval /dev/stdin \
@@ -2102,6 +2235,17 @@ activation_invoke_step() {
   HANDOFF_EVIDENCE_NAME="$evidence_name"
   HANDOFF_RESOURCE_URI="$resource_uri"
   HANDOFF_WORKFLOW_ID="$workflow_id"
+  if (( EXISTING_VERSION_MODE == 1 && CONTINUE_UNPUBLISH_MODE == 0 )) \
+    && [[ "$evidence_name" == existing-publish \
+      || "$evidence_name" == existing-unpublish ]]; then
+    if [[ -z "$EVIDENCE_DIR" \
+      || -e "$EVIDENCE_DIR/$evidence_name-diagnostics.json" \
+      || -L "$EVIDENCE_DIR/$evidence_name-diagnostics.json" ]]; then
+      EXISTING_DIAGNOSTIC_CAPTURE_FAILED=1
+      INVOCATION_STATUS=125
+      return 1
+    fi
+  fi
   PARENT_BINDING="$("$PARENT_HELPER_PATH" "$SERVER" "$resource_uri" "$operation" "$input_json" 2>/dev/null)" || return 1
   [[ "$PARENT_BINDING" =~ ^[0-9a-f]{64}$ ]] || return 1
   current_ms="$(now_ms)" || return 1
@@ -2165,6 +2309,12 @@ existing_version_preflight() {
   fi
 }
 
+stop_existing_diagnostic_capture_failed() {
+  persist_existing_summary stop diagnostic_capture_failed || true
+  emit_existing_stop diagnostic_capture_failed
+  return 125
+}
+
 run_existing_version_acceptance() {
   local baseline_input publish_ref publish_key unpublish_ref unpublish_key
   local preinvoke_code
@@ -2182,6 +2332,7 @@ run_existing_version_acceptance() {
   EXISTING_PUBLISH_APPROVAL_ABORT_CODE=""
   EXISTING_UNPUBLISH_HELPER_STATUS=125
   EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE=""
+  EXISTING_DIAGNOSTIC_CAPTURE_FAILED=0
   if ! existing_version_preflight; then return 10; fi
   EXISTING_RUN_ID="$(uuid)" || { emit_existing_stop run_id_failed; return 10; }
   RUN_ID="$EXISTING_RUN_ID"
@@ -2242,6 +2393,10 @@ run_existing_version_acceptance() {
     "fwc-n8n://$SERVER/workflows/$WORKFLOW_ID" existing-publish; then
     EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
     EXISTING_PUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( EXISTING_DIAGNOSTIC_CAPTURE_FAILED == 1 )); then
+      stop_existing_diagnostic_capture_failed
+      return $?
+    fi
     if (( HANDOFF_INVOKE_STARTED == 0 )); then
       preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
       persist_existing_summary stop "$preinvoke_code" || true
@@ -2251,6 +2406,10 @@ run_existing_version_acceptance() {
     persist_existing_summary unknown publish_outcome_unknown || true
     emit_existing_unknown publish_outcome_unknown
     return 20
+  fi
+  if (( EXISTING_DIAGNOSTIC_CAPTURE_FAILED == 1 )); then
+    stop_existing_diagnostic_capture_failed
+    return $?
   fi
   EXISTING_PUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
   ACTIVATION_PUBLISH_STATUS="$INVOCATION_STATUS"
@@ -2323,6 +2482,10 @@ run_existing_version_acceptance() {
     ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
     EXISTING_UNPUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
     EXISTING_UNPUBLISH_APPROVAL_ABORT_CODE="$APPROVAL_ABORT_CODE"
+    if (( EXISTING_DIAGNOSTIC_CAPTURE_FAILED == 1 )); then
+      stop_existing_diagnostic_capture_failed
+      return $?
+    fi
     if (( HANDOFF_INVOKE_STARTED == 0 )); then
       preinvoke_code="${APPROVAL_ABORT_CODE:-preinvoke_failed}"
       persist_existing_summary stop "$preinvoke_code" || true
@@ -2332,6 +2495,10 @@ run_existing_version_acceptance() {
     persist_existing_summary unknown unpublish_outcome_unknown || true
     emit_existing_unknown unpublish_outcome_unknown
     return 20
+  fi
+  if (( EXISTING_DIAGNOSTIC_CAPTURE_FAILED == 1 )); then
+    stop_existing_diagnostic_capture_failed
+    return $?
   fi
   EXISTING_UNPUBLISH_HELPER_STATUS="$APPROVAL_HELPER_STATUS"
   ACTIVATION_UNPUBLISH_STATUS="$INVOCATION_STATUS"
@@ -2802,6 +2969,25 @@ if [[ "$active" == true ]]; then
     and .input.guard.precondition.versionId == "selected-version"
     and .input.guard.precondition.active == false
     and .input.guard.precondition.isArchived == false' <<<"$envelope" >/dev/null || exit 87
+  if [[ "$EXISTING_TEST_SCENARIO" == publish_diagnostic_failure \
+      || "$EXISTING_TEST_SCENARIO" == publish_diagnostic_persist_failure ]]; then
+    printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' >&2
+    printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network PRIVATE-CANARY' >&2
+    for ((i = 0; i < 2048; i++)); do
+      printf '%s\n' 'unrecognized diagnostic filler that must be drained' >&2
+    done
+    exit 42
+  fi
+  if [[ "$EXISTING_TEST_SCENARIO" == publish_diagnostic_cap ]]; then
+    for ((i = 0; i < 40; i++)); do
+      printf '%s\n' 'FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network' >&2
+    done
+    for ((i = 0; i < 2048; i++)); do
+      printf '%s\n' 'unrecognized diagnostic filler that must be drained' >&2
+    done
+    printf '%s\n' drained >"$EXISTING_TEST_DRAIN_MARKER" || exit 94
+    exit 42
+  fi
   [[ "$EXISTING_TEST_SCENARIO" != publish_unknown ]] || exit 42
   after='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
   before='{"id":"syntheticworkflow","versionId":"selected-version","active":false,"activeVersionId":null,"isArchived":false,"stateDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":null}'
@@ -2819,6 +3005,14 @@ else
     and .input.guard.precondition.active == true
     and .input.guard.precondition.activeVersionId == "selected-version"' \
     <<<"$envelope" >/dev/null || exit 89
+  if [[ "$EXISTING_TEST_SCENARIO" == unpublish_diagnostic_failure ]]; then
+    printf '%s\n' 'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' >&2
+    printf '%s\n' 'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx secret=PRIVATE-CANARY' >&2
+    for ((i = 0; i < 2048; i++)); do
+      printf '%s\n' 'unrecognized diagnostic filler that must be drained' >&2
+    done
+    exit 43
+  fi
   [[ "$EXISTING_TEST_SCENARIO" != unpublish_unknown ]] || exit 43
   [[ "$EXISTING_TEST_SCENARIO" != continuation_unknown ]] || exit 43
   before='{"id":"syntheticworkflow","versionId":"selected-version","active":true,"activeVersionId":"selected-version","isArchived":false,"stateDigest":"blake3-256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","draft":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"published":{"versionId":"selected-version","graphDigest":"blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
@@ -2849,9 +3043,10 @@ EOF
   for scenario in baseline_bad baseline_digest_bad baseline_digest_missing \
     publish_approval_failed publish_approval_code_propagated \
     publish_approval_unrecognized \
-    publish_unknown publish_readback_bad publish_readback_digest_bad \
+    publish_diagnostic_failure publish_diagnostic_cap \
+    publish_diagnostic_persist_failure publish_unknown publish_readback_bad publish_readback_digest_bad \
     publish_readback_digest_missing unpublish_approval_failed \
-    unpublish_approval_unrecognized unpublish_unknown \
+    unpublish_approval_unrecognized unpublish_diagnostic_failure unpublish_unknown \
     unpublish_readback_bad success; do
     EXISTING_TEST_SCENARIO="$scenario"
     export EXISTING_TEST_SCENARIO
@@ -2860,9 +3055,10 @@ EOF
     EXISTING_TEST_PUBLISH_COUNT="$root/$scenario-publish-count"
     EXISTING_TEST_UNPUBLISH_COUNT="$root/$scenario-unpublish-count"
     EXISTING_TEST_PARENT_ARGS="$root/$scenario-parent-args"
+    EXISTING_TEST_DRAIN_MARKER="$root/$scenario-drained"
     export EXISTING_TEST_APPROVAL_COUNT EXISTING_TEST_GET_COUNT \
       EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT \
-      EXISTING_TEST_PARENT_ARGS
+      EXISTING_TEST_PARENT_ARGS EXISTING_TEST_DRAIN_MARKER
     EVIDENCE_DIR="$root/evidence-$scenario"
     REQUEST_ROOT="$root/approval-requests"
     ACTIVATION_PUBLISH_STATUS=125
@@ -2874,7 +3070,36 @@ EOF
     approval_count="$(cat "$EXISTING_TEST_APPROVAL_COUNT" 2>/dev/null || printf 0)"
     evidence="$EVIDENCE_DIR"
     [[ -f "$evidence/summary.json" ]] || return 1
-    if [[ "$scenario" == baseline_bad || "$scenario" == baseline_digest_bad \
+    if [[ "$scenario" == publish_diagnostic_failure ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.labels == ["FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network"]' \
+        "$evidence/existing-publish-diagnostics.json" >/dev/null || return 1
+      [[ "$("$STAT_BIN" -c '%a' -- "$evidence/existing-publish-diagnostics.json")" == 600 ]] || return 1
+      "$JQ_BIN" -e '.evidence_files | index("existing-publish-diagnostics.json") != null' \
+        "$evidence/summary.json" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
+    elif [[ "$scenario" == unpublish_diagnostic_failure ]]; then
+      [[ "$status" == 20 && "$get_count" == 3 && "$publish_count" == 1 \
+        && "$unpublish_count" == 1 && "$approval_count" == 2 ]] || return 1
+      "$JQ_BIN" -e '.labels == ["FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx"]' \
+        "$evidence/existing-unpublish-diagnostics.json" >/dev/null || return 1
+      [[ "$("$STAT_BIN" -c '%a' -- "$evidence/existing-unpublish-diagnostics.json")" == 600 ]] || return 1
+      if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
+    elif [[ "$scenario" == publish_diagnostic_cap ]]; then
+      [[ "$status" == 20 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && -f "$EXISTING_TEST_DRAIN_MARKER" \
+        && "$(cat "$EXISTING_TEST_DRAIN_MARKER")" == drained ]] || return 1
+      "$JQ_BIN" -e '.labels | length == 32 and all(.[]; . == "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network")' \
+        "$evidence/existing-publish-diagnostics.json" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
+    elif [[ "$scenario" == publish_diagnostic_persist_failure ]]; then
+      [[ "$status" == 125 && "$get_count" == 1 && "$publish_count" == 1 \
+        && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "diagnostic_capture_failed"
+        and .evidence_complete == false' "$evidence/summary.json" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
+    elif [[ "$scenario" == baseline_bad || "$scenario" == baseline_digest_bad \
       || "$scenario" == baseline_digest_missing ]]; then
       [[ "$status" == 10 && "$get_count" == 1 && "$publish_count" == 0 \
         && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
@@ -3149,7 +3374,7 @@ EOF
     && ! -e "$EXISTING_TEST_APPROVAL_COUNT" \
     && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
 
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":20}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":24}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

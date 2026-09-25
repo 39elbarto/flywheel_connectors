@@ -1409,8 +1409,10 @@ capture_existing_invoke_diagnostics() {
         or . == "FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_internal")
     ' <<<"$persisted" >/dev/null 2>&1 || exit 125
     if (( SELF_TEST == 1 )) \
-      && [[ "${EXISTING_TEST_SCENARIO:-}" == publish_diagnostic_persist_failure ]] \
-      && [[ "$action" == existing-publish ]]; then
+      && { [[ "${EXISTING_TEST_SCENARIO:-}" == publish_diagnostic_persist_failure \
+        && "$action" == existing-publish ]] \
+        || [[ "${EXISTING_TEST_SCENARIO:-}" == unpublish_diagnostic_persist_failure \
+          && "$action" == existing-unpublish ]]; }; then
       "$SYNC_BIN" -d "$EVIDENCE_DIR/.missing-diagnostic-sync-target" \
         >/dev/null 2>&1 || exit 125
       exit 125
@@ -2310,8 +2312,17 @@ existing_version_preflight() {
 }
 
 stop_existing_diagnostic_capture_failed() {
-  persist_existing_summary stop diagnostic_capture_failed || true
-  emit_existing_stop diagnostic_capture_failed
+  if (( HANDOFF_INVOKE_STARTED == 1 )); then
+    case "$HANDOFF_EVIDENCE_NAME" in
+      existing-publish) EXISTING_PUBLISH_HELPER_STATUS=0 ;;
+      existing-unpublish) EXISTING_UNPUBLISH_HELPER_STATUS=0 ;;
+    esac
+    persist_existing_summary unknown diagnostic_capture_failed_ambiguous || true
+    emit_existing_unknown diagnostic_capture_failed_ambiguous
+  else
+    persist_existing_summary stop diagnostic_capture_failed || true
+    emit_existing_stop diagnostic_capture_failed
+  fi
   return 125
 }
 
@@ -2902,6 +2913,10 @@ if [[ "$op" == "n8n.workflows.get" ]]; then
   [[ -f "$EXISTING_TEST_GET_COUNT" ]] && count="$(cat "$EXISTING_TEST_GET_COUNT")"
   count=$((count + 1))
   printf '%s\n' "$count" >"$EXISTING_TEST_GET_COUNT" || exit 81
+  if [[ "$EXISTING_TEST_SCENARIO" == publish_diagnostic_preinvoke_failure \
+    && "$count" == 1 ]]; then
+    printf '%s\n' stale >"$EVIDENCE_DIR/existing-publish-diagnostics.json" || exit 81
+  fi
   state=inactive
   if [[ "$EXISTING_TEST_SCENARIO" == baseline_bad && "$count" == 1 ]]; then state=active; fi
   if [[ "$EXISTING_TEST_SCENARIO" == publish_readback_bad && "$count" == 2 ]]; then state=inactive; fi
@@ -3005,7 +3020,8 @@ else
     and .input.guard.precondition.active == true
     and .input.guard.precondition.activeVersionId == "selected-version"' \
     <<<"$envelope" >/dev/null || exit 89
-  if [[ "$EXISTING_TEST_SCENARIO" == unpublish_diagnostic_failure ]]; then
+  if [[ "$EXISTING_TEST_SCENARIO" == unpublish_diagnostic_failure \
+    || "$EXISTING_TEST_SCENARIO" == unpublish_diagnostic_persist_failure ]]; then
     printf '%s\n' 'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx' >&2
     printf '%s\n' 'FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx secret=PRIVATE-CANARY' >&2
     for ((i = 0; i < 2048; i++)); do
@@ -3044,9 +3060,11 @@ EOF
     publish_approval_failed publish_approval_code_propagated \
     publish_approval_unrecognized \
     publish_diagnostic_failure publish_diagnostic_cap \
-    publish_diagnostic_persist_failure publish_unknown publish_readback_bad publish_readback_digest_bad \
+    publish_diagnostic_persist_failure publish_diagnostic_preinvoke_failure \
+    publish_unknown publish_readback_bad publish_readback_digest_bad \
     publish_readback_digest_missing unpublish_approval_failed \
-    unpublish_approval_unrecognized unpublish_diagnostic_failure unpublish_unknown \
+    unpublish_approval_unrecognized unpublish_diagnostic_failure \
+    unpublish_diagnostic_persist_failure unpublish_unknown \
     unpublish_readback_bad success; do
     EXISTING_TEST_SCENARIO="$scenario"
     export EXISTING_TEST_SCENARIO
@@ -3060,6 +3078,7 @@ EOF
       EXISTING_TEST_PUBLISH_COUNT EXISTING_TEST_UNPUBLISH_COUNT \
       EXISTING_TEST_PARENT_ARGS EXISTING_TEST_DRAIN_MARKER
     EVIDENCE_DIR="$root/evidence-$scenario"
+    export EVIDENCE_DIR
     REQUEST_ROOT="$root/approval-requests"
     ACTIVATION_PUBLISH_STATUS=125
     ACTIVATION_UNPUBLISH_STATUS=125
@@ -3096,8 +3115,21 @@ EOF
     elif [[ "$scenario" == publish_diagnostic_persist_failure ]]; then
       [[ "$status" == 125 && "$get_count" == 1 && "$publish_count" == 1 \
         && "$unpublish_count" == 0 && "$approval_count" == 1 ]] || return 1
-      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "diagnostic_capture_failed"
+      "$JQ_BIN" -e '.verdict == "unknown" and .abort_code == "diagnostic_capture_failed_ambiguous"
         and .evidence_complete == false' "$evidence/summary.json" >/dev/null || return 1
+      if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
+    elif [[ "$scenario" == publish_diagnostic_preinvoke_failure ]]; then
+      [[ "$status" == 125 && "$get_count" == 1 && "$publish_count" == 0 \
+        && "$unpublish_count" == 0 && "$approval_count" == 0 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "stop" and .abort_code == "diagnostic_capture_failed"
+        and .evidence_complete == false and .publish_attempts == 0' \
+        "$evidence/summary.json" >/dev/null || return 1
+    elif [[ "$scenario" == unpublish_diagnostic_persist_failure ]]; then
+      [[ "$status" == 125 && "$get_count" == 2 && "$publish_count" == 1 \
+        && "$unpublish_count" == 1 && "$approval_count" == 2 ]] || return 1
+      "$JQ_BIN" -e '.verdict == "unknown" and .abort_code == "diagnostic_capture_failed_ambiguous"
+        and .evidence_complete == false and .publish_attempts == 1
+        and .unpublish_attempts == 1' "$evidence/summary.json" >/dev/null || return 1
       if rg -q 'PRIVATE-CANARY|secret=' "$evidence" "$root/$scenario-output"; then return 1; fi
     elif [[ "$scenario" == baseline_bad || "$scenario" == baseline_digest_bad \
       || "$scenario" == baseline_digest_missing ]]; then
@@ -3374,7 +3406,7 @@ EOF
     && ! -e "$EXISTING_TEST_APPROVAL_COUNT" \
     && ! -e "$EXISTING_TEST_UNPUBLISH_COUNT" ]] || return 1
 
-  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":24}\n' \
+  printf '{"schema":"%s","verdict":"pass","mode":"existing-version-self-test","acceptance":false,"provider_actions":0,"scenarios":27}\n' \
     "$EXISTING_VERSION_SCHEMA"
 }
 

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:02810bea09f19f15114f7f94922dc7311f3c693fef15d7a428b5c57b9631fbd3"
+interface_hash = "blake3-256:fcp.interface.v2:cb47f5a8822dd9a18e5ec8c8d9b3b17f5057888e1eff66361ba9c893cba81092"
 
 [connector]
 id = "fcp.n8n"
@@ -232,6 +232,12 @@ type = [
 ]
 
 [provides.operations."n8n.executions.get".output_schema.properties.workflowId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.get".output_schema.properties.workflowVersionId]
 type = [
     "string",
     "null",
@@ -468,6 +474,12 @@ type = [
 ]
 
 [provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.workflowId]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."n8n.executions.list".output_schema.properties.data.items.properties.workflowVersionId]
 type = [
     "string",
     "null",

@@ -4298,6 +4298,7 @@ fn execution_view_schema() -> serde_json::Value {
             "retryOf": {"type": ["string", "null"]},
             "retrySuccessId": {"type": ["string", "null"]},
             "waitTill": {"type": ["string", "null"]},
+            "workflowVersionId": {"type": ["string", "null"]},
         },
     })
 }
@@ -4834,7 +4835,7 @@ fn workflow_execute_input_schema() -> serde_json::Value {
         "required": ["id", "mode", "versionId", "guard"],
         "properties": {
             "id": {"type": "string", "minLength": 1, "maxLength": 256},
-            "mode": {"type": "string", "enum": ["manual", "production"]},
+            "mode": {"type": "string", "enum": ["manual"]},
             "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
             "inputs": {"type": "object", "maxProperties": 64},
             "guard": {
@@ -4865,16 +4866,17 @@ fn workflow_execute_input_schema() -> serde_json::Value {
 fn workflow_execute_output_schema() -> serde_json::Value {
     json!({
         "type": "object", "additionalProperties": false,
-        "required": ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "retry", "readback"],
+        "required": ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "executionStatus", "retry", "readback"],
         "properties": {
-            "status": {"type": "string", "enum": ["submitted", "unknown"]},
+            "status": {"type": "string", "enum": ["verified", "failed", "unknown"]},
             "operation": {"const": "n8n.workflows.execute"},
             "provider": {"const": "official_mcp"},
             "workflowId": {"type": "string", "minLength": 1, "maxLength": 256},
-            "mode": {"type": "string", "enum": ["manual", "production"]},
+            "mode": {"type": "string", "const": "manual"},
             "versionId": {"type": "string", "maxLength": 256},
             "executionId": {"type": ["string", "null"], "maxLength": 256},
             "initialStatus": {"type": "string", "enum": ["accepted", "new", "running", "success", "error", "waiting", "canceled", "crashed"], "maxLength": 64},
+            "executionStatus": {"type": ["string", "null"], "maxLength": 64},
             "retry": {"const": "never_automatic"},
             "readback": {"const": "independent_execution_get"}
         }
@@ -5368,7 +5370,7 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Execute one manually or in production only after exact workflow/version precondition and current-chat approval; manual is not side-effect free.".into(),
+                when_to_use: "Execute one workflow manually only after exact workflow/version precondition and current-chat approval; manual is not side-effect free.".into(),
                 common_mistakes: vec![
                     "Only an owner-provisioned execute_workflow policy with exact per-server schema digests may be admitted; generic tools/call and REST execution routes are not exposed, and missing policy fails closed.".into(),
                     "Inputs are bounded and classified; credentials, headers, URLs, commands, paths, and arbitrary execution data are rejected or redacted.".into(),
@@ -6866,6 +6868,81 @@ mod tests {
         assert!(c.config.is_none());
         assert!(c.client.is_none());
         assert!(c.session_id.is_none());
+    }
+
+    #[test]
+    fn executions_get_and_list_keep_workflow_version_runtime_manifest_parity() {
+        let execution: crate::types::Execution = serde_json::from_value(json!({
+            "id": "execution-1",
+            "finished": true,
+            "workflowId": "workflow-1",
+            "workflowVersionId": "version-1",
+            "data": {"result": "private execution data"},
+            "credentials": {"api": "private credential"},
+            "headers": {"authorization": "private header"},
+            "responseBody": {"result": "private response body"},
+        }))
+        .expect("synthetic execution metadata should deserialize");
+        let projected = serde_json::to_value(execution.into_view())
+            .expect("execution metadata view should serialize");
+        assert_eq!(projected["workflowVersionId"], "version-1");
+        for private_field in ["data", "credentials", "headers", "responseBody"] {
+            assert!(
+                projected.get(private_field).is_none(),
+                "execution output must omit {private_field}"
+            );
+        }
+
+        let manifest_toml = match std::env::var_os("FCP_N8N_STAGED_MANIFEST_PATH") {
+            Some(path) => {
+                std::fs::read_to_string(path).expect("staged n8n manifest should be readable")
+            }
+            None => MANIFEST_TOML.to_owned(),
+        };
+        let manifest = fcp_manifest::ConnectorManifest::parse_str(&manifest_toml)
+            .expect("n8n manifest should parse and validate");
+        let runtime_operations = operations_info();
+        let runtime_get = runtime_operations
+            .iter()
+            .find(|operation| operation.id.as_ref() == "n8n.executions.get")
+            .expect("runtime executions.get operation");
+        let runtime_list = runtime_operations
+            .iter()
+            .find(|operation| operation.id.as_ref() == "n8n.executions.list")
+            .expect("runtime executions.list operation");
+        let manifest_get = &manifest.provides.operations["n8n.executions.get"].output_schema;
+        let manifest_list = &manifest.provides.operations["n8n.executions.list"].output_schema;
+        assert_eq!(runtime_get.output_schema, *manifest_get);
+        assert_eq!(runtime_list.output_schema, *manifest_list);
+        assert_eq!(runtime_get.output_schema, execution_view_schema());
+        assert_eq!(
+            runtime_list.output_schema,
+            list_output_schema(&execution_view_schema())
+        );
+
+        let version_contract = json!({"type": ["string", "null"]});
+        for (schema, version_property, required) in [
+            (
+                &runtime_get.output_schema,
+                &runtime_get.output_schema["properties"]["workflowVersionId"],
+                &runtime_get.output_schema["required"],
+            ),
+            (
+                &runtime_list.output_schema,
+                &runtime_list.output_schema["properties"]["data"]["items"]["properties"]["workflowVersionId"],
+                &runtime_list.output_schema["properties"]["data"]["items"]["required"],
+            ),
+        ] {
+            assert_eq!(version_property, &version_contract);
+            assert!(
+                !required
+                    .as_array()
+                    .expect("schema required list")
+                    .iter()
+                    .any(|field| field == "workflowVersionId"),
+                "workflowVersionId must remain optional in schema {schema}"
+            );
+        }
     }
 
     #[test]

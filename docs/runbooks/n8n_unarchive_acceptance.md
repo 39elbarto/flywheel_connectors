@@ -1,37 +1,83 @@
-# n8n unarchive acceptance
+# n8n unarchive and lifecycle acceptance closeout
 
-## Current acceptance and closeout (2026-09-21; PASS)
+## Current closeout (2026-09-25)
 
-`flywheel_connectors-nqm81.23` acceptance is complete for EEC and Hetzner.
-The main fix is `4ef0578dc`; the installed candidate is
-`release-20260920-02d215cfd-unarchive-introspection-rc26` (rc26).
-The retained evidence is server-specific:
+The RC33 existing-version lifecycle acceptance is **PASS for the selected
+workflow on EEC and the separately selected workflow on Hetzner**. This closes
+the `flywheel_connectors-nqm81.24` lifecycle scope. The prior `.24` pending or
+live-unaccepted wording is obsolete; do not repeat live acceptance for this
+closeout.
 
-| Server | Workflow | PASS evidence directory |
+The installed release is
+`release-20260925-fd9941702-manifest-interface-hash-rc33`, with provenance
+source revision `fd99417021bba2872cf9d4bbbf3b7cae670d7729`. The runner/source
+checkout was `main` at `996779846cd6f659a81ddf5dcb673c6fee4472a7`.
+
+| Server | Explicitly selected workflow | Selected version | Verdict | Evidence |
+| --- | --- | --- | --- | --- |
+| EEC | `kXVmpnLGECl1aHLy` | `32385eab-f3ad-4bab-a545-62104f95f42c` | PASS | `/srv/dev-ssd/fcp/nqm81.24/acceptance-eec-existing-version-rc33-20260925-01` |
+| Hetzner | `uQXXNMWE2lzlCgag` | `b22acfe1-ecca-45c8-97a1-b10420dfb241` | PASS | `/srv/dev-ssd/fcp/nqm81.24/acceptance-hetzner-existing-version-uQXXNMWE2lzlCgag-20260925-01` |
+
+Each server has its own independent evidence bundle and must be interpreted
+separately. In each bundle, the exact baseline was inactive, unpublished,
+unarchived, and on the selected draft version. The run used one fresh,
+request-bound approval and one publish; an independent GET confirmed the same
+selected version was active and published. A separate fresh approval and one
+unpublish followed. The independent final GET confirmed the same workflow and
+version were inactive, with `activeVersionId=null`, `published=null`, and
+unarchived. Baseline and final `stateDigest` values match within each server's
+bundle.
+
+Both summaries report `retries=0`, `execution_attempts=0`,
+`workflow_creation=false`, `automatic_cleanup=false`, and
+`evidence_complete=true`. No workflow or Webhook invocation was issued as part
+of this acceptance. The summary schema records zero execution attempts but has
+no explicit `webhook_invoked` field.
+
+The RC33 closeout supersedes the older `.24` pending status only for these two
+existing-version lifecycle runs. It does not change the separate result below.
+
+## Separate historical Hetzner create result (2026-09-25; UNKNOWN)
+
+The disposable-create run tracked by `flywheel_connectors-nqm81.32` is a
+separate **UNKNOWN**, not part of the `.24` existing-version PASS:
+
+- Run: `fcbf7687-9ad8-4ebd-ae66-69c4cfd8b796`
+- Evidence: `/srv/dev-ssd/fcp/nqm81.24/acceptance-hetzner-activation-rc33-20260925-01`
+- Recorded fields: `verdict=unknown`, `create_status=1`, empty `workflow_id`,
+  `retries=0`, `evidence_complete=false`, `abort_code=create_unknown`.
+
+This receipt does not prove that creation succeeded or that no workflow was
+created. Preserve the UNKNOWN as recorded: do not infer success or absence,
+replay the run, or fold it into either `.24` PASS.
+
+## Earlier unarchive result (2026-09-21; PASS)
+
+The earlier `flywheel_connectors-nqm81.23` bounded REST unarchive acceptance
+passed on both servers using RC26, release
+`release-20260920-02d215cfd-unarchive-introspection-rc26`, and fix
+`4ef0578dc`. Its retained server-specific evidence was:
+
+| Server | Workflow | Evidence |
 | --- | --- | --- |
 | EEC | `2Zdk8MWoC70eyqeb` | `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1` |
 | Hetzner | `uQXXNMWE2lzlCgag` | `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85` |
 
-Each acceptance used exactly one fresh archived baseline GET, one approval,
-one typed REST unarchive, and one independent GET. Both prove
-`isArchived: true -> false`, with `active=false`, `published=null`, and
-`activeVersionId=null` before and after, and the draft graph digest preserved.
-Draft version identifiers and state digests rotated as allowed by the contract.
-The invoke projections report `status: "verified"`; the summaries report
-`verdict: "pass"` and zero approval, invocation, and final-GET exit statuses.
-There was no retry, and no raw provider/request bodies, tokens, seeds, or
-secrets were persisted in the evidence.
+Those receipts prove `isArchived: true -> false` while keeping the workflow
+inactive, unpublished, and without an active version; they concern unarchive,
+not version publish/unpublish. Earlier NO-GO comments from before 2026-09-25
+remain historical records for their candidates and attempts; they do not
+replace the PASS or UNKNOWN verdicts above.
 
-This closes bounded REST unarchive acceptance only. `restore_workflow_version`
-is a separate version-restore operation; this result does not repair or accept
-MCP `archive_workflow`. Earlier NO-GO comments and acceptance history remain
-historical records of their candidates/attempts, not the current verdict.
+## Next scope
 
-The next order is `nqm81.24` activation capability decision, then `nqm81.25`
-guarded test/manual execution, then `nqm81.26` production gate. This closeout
-does not claim those follow-up gates are implemented or accepted.
+`flywheel_connectors-nqm81.25` covers separate test and manual execution
+controls. It requires a separately selected suitable disposable fixture and
+an explicit side-effect and credential review. The `.24` lifecycle fixture
+must not be assumed suitable as an execution target. This closeout authorizes
+no `.25` work or live operation.
 
-## Runner scope
+## Runner scope (nqm81.23 unarchive)
 
 This runner proves one bounded unarchive of one already-existing archived
 workflow on one explicit n8n server. It performs one fresh `GET` baseline,
@@ -71,9 +117,8 @@ raw provider responses, request bodies, tokens, seeds, and secrets are not
 persisted there. If the bounded approval handoff fails before invocation, the
 summary is still written with `verdict: "stop"` and
 `abort_code: "approval_failed"`, alongside the existing numeric
-`approval_helper_status` and
-`approval_reader_status` fields; no helper output or other sensitive material
-is captured.
+`approval_helper_status` and `approval_reader_status` fields; no helper output
+or other sensitive material is captured.
 
 The approval helper runs once through `sudo -n` and a 40-second `timeout`,
 inside the 45-second request TTL. Because sudo-rs closes inherited FD3, a
@@ -104,7 +149,7 @@ invocation and is never placed in a shell variable, file, or evidence.
   evidence and start a separately approved acceptance only after the operator
   decides it is safe.
 
-## Offline self-test
+## Offline self-tests
 
 ```sh
 scripts/n8n_unarchive_acceptance.sh --self-test
@@ -113,8 +158,8 @@ scripts/n8n_unarchive_acceptance.sh --self-test
 Self-test uses only temporary safe data. It checks request write/read metadata,
 13-digit expiry acceptance and stale/over-limit rejection, and FD3 pipe
 handoff, EOF, and callback exit-status behavior. It does not need KeePass,
-`sudo`, the launcher, the parent helper, an issuer, or network access.
-The self-test intentionally does not perform destructive cleanup.
+`sudo`, the launcher, the parent helper, an issuer, or network access. The
+self-test intentionally does not perform destructive cleanup.
 
 The actual handoff synthetic test exercises the complete `approval_fd3_handoff`
 shape without provider access:

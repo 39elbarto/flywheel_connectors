@@ -1964,6 +1964,7 @@ const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 7] = [
     RUN_ONCE_CREDENTIAL_FD_ENV,
 ];
 const N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
+const N8N_ACTIVATION_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS";
 const N8N_UNARCHIVE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_UNARCHIVE_MAX_DEADLINE_MS: u64 = 60_000;
 const N8N_UNARCHIVE_READBACK_RESERVE_MS: u64 = 5_000;
@@ -1993,6 +1994,31 @@ fn n8n_unarchive_request_timeout_ms(
         })
 }
 
+fn n8n_activation_request_timeout_ms(
+    operation: &OperationId,
+    deadline_ms: Option<u64>,
+) -> HostResult<Option<u64>> {
+    if operation.as_str() != "n8n.workflows.activate" {
+        return Ok(None);
+    }
+    let deadline_ms = deadline_ms.unwrap_or(N8N_UNARCHIVE_DEFAULT_DEADLINE_MS);
+    if deadline_ms == 0 || deadline_ms > N8N_UNARCHIVE_MAX_DEADLINE_MS {
+        return Err(HostError::PreflightFailed(
+            "n8n workflow activation deadline is outside the host bound".to_string(),
+        ));
+    }
+    deadline_ms
+        .checked_sub(N8N_UNARCHIVE_READBACK_RESERVE_MS)
+        .and_then(|remaining| remaining.checked_div(3))
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "n8n workflow activation deadline cannot reserve independent readback".to_string(),
+            )
+        })
+}
+
 fn launch_snapshot_for_request(
     binding: &ValidatedConnectorLaunchBinding,
     config: &ConnectorConfig,
@@ -2004,6 +2030,14 @@ fn launch_snapshot_for_request(
     {
         snapshot.fixed_env.insert(
             OsString::from(N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV),
+            OsString::from(timeout_ms.to_string()),
+        );
+    }
+    if let Some(timeout_ms) =
+        n8n_activation_request_timeout_ms(&request.operation, request.deadline_ms)?
+    {
+        snapshot.fixed_env.insert(
+            OsString::from(N8N_ACTIVATION_REQUEST_TIMEOUT_ENV),
             OsString::from(timeout_ms.to_string()),
         );
     }
@@ -2023,6 +2057,21 @@ fn n8n_unarchive_budget_is_host_bounded_and_reserves_readback() {
     );
     assert!(n8n_unarchive_request_timeout_ms(&operation, Some(5_000)).is_err());
     assert!(n8n_unarchive_request_timeout_ms(&operation, Some(60_001)).is_err());
+}
+
+#[test]
+fn n8n_activation_budget_is_host_bounded_and_reserves_readback() {
+    let operation = OperationId::from_static("n8n.workflows.activate");
+    assert_eq!(
+        n8n_activation_request_timeout_ms(&operation, None).expect("default deadline"),
+        Some(8_333)
+    );
+    assert_eq!(
+        n8n_activation_request_timeout_ms(&operation, Some(30_000)).expect("bounded deadline"),
+        Some(8_333)
+    );
+    assert!(n8n_activation_request_timeout_ms(&operation, Some(5_000)).is_err());
+    assert!(n8n_activation_request_timeout_ms(&operation, Some(60_001)).is_err());
 }
 
 #[derive(Clone, Debug)]
@@ -3222,6 +3271,16 @@ impl SubprocessRegistry {
                         .to_string(),
                 ));
             }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_ACTIVATION_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation launch env key for n8n activation timeout is host-derived"
+                        .to_string(),
+                ));
+            }
 
             if entry.manifest_constraints.source.is_none() {
                 return Err(HostError::PreflightFailed(
@@ -3384,6 +3443,16 @@ impl SubprocessRegistry {
             {
                 return Err(HostError::PreflightFailed(
                     "per-invocation launch env key for n8n unarchive timeout proof changed"
+                        .to_string(),
+                ));
+            }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_ACTIVATION_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "per-invocation launch env key for n8n activation timeout proof changed"
                         .to_string(),
                 ));
             }
@@ -4324,7 +4393,13 @@ async fn owned_perform_egress(
                 &request.context,
                 &request.context.resource_uri,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                emit_n8n_run_once_owned_egress_stage(
+                    N8nRunOnceOwnedEgressStage::HostAuthorizationBinding,
+                );
+                error
+            })?;
             if authorized.connector_id.to_string() != binding.connector_id
                 || authorized.operation.to_string() != binding.operation_id
                 || authorized.zone_id.to_string() != binding.zone_id
@@ -4332,6 +4407,9 @@ async fn owned_perform_egress(
                 || authorized.correlation_id != binding.correlation_id
                 || authorized.constraints != binding.network_constraints
             {
+                emit_n8n_run_once_owned_egress_stage(
+                    N8nRunOnceOwnedEgressStage::HostAuthorizationBinding,
+                );
                 return Err(HostError::PreflightFailed(
                     "owned host-egress authorization did not match invocation binding".to_string(),
                 ));
@@ -4342,13 +4420,18 @@ async fn owned_perform_egress(
                 request.credential_id.as_deref(),
                 &authorized.credential_allow,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::CredentialLease);
+                error
+            })?;
             let result = authorize_and_perform_host_http_egress(
                 state,
                 &authorized,
                 request,
                 lease.as_ref(),
                 started_at,
+                true,
             )
             .await;
             if let Some(lease) = lease {
@@ -13780,6 +13863,40 @@ enum N8nRunOnceOwnedDiagnostic {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceOwnedEgressStage {
+    HostAuthorizationBinding,
+    CredentialLease,
+    PolicyPreflight,
+    DnsResolution,
+    TlsPolicyValidation,
+    OutboundTransport,
+    ResponseBodyRead,
+}
+
+#[cfg(target_os = "linux")]
+impl N8nRunOnceOwnedEgressStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::HostAuthorizationBinding => "owned.egress_stage.host_authorization_binding",
+            Self::CredentialLease => "owned.egress_stage.credential_lease",
+            Self::PolicyPreflight => "owned.egress_stage.policy_preflight",
+            Self::DnsResolution => "owned.egress_stage.dns_resolution",
+            Self::TlsPolicyValidation => "owned.egress_stage.tls_policy_validation",
+            Self::OutboundTransport => "owned.egress_stage.outbound_transport",
+            Self::ResponseBodyRead => "owned.egress_stage.response_body_read",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_owned_egress_stage(stage: N8nRunOnceOwnedEgressStage) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!("{N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX}{}", stage.label());
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl N8nRunOnceOwnedDiagnostic {
     const fn label(self) -> &'static str {
         match self {
@@ -20402,6 +20519,7 @@ async fn host_egress_http_handler(
         request,
         lease.as_ref(),
         started_at,
+        false,
     )
     .await;
     if let Some(lease) = lease {
@@ -20416,6 +20534,7 @@ async fn authorize_and_perform_host_http_egress(
     request: HostEgressHttpRequest,
     lease: Option<&CredentialLease>,
     started_at: Instant,
+    owned_diagnostics: bool,
 ) -> HostResult<HostEgressHttpResponse> {
     let leased_injector = HostCredentialInjector::new(lease.cloned());
     let noop = NoOpCredentialInjector;
@@ -20424,9 +20543,14 @@ async fn authorize_and_perform_host_http_egress(
     } else {
         &noop
     };
-    let response =
-        perform_authorized_host_http_egress_once(authorized, &request, injector_ref, started_at)
-            .await?;
+    let response = perform_authorized_host_http_egress_once(
+        authorized,
+        &request,
+        injector_ref,
+        started_at,
+        owned_diagnostics,
+    )
+    .await?;
     if response.status != 401 {
         return Ok(response);
     }
@@ -20454,8 +20578,14 @@ async fn authorize_and_perform_host_http_egress(
     )
     .await?;
     let refreshed_injector = HostCredentialInjector::new(Some(refreshed_lease));
-    perform_authorized_host_http_egress_once(authorized, &request, &refreshed_injector, started_at)
-        .await
+    perform_authorized_host_http_egress_once(
+        authorized,
+        &request,
+        &refreshed_injector,
+        started_at,
+        owned_diagnostics,
+    )
+    .await
 }
 
 fn host_egress_allows_unauthorized_refresh_replay(
@@ -20481,6 +20611,7 @@ async fn perform_authorized_host_http_egress_once(
     request: &HostEgressHttpRequest,
     injector: &dyn CredentialInjector,
     started_at: Instant,
+    owned_diagnostics: bool,
 ) -> HostResult<HostEgressHttpResponse> {
     let mut guard_request = EgressHttpRequest {
         url: request.url.clone(),
@@ -20501,7 +20632,13 @@ async fn perform_authorized_host_http_egress_once(
         &authorized.constraints,
         &mut guard_request,
         injector,
-    )?;
+    )
+    .map_err(|error| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+        }
+        error
+    })?;
     let remaining_timeout =
         host_egress_remaining_timeout(authorized, started_at).ok_or_else(|| {
             HostError::PreflightFailed(format!(
@@ -20511,7 +20648,12 @@ async fn perform_authorized_host_http_egress_once(
         })?;
     let response = fcp_async_core::time::timeout(
         remaining_timeout,
-        perform_host_http_egress(&guard_request, &mut decision, &authorized.constraints),
+        perform_host_http_egress(
+            &guard_request,
+            &mut decision,
+            &authorized.constraints,
+            owned_diagnostics,
+        ),
     )
     .await
     .map_err(|_| {
@@ -20851,25 +20993,58 @@ async fn perform_host_http_egress(
     request: &EgressHttpRequest,
     decision: &mut fcp_sandbox::EgressDecision,
     constraints: &NetworkConstraints,
+    owned_diagnostics: bool,
 ) -> HostResult<RawHttpEgressResponse> {
     let url = url::Url::parse(&request.url).map_err(|err| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+        }
         HostError::PreflightFailed(format!("host-egress HTTP URL rejected after policy: {err}"))
     })?;
     if !matches!(url.scheme(), "http" | "https") {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+        }
         return Err(HostError::PreflightFailed(format!(
             "host-egress HTTP transport only supports `http` and `https`; `{}` was policy-checked but cannot be transported",
             url.scheme()
         )));
     }
-    verify_host_egress_tls_requirements(decision, url.host_str(), "HTTP")?;
+    verify_host_egress_tls_requirements(decision, url.host_str(), "HTTP").map_err(|error| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::TlsPolicyValidation);
+        }
+        error
+    })?;
     let is_https = url.scheme() == "https";
     if !is_https && !decision.spki_pins.is_empty() {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::TlsPolicyValidation);
+        }
         return Err(HostError::PreflightFailed(format!(
             "host-egress HTTP SPKI pin verification for `{}` requires HTTPS; cleartext HTTP has no peer certificate chain",
             decision.canonical_host
         )));
     }
-    let socket_addrs = resolve_host_egress_decision(decision, constraints, "HTTP").await?;
+    let socket_addrs = if owned_diagnostics {
+        let ips = resolve_host_egress_ips(
+            decision.canonical_host.clone(),
+            decision.port,
+            constraints.connect_timeout_ms,
+            "HTTP",
+        )
+        .await
+        .map_err(|error| {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::DnsResolution);
+            error
+        })?;
+        validate_host_egress_resolved_ips(decision, constraints, ips, "HTTP").map_err(|error| {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+            error
+        })?
+    } else {
+        resolve_host_egress_decision(decision, constraints, "HTTP").await?
+    };
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .connect_timeout(Duration::from_millis(u64::from(
@@ -20878,23 +21053,48 @@ async fn perform_host_http_egress(
         .timeout(Duration::from_millis(u64::from(
             constraints.total_timeout_ms,
         )))
-        .redirect(host_http_redirect_policy(&url, constraints)?);
+        .redirect(
+            host_http_redirect_policy(&url, constraints).map_err(|error| {
+                if owned_diagnostics {
+                    emit_n8n_run_once_owned_egress_stage(
+                        N8nRunOnceOwnedEgressStage::PolicyPreflight,
+                    );
+                }
+                error
+            })?,
+        );
     if is_https {
-        builder = builder.tls_backend_preconfigured(host_egress_rustls_client_config(
-            "HTTP",
-            &decision.canonical_host,
-            &decision.spki_pins,
-            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
-        )?);
+        builder = builder.tls_backend_preconfigured(
+            host_egress_rustls_client_config(
+                "HTTP",
+                &decision.canonical_host,
+                &decision.spki_pins,
+                vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            )
+            .map_err(|error| {
+                if owned_diagnostics {
+                    emit_n8n_run_once_owned_egress_stage(
+                        N8nRunOnceOwnedEgressStage::TlsPolicyValidation,
+                    );
+                }
+                error
+            })?,
+        );
     }
     builder = builder.resolve_to_addrs(&decision.canonical_host, &socket_addrs);
     let client = builder.build().map_err(|err| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::TlsPolicyValidation);
+        }
         HostError::PreflightFailed(format!(
             "host-egress HTTP client for `{}` could not be built: {err}",
             decision.canonical_host
         ))
     })?;
     let method = reqwest::Method::from_bytes(request.method.as_bytes()).map_err(|err| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+        }
         HostError::PreflightFailed(format!(
             "host-egress HTTP method `{}` rejected after policy: {err}",
             request.method
@@ -20905,15 +21105,28 @@ async fn perform_host_http_egress(
         if forbidden_egress_request_header(&header.name) {
             continue;
         }
-        validate_wire_header(&header.name, &header.value)?;
+        validate_wire_header(&header.name, &header.value).map_err(|error| {
+            if owned_diagnostics {
+                emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+            }
+            error
+        })?;
         let name =
             reqwest::header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|err| {
+                if owned_diagnostics {
+                    emit_n8n_run_once_owned_egress_stage(
+                        N8nRunOnceOwnedEgressStage::PolicyPreflight,
+                    );
+                }
                 HostError::PreflightFailed(format!(
                     "host-egress HTTP header name `{}` rejected after policy: {err}",
                     header.name
                 ))
             })?;
         let value = reqwest::header::HeaderValue::from_str(&header.value).map_err(|err| {
+            if owned_diagnostics {
+                emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
+            }
             HostError::PreflightFailed(format!(
                 "host-egress HTTP header `{}` value rejected after policy: {err}",
                 header.name
@@ -20929,6 +21142,9 @@ async fn perform_host_http_egress(
         constraints.max_redirects
     );
     let response = outbound.send().await.map_err(|err| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::OutboundTransport);
+        }
         map_reqwest_host_egress_error(err, &request_error_label, &decision.canonical_host)
     })?;
     let status = response.status().as_u16();
@@ -20946,6 +21162,7 @@ async fn perform_host_http_egress(
         response,
         constraints.max_response_bytes,
         "host-egress HTTP response",
+        owned_diagnostics,
     )
     .await?;
     Ok(RawHttpEgressResponse {
@@ -21000,15 +21217,20 @@ async fn read_bounded_reqwest_body(
     mut response: reqwest::Response,
     max_response_bytes: u64,
     label: &str,
+    owned_diagnostics: bool,
 ) -> HostResult<Vec<u8>> {
     let max = usize::try_from(max_response_bytes).unwrap_or(usize::MAX);
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| map_reqwest_host_egress_error(err, label, "streaming response body"))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        if owned_diagnostics {
+            emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::ResponseBodyRead);
+        }
+        map_reqwest_host_egress_error(err, label, "streaming response body")
+    })? {
         if body.len().saturating_add(chunk.len()) > max {
+            if owned_diagnostics {
+                emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::ResponseBodyRead);
+            }
             return Err(HostError::PreflightFailed(format!(
                 "{label} exceeded max_response_bytes={max_response_bytes}"
             )));
@@ -26234,6 +26456,41 @@ deny_ptrace = true
         );
         assert!(!spec.fixed_env.contains_key(OsStr::new(
             "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS_FROM_CALLER"
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn n8n_activation_host_budget_reaches_owned_connector_process_spec() {
+        let (config, catalog, mut request) = per_invocation_plan_test_fixture();
+        let registry = per_invocation_plan_test_registry(config.clone(), catalog);
+        let mut plan = registry
+            .per_invocation_execution_plan(&request)
+            .await
+            .expect("generic per-invocation plan")
+            .expect("per-invocation plan should exist");
+
+        request.connector_id = ConnectorId::from_static("fcp.n8n");
+        request.operation = OperationId::from_static("n8n.workflows.activate");
+        request.deadline_ms = Some(30_000);
+        plan.connector_id = request.connector_id.clone();
+        plan.operation = request.operation.clone();
+        plan.manifest_operation.id = request.operation.clone();
+        let binding = ValidatedConnectorLaunchBinding::from_config(&config)
+            .expect("fixture has a validated launch binding");
+        plan.launch_snapshot = launch_snapshot_for_request(&binding, &config, &request)
+            .expect("host derives the bounded activation request budget");
+
+        let spec = owned_process_spec(&plan, "test-auth-token")
+            .expect("owned connector launch should accept host-derived fixed env");
+        assert_eq!(
+            spec.fixed_env
+                .get(OsStr::new(N8N_ACTIVATION_REQUEST_TIMEOUT_ENV)),
+            Some(&OsString::from("8333")),
+            "the actual owned connector ProcessSpec must carry the host-derived budget"
+        );
+        assert!(!spec.fixed_env.contains_key(OsStr::new(
+            "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS_FROM_CALLER"
         )));
     }
 
@@ -35072,6 +35329,57 @@ done"#;
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn n8n_run_once_owned_egress_stage_labels_are_finite_and_redacted() {
+        let cases = [
+            (
+                N8nRunOnceOwnedEgressStage::HostAuthorizationBinding,
+                "owned.egress_stage.host_authorization_binding",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::CredentialLease,
+                "owned.egress_stage.credential_lease",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::PolicyPreflight,
+                "owned.egress_stage.policy_preflight",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::DnsResolution,
+                "owned.egress_stage.dns_resolution",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::TlsPolicyValidation,
+                "owned.egress_stage.tls_policy_validation",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::OutboundTransport,
+                "owned.egress_stage.outbound_transport",
+            ),
+            (
+                N8nRunOnceOwnedEgressStage::ResponseBodyRead,
+                "owned.egress_stage.response_body_read",
+            ),
+        ];
+        let forbidden_content = [
+            "example.com",
+            "https://",
+            "/private/",
+            "credential-id",
+            "request-id",
+            "correlation-id",
+            "token",
+            "secret",
+        ];
+        for (stage, expected) in cases {
+            assert_eq!(stage.label(), expected);
+            for forbidden in forbidden_content {
+                assert!(!stage.label().contains(forbidden));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn n8n_run_once_host_error_detail_is_stable_and_redacted() {
         let cases = [
             (
@@ -36632,6 +36940,63 @@ done"#;
         let mut non_object = base;
         non_object["graph"]["settings"] = json!(true);
         assert!(validate_n8n_draft_input("n8n.workflows.create_draft", &non_object).is_err());
+    }
+
+    #[test]
+    fn n8n_activation_runner_create_input_matches_production_validators() {
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/n8n_unarchive_acceptance.sh");
+        let output = std::process::Command::new("/usr/bin/bash")
+            .arg(script)
+            .arg("--activation-create-input-self-test")
+            .output()
+            .expect("activation input self-test should launch");
+        assert!(
+            output.status.success(),
+            "activation input self-test failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let input: Value = serde_json::from_slice(&output.stdout)
+            .expect("activation input self-test should emit one JSON object");
+        assert_eq!(input["guard"]["precondition"], json!({}));
+
+        let config = run_once_n8n_draft_test_config();
+        let plan_input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.create_draft".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-n8n://eec".to_string(),
+            input: input.clone(),
+            approval_token: None,
+            deadline_ms: Some(30_000),
+            correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        };
+        build_n8n_read_only_run_once_plan(plan_input, &config)
+            .expect("runner-generated create input must pass production host validator");
+
+        let now_ms = n8n_run_once_now_ms();
+        let canonical_binding = to_deterministic_cbor(&json!({
+            "server_id": "eec",
+            "resource_uri": "fwc-n8n://eec",
+            "operation": "n8n.workflows.create_draft",
+            "input": input.clone(),
+        }))
+        .expect("create input parent binding should canonicalize");
+        let issue_request = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: String::new(),
+            operation: N8nLifecycleOperation::CreateDraft,
+            input,
+            official_mcp_tool: String::new(),
+            official_mcp_resource_uri: String::new(),
+            official_mcp_payload_digest: String::new(),
+            parent_binding_sha256: hex::encode(blake3::hash(&canonical_binding).as_bytes()),
+            expires_at_ms: now_ms.saturating_add(30_000),
+        };
+        build_unsigned_n8n_approval_token(&issue_request, now_ms)
+            .expect("runner-generated create input must pass production issuer validator");
     }
 
     #[test]

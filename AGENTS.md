@@ -65,7 +65,30 @@ holder. Do not bypass the conflict by creating an untracked parallel copy.
 
 ## n8n-Specific Coordination
 
-n8n work follows the tracked operating contract in [the n8n agent workflow](docs/runbooks/n8n_agent_workflow.md). It defines the default Terra/Luna/Sol/Astra roles, bounded handoffs, ownership and build serialization, approval/retry/secret rules, review gates, and coordinator transitions; direct user instructions prevail.
+n8n work uses coordinator, implementer, and reviewer roles; follow the single
+[n8n workflow runbook](docs/runbooks/n8n_agent_workflow.md). New implementers
+default to Codex `gpt-6-luna` at high effort and reviewers to `gpt-6-sol` at
+medium effort. Reuse the already assigned coordinator/reviewer sessions; check
+`launch.requested` against `launch.effective`. `--terminal` cannot be combined
+with `--model` or `--effort`. Direct user instructions retain authority; these
+defaults do not grant live-operation or key-rotation scope.
+
+For every new Dispatch, include the current coordinator terminal handle in the
+spec. The worker sends `worker_done` exactly once with the matching `taskId`,
+`dispatchId`, and `outcome`; only after its durable receipt succeeds, it makes
+the one narrow post-settlement action: exactly one `orca terminal send` to that
+handle with `--enter --wait-submit 10` and a message containing the actual
+`taskId` and `dispatchId`, then observes that terminal-send receipt and stops.
+The coordinator consumes,
+validates, and acknowledges its own Orca delivery. This is only a wake and
+receipt observation: never
+create tasks, poll, resend `worker_done`, or mutate lifecycle; `input_accepted`
+is not `turn_started`, a queued coordinator is normal, timeout does not permit
+a resend, and ambiguous transport permits only a retry-request for the same
+`requestId`. Wake failure never invalidates `worker_done`; the coordinator
+verifies actual dispatch/delivery and never repeats provider calls. After three
+empty waits, it inspects `worker-list` and continues waiting; it never
+finalizes solely because of a timeout.
 
 ---
 
@@ -92,11 +115,13 @@ The `am serve-http` process is a **shared singleton** that all agents depend on.
 
 ## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
-1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences.
+1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or irreversibly overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences. The reversible artifact-install exception below is not covered by this prohibition.
 2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
 3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
-4. **Mandatory explicit plan:** Even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
+4. **Mandatory explicit plan:** For destructive or irreversible actions, even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
+
+**Scoped reversible artifact-install exception:** When an already-authorized task calls for installing or updating one exact artifact at its fixed, in-scope destination, the agent may proceed without asking the owner to repeat the authorization or retype the command if all of these hold: verify the candidate's exact SHA-256 immediately before installation; preserve the current destination using `install --backup=numbered`; and verify the installed SHA-256, owner, group, mode, and numbered backup's digest afterward. Stop on any digest, destination, metadata, or backup discrepancy. This exception covers only that previously authorized artifact replacement; it grants no blanket deployment or live-operation authority and does not cover deletion, data loss, signing/trust-key changes, access expansion, or a new target/scope.
 
 ---
 

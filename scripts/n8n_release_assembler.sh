@@ -40,7 +40,6 @@ readonly EEC_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_INPUT_SCHEMA_DIG
 readonly EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
-readonly EEC_N8N_VERSION="2.38.4"
 readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
 readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
 readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
@@ -50,7 +49,7 @@ readonly HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_OUTPUT_
 readonly HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
-readonly LOCAL_MCP_PACKAGE_VERSION="2.84.4"
+readonly LOCAL_MCP_PACKAGE_VERSION="2.87.0"
 readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
 readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
 readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
@@ -471,7 +470,6 @@ write_inventory_and_request() {
   bridge_digest="$($hash_helper "$stage_root/bin/fcp-mcp-bridge")"
 
   python3 - "$stage_root" "$source_release" "$new_root" "$n8n_digest" "$bridge_digest" "$request_path" "$PROVISION_REQUEST_SCHEMA" "$git_revision" \
-    "$EEC_N8N_VERSION" \
     "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
     "$EEC_ARCHIVE_INPUT_SCHEMA_DIGEST" "$EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
@@ -493,7 +491,6 @@ import sys
     request_path,
     request_schema,
     git_revision,
-    eec_n8n_version,
     eec_publish_input,
     eec_publish_output,
     eec_unpublish_input,
@@ -555,9 +552,19 @@ for server in ("eec", "hetzner"):
     unarchive_network = dict(unarchive_network)
     unarchive_network["max_response_bytes"] = 1048576
     common["operation_network_constraints"][unarchive_operation] = dict(unarchive_network)
+    activation_operation = "n8n.workflows.activate"
+    if activation_operation not in common["allowed_operations"]:
+        common["allowed_operations"].append(activation_operation)
+    activation_network = common["operation_network_constraints"].get("n8n.workflows.get")
+    if not isinstance(activation_network, dict):
+        raise SystemExit(f"missing workflows.get network constraint for {server}")
+    activation_network = dict(activation_network)
+    activation_network["max_response_bytes"] = 1048576
+    common["operation_network_constraints"][activation_operation] = dict(activation_network)
     for bounded_operation in (
         "n8n.workflows.delete_disposable",
         "n8n.workflows.unarchive",
+        "n8n.workflows.activate",
     ):
         bounded_network = common["operation_network_constraints"].get(bounded_operation)
         if not isinstance(bounded_network, dict) or bounded_network.get("max_response_bytes") != 1048576:
@@ -580,8 +587,6 @@ for server in ("eec", "hetzner"):
             "execute_workflow": (hetzner_execute_input, hetzner_execute_output),
         },
     }
-    if server == "eec":
-        official["config"]["capability_policy"]["n8n_version"] = eec_n8n_version
     for tool in official["config"]["capability_policy"]["approved_tools"]:
         schema = lifecycle[server].get(tool["name"])
         if schema is not None:
@@ -748,6 +753,9 @@ main() {
   hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
 
   copy_templates "$source_release" "$stage_root"
+  echo "[test] staged n8n manifest production validation" >&2
+  FCP_N8N_STAGED_MANIFEST_PATH="$stage_root/manifests/fcp-n8n.toml" \
+    bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test -p fcp-n8n operations_and_rate_pools_match_parsed_manifest
   write_local_mcp_policy "$stage_root" "$hash_helper"
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"

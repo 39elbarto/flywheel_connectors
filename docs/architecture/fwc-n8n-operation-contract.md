@@ -390,9 +390,11 @@ historical/update-path tests. This is historical version evidence only, not the
 current installed runtime policy and not a live provider check.
 
 Current source boundary: `fwc-n8n` is a thin typed CLI for `resolve`, `route`,
-`run-once`, `update-review detect`, `provision [--mode preflight|apply]`, and
-`status`. `provision` defaults to read-only `preflight`; mutation requires the
-explicit owner-gated `provision --mode apply`. `run-once` supports ten Phase-1
+`run-once`, `update-review detect`, the explicit owner-only
+`update-review stage-local-mcp <exact-version>` staging review, `provision
+[--mode preflight|apply]`, and `status`. `provision` defaults to read-only
+`preflight`; mutation requires the explicit owner-gated `provision --mode
+apply`. `run-once` supports ten Phase-1
 REST reads, guarded REST draft create/update, typed source paths for lifecycle
 `publish`/`unpublish` and archive, two local knowledge/validation operations,
 and one official-MCP discovery operation, `n8n.capabilities.inspect`, plus the
@@ -416,11 +418,19 @@ sorted tool names, SHA-256 input/output schema digests, and explicit
 
 Implementation status snapshot (2026-08-19): the host-side local
 `n8n-mcp` update executor and its security primitives are implemented behind
-the connector boundary. The public CLI still has no registry fetch, `npm`
-invocation, or apply mode for `update-review`. Its separate explicit
-`provision --mode apply` path is limited to fixed-root, proof-carrying,
-owner-gated immutable release promotion; it is not a generic live update
-command. The implementation status
+the connector boundary. The public CLI has one explicit root-gated
+`update-review stage-local-mcp <exact-version>` path that obtains metadata and
+the exact tarball through fixed npm plans, stages only under the fixed local-MCP
+  root with scripts/audit/fund/bin-links disabled, emits a retained redacted
+  receipt, and strictly verifies metadata/SRI/tarball/canonical registry-only
+  lock closure/tree/entrypoint before success. npm and tar run in dedicated
+  process groups, and timeout teardown terminates the complete group before
+  output readers are joined. It
+does not modify the global package, promote an FWC release, call a provider, or
+register a capability; no retry occurs after an unknown result. Its separate
+explicit `provision --mode apply` path is limited to fixed-root,
+proof-carrying, owner-gated immutable release promotion; it is not a generic
+live update command. The implementation status
 and evidence are maintained in `connectors/n8n/README.md`; this document
 continues to define the accepted public contract and owner gates.
 
@@ -597,8 +607,25 @@ disconnect, HTTP error, malformed/advisory response, provider identity or
 normalization failure) therefore reaches exactly one GET; readback drift or
 failure is terminal `unknown_outcome` with no retry.
 
-Activation,
-restore_workflow_version, versions, execution, credential mutation, and permanent
+The public `n8n.workflows.activate` operation is now source-implemented as a
+typed REST contract for EEC and Hetzner only. `active=true` maps only to one
+`POST /api/v1/workflows/{id}/publish` (with the optional exact `versionId` in
+the input), while `active=false` maps only to one no-body
+`POST /api/v1/workflows/{id}/unpublish`; each transition is exactly baseline
+GET, one POST, and one independent GET, with no automatic retry. The host binds
+the exact original input and approval, fixes credential purpose to REST API,
+enforces the 1 MiB HTTPS response policy, and derives a trusted timeout that
+reserves the readback tail. Publish succeeds only when readback proves
+`active=true`, matching `activeVersionId`, matching `published.versionId` and
+published graph digest, while preserving workflow identity, draft graph, and
+archive state; unpublish proves `active=false`, `activeVersionId=null`,
+`published=null`, and the same identity/draft/archive invariants. A newly
+created credential-free Webhook draft is the only acceptance target; the
+webhook is never invoked, uncertainty stops the run, and no automatic cleanup
+is performed. Source and offline evidence are present, but live acceptance and
+release promotion remain unclaimed.
+
+`restore_workflow_version`, versions, execution, credential mutation, and permanent
 deletion remain outside this packet; no legacy route is guessed. The bounded
 `n8n.workflows.archive` operation separately maps only to the documented
 official MCP `archive_workflow` tool, requires an inactive/unarchived baseline,
@@ -948,6 +975,7 @@ guarantees, not permission to replay.
 | `n8n.workflows.compare` | `n8n.workflows.read` | Safe / Medium | None | None | official MCP | both version URIs/digests | 512 KiB |
 | `n8n.workflows.create_draft` | `n8n.workflows.write` | Risky / Medium | Interactive | BestEffort | typed REST | new URI; draft/readback state | 512 KiB |
 | `n8n.workflows.update_draft` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST | draft version/digest; published unchanged | 512 KiB |
+| `n8n.workflows.activate` | `n8n.workflows.write` | Risky / High | Interactive | BestEffort | typed REST publish/unpublish on EEC/Hetzner with independent REST GET readback | active transition with matching published version/graph, or inactive/null active version/null published; draft graph/archive preserved | 1 MiB |
 | `n8n.workflows.lifecycle` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP publish/unpublish with independent REST GET readback | all normalized state fields | 256 KiB |
 | `n8n.workflows.archive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | official MCP `archive_workflow` with independent REST GET readback | archived/inactive state; draft/published unchanged | 256 KiB |
 | `n8n.workflows.unarchive` | `n8n.workflows.lifecycle` | Risky / High | Interactive | BestEffort | typed REST `POST /api/v1/workflows/{workflowId}/unarchive` with independent REST GET readback | unarchived state; draft graph/published/lifecycle state unchanged; draft version rotation allowed | 256 KiB |
@@ -974,7 +1002,8 @@ separate:
   `workflows.update_draft`, `workflows.lifecycle`, `workflows.archive`,
   `workflows.delete_disposable`, `workflows.execute`, and
   `mcp_access.reconcile`. A manifest declaration does
-  not override an operation's fail-closed provider gate.
+  not override an operation's fail-closed provider gate; the typed REST
+  activation implementation is present in source but remains live-unaccepted.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is absent from
   the connector manifest. The wrapper/host path accepts an empty operation
   input, derives a fixed EEC/Hetzner server from its bounded envelope, and
@@ -989,8 +1018,9 @@ separate:
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
   without a corresponding host/connector dispatch remain future or
   unimplemented execution paths. `restore_workflow_version`, `versions`, credential
-  mutation, permanent/general deletion, and the provider activation path remain
-  fail-closed/non-goals.
+  mutation, and permanent/general deletion remain fail-closed/non-goals. Typed
+  REST activation is implemented but remains outside live acceptance until the
+  bounded EEC-then-Hetzner procedure passes.
 
 Historical live acceptance boundary (2026-08-21; release ID and evidence receipt
 not recorded here): the then-installed owner-gated bundle
@@ -1480,6 +1510,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
 | `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
+| `workflows.activate` | exact workflow target, `active`, full `guard.precondition`, UUID idempotency key | publish `versionId` (required for pinned activation), one matching approval | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState,active:true|false}` after one REST POST and independent REST GET readback |
 | `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact official-MCP call and independent REST GET readback |
 | `workflows.versions` | exact workflow target, `action` | `versionId`, `guard`, `page` | action-specific version list/get/rollback result |
 | `workflows.execute` | exact workflow target, `mode`, `versionId`, `guard` | `inputs` (bounded), `wait=false` | `{status,operation,provider,workflowId,mode,versionId,executionId,initialStatus,retry,readback}`; only bounded identifiers/status are returned. Host admission requires the exact immutable owner-provisioned EEC/Hetzner schema binding; after any provider attempt, readback transport/decode/mismatch is terminal `unknown_outcome` with no automatic retry. |
@@ -1540,10 +1571,10 @@ The default is `runtime`; provider-specific extra profiles cannot become public
 without a contract revision.
 
 `workflows.lifecycle.action` is exactly `publish` or `unpublish`; archive is a
-separate typed `n8n.workflows.archive` operation. Restore/unarchive,
-activation/deactivation, version operations, and execution cannot be
-represented as aliases here; each provider action is fixed by its typed enum
-and route.
+separate typed `n8n.workflows.archive` operation, and activation/deactivation
+is the separate typed `n8n.workflows.activate` REST operation. Restore/unarchive,
+version operations, and execution cannot be represented as aliases here; each
+provider action is fixed by its typed enum and route.
 
 Lifecycle acceptance fixtures have a stricter provider-readiness requirement
 than draft creation: the graph must contain at least one activation-eligible
@@ -2007,8 +2038,9 @@ The trusted local-provider update path is review-first and host-owned:
 - candidate, stage plan, metadata, registry URL, and exact artifact SRI are
   bound before stage creation; a mismatch performs no stage I/O;
 - archive listing is streamed with a hard output bound and absolute deadline;
-  timeout handling kills and waits for the same child, and non-zero, oversized,
-  or I/O failures are fail-closed;
+  timeout handling terminates and waits for the complete dedicated process
+  group, so descendants cannot retain output pipes; non-zero, oversized, or I/O
+  failures are fail-closed;
 - the receipt digest is checked before and after listing and again on a fresh
   descriptor immediately before extraction, so the validated artifact cannot be
   silently replaced between those phases;
@@ -2022,9 +2054,39 @@ The trusted local-provider update path is review-first and host-owned:
   authority.
 
 The executor's apply path is tested offline, but wiring registry discovery and
-live acceptance remain separate gates. A failed
-exact precondition returns before the component lock is acquired; callers must
-not infer lock ownership from that error.
+the owner-operated staging path is tested offline through command/stage seams;
+live acceptance remains a separate gate. Registry range metadata is resolved
+explicitly: npm `view` object and array results are normalized, npm-semver
+prerelease/build, partial, comparator, wildcard, OR, and hyphen forms are
+evaluated, and the highest matching concrete semver is selected
+deterministically. The selected package/version/SRI/tarball records and every
+parent-edge target are hashed into the redacted receipt. Unsupported range
+syntax fails closed before content fetch. The root exact-version gate remains
+mandatory. A failed exact precondition returns before the component lock is
+acquired; callers must not infer lock ownership from that error.
+
+The staging path rejects file/link/git/ssh/http(s), npm aliases, bundled
+dependencies, and overrides on direct, optional, peer, and transitive edges
+before any package-content fetch. It creates an initially empty cache under
+the UUID-v4 stage, runs one fixed exact `npm pack` per selected registry
+artifact, verifies every tarball's SHA-512 SRI, rejects published package
+lockfiles, bundles, aliases, and manifest disagreement before install, writes a
+root project manifest plus an immutable npm-compatible `package-lock.json`
+from the frozen closure with deterministic package placement, seeds only that
+stage cache, and invokes `npm ci --offline` without a package spec. Pack
+consumes each frozen validated registry tarball URL; install can consume only
+the stage-owned cache and placement, never a fresh registry resolution.
+Environment clearing, the fixed-prefix project `.npmrc` guard, and distinct
+fixed empty user/global npmrc paths prevent ambient npm configuration or cache
+state from changing the closure. Optional dependencies may be omitted
+only for a selected package whose `os`/`cpu` constraints exclude the current
+platform; optional peers may be absent by npm semantics. Required and
+non-optional peer edges must be present, and every installed lock dependency
+map and edge target must match the frozen selected manifests exactly.
+
+Dependency updates and discovery cannot expand the public FWC function set.
+Any new capability requires an explicit, separately reviewed implementation
+with its own contract and authorization evidence.
 
 ### 12.2 Fail-closed acceptance preflight
 

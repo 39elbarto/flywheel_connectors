@@ -115,7 +115,7 @@ async fn local_non_mock_workflow_activate_and_executions_use_production_http_cli
         ),
         HttpResponse::json(
             "200 OK",
-            r#"{"id":"1001","name":"Ops workflow","active":true,"versionId":"draft-v1","activeVersionId":"published-v1","isArchived":false,"nodes":[{"id":"draft-node"}],"connections":{},"activeVersion":{"versionId":"published-v1","nodes":[{"id":"published-node"}],"connections":{}}}"#,
+            r#"{"id":"1001","name":"Ops workflow","active":true,"versionId":"draft-v1","activeVersionId":"published-v1","isArchived":false,"nodes":[{"id":"draft-node"}],"connections":{},"activeVersion":{"versionId":"published-v1","nodes":[{"id":"draft-node"}],"connections":{}}}"#,
         ),
         HttpResponse::json("200 OK", r#"{"data":[{"id":"5001","finished":true}]}"#),
         HttpResponse::json(

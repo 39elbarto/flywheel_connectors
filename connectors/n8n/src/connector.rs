@@ -23,20 +23,29 @@ use tracing::{info, instrument};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
+const HOST_ACTIVATION_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS";
 
-fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
-    let Some(value) = std::env::var_os(HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV) else {
+fn host_request_timeout(env_key: &str, operation: &str) -> N8nResult<Option<Duration>> {
+    let Some(value) = std::env::var_os(env_key) else {
         return Ok(None);
     };
     let value = value
         .to_str()
-        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+        .ok_or_else(|| N8nError::InvalidInput(format!("invalid {operation} request timeout")))?;
     let milliseconds = value
         .parse::<u64>()
         .ok()
         .filter(|milliseconds| *milliseconds > 0)
-        .ok_or_else(|| N8nError::InvalidInput("invalid unarchive request timeout".into()))?;
+        .ok_or_else(|| N8nError::InvalidInput(format!("invalid {operation} request timeout")))?;
     Ok(Some(Duration::from_millis(milliseconds)))
+}
+
+fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
+    host_request_timeout(HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV, "unarchive")
+}
+
+fn host_activation_request_timeout() -> N8nResult<Option<Duration>> {
+    host_request_timeout(HOST_ACTIVATION_REQUEST_TIMEOUT_ENV, "activation")
 }
 
 use crate::{
@@ -486,9 +495,15 @@ impl N8nConnector {
     /// variables are incomplete, conflicting, invalid, or unsupported.
     pub fn try_new() -> N8nResult<Self> {
         let unarchive_timeout = host_unarchive_request_timeout()?;
+        let activation_timeout = host_activation_request_timeout()?;
+        if unarchive_timeout.is_some() && activation_timeout.is_some() {
+            return Err(N8nError::InvalidInput(
+                "conflicting n8n request timeout launch configuration".into(),
+            ));
+        }
         let mut runtime_config =
             ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30));
-        if let Some(timeout) = unarchive_timeout {
+        if let Some(timeout) = unarchive_timeout.or(activation_timeout) {
             // The host bridge derives this per-request budget from the
             // absolute run-once deadline and reserves a bounded tail for a
             // mandatory readback. Applying it to both direct and mediated
@@ -945,7 +960,7 @@ impl N8nConnector {
                 .await
             }
             "n8n.workflows.lifecycle" => {
-                self.invoke_workflow_lifecycle(client, &input, Some(context))
+                self.invoke_workflow_lifecycle(client, &input, Some(context), true)
                     .await
             }
             "n8n.workflows.activate" => {
@@ -1494,6 +1509,11 @@ impl N8nConnector {
     ) -> Result<Value, N8nError> {
         let typed = parse_workflow_activation_input(input)?;
         let server_id = self.configured_server_id()?;
+        if !matches!(server_id, "eec" | "hetzner") {
+            return Err(N8nError::CapabilityUnavailable(
+                "workflow activation is available only for EEC and Hetzner",
+            ));
+        }
         let lock_key = format!("activation:{server_id}:{}", typed.id);
         let Some(_lock) = self.try_resource_lock(lock_key)? else {
             return Err(N8nError::PreconditionFailed(
@@ -1520,7 +1540,7 @@ impl N8nConnector {
         );
 
         let mut result = self
-            .invoke_workflow_lifecycle(client, &lifecycle_input, context)
+            .invoke_workflow_lifecycle(client, &lifecycle_input, context, false)
             .await?;
         let result_object = result
             .as_object_mut()
@@ -1539,8 +1559,12 @@ impl N8nConnector {
         client: &N8nClient,
         input: &Value,
         context: Option<HostEgressContext>,
+        require_publish_version_match: bool,
     ) -> Result<Value, N8nError> {
-        let typed = parse_workflow_lifecycle_input(input)?;
+        let typed = parse_workflow_lifecycle_input_with_version_binding(
+            input,
+            require_publish_version_match,
+        )?;
         let baseline_workflow = client
             .get_workflow_typed(&typed.id, context.clone())
             .await?;
@@ -3190,6 +3214,7 @@ fn parse_workflow_activation_input(input: &Value) -> N8nResult<WorkflowActivatio
         } else {
             WorkflowLifecycleAction::Unpublish
         },
+        false,
     )?;
     if !typed.active && typed.version_id.is_some() {
         return Err(N8nError::InvalidInput(
@@ -3200,16 +3225,29 @@ fn parse_workflow_activation_input(input: &Value) -> N8nResult<WorkflowActivatio
 }
 
 fn parse_workflow_lifecycle_input(input: &Value) -> N8nResult<WorkflowLifecycleInput> {
+    parse_workflow_lifecycle_input_with_version_binding(input, true)
+}
+
+fn parse_workflow_lifecycle_input_with_version_binding(
+    input: &Value,
+    require_publish_version_match: bool,
+) -> N8nResult<WorkflowLifecycleInput> {
     let typed: WorkflowLifecycleInput = serde_json::from_value(input.clone()).map_err(|_| {
         N8nError::InvalidInput(
             "workflow lifecycle input requires id, action, and exact guard precondition".into(),
         )
     })?;
+    if typed.action == WorkflowLifecycleAction::Unpublish && input.get("versionId").is_some() {
+        return Err(N8nError::InvalidInput(
+            "unpublish must not include a versionId".into(),
+        ));
+    }
     validate_workflow_lifecycle_guard(
         &typed.id,
         &typed.guard,
         typed.version_id.as_deref(),
         typed.action,
+        require_publish_version_match,
     )?;
     Ok(typed)
 }
@@ -3219,6 +3257,7 @@ fn validate_workflow_lifecycle_guard(
     guard: &WorkflowLifecycleGuard,
     version_id: Option<&str>,
     action: WorkflowLifecycleAction,
+    require_publish_version_match: bool,
 ) -> N8nResult<()> {
     sanitize_path_segment(workflow_id, "workflow id")?;
     if guard.approval_ref.is_empty()
@@ -3256,10 +3295,23 @@ fn validate_workflow_lifecycle_guard(
             "workflow lifecycle versionId is invalid".into(),
         ));
     }
-    if action == WorkflowLifecycleAction::Unpublish && version_id.is_some() {
-        return Err(N8nError::InvalidInput(
-            "unpublish must not include a versionId".into(),
-        ));
+    match action {
+        WorkflowLifecycleAction::Publish => {
+            let selected_version = version_id.ok_or_else(|| {
+                N8nError::InvalidInput("publish requires an explicit versionId".into())
+            })?;
+            if require_publish_version_match && selected_version != precondition.version_id {
+                return Err(N8nError::InvalidInput(
+                    "publish versionId must match the approval precondition versionId".into(),
+                ));
+            }
+        }
+        WorkflowLifecycleAction::Unpublish if version_id.is_some() => {
+            return Err(N8nError::InvalidInput(
+                "unpublish must not include a versionId".into(),
+            ));
+        }
+        WorkflowLifecycleAction::Unpublish => {}
     }
     Ok(())
 }
@@ -3539,7 +3591,7 @@ fn verify_workflow_lifecycle_readback(
     provider: Option<&WorkflowStateView>,
     readback: &WorkflowStateView,
 ) -> N8nResult<()> {
-    if provider.is_some_and(|provider| provider.draft != baseline.draft) {
+    if readback.id != baseline.id || readback.draft != baseline.draft {
         return Err(N8nError::UnknownOutcome);
     }
     let mismatch = |provider_state: Option<&WorkflowStateView>| {
@@ -3551,17 +3603,15 @@ fn verify_workflow_lifecycle_readback(
     };
     match action {
         WorkflowLifecycleAction::Publish => {
-            let target_version_id = requested_version_id
-                .or(readback.active_version_id.as_deref())
-                .ok_or_else(|| mismatch(provider))?;
+            let target_version_id = requested_version_id.ok_or_else(|| mismatch(provider))?;
             if !readback.active
                 || readback.is_archived != baseline.is_archived
                 || readback.active_version_id.as_deref() != Some(target_version_id)
-                || readback
-                    .published
-                    .as_ref()
-                    .is_none_or(|published| published.version_id.as_str() != target_version_id)
-                || readback.draft != baseline.draft
+                || readback.published.as_ref().is_none_or(|published| {
+                    published.version_id != target_version_id
+                        || published.graph_digest.is_empty()
+                        || published.graph_digest != readback.draft.graph_digest
+                })
             {
                 return Err(mismatch(provider));
             }
@@ -3570,7 +3620,7 @@ fn verify_workflow_lifecycle_readback(
             if readback.active
                 || readback.active_version_id.is_some()
                 || readback.is_archived != baseline.is_archived
-                || readback.draft != baseline.draft
+                || readback.published.is_some()
             {
                 return Err(mismatch(provider));
             }
@@ -4577,6 +4627,16 @@ fn workflow_lifecycle_input_schema() -> serde_json::Value {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "action", "guard"],
+        "allOf": [
+            {
+                "if": {"properties": {"action": {"const": "publish"}}, "required": ["action"]},
+                "then": {"required": ["versionId"]}
+            },
+            {
+                "if": {"properties": {"action": {"const": "unpublish"}}, "required": ["action"]},
+                "then": {"not": {"required": ["versionId"]}}
+            }
+        ],
         "properties": {
             "id": {"type": "string", "minLength": 1, "maxLength": 256},
             "action": {"type": "string", "enum": ["publish", "unpublish"]},
@@ -4617,6 +4677,20 @@ fn workflow_activation_input_schema() -> serde_json::Value {
         .expect("workflow lifecycle input schema required must be an array");
     required.retain(|field| field.as_str() != Some("action"));
     required.push(Value::String("active".into()));
+    object.remove("allOf");
+    object.insert(
+        "allOf".into(),
+        json!([
+            {
+                "if": {"properties": {"active": {"const": true}}, "required": ["active"]},
+                "then": {"required": ["versionId"]}
+            },
+            {
+                "if": {"properties": {"active": {"const": false}}, "required": ["active"]},
+                "then": {"not": {"required": ["versionId"]}}
+            }
+        ]),
+    );
     let properties = object
         .get_mut("properties")
         .and_then(Value::as_object_mut)
@@ -5165,7 +5239,7 @@ fn operations_info() -> Vec<OperationInfo> {
         ),
         op_info(
             "n8n.workflows.activate",
-            "Activate or deactivate an exact n8n workflow through the canonical typed REST publish/unpublish routes with independent GET readback",
+            "Activate or deactivate an exact workflow through canonical REST publish/unpublish with independent GET readback",
             workflow_activation_input_schema(),
             workflow_activation_output_schema(),
             "n8n.workflows.write",
@@ -5173,9 +5247,10 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::BestEffort,
             AgentHint {
-                when_to_use: "Use only with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and a current-chat approval bound to this exact request.".into(),
+                when_to_use: "Use only with an exact workflow target, UUID idempotency key, full current lifecycle precondition, and current-chat approval bound to this exact request.".into(),
                 common_mistakes: vec![
-                    "active=true uses only POST /workflows/{workflowId}/publish and active=false uses only POST /workflows/{workflowId}/unpublish; deprecated activate/deactivate routes and graph PUT are never used.".into(),
+                    "active=true maps only to POST /workflows/{workflowId}/publish and active=false only to POST /workflows/{workflowId}/unpublish; deprecated activate/deactivate routes are never used.".into(),
+                    "Do not use PUT /workflows/{id}: its active field is readOnly and the route updates workflow graphs.".into(),
                     "The full versionId, explicit activeVersionId (null or value), active, isArchived, stateDigest, UUID idempotencyKey, and matching approval are required.".into(),
                     "A timeout, conflict, malformed response, or readback mismatch is terminal/unknown and never retried automatically; success requires an independent GET preserving the draft and published invariants.".into(),
                 ],
@@ -6568,7 +6643,7 @@ mod tests {
             .into_iter()
             .find(|op| op.id.as_ref() == "n8n.workflows.activate")
             .expect("activation operation should be catalogued");
-        assert!(activation.summary.contains("canonical typed REST"));
+        assert!(activation.summary.contains("canonical REST"));
         assert_eq!(
             activation.requires_approval,
             Some(ApprovalMode::Interactive)
@@ -6797,8 +6872,14 @@ mod tests {
     fn operations_and_rate_pools_match_parsed_manifest() {
         use std::collections::BTreeSet;
 
-        let manifest = fcp_manifest::ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
-            .expect("embedded n8n manifest should parse");
+        let manifest_toml = match std::env::var_os("FCP_N8N_STAGED_MANIFEST_PATH") {
+            Some(path) => {
+                std::fs::read_to_string(path).expect("staged n8n manifest should be readable")
+            }
+            None => MANIFEST_TOML.to_owned(),
+        };
+        let manifest = fcp_manifest::ConnectorManifest::parse_str(&manifest_toml)
+            .expect("n8n manifest should parse and validate");
         let runtime_operations = operations_info();
         let manifest_ids = manifest
             .provides
@@ -7702,6 +7783,7 @@ mod tests {
         let input = json!({
             "id": "1001",
             "action": "publish",
+            "versionId": "draft-v1",
             "guard": {
                 "approvalRef": "approval-1",
                 "idempotencyKey": "00000000-0000-4000-8000-000000000003",
@@ -7716,6 +7798,7 @@ mod tests {
         });
         let parsed = parse_workflow_lifecycle_input(&input).expect("valid lifecycle input");
         assert_eq!(parsed.action.as_str(), "publish");
+        assert_eq!(parsed.version_id.as_deref(), Some("draft-v1"));
         assert!(matches!(
             parsed.guard.precondition.active_version_id,
             crate::types::RequiredNullable::Null
@@ -7731,6 +7814,91 @@ mod tests {
         let mut bad_uuid = input;
         bad_uuid["guard"]["idempotencyKey"] = json!("not-a-uuid");
         assert!(parse_workflow_lifecycle_input(&bad_uuid).is_err());
+    }
+
+    #[test]
+    fn lifecycle_parser_requires_exact_selected_publish_version_and_versionless_unpublish() {
+        let valid = json!({
+            "id": "1001",
+            "action": "publish",
+            "versionId": "draft-v1",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let parsed = parse_workflow_lifecycle_input(&valid).expect("selected version is valid");
+        assert_eq!(parsed.version_id.as_deref(), Some("draft-v1"));
+
+        let hash = approval_binding_hash(
+            "eec",
+            "fwc-mcp-bridge://eec/tools/publish_workflow",
+            "n8n.workflows.lifecycle",
+            &valid,
+        )
+        .expect("approval binding hash");
+        let mut changed_after_approval = valid.clone();
+        changed_after_approval["versionId"] = json!("different-version");
+        assert_ne!(
+            approval_binding_hash(
+                "eec",
+                "fwc-mcp-bridge://eec/tools/publish_workflow",
+                "n8n.workflows.lifecycle",
+                &changed_after_approval,
+            ),
+            Some(hash),
+            "approval binding must include the selected versionId",
+        );
+
+        let mut missing = valid.clone();
+        missing
+            .as_object_mut()
+            .expect("input object")
+            .remove("versionId");
+        let mut null = valid.clone();
+        null["versionId"] = Value::Null;
+        let mut empty = valid.clone();
+        empty["versionId"] = json!("");
+        let mut padded = valid.clone();
+        padded["versionId"] = json!(" draft-v1");
+        let mut too_long = valid.clone();
+        too_long["versionId"] = json!("v".repeat(257));
+        let mut mismatch = valid;
+        mismatch["versionId"] = json!("other-version");
+        for invalid in [missing, null, empty, padded, too_long, mismatch] {
+            assert!(parse_workflow_lifecycle_input(&invalid).is_err());
+        }
+
+        let unpublish = json!({
+            "id": "1001",
+            "action": "unpublish",
+            "guard": {
+                "approvalRef": "approval-1",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000003",
+                "precondition": {
+                    "versionId": "draft-v1",
+                    "activeVersionId": "published-v1",
+                    "active": true,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                }
+            }
+        });
+        let parsed_unpublish =
+            parse_workflow_lifecycle_input(&unpublish).expect("unpublish remains versionless");
+        assert_eq!(parsed_unpublish.version_id, None);
+        for version_id in [Value::Null, json!("published-v1")] {
+            let mut invalid = unpublish.clone();
+            invalid["versionId"] = version_id;
+            assert!(parse_workflow_lifecycle_input(&invalid).is_err());
+        }
     }
 
     #[test]
@@ -7819,6 +7987,19 @@ mod tests {
         assert!(input["properties"]["guard"].is_object());
         assert!(input["properties"]["active"].is_object());
         assert!(input["properties"].get("action").is_none());
+        assert_eq!(
+            input["allOf"][0]["if"]["properties"]["active"]["const"],
+            json!(true)
+        );
+        assert_eq!(input["allOf"][0]["then"]["required"], json!(["versionId"]));
+        assert_eq!(
+            input["allOf"][1]["if"]["properties"]["active"]["const"],
+            json!(false)
+        );
+        assert_eq!(
+            input["allOf"][1]["then"]["not"]["required"],
+            json!(["versionId"])
+        );
 
         let output = workflow_activation_output_schema();
         assert_eq!(

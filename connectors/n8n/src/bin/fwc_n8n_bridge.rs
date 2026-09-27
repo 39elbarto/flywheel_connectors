@@ -81,6 +81,8 @@ const UPDATE_DRAFT_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approve
 #[cfg(target_os = "linux")]
 const DELETE_DISPOSABLE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.delete_disposable"}"#;
 #[cfg(target_os = "linux")]
+const WORKFLOWS_ACTIVATE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.activate"}"#;
+#[cfg(target_os = "linux")]
 const WORKFLOWS_UNARCHIVE_OWNER_ADMISSION: &str = r#"{"version":1,"mode":"owner-approved-single-host","zone_id":"z:work","connector_id":"fcp.n8n","operation":"n8n.workflows.unarchive"}"#;
 #[cfg(target_os = "linux")]
 // The supervised host performs the side effect as this nested request.  The
@@ -328,6 +330,7 @@ fn process_spec(
     let owner_admission = match envelope.operation {
         super::HostRunOnceOperation::WorkflowsCreateDraft => Some(CREATE_DRAFT_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsUpdateDraft => Some(UPDATE_DRAFT_OWNER_ADMISSION),
+        super::HostRunOnceOperation::WorkflowsActivate => Some(WORKFLOWS_ACTIVATE_OWNER_ADMISSION),
         super::HostRunOnceOperation::WorkflowsDeleteDisposable => {
             Some(DELETE_DISPOSABLE_OWNER_ADMISSION)
         }
@@ -1097,10 +1100,8 @@ pub fn run_process(
     let stderr = stderr.map_err(|error| with_diagnostic(error, diagnostic))?;
     let _ = stdin.map_err(|error| with_diagnostic(error, diagnostic))?;
     if !status.success() {
-        let diagnostic = diagnostic.or_else(|| child_primary_diagnostic(&stderr));
         emit_child_invoke_diagnostic(&stderr);
-        let child_error = child_failure(&stdout);
-        return Err(child_error.with_diagnostic(child_error.diagnostic().or(diagnostic)));
+        return Err(child_failure_with_stderr(&stdout, &stderr, diagnostic));
     }
     Ok(ProcessOutput {
         stdout,
@@ -1112,20 +1113,69 @@ pub fn run_process(
 
 #[cfg(target_os = "linux")]
 fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
-    // Match stderr forwarding order: invoke, plan, external provenance, host
-    // class, host detail, owned, child error. Within a family, retain the first
-    // allowlisted line, preserving existing invoke/plan precedence.
+    // Provider outcomes retain priority. Owned egress stages replace only a
+    // generic host fallback; specific host details keep their prior precedence.
+    let owned_egress_stage = stderr
+        .split(|byte| *byte == b'\n')
+        .find_map(child_owned_diagnostic_label)
+        .filter(|label| label.starts_with("owned.egress_stage."));
+    let host_error = child_host_error_diagnostic(stderr);
+    let host_error_detail = child_host_error_detail(stderr);
+    let generic_host_fallback = (host_error.is_none() || host_error == Some("local.policy_denied"))
+        && (host_error_detail.is_none() || host_error_detail == Some("policy.network"));
     child_invoke_diagnostic(stderr)
         .or_else(|| child_plan_diagnostic(stderr))
         .or_else(|| child_external_provenance_diagnostic(stderr))
-        .or_else(|| child_host_error_diagnostic(stderr))
-        .or_else(|| child_host_error_detail(stderr))
+        .or_else(|| {
+            if generic_host_fallback {
+                owned_egress_stage.or(host_error).or(host_error_detail)
+            } else if owned_egress_stage.is_some()
+                && host_error == Some("local.policy_denied")
+                && host_error_detail.is_some_and(|detail| detail != "policy.network")
+            {
+                host_error_detail
+            } else {
+                host_error.or(host_error_detail)
+            }
+        })
         .or_else(|| {
             stderr
                 .split(|byte| *byte == b'\n')
                 .find_map(child_owned_diagnostic_label)
         })
         .or_else(|| child_child_error_diagnostic(stderr))
+}
+
+#[cfg(target_os = "linux")]
+fn generic_child_diagnostic(diagnostic: &str) -> bool {
+    matches!(
+        diagnostic,
+        "invoke_unknown" | "local.policy_denied" | "policy.network"
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn child_failure_with_stderr(
+    stdout: &[u8],
+    stderr: &[u8],
+    prior_diagnostic: Option<&'static str>,
+) -> BridgeError {
+    let error = child_failure(stdout);
+    let stderr_diagnostic = child_primary_diagnostic(stderr);
+    let fallback_diagnostic = match prior_diagnostic {
+        Some(existing) if generic_child_diagnostic(existing) => {
+            stderr_diagnostic.or(Some(existing))
+        }
+        Some(existing) => Some(existing),
+        None => stderr_diagnostic,
+    };
+    let diagnostic = match error.diagnostic() {
+        Some(existing) if generic_child_diagnostic(existing) => {
+            fallback_diagnostic.or(Some(existing))
+        }
+        existing => existing.or(fallback_diagnostic),
+    };
+    error.with_diagnostic(diagnostic)
 }
 
 #[cfg(target_os = "linux")]
@@ -1402,6 +1452,17 @@ fn child_owned_diagnostic_label(line: &[u8]) -> Option<&'static str> {
         b"owned.egress_codec.invalid_response" => Some("owned.egress_codec.invalid_response"),
         b"owned.egress_codec.invalid_auth_token" => Some("owned.egress_codec.invalid_auth_token"),
         b"owned.egress_codec.missing_request" => Some("owned.egress_codec.missing_request"),
+        b"owned.egress_stage.host_authorization_binding" => {
+            Some("owned.egress_stage.host_authorization_binding")
+        }
+        b"owned.egress_stage.credential_lease" => Some("owned.egress_stage.credential_lease"),
+        b"owned.egress_stage.policy_preflight" => Some("owned.egress_stage.policy_preflight"),
+        b"owned.egress_stage.dns_resolution" => Some("owned.egress_stage.dns_resolution"),
+        b"owned.egress_stage.tls_policy_validation" => {
+            Some("owned.egress_stage.tls_policy_validation")
+        }
+        b"owned.egress_stage.outbound_transport" => Some("owned.egress_stage.outbound_transport"),
+        b"owned.egress_stage.response_body_read" => Some("owned.egress_stage.response_body_read"),
         b"owned.teardown" => Some("owned.teardown"),
         _ => None,
     }
@@ -1850,6 +1911,11 @@ struct FwcN8nErrorEnvelope {
 #[cfg(target_os = "linux")]
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "lifecycle_provider_rejected",
+    "lifecycle_provider_status_rejected",
+    "lifecycle_provider_error_field",
+    "lifecycle_provider_result_is_error",
+    "lifecycle_provider_result_success_false",
+    "lifecycle_provider_result_error_field",
     "provider_unauthorized",
     "provider_forbidden",
     "provider_not_found",
@@ -2208,6 +2274,45 @@ mod tests {
         assert_eq!(admission["connector_id"], "fcp.n8n");
         assert_eq!(admission["operation"], "n8n.workflows.create_draft");
 
+        let activate = process_spec(
+            &bundle,
+            &test_envelope(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::WorkflowsActivate,
+                Value::Null,
+            ),
+        )
+        .expect("workflow activation write spec");
+        assert_eq!(
+            activate.fixed_args,
+            vec![OsString::from("n8n-write-run-once-supervised")]
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_CONNECTORS_FILE")),
+            Some(&OsString::from("/release/inventory/eec.json"))
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
+            Some(&OsString::from(WORKFLOWS_ACTIVATE_OWNER_ADMISSION))
+        );
+        assert_eq!(
+            activate
+                .fixed_env
+                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE")),
+            Some(&OsString::from("/etc/fwc-n8n/approval-public-key"))
+        );
+        let activation_admission: Value = serde_json::from_str(WORKFLOWS_ACTIVATE_OWNER_ADMISSION)
+            .expect("fixed activation owner admission must remain valid JSON");
+        assert_eq!(activation_admission["version"], 1);
+        assert_eq!(activation_admission["mode"], "owner-approved-single-host");
+        assert_eq!(activation_admission["zone_id"], "z:work");
+        assert_eq!(activation_admission["connector_id"], "fcp.n8n");
+        assert_eq!(activation_admission["operation"], "n8n.workflows.activate");
+
         let update = process_spec(
             &bundle,
             &test_envelope(
@@ -2482,6 +2587,22 @@ mod tests {
         assert_eq!(error.code(), "child_failed");
         assert_eq!(error.diagnostic(), Some("response_capability"));
         assert_eq!(error.correlation_id(), Uuid::parse_str(correlation_id).ok());
+
+        for diagnostic in [
+            "lifecycle_provider_status_rejected",
+            "lifecycle_provider_error_field",
+            "lifecycle_provider_result_is_error",
+            "lifecycle_provider_result_success_false",
+            "lifecycle_provider_result_error_field",
+        ] {
+            let encoded = format!(
+                r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"{diagnostic}","correlationId":"{correlation_id}"}}"#
+            );
+            let error = child_failure(encoded.as_bytes());
+            assert_eq!(error.code(), "child_failed");
+            assert_eq!(error.diagnostic(), Some(diagnostic));
+            assert_eq!(error.correlation_id(), Uuid::parse_str(correlation_id).ok());
+        }
 
         let private = "PRIVATE-PROVIDER-DETAIL";
         let encoded = format!(
@@ -2907,6 +3028,13 @@ mod tests {
             "owned.egress_codec.invalid_response",
             "owned.egress_codec.invalid_auth_token",
             "owned.egress_codec.missing_request",
+            "owned.egress_stage.host_authorization_binding",
+            "owned.egress_stage.credential_lease",
+            "owned.egress_stage.policy_preflight",
+            "owned.egress_stage.dns_resolution",
+            "owned.egress_stage.tls_policy_validation",
+            "owned.egress_stage.outbound_transport",
+            "owned.egress_stage.response_body_read",
             "owned.teardown",
         ] {
             let stderr = format!("FCP-N8N-OWNED-DIAGNOSTIC/v1 {label}\n");
@@ -2917,11 +3045,92 @@ mod tests {
             b"FCP-N8N-OWNED-DIAGNOSTIC/v1 PRIVATE".as_slice(),
             b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.launch",
             b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error PRIVATE",
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.dns_resolution_PRIVATE",
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.dns_resolution PRIVATE",
             b"prefix FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.rpc_child_error",
+            b"prefix FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.dns_resolution",
             b"FCP-N8N-OWNED-DIAGNOSTIC/v2 owned.rpc_child_error",
+            b"FCP-N8N-OWNED-DIAGNOSTIC/v2 owned.egress_stage.dns_resolution",
         ] {
             assert!(child_owned_diagnostics(stderr).is_empty());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_egress_stage_supersedes_only_generic_local_fallbacks() {
+        let stage = "FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.egress_stage.dns_resolution";
+        for generic in [
+            "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied",
+            "FCP-N8N-HOST-ERROR-DETAIL/v1 policy.network",
+        ] {
+            let stderr = format!("{generic}\n{stage}\n");
+            assert_eq!(
+                child_primary_diagnostic(stderr.as_bytes()),
+                Some("owned.egress_stage.dns_resolution")
+            );
+        }
+
+        let generic_host_fallback = format!(
+            "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied\nFCP-N8N-HOST-ERROR-DETAIL/v1 policy.network\n{stage}\n"
+        );
+        for child_diagnostic in ["invoke_unknown", "local.policy_denied", "policy.network"] {
+            let stdout = format!(
+                "{{\"schema\":\"fwc.n8n.error.v1\",\"status\":\"error\",\"code\":\"host_n8n_invoke_failed\",\"diagnostic\":\"{child_diagnostic}\"}}"
+            );
+            let merged = child_failure_with_stderr(
+                stdout.as_bytes(),
+                generic_host_fallback.as_bytes(),
+                None,
+            );
+            assert_eq!(
+                merged.diagnostic(),
+                Some("owned.egress_stage.dns_resolution")
+            );
+        }
+
+        let provider = format!("FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx\n{stage}\n");
+        assert_eq!(
+            child_primary_diagnostic(provider.as_bytes()),
+            Some("response_external_5xx")
+        );
+        let specific =
+            format!("FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.capability_denied\n{stage}\n");
+        assert_eq!(
+            child_primary_diagnostic(specific.as_bytes()),
+            Some("local.capability_denied")
+        );
+        let specific_detail = format!(
+            "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied\nFCP-N8N-HOST-ERROR-DETAIL/v1 policy.capability\n{stage}\n"
+        );
+        assert_eq!(
+            child_primary_diagnostic(specific_detail.as_bytes()),
+            Some("policy.capability")
+        );
+
+        let generic_invoke = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"invoke_unknown"}"#;
+        let provider = child_failure_with_stderr(
+            generic_invoke,
+            format!("FCP-N8N-INVOKE-DIAGNOSTIC/v1 response_external_5xx\n{stage}\n").as_bytes(),
+            None,
+        );
+        assert_eq!(provider.diagnostic(), Some("response_external_5xx"));
+
+        let host_denial = child_failure_with_stderr(
+            generic_invoke,
+            format!("FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.capability_denied\n{stage}\n")
+                .as_bytes(),
+            None,
+        );
+        assert_eq!(host_denial.diagnostic(), Some("local.capability_denied"));
+
+        let specific_detail = child_failure_with_stderr(
+            generic_invoke,
+            format!("FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.policy_denied\nFCP-N8N-HOST-ERROR-DETAIL/v1 policy.capability\n{stage}\n")
+                .as_bytes(),
+            None,
+        );
+        assert_eq!(specific_detail.diagnostic(), Some("policy.capability"));
     }
 
     #[cfg(target_os = "linux")]

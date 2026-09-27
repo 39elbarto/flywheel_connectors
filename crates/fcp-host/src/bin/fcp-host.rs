@@ -10773,7 +10773,7 @@ fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "id" | "mode" | "versionId" | "inputs" | "guard"
+            "id" | "mode" | "versionId" | "triggerNodeName" | "inputs" | "guard"
         )
     }) || !["id", "mode", "versionId", "guard"]
         .iter()
@@ -10806,6 +10806,18 @@ fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
         .ok_or_else(|| {
             HostError::InvalidFilter("n8n workflow execute versionId is invalid".to_string())
         })?;
+    if object.get("triggerNodeName").is_some_and(|value| {
+        value.as_str().is_none_or(|name| {
+            name.is_empty()
+                || name.len() > 256
+                || name.trim() != name
+                || name.chars().any(char::is_control)
+        })
+    }) {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow execute triggerNodeName is invalid".to_string(),
+        ));
+    }
     let guard = object
         .get("guard")
         .and_then(Value::as_object)
@@ -11836,11 +11848,9 @@ fn build_n8n_official_mcp_run_once_plan(
                 "executionMode".to_string(),
                 object.get("mode").cloned().unwrap_or(Value::Null),
             );
-            arguments.insert(
-                "versionId".to_string(),
-                object.get("versionId").cloned().unwrap_or(Value::Null),
-            );
-            arguments.insert("wait".to_string(), Value::Bool(false));
+            if let Some(trigger_node_name) = object.get("triggerNodeName") {
+                arguments.insert("triggerNodeName".to_string(), trigger_node_name.clone());
+            }
             if let Some(inputs) = object.get("inputs") {
                 arguments.insert("inputs".to_string(), inputs.clone());
             }
@@ -11959,22 +11969,6 @@ fn official_mcp_approval_constraints(
             "parent_binding_sha256".to_string(),
             Value::String(hex::encode(parent_binding_hash)),
         );
-    }
-    if plan.operation.as_str() == "n8n.workflows.execute" {
-        if let Some(input) = plan.input.get("arguments").and_then(Value::as_object) {
-            object.insert(
-                "execution_mode".to_string(),
-                input.get("executionMode").cloned().unwrap_or(Value::Null),
-            );
-            object.insert(
-                "workflow_version".to_string(),
-                input.get("versionId").cloned().unwrap_or(Value::Null),
-            );
-            object.insert(
-                "wait".to_string(),
-                input.get("wait").cloned().unwrap_or(Value::Null),
-            );
-        }
     }
     Ok(object
         .iter()
@@ -12550,28 +12544,19 @@ fn n8n_run_once_approval_material(
             b"fwc-n8n.approval-ref.v1",
             guard.get("approvalRef").unwrap_or(&Value::Null),
         );
-        let mutation_digest = n8n_run_once_digest(
-            if plan.operation.as_str() == "n8n.workflows.archive" {
-                &b"fwc-n8n.archive-mutation.v1"[..]
-            } else if plan.operation.as_str() == "n8n.workflows.execute" {
-                &b"fwc-n8n.execute-mutation.v1"[..]
-            } else {
-                &b"fwc-n8n.lifecycle-mutation.v1"[..]
-            },
-            &json!({
-                "server_id": plan.server_id.as_str(),
-                "resource_digest": resource_digest.clone(),
-                "workflow_id_digest": workflow_id_digest.clone(),
-                "action": object.get("action").cloned().unwrap_or(Value::Null),
-                "mode": object.get("mode").cloned().unwrap_or(Value::Null),
-                "input_class": guard.get("inputClass").cloned().unwrap_or(Value::Null),
-                "side_effect_summary": guard.get("sideEffectSummary").cloned().unwrap_or(Value::Null),
-                "inputs_digest": object.get("inputs").map(|value| n8n_run_once_digest(b"fwc-n8n.execute-inputs.v1", value)),
-                "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
-                "precondition": precondition,
-            }),
-        );
-        let material = json!({
+        let mut mutation_material = json!({
+            "server_id": plan.server_id.as_str(),
+            "resource_digest": resource_digest.clone(),
+            "workflow_id_digest": workflow_id_digest.clone(),
+            "action": object.get("action").cloned().unwrap_or(Value::Null),
+            "mode": object.get("mode").cloned().unwrap_or(Value::Null),
+            "input_class": guard.get("inputClass").cloned().unwrap_or(Value::Null),
+            "side_effect_summary": guard.get("sideEffectSummary").cloned().unwrap_or(Value::Null),
+            "inputs_digest": object.get("inputs").map(|value| n8n_run_once_digest(b"fwc-n8n.execute-inputs.v1", value)),
+            "version_id": object.get("versionId").cloned().unwrap_or(Value::Null),
+            "precondition": precondition,
+        });
+        let mut material = json!({
             "server_id": plan.server_id.as_str(),
             "resource_digest": resource_digest,
             "operation": plan.operation.as_str(),
@@ -12596,7 +12581,6 @@ fn n8n_run_once_approval_material(
             "state_digest": precondition.get("stateDigest").cloned().unwrap_or(Value::Null),
             "approval_ref_hash": approval_ref_hash,
             "idempotency_key_hash": idempotency_key_hash,
-            "mutation_digest": mutation_digest.clone(),
             "provider": "official_mcp",
             "side_effect": if plan.operation.as_str() == "n8n.workflows.archive" {
                 "workflow_archive"
@@ -12606,6 +12590,25 @@ fn n8n_run_once_approval_material(
                 "workflow_lifecycle"
             },
         });
+        if plan.operation.as_str() == "n8n.workflows.execute" {
+            let trigger_node_name = object
+                .get("triggerNodeName")
+                .cloned()
+                .unwrap_or(Value::Null);
+            mutation_material["trigger_node_name"] = trigger_node_name.clone();
+            material["trigger_node_name"] = trigger_node_name;
+        }
+        let mutation_digest = n8n_run_once_digest(
+            if plan.operation.as_str() == "n8n.workflows.archive" {
+                &b"fwc-n8n.archive-mutation.v1"[..]
+            } else if plan.operation.as_str() == "n8n.workflows.execute" {
+                &b"fwc-n8n.execute-mutation.v1"[..]
+            } else {
+                &b"fwc-n8n.lifecycle-mutation.v1"[..]
+            },
+            &mutation_material,
+        );
+        material["mutation_digest"] = json!(mutation_digest);
         return Ok((material, String::new(), mutation_digest));
     }
     if !N8N_WRITE_OPERATIONS.contains(&plan.operation.as_str()) {
@@ -36313,10 +36316,12 @@ done"#;
                 "id": "workflow-1",
                 "mode": "manual",
                 "versionId": "version-1",
+                "triggerNodeName": "Webhook Trigger",
+                "inputs": {"webhook": {"event": "ready"}},
                 "guard": {
                     "approvalRef": "chat-execute-approval",
                     "idempotencyKey": "33333333-4444-4555-8666-777777777777",
-                    "inputClass": "none",
+                    "inputClass": "bounded_json",
                     "sideEffectSummary": "manual approved run",
                     "precondition": {
                         "versionId": "version-1",
@@ -36335,6 +36340,26 @@ done"#;
         production_input.input["mode"] = json!("production");
         assert!(validate_n8n_workflow_execute_input(&production_input.input).is_err());
         assert!(build_n8n_official_mcp_run_once_plan(production_input, &config).is_err());
+        let mut optional_trigger = input.clone();
+        optional_trigger
+            .input
+            .as_object_mut()
+            .expect("execute input")
+            .remove("triggerNodeName");
+        assert!(build_n8n_official_mcp_run_once_plan(optional_trigger, &config).is_ok());
+        let invalid_triggers = vec![
+            String::new(),
+            " padded".to_owned(),
+            "padded ".to_owned(),
+            "control\nname".to_owned(),
+            "x".repeat(257),
+        ];
+        for invalid_trigger in invalid_triggers {
+            let mut invalid = input.clone();
+            invalid.input["triggerNodeName"] = json!(invalid_trigger);
+            assert!(validate_n8n_workflow_execute_input(&invalid.input).is_err());
+            assert!(build_n8n_official_mcp_run_once_plan(invalid, &config).is_err());
+        }
         let plan = build_n8n_official_mcp_run_once_plan(input.clone(), &config)
             .expect("owner-provisioned execute binding");
         assert_eq!(plan.server_id, N8nReadOnlyServerId::Eec);
@@ -36342,9 +36367,121 @@ done"#;
         assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_EXECUTE_TOOL);
         assert_eq!(plan.input["arguments"]["workflowId"], "workflow-1");
         assert_eq!(plan.input["arguments"]["executionMode"], "manual");
-        assert_eq!(plan.input["arguments"]["versionId"], "version-1");
-        assert_eq!(plan.input["arguments"]["inputs"], input.input["inputs"]);
-        assert_eq!(plan.input["arguments"]["wait"], false);
+        assert_eq!(
+            plan.input["arguments"],
+            json!({
+                "workflowId": "workflow-1",
+                "executionMode": "manual",
+                "triggerNodeName": "Webhook Trigger",
+                "inputs": {"webhook": {"event": "ready"}}
+            })
+        );
+        assert!(plan.input["arguments"].get("versionId").is_none());
+        assert!(plan.input["arguments"].get("wait").is_none());
+
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let approval = signed_external_approval(
+            "chat-execute-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            mcp_tools_call_payload_digest(&plan.input).expect("execute MCP payload hash"),
+            official_mcp_approval_constraints(&plan).expect("execute approval constraints"),
+            ZoneId::work(),
+            &signing_key,
+        );
+        validate_external_n8n_approval(
+            Some(&approval),
+            "chat-execute-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &ZoneId::work(),
+            mcp_tools_call_payload_digest(&plan.input).expect("execute MCP payload hash"),
+            &official_mcp_approval_constraints(&plan).expect("execute approval constraints"),
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("exact execute approval verifies");
+        let original_parent = plan.parent_binding_hash.expect("execute parent binding");
+        let mut changed_trigger = input.clone();
+        changed_trigger.input["triggerNodeName"] = json!("Other Trigger");
+        let changed_trigger_plan = build_n8n_official_mcp_run_once_plan(changed_trigger, &config)
+            .expect("changed trigger remains structurally valid");
+        assert_ne!(
+            changed_trigger_plan.parent_binding_hash,
+            Some(original_parent),
+            "the high-level parent binding must cover triggerNodeName"
+        );
+        assert!(
+            validate_external_n8n_approval(
+                Some(&approval),
+                "chat-execute-approval",
+                "fcp.mcp-bridge",
+                N8N_APPROVAL_WRAPPER_OPERATION,
+                &ZoneId::work(),
+                mcp_tools_call_payload_digest(&changed_trigger_plan.input)
+                    .expect("changed execute MCP payload hash"),
+                &official_mcp_approval_constraints(&changed_trigger_plan)
+                    .expect("changed execute approval constraints"),
+                Some(&signing_key.verifying_key()),
+            )
+            .is_err()
+        );
+        let mut changed_version = input.clone();
+        changed_version.input["versionId"] = json!("version-2");
+        changed_version.input["guard"]["precondition"]["versionId"] = json!("version-2");
+        let changed_version_plan = build_n8n_official_mcp_run_once_plan(changed_version, &config)
+            .expect("changed FCP version remains structurally valid");
+        assert_eq!(
+            changed_version_plan.input["arguments"], plan.input["arguments"],
+            "FCP version remains outside provider arguments"
+        );
+        assert_ne!(
+            changed_version_plan.parent_binding_hash,
+            Some(original_parent),
+            "the high-level parent binding must cover FCP versionId"
+        );
+        assert!(
+            validate_external_n8n_approval(
+                Some(&approval),
+                "chat-execute-approval",
+                "fcp.mcp-bridge",
+                N8N_APPROVAL_WRAPPER_OPERATION,
+                &ZoneId::work(),
+                mcp_tools_call_payload_digest(&changed_version_plan.input)
+                    .expect("changed execute MCP payload hash"),
+                &official_mcp_approval_constraints(&changed_version_plan)
+                    .expect("changed execute approval constraints"),
+                Some(&signing_key.verifying_key()),
+            )
+            .is_err()
+        );
+
+        let execute_operation = OperationId::new("n8n.workflows.execute").expect("operation");
+        let material_plan = N8nReadOnlyRunOncePlan {
+            server_id: plan.server_id,
+            operation: execute_operation.clone(),
+            zone_id: plan.zone_id.clone(),
+            resource_uri: expected_n8n_read_only_resource_uri(
+                plan.server_id,
+                execute_operation.as_str(),
+                &input.input,
+            )
+            .expect("execute resource binding"),
+            input: input.input.clone(),
+            approval_token: None,
+            deadline_ms: plan.deadline_ms,
+            correlation_id: plan.correlation_id.clone(),
+            credential_binding: plan.credential_binding.clone(),
+            typed_approval: None,
+        };
+        let (material, _, mutation_digest) =
+            n8n_run_once_approval_material(&material_plan).expect("execute approval material");
+        assert_eq!(material["trigger_node_name"], "Webhook Trigger");
+        let mut changed_material_plan = material_plan;
+        changed_material_plan.input["triggerNodeName"] = json!("Other Trigger");
+        let (_, _, changed_mutation_digest) =
+            n8n_run_once_approval_material(&changed_material_plan)
+                .expect("changed execute approval material");
+        assert_ne!(mutation_digest, changed_mutation_digest);
 
         let mut wrong_digest = config.clone();
         wrong_digest.config.as_mut().expect("config")["capability_policy"]["approved_tools"][3]["output_schema_digest"] =
@@ -36435,6 +36572,158 @@ done"#;
                 "output_schema_digest": N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
             }));
         assert!(build_n8n_official_mcp_run_once_plan(input, &extra_tool).is_err());
+    }
+
+    #[test]
+    fn n8n_execute_issuer_token_matches_generic_host_approval_binding() {
+        let config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let high_level = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.execute".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_string(),
+            input: json!({
+                "id": "workflow-1",
+                "mode": "manual",
+                "versionId": "version-1",
+                "triggerNodeName": "Webhook Trigger",
+                "inputs": {"webhook": {"event": "ready"}},
+                "guard": {
+                    "approvalRef": "chat-execute-approval",
+                    "idempotencyKey": "33333333-4444-4555-8666-777777777777",
+                    "inputClass": "bounded_json",
+                    "sideEffectSummary": "run one approved workflow",
+                    "precondition": {
+                        "versionId": "version-1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }
+            }),
+            approval_token: None,
+            deadline_ms: None,
+            correlation_id: None,
+        };
+        let plan = build_n8n_official_mcp_run_once_plan(high_level.clone(), &config)
+            .expect("manual execute plan");
+        let payload_hash = mcp_tools_call_payload_digest(&plan.input).expect("payload hash");
+        let constraints = official_mcp_approval_constraints(&plan).expect("exact host constraints");
+        assert_eq!(constraints.len(), 7);
+        assert!(
+            constraints
+                .iter()
+                .all(|constraint| constraint.pointer != "/typed_plan_sha256")
+        );
+        let now_ms = n8n_run_once_now_ms();
+        let issue = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: "workflow-1".to_string(),
+            operation: N8nLifecycleOperation::Execute,
+            input: high_level.input.clone(),
+            official_mcp_tool: N8N_OFFICIAL_MCP_EXECUTE_TOOL.to_string(),
+            official_mcp_resource_uri: plan.resource_uri.clone(),
+            official_mcp_payload_digest: format!("sha256:{}", hex::encode(payload_hash)),
+            parent_binding_sha256: hex::encode(plan.parent_binding_hash.expect("parent binding")),
+            expires_at_ms: now_ms.saturating_add(N8N_READ_ONLY_RUN_ONCE_TTL_SECS * 1000),
+        };
+        let mut token = build_unsigned_n8n_approval_token(&issue, now_ms)
+            .expect("existing issuer creates generic execute approval");
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let signing_bytes = approval_token_signing_bytes(&token).expect("approval bytes");
+        token.signature = Some(signing_key.sign(&signing_bytes).to_bytes().to_vec());
+
+        validate_external_n8n_approval(
+            Some(&token),
+            "chat-execute-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &ZoneId::work(),
+            payload_hash,
+            &constraints,
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("issuer token passes the actual generic host validator");
+        let ApprovalScope::Execution(scope) = &token.scope else {
+            panic!("execute token must use execution scope");
+        };
+        assert_eq!(scope.connector_id, "fcp.mcp-bridge");
+        assert_eq!(scope.method_pattern, N8N_APPROVAL_WRAPPER_OPERATION);
+        assert_eq!(scope.input_hash, Some(payload_hash));
+        assert_eq!(scope.input_constraints.len(), constraints.len());
+        assert!(
+            scope
+                .input_constraints
+                .iter()
+                .zip(&constraints)
+                .all(|(actual, expected)| {
+                    actual.pointer == expected.pointer && actual.expected == expected.expected
+                })
+        );
+
+        let verify_old_token_denied =
+            |changed: N8nReadOnlyRunOnceInput, changed_config: &ManagedConnectorConfig| {
+                let changed_plan = build_n8n_official_mcp_run_once_plan(changed, changed_config)
+                    .expect("changed exact execute plan");
+                validate_external_n8n_approval(
+                    Some(&token),
+                    "chat-execute-approval",
+                    "fcp.mcp-bridge",
+                    N8N_APPROVAL_WRAPPER_OPERATION,
+                    &ZoneId::work(),
+                    mcp_tools_call_payload_digest(&changed_plan.input).expect("changed payload"),
+                    &official_mcp_approval_constraints(&changed_plan).expect("changed constraints"),
+                    Some(&signing_key.verifying_key()),
+                )
+                .is_err()
+            };
+
+        let mut changed_trigger = high_level.clone();
+        changed_trigger.input["triggerNodeName"] = json!("Other Trigger");
+        assert!(verify_old_token_denied(changed_trigger, &config));
+
+        let mut changed_version = high_level.clone();
+        changed_version.input["versionId"] = json!("version-2");
+        changed_version.input["guard"]["precondition"]["versionId"] = json!("version-2");
+        assert!(verify_old_token_denied(changed_version, &config));
+
+        let mut changed_inputs = high_level.clone();
+        changed_inputs.input["inputs"]["webhook"]["event"] = json!("changed");
+        assert!(verify_old_token_denied(changed_inputs, &config));
+
+        let mut hetzner_config = config.clone();
+        hetzner_config.config.as_mut().expect("config")["server_id"] = json!("hetzner");
+        hetzner_config.config.as_mut().expect("config")["mcp_url"] =
+            json!("https://n8n.example.test:8443/mcp-server/http");
+        hetzner_config.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!(N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION);
+        for (field, value) in [
+            (
+                "input_schema_digest",
+                N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+            ),
+            (
+                "output_schema_digest",
+                N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+            ),
+        ] {
+            hetzner_config.config.as_mut().expect("config")["capability_policy"]["execute_workflow_schema"]
+                [field] = json!(value);
+            hetzner_config.config.as_mut().expect("config")["capability_policy"]["approved_tools"]
+                [3][field] = json!(value);
+        }
+        let mut changed_server = high_level.clone();
+        changed_server.server_id = N8nReadOnlyServerId::Hetzner;
+        changed_server.resource_uri =
+            "fwc-mcp-bridge://hetzner/tools/execute%5Fworkflow".to_string();
+        assert!(verify_old_token_denied(changed_server, &hetzner_config));
+
+        let mut production = high_level;
+        production.input["mode"] = json!("production");
+        assert!(build_n8n_official_mcp_run_once_plan(production, &config).is_err());
     }
 
     #[test]
@@ -37127,6 +37416,7 @@ done"#;
         }
         assert!(material.get("workflow_id_digest").is_some());
         assert!(material.get("idempotency_key_hash").is_some());
+        assert!(material.get("trigger_node_name").is_none());
 
         let mut missing_version = input.clone();
         missing_version

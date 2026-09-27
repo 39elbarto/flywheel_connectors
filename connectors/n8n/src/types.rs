@@ -370,6 +370,8 @@ pub struct WorkflowExecuteInput {
     pub mode: WorkflowExecuteMode,
     #[serde(rename = "versionId")]
     pub version_id: String,
+    #[serde(default, rename = "triggerNodeName")]
+    pub trigger_node_name: Option<String>,
     #[serde(default)]
     pub inputs: Option<Value>,
     pub guard: WorkflowExecuteGuard,

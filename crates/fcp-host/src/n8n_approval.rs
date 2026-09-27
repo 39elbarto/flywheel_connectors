@@ -41,6 +41,7 @@ pub enum N8nLifecycleOperation {
     Unpublish,
     Archive,
     Unarchive,
+    Execute,
     CreateDraft,
     UpdateDraft,
     DeleteDisposable,
@@ -55,6 +56,7 @@ impl N8nLifecycleOperation {
             Self::Publish | Self::Unpublish => "n8n.workflows.lifecycle",
             Self::Archive => "n8n.workflows.archive",
             Self::Unarchive => "n8n.workflows.unarchive",
+            Self::Execute => "n8n.workflows.execute",
             Self::CreateDraft => "n8n.workflows.create_draft",
             Self::UpdateDraft => "n8n.workflows.update_draft",
             Self::DeleteDisposable => "n8n.workflows.delete_disposable",
@@ -69,6 +71,7 @@ impl N8nLifecycleOperation {
             Self::Unpublish => "unpublish",
             Self::Archive => "archive",
             Self::Unarchive => "unarchive",
+            Self::Execute => "execute",
             Self::CreateDraft => "create_draft",
             Self::UpdateDraft => "update_draft",
             Self::DeleteDisposable => "delete_disposable",
@@ -287,6 +290,7 @@ impl N8nApprovalPlan {
             N8nLifecycleOperation::Publish => "publish_workflow",
             N8nLifecycleOperation::Unpublish => "unpublish_workflow",
             N8nLifecycleOperation::Archive => "archive_workflow",
+            N8nLifecycleOperation::Execute => "execute_workflow",
             N8nLifecycleOperation::CreateDraft
             | N8nLifecycleOperation::Unarchive
             | N8nLifecycleOperation::UpdateDraft
@@ -472,6 +476,38 @@ fn validate_issued_token_shape(
         if scope.input_hash != Some(expected_input_hash) || !scope.input_constraints.is_empty() {
             return Err(N8nApprovalError::InvalidIssuedToken);
         }
+    } else if plan.operation == N8nLifecycleOperation::Execute {
+        let payload_hex = plan
+            .official_mcp_payload_digest
+            .strip_prefix(OFFICIAL_MCP_PAYLOAD_DOMAIN)
+            .ok_or(N8nApprovalError::InvalidIssuedToken)?;
+        let mut expected_input_hash = [0_u8; 32];
+        hex::decode_to_slice(payload_hex, &mut expected_input_hash)
+            .map_err(|_| N8nApprovalError::InvalidIssuedToken)?;
+        let expected_constraints = n8n_official_mcp_approval_constraints(
+            plan.server,
+            &plan.official_mcp_tool,
+            &format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                plan.server.as_str(),
+                encode_resource_segment(&plan.official_mcp_tool),
+            ),
+            &plan.official_mcp_payload_digest,
+            &plan.parent_binding_sha256,
+            "",
+        )?;
+        if scope.input_hash != Some(expected_input_hash)
+            || scope.input_constraints.len() != expected_constraints.len()
+            || !scope
+                .input_constraints
+                .iter()
+                .zip(&expected_constraints)
+                .all(|(actual, expected)| {
+                    actual.pointer == expected.pointer && actual.expected == expected.expected
+                })
+        {
+            return Err(N8nApprovalError::InvalidIssuedToken);
+        }
     }
     Ok(())
 }
@@ -530,9 +566,9 @@ pub fn n8n_typed_approval_plan_digest(
     .map(|plan| plan.plan_digest)
 }
 
-/// Build the exact official-MCP constraints checked by the host for a typed
-/// lifecycle/archive approval. Direct REST approvals use their exact request
-/// binding as the token input hash and carry no MCP constraints.
+/// Build the exact official-MCP constraints checked by the host. Execute uses
+/// the generic seven-field wrapper binding; typed lifecycle/archive approvals
+/// add their existing typed-plan digest constraint.
 pub fn n8n_official_mcp_approval_constraints(
     server: N8nApprovalServer,
     official_mcp_tool: &str,
@@ -541,7 +577,9 @@ pub fn n8n_official_mcp_approval_constraints(
     parent_binding_sha256: &str,
     typed_plan_digest: &str,
 ) -> Result<Vec<InputConstraint>, N8nApprovalError> {
-    if typed_plan_digest.is_empty()
+    let is_execute = official_mcp_tool == "execute_workflow";
+    if (is_execute && !typed_plan_digest.is_empty())
+        || (!is_execute && typed_plan_digest.is_empty())
         || !is_sha256_digest(official_mcp_payload_digest)
         || !is_raw_sha256_digest(parent_binding_sha256)
     {
@@ -550,10 +588,12 @@ pub fn n8n_official_mcp_approval_constraints(
         ));
     }
     let expected_tool = match official_mcp_tool {
-        "publish_workflow" | "unpublish_workflow" | "archive_workflow" => official_mcp_tool,
+        "publish_workflow" | "unpublish_workflow" | "archive_workflow" | "execute_workflow" => {
+            official_mcp_tool
+        }
         _ => {
             return Err(N8nApprovalError::InvalidPlan(
-                "official MCP tool is not lifecycle/archive",
+                "official MCP tool is not an approved typed operation",
             ));
         }
     };
@@ -577,7 +617,7 @@ pub fn n8n_official_mcp_approval_constraints(
             "official MCP resource binding is invalid",
         ));
     }
-    Ok([
+    let mut constraints = vec![
         (
             "operation",
             Value::String(OFFICIAL_MCP_WRAPPER_OPERATION.to_owned()),
@@ -594,17 +634,20 @@ pub fn n8n_official_mcp_approval_constraints(
         ),
         ("server_id", Value::String(server.as_str().to_owned())),
         ("tool_name", Value::String(expected_tool.to_owned())),
-        (
-            "typed_plan_sha256",
-            Value::String(typed_plan_digest.to_owned()),
-        ),
     ]
     .into_iter()
     .map(|(field, expected)| InputConstraint {
         pointer: format!("/{field}"),
         expected,
     })
-    .collect())
+    .collect::<Vec<_>>();
+    if !is_execute {
+        constraints.push(InputConstraint {
+            pointer: "/typed_plan_sha256".to_owned(),
+            expected: Value::String(typed_plan_digest.to_owned()),
+        });
+    }
+    Ok(constraints)
 }
 
 /// Load the same runtime trust-root source used by the host's typed n8n path.
@@ -744,7 +787,11 @@ pub fn build_unsigned_n8n_approval_token(
             &request.official_mcp_resource_uri,
             &request.official_mcp_payload_digest,
             &request.parent_binding_sha256,
-            &plan.plan_digest,
+            if request.operation == N8nLifecycleOperation::Execute {
+                ""
+            } else {
+                &plan.plan_digest
+            },
         )?;
         let payload_hex = request
             .official_mcp_payload_digest
@@ -803,6 +850,14 @@ fn validate_issue_request(
         N8nLifecycleOperation::Unpublish => &["id", "action", "guard"],
         N8nLifecycleOperation::Archive => &["id", "guard"],
         N8nLifecycleOperation::Unarchive => &["id", "guard"],
+        N8nLifecycleOperation::Execute => &[
+            "id",
+            "mode",
+            "versionId",
+            "triggerNodeName",
+            "inputs",
+            "guard",
+        ],
         N8nLifecycleOperation::CreateDraft => {
             &["name", "project_id", "parent_folder_id", "graph", "guard"]
         }
@@ -877,6 +932,43 @@ fn validate_issue_request(
         }
         N8nLifecycleOperation::Archive => {}
         N8nLifecycleOperation::Unarchive => {}
+        N8nLifecycleOperation::Execute => {
+            if object.get("mode").and_then(Value::as_str) != Some("manual") {
+                return Err(N8nApprovalError::InvalidPlan("execute mode must be manual"));
+            }
+            let version = object
+                .get("versionId")
+                .ok_or(N8nApprovalError::InvalidPlan("execute version is missing"))?;
+            validate_identifier(version, "execute version is invalid")?;
+            if version
+                .as_str()
+                .is_none_or(|value| value.chars().any(char::is_control))
+            {
+                return Err(N8nApprovalError::InvalidPlan("execute version is invalid"));
+            }
+            object
+                .get("triggerNodeName")
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= 256
+                        && value.trim() == *value
+                        && !value.chars().any(char::is_control)
+                })
+                .ok_or(N8nApprovalError::InvalidPlan(
+                    "execute triggerNodeName is invalid",
+                ))?;
+            if let Some(inputs) = object.get("inputs") {
+                let encoded = serde_json::to_vec(inputs)
+                    .map_err(|_| N8nApprovalError::InvalidPlan("execute inputs are invalid"))?;
+                if !inputs.is_object()
+                    || encoded.len() > 64 * 1024
+                    || !bounded_execute_json(inputs, 0)
+                {
+                    return Err(N8nApprovalError::InvalidPlan("execute inputs are invalid"));
+                }
+            }
+        }
         N8nLifecycleOperation::CreateDraft => {
             if object
                 .get("name")
@@ -1011,10 +1103,13 @@ fn validate_issue_request(
         .get("guard")
         .and_then(Value::as_object)
         .ok_or(N8nApprovalError::InvalidPlan("guard is missing"))?;
-    if guard.len() != 3
+    let execute_guard = request.operation == N8nLifecycleOperation::Execute;
+    if guard.len() != if execute_guard { 5 } else { 3 }
         || !guard.contains_key("approvalRef")
         || !guard.contains_key("idempotencyKey")
         || !guard.contains_key("precondition")
+        || (execute_guard
+            && (!guard.contains_key("inputClass") || !guard.contains_key("sideEffectSummary")))
     {
         return Err(N8nApprovalError::InvalidPlan("guard is not exact"));
     }
@@ -1034,6 +1129,25 @@ fn validate_issue_request(
         .ok_or(N8nApprovalError::InvalidPlan("idempotency key is missing"))?;
     Uuid::parse_str(idempotency_key)
         .map_err(|_| N8nApprovalError::InvalidPlan("idempotency key must be a UUID"))?;
+    if execute_guard {
+        let input_class = guard.get("inputClass").and_then(Value::as_str).ok_or(
+            N8nApprovalError::InvalidPlan("execute inputClass is invalid"),
+        )?;
+        let has_inputs = object.contains_key("inputs");
+        if !matches!(input_class, "none" | "bounded_json")
+            || has_inputs != (input_class == "bounded_json")
+            || guard
+                .get("sideEffectSummary")
+                .and_then(Value::as_str)
+                .is_none_or(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                })
+        {
+            return Err(N8nApprovalError::InvalidPlan(
+                "execute approval binding is invalid",
+            ));
+        }
+    }
     let precondition = guard
         .get("precondition")
         .and_then(Value::as_object)
@@ -1064,6 +1178,11 @@ fn validate_issue_request(
         precondition.get("versionId").unwrap_or(&Value::Null),
         "precondition version is invalid",
     )?;
+    if execute_guard && precondition.get("versionId") != object.get("versionId") {
+        return Err(N8nApprovalError::InvalidPlan(
+            "execute precondition version does not match request",
+        ));
+    }
     let active_version = precondition
         .get("activeVersionId")
         .ok_or(N8nApprovalError::InvalidPlan("activeVersionId is missing"))?;
@@ -1300,6 +1419,47 @@ fn validate_identifier(value: &Value, message: &'static str) -> Result<(), N8nAp
         .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
         .ok_or(N8nApprovalError::InvalidPlan(message))?;
     Ok(())
+}
+
+fn bounded_execute_json(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match value {
+        Value::Object(object) => {
+            object.len() <= 64
+                && object.iter().all(|(key, value)| {
+                    let lowered = key.to_ascii_lowercase();
+                    key.len() <= 128
+                        && ![
+                            "secret",
+                            "token",
+                            "credential",
+                            "header",
+                            "authorization",
+                            "cookie",
+                            "api_key",
+                            "apikey",
+                            "password",
+                            "url",
+                            "command",
+                            "path",
+                            "data",
+                        ]
+                        .iter()
+                        .any(|marker| lowered.contains(marker))
+                        && bounded_execute_json(value, depth + 1)
+                })
+        }
+        Value::Array(array) => {
+            array.len() <= 128
+                && array
+                    .iter()
+                    .all(|value| bounded_execute_json(value, depth + 1))
+        }
+        Value::String(value) => value.len() <= 4096 && !value.chars().any(char::is_control),
+        _ => true,
+    }
 }
 
 fn is_blake3_digest(value: &str) -> bool {
@@ -1730,6 +1890,133 @@ mod tests {
         )
         .expect("parent binding");
         request
+    }
+
+    fn execute_issue_request() -> N8nApprovalIssueRequest {
+        let mut request = N8nApprovalIssueRequest {
+            schema: APPROVAL_REQUEST_SCHEMA.to_owned(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: "workflow-1".to_owned(),
+            operation: N8nLifecycleOperation::Execute,
+            input: json!({
+                "id": "workflow-1",
+                "mode": "manual",
+                "versionId": "version-1",
+                "triggerNodeName": "Webhook Trigger",
+                "inputs": {"webhook": {"event": "ready"}},
+                "guard": {
+                    "approvalRef": "approval-execute",
+                    "idempotencyKey": "00000000-0000-4000-8000-000000000009",
+                    "inputClass": "bounded_json",
+                    "sideEffectSummary": "run one manually approved workflow",
+                    "precondition": {
+                        "versionId": "version-1",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }
+                }
+            }),
+            official_mcp_tool: "execute_workflow".to_owned(),
+            official_mcp_resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_owned(),
+            official_mcp_payload_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            parent_binding_sha256: String::new(),
+            expires_at_ms: NOW + MAX_APPROVAL_TTL_MS,
+        };
+        request.parent_binding_sha256 = n8n_parent_binding_digest(
+            request.server,
+            "fwc-n8n://eec/workflows/workflow%2D1",
+            request.operation.operation_id(),
+            &request.input,
+        )
+        .expect("execute parent binding");
+        request
+    }
+
+    #[test]
+    fn execute_issuer_emits_exact_generic_mcp_approval_and_rejects_mismatches() {
+        let request = execute_issue_request();
+        let mut token = build_unsigned_n8n_approval_token(&request, NOW).expect("execute approval");
+        let ApprovalScope::Execution(scope) = &mut token.scope else {
+            panic!("execute approval must use execution scope");
+        };
+        assert_eq!(scope.connector_id, "fcp.mcp-bridge");
+        assert_eq!(scope.method_pattern, OFFICIAL_MCP_WRAPPER_OPERATION);
+        assert_eq!(
+            scope.input_hash,
+            Some(
+                hex::decode(
+                    request
+                        .official_mcp_payload_digest
+                        .trim_start_matches("sha256:")
+                )
+                .expect("payload hash")
+                .try_into()
+                .expect("payload hash size")
+            )
+        );
+        assert_eq!(scope.input_constraints.len(), 7);
+        let pointers = scope
+            .input_constraints
+            .iter()
+            .map(|constraint| constraint.pointer.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            pointers,
+            [
+                "/operation",
+                "/parent_binding_sha256",
+                "/payload_sha256",
+                "/provider",
+                "/resource_uri",
+                "/server_id",
+                "/tool_name",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(!pointers.contains("/typed_plan_sha256"));
+
+        let plan = N8nApprovalPlan::from_official_mcp(
+            request.server,
+            &request.workflow_id,
+            request.operation,
+            &request.official_mcp_tool,
+            &request.official_mcp_resource_uri,
+            &request.official_mcp_payload_digest,
+            &request.input,
+            &request.input["guard"]["precondition"],
+            request.input["guard"]["idempotencyKey"]
+                .as_str()
+                .expect("idempotency"),
+            request.expires_at_ms,
+        )
+        .expect("exact execute plan");
+        token.signature = Some(vec![1]);
+        assert!(validate_issued_token_shape(&token, &plan, NOW).is_ok());
+
+        let mut changed_trigger = request.clone();
+        changed_trigger.input["triggerNodeName"] = json!("Other Trigger");
+        assert!(build_unsigned_n8n_approval_token(&changed_trigger, NOW).is_err());
+
+        let mut changed_version = request.clone();
+        changed_version.input["versionId"] = json!("version-2");
+        changed_version.input["guard"]["precondition"]["versionId"] = json!("version-2");
+        assert!(build_unsigned_n8n_approval_token(&changed_version, NOW).is_err());
+
+        let mut changed_input = request.clone();
+        changed_input.input["inputs"]["webhook"]["event"] = json!("changed");
+        assert!(build_unsigned_n8n_approval_token(&changed_input, NOW).is_err());
+
+        let mut changed_server = request.clone();
+        changed_server.server = N8nApprovalServer::Hetzner;
+        assert!(build_unsigned_n8n_approval_token(&changed_server, NOW).is_err());
+
+        let mut production = request;
+        production.input["mode"] = json!("production");
+        assert!(build_unsigned_n8n_approval_token(&production, NOW).is_err());
     }
 
     fn mcp_access_issue_request() -> N8nApprovalIssueRequest {

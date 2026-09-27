@@ -3259,7 +3259,7 @@ fn validate_workflow_execute_input(
     if object.keys().any(|key| {
         !matches!(
             key.as_str(),
-            "id" | "mode" | "versionId" | "inputs" | "guard"
+            "id" | "mode" | "versionId" | "triggerNodeName" | "inputs" | "guard"
         )
     }) {
         return Err(AppError::new("invalid_operation_input"));
@@ -3280,6 +3280,16 @@ fn validate_workflow_execute_input(
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty() && value.len() <= 256 && value.trim() == *value)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if object.get("triggerNodeName").is_some_and(|value| {
+        value.as_str().is_none_or(|name| {
+            name.is_empty()
+                || name.len() > 256
+                || name.trim() != name
+                || name.chars().any(char::is_control)
+        })
+    }) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
     let guard = object
         .get("guard")
         .and_then(Value::as_object)
@@ -4209,6 +4219,33 @@ mod tests {
             })
             .expect_err("production execution is outside the manual-only path");
         assert_eq!(error.code, "invalid_operation_input");
+    }
+
+    #[test]
+    fn execute_invalid_trigger_node_name_is_rejected_before_provider_dispatch() {
+        let invalid_triggers = vec![
+            String::new(),
+            " padded".to_owned(),
+            "padded ".to_owned(),
+            "control\nname".to_owned(),
+            "x".repeat(257),
+        ];
+        for trigger in invalid_triggers {
+            let mut input = execute_input_fixture();
+            input["triggerNodeName"] = json!(trigger);
+            let bytes = serde_json::to_vec(&json!({
+                "server_id": "eec",
+                "input": input,
+                "deadline_ms": 1000
+            }))
+            .expect("run-once input JSON");
+            let error =
+                run_once_from_bytes_at("n8n.workflows.execute", &bytes, Instant::now(), |_, _| {
+                    panic!("invalid triggerNodeName must fail before provider dispatch")
+                })
+                .expect_err("invalid triggerNodeName");
+            assert_eq!(error.code, "invalid_operation_input");
+        }
     }
 
     #[test]

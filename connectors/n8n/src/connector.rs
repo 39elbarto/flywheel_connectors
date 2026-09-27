@@ -3356,6 +3356,16 @@ fn parse_workflow_execute_input(input: &Value) -> N8nResult<WorkflowExecuteInput
         return Err(N8nError::InvalidInput("workflow id is invalid".into()));
     }
     sanitize_path_segment(&typed.id, "workflow id")?;
+    if typed.trigger_node_name.as_ref().is_some_and(|name| {
+        name.is_empty()
+            || name.len() > 256
+            || name.trim() != name
+            || name.chars().any(char::is_control)
+    }) {
+        return Err(N8nError::InvalidInput(
+            "triggerNodeName must be a bounded, trimmed name without control characters".into(),
+        ));
+    }
     if typed.version_id.is_empty()
         || typed.version_id.len() > 256
         || typed.version_id.trim() != typed.version_id
@@ -4837,6 +4847,7 @@ fn workflow_execute_input_schema() -> serde_json::Value {
             "id": {"type": "string", "minLength": 1, "maxLength": 256},
             "mode": {"type": "string", "enum": ["manual"]},
             "versionId": {"type": "string", "minLength": 1, "maxLength": 256},
+            "triggerNodeName": {"type": "string", "minLength": 1, "maxLength": 256},
             "inputs": {"type": "object", "maxProperties": 64},
             "guard": {
                 "type": "object", "additionalProperties": false,
@@ -6637,6 +6648,56 @@ mod tests {
         );
         assert!(schema["properties"].get("payload").is_none());
         assert!(schema["properties"].get("data").is_none());
+    }
+
+    #[test]
+    fn execute_trigger_node_name_is_optional_and_validated_before_provider_access() {
+        let mut input = json!({
+            "id": "workflow-1",
+            "mode": "manual",
+            "versionId": "version-1",
+            "guard": {
+                "approvalRef": "chat-approval",
+                "idempotencyKey": "11111111-2222-4333-8444-555555555555",
+                "inputClass": "none",
+                "sideEffectSummary": "manual approved run",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        });
+        let schema = workflow_execute_input_schema();
+        assert_eq!(
+            schema.pointer("/properties/triggerNodeName/type"),
+            Some(&json!("string"))
+        );
+        assert_eq!(
+            schema.pointer("/properties/triggerNodeName/minLength"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            schema.pointer("/properties/triggerNodeName/maxLength"),
+            Some(&json!(256))
+        );
+        assert!(parse_workflow_execute_input(&input).is_ok());
+        let invalid_values = vec![
+            String::new(),
+            " leading".to_owned(),
+            "trailing ".to_owned(),
+            "node\nname".to_owned(),
+            "x".repeat(257),
+        ];
+        for invalid in invalid_values {
+            input["triggerNodeName"] = json!(invalid);
+            assert!(
+                parse_workflow_execute_input(&input).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
     }
 
     #[test]

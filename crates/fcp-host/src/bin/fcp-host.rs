@@ -399,13 +399,13 @@ const N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION: &str = "2.34.6";
 const N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
 const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7";
+    "sha256:5ed5467d3493c432303df97ce6503ef4193477dbe0e81d5b51cb6c8c85fc3b1b";
 const N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f";
+    "sha256:083570a3e4c98a332914f2c029244add6cfd77e01323385acc84455c7dc503a7";
 const N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd";
+    "sha256:5ed5467d3493c432303df97ce6503ef4193477dbe0e81d5b51cb6c8c85fc3b1b";
 const N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b";
+    "sha256:083570a3e4c98a332914f2c029244add6cfd77e01323385acc84455c7dc503a7";
 #[cfg(target_os = "linux")]
 const N8N_SUPERVISOR_CONTROL_FD_ENV: &str = "FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD";
 
@@ -10794,7 +10794,7 @@ fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
     let mode = object.get("mode").and_then(Value::as_str).ok_or_else(|| {
         HostError::InvalidFilter("n8n workflow execute mode is invalid".to_string())
     })?;
-    if !matches!(mode, "manual" | "production") {
+    if mode != "manual" {
         return Err(HostError::InvalidFilter(
             "n8n workflow execute mode is invalid".to_string(),
         ));
@@ -10914,15 +10914,6 @@ fn validate_n8n_workflow_execute_input(input: &Value) -> HostResult<()> {
     {
         return Err(HostError::InvalidFilter(
             "n8n workflow execute precondition is invalid".to_string(),
-        ));
-    }
-    if mode == "production"
-        && (precondition.get("active") != Some(&Value::Bool(true))
-            || precondition.get("isArchived") != Some(&Value::Bool(false))
-            || precondition.get("activeVersionId") != Some(&Value::String(version_id.to_owned())))
-    {
-        return Err(HostError::InvalidFilter(
-            "production execution requires the published version".to_string(),
         ));
     }
     Ok(())
@@ -11732,6 +11723,18 @@ fn build_n8n_official_mcp_run_once_plan(
     if input.schema != N8N_READ_ONLY_RUN_ONCE_SCHEMA {
         return Err(HostError::InvalidFilter(
             "n8n official MCP run-once operation is not allowed".to_string(),
+        ));
+    }
+    if config
+        .config
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|config| config.get("server_id"))
+        .and_then(Value::as_str)
+        != Some(input.server_id.as_str())
+    {
+        return Err(HostError::PreflightFailed(
+            "n8n official MCP server binding was denied".to_string(),
         ));
     }
     let parent_binding_hash = if matches!(
@@ -36328,20 +36331,98 @@ done"#;
             deadline_ms: None,
             correlation_id: None,
         };
+        let mut production_input = input.clone();
+        production_input.input["mode"] = json!("production");
+        assert!(validate_n8n_workflow_execute_input(&production_input.input).is_err());
+        assert!(build_n8n_official_mcp_run_once_plan(production_input, &config).is_err());
         let plan = build_n8n_official_mcp_run_once_plan(input.clone(), &config)
             .expect("owner-provisioned execute binding");
+        assert_eq!(plan.server_id, N8nReadOnlyServerId::Eec);
+        assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
         assert_eq!(plan.input["name"], N8N_OFFICIAL_MCP_EXECUTE_TOOL);
         assert_eq!(plan.input["arguments"]["workflowId"], "workflow-1");
         assert_eq!(plan.input["arguments"]["executionMode"], "manual");
+        assert_eq!(plan.input["arguments"]["versionId"], "version-1");
+        assert_eq!(plan.input["arguments"]["inputs"], input.input["inputs"]);
+        assert_eq!(plan.input["arguments"]["wait"], false);
 
         let mut wrong_digest = config.clone();
         wrong_digest.config.as_mut().expect("config")["capability_policy"]["approved_tools"][3]["output_schema_digest"] =
             json!("sha256:wrong");
         assert!(build_n8n_official_mcp_run_once_plan(input.clone(), &wrong_digest).is_err());
 
+        for (location, field, old_digest) in [
+            (
+                "execute_workflow_schema",
+                "input_schema_digest",
+                "sha256:73dc25c767561b5a2ad876e0d20bd7de221f2c644728de04365c346b2d1a3ef7",
+            ),
+            (
+                "execute_workflow_schema",
+                "output_schema_digest",
+                "sha256:85d462b2dc634ca404ad6f43fa1bc773126b8695911c285d1cd3a4ae73eacb3f",
+            ),
+            (
+                "approved_tools",
+                "input_schema_digest",
+                "sha256:89642ea4227211fc6a6b6d9f49f546019ac077f6021c7661baa59c2a58d864bd",
+            ),
+            (
+                "approved_tools",
+                "output_schema_digest",
+                "sha256:951004b01987be0ee79562c09439b21d6cc66599c8a37a1bcb9350929105537b",
+            ),
+        ] {
+            let mut mismatched_digest = config.clone();
+            if location == "execute_workflow_schema" {
+                mismatched_digest.config.as_mut().expect("config")["capability_policy"][location]
+                    [field] = json!(old_digest);
+            } else {
+                mismatched_digest.config.as_mut().expect("config")["capability_policy"][location]
+                    [3][field] = json!(old_digest);
+            }
+            assert!(
+                build_n8n_official_mcp_run_once_plan(input.clone(), &mismatched_digest).is_err(),
+                "must reject mismatched {location}.{field}"
+            );
+        }
+
         let mut wrong_server = config.clone();
         wrong_server.config.as_mut().expect("config")["server_id"] = json!("hetzner");
         assert!(build_n8n_official_mcp_run_once_plan(input.clone(), &wrong_server).is_err());
+
+        let mut hetzner_config = config.clone();
+        hetzner_config.config.as_mut().expect("config")["server_id"] = json!("hetzner");
+        hetzner_config.config.as_mut().expect("config")["mcp_url"] =
+            json!("https://n8n.example.test:8443/mcp-server/http");
+        hetzner_config.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!(N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION);
+        let mut hetzner_input = input.clone();
+        hetzner_input.server_id = N8nReadOnlyServerId::Hetzner;
+        hetzner_input.resource_uri =
+            "fwc-mcp-bridge://hetzner/tools/execute%5Fworkflow".to_string();
+        let hetzner_plan =
+            build_n8n_official_mcp_run_once_plan(hetzner_input.clone(), &hetzner_config)
+                .expect("Hetzner uses its separately selected owner schema binding");
+        assert_eq!(hetzner_plan.server_id, N8nReadOnlyServerId::Hetzner);
+
+        let mut eec_config_with_hetzner_schema = hetzner_config;
+        eec_config_with_hetzner_schema
+            .config
+            .as_mut()
+            .expect("config")["server_id"] = json!("eec");
+        eec_config_with_hetzner_schema
+            .config
+            .as_mut()
+            .expect("config")["capability_policy"]["n8n_version"] =
+            json!(N8N_OFFICIAL_MCP_EEC_N8N_VERSION);
+        let mut eec_input = hetzner_input;
+        eec_input.server_id = N8nReadOnlyServerId::Eec;
+        eec_input.resource_uri = "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_string();
+        assert!(
+            build_n8n_official_mcp_run_once_plan(eec_input, &eec_config_with_hetzner_schema)
+                .is_err()
+        );
 
         let mut extra_tool = config;
         extra_tool.config.as_mut().expect("config")["capability_policy"]["approved_tools"]

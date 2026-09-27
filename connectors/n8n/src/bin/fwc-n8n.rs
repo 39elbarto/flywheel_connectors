@@ -67,6 +67,7 @@ const LIFECYCLE_READBACK_RESERVE: Duration = Duration::from_millis(15_200);
 // request to one third of the pre-reserved budget so a stalled POST cannot
 // consume the reconciliation opportunity.
 const UNARCHIVE_READBACK_RESERVE: Duration = Duration::from_secs(5);
+const EXECUTION_READBACK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LOCAL_RUN_ONCE_SCHEMA: &str = "fwc.n8n.local-run-once.v1";
 const PROVISION_INPUT_SCHEMA: &str = "fwc.n8n.provision-request.v1";
 const PROVISION_OUTPUT_SCHEMA: &str = "fwc.n8n.provision-result.v1";
@@ -2170,7 +2171,7 @@ fn verify_execution_readback(
     input: &Value,
     execution_id: &str,
     readback: &Value,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let workflow_id = input
         .get("id")
         .and_then(Value::as_str)
@@ -2205,7 +2206,7 @@ fn verify_execution_readback(
     if status.chars().any(char::is_control) {
         return Err(AppError::new("readback_mismatch"));
     }
-    Ok(())
+    Ok(status.to_owned())
 }
 
 fn terminal_execute_readback<T>(result: Result<T, AppError>) -> Result<T, AppError> {
@@ -2254,25 +2255,40 @@ where
         .get("executionId")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    let execution_get = terminal_execute_readback(executions_get_envelope(
-        &envelope,
-        workflow_id,
-        execution_id,
-    ))?;
-    let readback_response = terminal_execute_readback(bridge(
-        &execution_get,
-        BrokerCredentialPurpose::RestApi,
-        request_deadline_at,
-    ))?;
-    let readback =
-        terminal_execute_readback(response_result(readback_response, "unknown_outcome"))?;
-    terminal_execute_readback(verify_execution_readback(
-        &envelope.input,
-        execution_id,
-        &readback,
-    ))?;
-    if provider.get("providerFailure").and_then(Value::as_bool) == Some(true) {
-        return Err(AppError::new("unknown_outcome"));
+    let mut execution_status = None;
+    loop {
+        if Instant::now() >= request_deadline_at {
+            break;
+        }
+        let execution_get = terminal_execute_readback(executions_get_envelope(
+            &envelope,
+            workflow_id,
+            execution_id,
+        ))?;
+        let readback_response = terminal_execute_readback(bridge(
+            &execution_get,
+            BrokerCredentialPurpose::RestApi,
+            request_deadline_at,
+        ))?;
+        let readback =
+            terminal_execute_readback(response_result(readback_response, "unknown_outcome"))?;
+        let status = terminal_execute_readback(verify_execution_readback(
+            &envelope.input,
+            execution_id,
+            &readback,
+        ))?;
+        execution_status = Some(status);
+        if matches!(
+            execution_status.as_deref(),
+            Some("success" | "error" | "canceled" | "crashed")
+        ) {
+            break;
+        }
+        let remaining = request_deadline_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(EXECUTION_READBACK_POLL_INTERVAL.min(remaining));
     }
     let mode = envelope
         .input
@@ -2284,8 +2300,18 @@ where
         .get("versionId")
         .cloned()
         .unwrap_or(Value::Null);
+    let status = match execution_status.as_deref() {
+        Some("success") => "verified",
+        Some("error" | "canceled" | "crashed") => "failed",
+        _ => "unknown",
+    };
+    if provider.get("providerFailure").and_then(Value::as_bool) == Some(true)
+        && status == "verified"
+    {
+        return Err(AppError::new("unknown_outcome"));
+    }
     Ok(json!({
-        "status": "submitted",
+        "status": status,
         "operation": "n8n.workflows.execute",
         "provider": "official_mcp",
         "workflowId": provider.get("workflowId").cloned().unwrap_or(Value::Null),
@@ -2293,6 +2319,7 @@ where
         "versionId": version_id,
         "executionId": provider.get("executionId").cloned().unwrap_or(Value::Null),
         "initialStatus": provider.get("initialStatus").cloned().unwrap_or(Value::Null),
+        "executionStatus": execution_status,
         "retry": "never_automatic",
         "readback": "independent_execution_get",
     }))
@@ -3237,10 +3264,10 @@ fn validate_workflow_execute_input(
         .filter(|value| !value.is_empty() && value.len() <= 256)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
     host_run_once_input_id(&json!({"id": id}), "id")?;
-    let mode = object
+    let _mode = object
         .get("mode")
         .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "manual" | "production"))
+        .filter(|value| *value == "manual")
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
     let version_id = object
         .get("versionId")
@@ -3331,13 +3358,6 @@ fn validate_workflow_execute_input(
                     value.is_empty() || value.len() > 256 || value.trim() != value
                 })
         })
-    {
-        return Err(AppError::new("invalid_operation_input"));
-    }
-    if mode == "production"
-        && (precondition.get("active") != Some(&Value::Bool(true))
-            || precondition.get("isArchived") != Some(&Value::Bool(false))
-            || precondition.get("activeVersionId") != Some(&Value::String(version_id.to_owned())))
     {
         return Err(AppError::new("invalid_operation_input"));
     }
@@ -3906,19 +3926,43 @@ mod tests {
             responses: [
                 Ok(json!({"status": "ok", "result": baseline})),
                 Ok(provider),
-                Ok(readback),
+                Ok(readback.clone()),
+                Ok(json!({
+                    "status": "ok",
+                    "result": {
+                        "id": "execution-1",
+                        "workflowId": "workflow-1",
+                        "workflowVersionId": "version-1",
+                        "mode": "manual",
+                        "status": "success"
+                    }
+                })),
             ]
             .into_iter()
             .collect(),
         };
-        let result = execute_workflow_execute_with_bridge(
-            execute_host_envelope_fixture(),
-            Instant::now() + Duration::from_secs(5),
-            |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+        let input =
+            json!({"server_id": "eec", "input": execute_input_fixture(), "deadline_ms": 5000});
+        let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
+        let started = Instant::now();
+        let result = run_once_from_bytes_at(
+            "n8n.workflows.execute",
+            &bytes,
+            started,
+            |envelope, deadline| {
+                assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
+                execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                    probe.dispatch(request, purpose, deadline)
+                })
+            },
         )
         .expect("fixture execution path");
 
-        assert_eq!(result["status"], "submitted");
+        assert_eq!(result["status"], "verified");
+        assert_eq!(result["executionStatus"], "success");
+        assert_eq!(result["mode"], "manual");
+        assert_eq!(result["workflowId"], "workflow-1");
+        assert_eq!(result["versionId"], "version-1");
         assert_eq!(result["readback"], "independent_execution_get");
         assert_eq!(
             probe
@@ -3929,6 +3973,7 @@ mod tests {
             vec![
                 ("rest", "n8n.workflows.get"),
                 ("official_mcp", "n8n.workflows.execute"),
+                ("rest", "n8n.executions.get"),
                 ("rest", "n8n.executions.get"),
             ]
         );
@@ -3941,6 +3986,7 @@ mod tests {
             1
         );
         assert!(probe.calls[2].2.contains("executions"));
+        assert_eq!(probe.calls[2].2, probe.calls[3].2);
     }
 
     #[test]
@@ -3981,6 +4027,22 @@ mod tests {
                 .code,
             "unknown_outcome"
         );
+        for readback in [
+            json!({"id": "other", "workflowId": "workflow-1", "mode": "manual", "workflowVersionId": "version-1", "status": "running"}),
+            json!({"id": "execution-1", "workflowId": "workflow-1", "mode": "production", "workflowVersionId": "version-1", "status": "running"}),
+            json!({"id": "execution-1", "workflowId": "workflow-1", "mode": "manual", "workflowVersionId": "other", "status": "running"}),
+        ] {
+            assert_eq!(
+                terminal_execute_readback(verify_execution_readback(
+                    &input,
+                    "execution-1",
+                    &readback,
+                ))
+                .expect_err("identity mismatch")
+                .code,
+                "unknown_outcome"
+            );
+        }
         let transport: Result<Value, AppError> = Err(AppError::new("timeout"));
         assert_eq!(
             terminal_execute_readback(transport)
@@ -3988,6 +4050,159 @@ mod tests {
                 .code,
             "unknown_outcome"
         );
+    }
+
+    #[test]
+    fn execute_post_dispatch_nonterminal_deadline_is_unknown_without_retry() {
+        let baseline = json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        let provider = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "success": true,
+                    "workflowId": "workflow-1",
+                    "executionId": "execution-1",
+                    "initialStatus": "running"
+                }
+            }
+        });
+        let mut probe = ExecuteSequenceProbe {
+            calls: Vec::new(),
+            responses: [
+                Ok(json!({"status": "ok", "result": baseline})),
+                Ok(provider),
+                Ok(json!({
+                    "status": "ok",
+                    "result": {
+                        "id": "execution-1",
+                        "workflowId": "workflow-1",
+                        "workflowVersionId": "version-1",
+                        "mode": "manual",
+                        "status": "running"
+                    }
+                })),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let input =
+            json!({"server_id": "eec", "input": execute_input_fixture(), "deadline_ms": 10});
+        let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
+        let result = run_once_from_bytes_at(
+            "n8n.workflows.execute",
+            &bytes,
+            Instant::now(),
+            |envelope, deadline| {
+                execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                    probe.dispatch(request, purpose, deadline)
+                })
+            },
+        )
+        .expect("bounded nonterminal readback is an unknown result");
+
+        assert_eq!(result["status"], "unknown");
+        assert_eq!(result["executionStatus"], "running");
+        assert_eq!(
+            probe.calls.len(),
+            3,
+            "one baseline, one execute, one readback"
+        );
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .filter(|(purpose, operation, _)| {
+                    purpose == "official_mcp" && operation == "n8n.workflows.execute"
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn execute_terminal_failure_states_are_known_and_never_retried() {
+        for terminal_status in ["error", "canceled", "crashed"] {
+            let baseline = json!({
+                "id": "workflow-1",
+                "versionId": "version-1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            });
+            let provider = json!({
+                "status": "ok",
+                "result": {
+                    "structuredContent": {
+                        "success": true,
+                        "workflowId": "workflow-1",
+                        "executionId": "execution-1",
+                        "initialStatus": "accepted"
+                    }
+                }
+            });
+            let mut probe = ExecuteSequenceProbe {
+                calls: Vec::new(),
+                responses: [
+                    Ok(json!({"status": "ok", "result": baseline})),
+                    Ok(provider),
+                    Ok(json!({
+                        "status": "ok",
+                        "result": {
+                            "id": "execution-1",
+                            "workflowId": "workflow-1",
+                            "workflowVersionId": "version-1",
+                            "mode": "manual",
+                            "status": terminal_status
+                        }
+                    })),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            let result = execute_workflow_execute_with_bridge(
+                execute_host_envelope_fixture(),
+                Instant::now() + Duration::from_secs(5),
+                |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+            )
+            .expect("terminal failure is a known non-success");
+            assert_eq!(result["status"], "failed");
+            assert_eq!(result["executionStatus"], terminal_status);
+            assert_eq!(probe.calls.len(), 3);
+            assert_eq!(
+                probe
+                    .calls
+                    .iter()
+                    .filter(|(purpose, _, _)| purpose == "official_mcp")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn execute_production_mode_is_rejected_before_run_once_dispatch() {
+        let mut input = execute_input_fixture();
+        input["mode"] = json!("production");
+        let bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": input,
+            "deadline_ms": 1000
+        }))
+        .expect("run-once input JSON");
+        let error =
+            run_once_from_bytes_at("n8n.workflows.execute", &bytes, Instant::now(), |_, _| {
+                panic!("production mode must fail before provider dispatch")
+            })
+            .expect_err("production execution is outside the manual-only path");
+        assert_eq!(error.code, "invalid_operation_input");
     }
 
     #[test]
@@ -4027,7 +4242,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_provider_failure_with_id_reads_back_once_then_is_unknown() {
+    fn execute_provider_failure_with_id_reads_back_terminal_failure_without_retry() {
         let baseline = json!({
             "id": "workflow-1",
             "versionId": "version-1",
@@ -4068,15 +4283,15 @@ mod tests {
             .collect(),
         };
 
-        let error = execute_workflow_execute_with_bridge(
+        let result = execute_workflow_execute_with_bridge(
             execute_host_envelope_fixture(),
             Instant::now() + Duration::from_secs(5),
             |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
         )
-        .expect_err("provider failure must remain unknown after one readback");
+        .expect("independent terminal readback classifies the failed execution");
 
-        assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(error.diagnostic, None);
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["executionStatus"], "error");
         assert_eq!(probe.calls.len(), 3, "baseline, execute, one readback");
         assert_eq!(
             probe

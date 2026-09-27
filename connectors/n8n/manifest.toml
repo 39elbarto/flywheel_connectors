@@ -1775,7 +1775,7 @@ maxLength = 256
 
 [provides.operations."n8n.workflows.execute".input_schema.properties.mode]
 type = "string"
-enum = ["manual", "production"]
+enum = ["manual"]
 
 [provides.operations."n8n.workflows.execute".input_schema.properties.versionId]
 type = "string"
@@ -1836,12 +1836,12 @@ maxLength = 75
 
 [provides.operations."n8n.workflows.execute".output_schema]
 additionalProperties = false
-required = ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "retry", "readback"]
+required = ["status", "operation", "provider", "workflowId", "mode", "versionId", "executionId", "initialStatus", "executionStatus", "retry", "readback"]
 type = "object"
 
 [provides.operations."n8n.workflows.execute".output_schema.properties.status]
 type = "string"
-enum = ["submitted", "unknown"]
+enum = ["verified", "failed", "unknown"]
 
 [provides.operations."n8n.workflows.execute".output_schema.properties.operation]
 const = "n8n.workflows.execute"
@@ -1856,7 +1856,7 @@ maxLength = 256
 
 [provides.operations."n8n.workflows.execute".output_schema.properties.mode]
 type = "string"
-enum = ["manual", "production"]
+const = "manual"
 
 [provides.operations."n8n.workflows.execute".output_schema.properties.versionId]
 type = "string"
@@ -1869,6 +1869,10 @@ maxLength = 256
 [provides.operations."n8n.workflows.execute".output_schema.properties.initialStatus]
 type = "string"
 enum = ["accepted", "new", "running", "success", "error", "waiting", "canceled", "crashed"]
+maxLength = 64
+
+[provides.operations."n8n.workflows.execute".output_schema.properties.executionStatus]
+type = ["string", "null"]
 maxLength = 64
 
 [provides.operations."n8n.workflows.execute".output_schema.properties.retry]
@@ -1896,7 +1900,7 @@ total_timeout_ms = 15000
 max_response_bytes = 1048576
 
 [provides.operations."n8n.workflows.execute".ai_hints]
-when_to_use = "Execute one manually or in production only after exact workflow/version precondition and current-chat approval; manual is not side-effect free."
+when_to_use = "Execute one workflow manually only after exact workflow/version precondition and current-chat approval; manual is not side-effect free."
 common_mistakes = [
     "Only an owner-provisioned execute_workflow policy with exact per-server schema digests may be admitted; generic tools/call and REST execution routes are not exposed, and missing policy fails closed.",
     "Inputs are bounded and classified; credentials, headers, URLs, commands, paths, and arbitrary execution data are rejected or redacted.",

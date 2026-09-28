@@ -11,8 +11,15 @@
     clippy::unused_async
 )]
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::io::{Read, Write};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+    mpsc::{self, TryRecvError},
+};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use fcp_crypto::{
@@ -33,6 +40,147 @@ use fcp_n8n::connector::N8nConnector;
 const TEST_SERVER_ID: &str = "eec";
 const TEST_INSTANCE_ID: &str = "inst_n8n_test";
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const RUN_ONCE_CLI_MAX_STDOUT_BYTES: usize = 8 * 1024;
+const RUN_ONCE_CLI_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn stop_bounded_cli_child(child: &mut Child, stdout_reader: JoinHandle<()>) {
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = stdout_reader.join();
+}
+
+fn run_fwc_n8n_cli_once_bounded(
+    input: &[u8],
+    launch_count: &AtomicUsize,
+) -> Result<(ExitStatus, Vec<u8>), &'static str> {
+    let deadline = Instant::now()
+        .checked_add(RUN_ONCE_CLI_TIMEOUT)
+        .ok_or("child_timeout_unrepresentable")?;
+    launch_count.fetch_add(1, Ordering::SeqCst);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fwc-n8n"))
+        .arg("run-once")
+        .arg("n8n.workflows.execute")
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "child_launch_failed")?;
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("child_stdio_unavailable");
+    };
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let stdout_reader = thread::spawn(move || {
+        let mut captured = Vec::with_capacity(RUN_ONCE_CLI_MAX_STDOUT_BYTES + 1);
+        let result = stdout
+            .take((RUN_ONCE_CLI_MAX_STDOUT_BYTES + 1) as u64)
+            .read_to_end(&mut captured);
+        let _ = sender.send(result.map(|_| captured));
+    });
+    if stdin.write_all(input).is_err() {
+        drop(stdin);
+        stop_bounded_cli_child(&mut child, stdout_reader);
+        return Err("child_stdin_write_failed");
+    }
+    drop(stdin);
+
+    let mut captured = None;
+    let status = loop {
+        if captured.is_none() {
+            match receiver.try_recv() {
+                Ok(Ok(bytes)) if bytes.len() > RUN_ONCE_CLI_MAX_STDOUT_BYTES => {
+                    stop_bounded_cli_child(&mut child, stdout_reader);
+                    return Err("child_stdout_limit_exceeded");
+                }
+                Ok(Ok(bytes)) => captured = Some(bytes),
+                Ok(Err(_)) => {
+                    stop_bounded_cli_child(&mut child, stdout_reader);
+                    return Err("child_stdout_read_failed");
+                }
+                Err(TryRecvError::Disconnected) => {
+                    stop_bounded_cli_child(&mut child, stdout_reader);
+                    return Err("child_stdout_reader_failed");
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                stop_bounded_cli_child(&mut child, stdout_reader);
+                return Err("child_wait_failed");
+            }
+        }
+        if Instant::now() >= deadline {
+            stop_bounded_cli_child(&mut child, stdout_reader);
+            return Err("child_timeout");
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+
+    if captured.is_none() {
+        captured = match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(bytes)) if bytes.len() <= RUN_ONCE_CLI_MAX_STDOUT_BYTES => Some(bytes),
+            _ => {
+                let _ = stdout_reader.join();
+                return Err("child_stdout_unavailable");
+            }
+        };
+    }
+    let _ = stdout_reader.join();
+    let Some(bytes) = captured else {
+        return Err("child_stdout_unavailable");
+    };
+    Ok((status, bytes))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FwcN8nCliErrorEnvelope {
+    schema: String,
+    status: String,
+    code: String,
+    diagnostic: Option<String>,
+    correlation_id: String,
+}
+
+fn safe_fwc_n8n_cli_error_projection(
+    envelope: &FwcN8nCliErrorEnvelope,
+    requested_correlation_id: &str,
+) -> Value {
+    let status = match envelope.status.as_str() {
+        "ok" => "ok",
+        "error" => "error",
+        _ => "other",
+    };
+    let code = match envelope.code.as_str() {
+        "invalid_operation_input" => "invalid_operation_input",
+        _ => "other",
+    };
+    let diagnostic = match envelope.diagnostic.as_deref() {
+        Some("response_upstream_timeout") => Some("response_upstream_timeout"),
+        Some("execute_receipt_persist_failed") => Some("execute_receipt_persist_failed"),
+        _ => None,
+    };
+    let requested_correlation_id = uuid::Uuid::parse_str(requested_correlation_id)
+        .ok()
+        .map(|id| id.to_string());
+    let observed_correlation_id = uuid::Uuid::parse_str(&envelope.correlation_id)
+        .ok()
+        .map(|id| id.to_string());
+    json!({
+        "status": status,
+        "code": code,
+        "diagnostic": diagnostic,
+        "requestedCorrelationId": requested_correlation_id,
+        "observedCorrelationId": observed_correlation_id,
+    })
+}
 
 fn test_signing_key() -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[42_u8; 32]).expect("fixed test key should parse")
@@ -6405,4 +6553,123 @@ async fn reconfigure_succeeds() {
     assert_eq!(health["handshaken"], false);
     assert!(invoke(&c, "n8n.workflows.list", json!({})).await.is_err());
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn fwc_n8n_run_once_execute_error_is_safely_projected_and_persisted() {
+    let requested_correlation_id = "11111111-2222-4333-8444-555555555555";
+    let guard_canary = "PRIVATE-GUARD-CANARY-ONLY-IN-REQUEST";
+    let body_canary = "PRIVATE-BODY-CANARY-ONLY-IN-REQUEST";
+    let input = json!({
+        "server_id": "eec",
+        "input": {
+            "id": "offline-workflow",
+            "mode": "manual",
+            "versionId": "offline-version",
+            "inputs": {
+                "webhook": {
+                    "method": "POST",
+                    "query": {},
+                    "body": {"fcpProjectionCanary": body_canary}
+                }
+            },
+            "guard": {
+                "approvalRef": "offline-approval",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000025",
+                "inputClass": "bounded_json",
+                "sideEffectSummary": "offline guard validation rejection",
+                "precondition": {
+                    "versionId": "offline-version",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "canaryField": guard_canary
+            }
+        },
+        "deadline_ms": 1000,
+        "correlation_id": requested_correlation_id
+    });
+    let input_bytes = serde_json::to_vec(&input).expect("bounded CLI request JSON");
+    assert!(input_bytes.len() <= 64 * 1024);
+
+    let process_launch_count = AtomicUsize::new(0);
+    let (exit_status, stdout) = run_fwc_n8n_cli_once_bounded(&input_bytes, &process_launch_count)
+        .expect("one bounded offline CLI invocation");
+    assert_eq!(process_launch_count.load(Ordering::SeqCst), 1);
+    assert!(!exit_status.success());
+    assert!(stdout.len() <= RUN_ONCE_CLI_MAX_STDOUT_BYTES);
+    let raw_stdout = std::str::from_utf8(&stdout).expect("CLI error envelope UTF-8");
+    assert!(!raw_stdout.contains(guard_canary));
+    assert!(!raw_stdout.contains(body_canary));
+
+    let envelope: FwcN8nCliErrorEnvelope =
+        serde_json::from_slice(&stdout).expect("actual CLI ErrorEnvelope");
+    assert_eq!(envelope.schema, "fwc.n8n.error.v1");
+    assert_eq!(envelope.status, "error");
+    assert_eq!(envelope.code, "invalid_operation_input");
+    assert_eq!(envelope.diagnostic, None);
+    assert!(uuid::Uuid::parse_str(requested_correlation_id).is_ok());
+    assert!(uuid::Uuid::parse_str(&envelope.correlation_id).is_ok());
+    assert_ne!(envelope.correlation_id, requested_correlation_id);
+
+    // The prior inline caller projection forwarded status/correlation but omitted code.
+    let legacy_projection = json!({
+        "status": envelope.status,
+        "correlationId": envelope.correlation_id,
+    });
+    assert!(legacy_projection.get("code").is_none());
+
+    let projection = safe_fwc_n8n_cli_error_projection(&envelope, requested_correlation_id);
+    assert_eq!(projection.as_object().map(serde_json::Map::len), Some(5));
+    assert_eq!(projection["status"], "error");
+    assert_eq!(projection["code"], "invalid_operation_input");
+    assert_eq!(projection["diagnostic"], Value::Null);
+    assert_eq!(
+        projection["requestedCorrelationId"],
+        requested_correlation_id
+    );
+    assert_eq!(projection["observedCorrelationId"], envelope.correlation_id);
+
+    let code_canary = "PRIVATE-CODE-CANARY";
+    let diagnostic_canary = "PRIVATE-DIAGNOSTIC-CANARY";
+    let untrusted_envelope = FwcN8nCliErrorEnvelope {
+        schema: "fwc.n8n.error.v1".to_owned(),
+        status: "error".to_owned(),
+        code: code_canary.to_owned(),
+        diagnostic: Some(diagnostic_canary.to_owned()),
+        correlation_id: envelope.correlation_id.clone(),
+    };
+    let redacted_projection =
+        safe_fwc_n8n_cli_error_projection(&untrusted_envelope, requested_correlation_id);
+    assert_eq!(redacted_projection["code"], "other");
+    assert_eq!(redacted_projection["diagnostic"], Value::Null);
+    let redacted_bytes = serde_json::to_vec(&redacted_projection).expect("safe projection JSON");
+    let redacted_text = String::from_utf8(redacted_bytes).expect("safe projection UTF-8");
+    assert!(!redacted_text.contains(code_canary));
+    assert!(!redacted_text.contains(diagnostic_canary));
+
+    let projection_bytes = serde_json::to_vec(&projection).expect("safe projection JSON");
+    let (mut evidence_file, evidence_path) = tempfile::NamedTempFile::new()
+        .expect("SSD temporary projection artifact")
+        .keep()
+        .expect("retain persisted projection artifact");
+    assert!(evidence_path.starts_with(std::env::temp_dir()));
+    evidence_file
+        .write_all(&projection_bytes)
+        .expect("write safe projection evidence");
+    evidence_file
+        .sync_all()
+        .expect("sync safe projection evidence");
+    let persisted = std::fs::read(&evidence_path).expect("read back persisted projection");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&persisted).expect("persisted projection JSON"),
+        projection
+    );
+    let persisted_text = String::from_utf8(persisted).expect("persisted projection UTF-8");
+    for canary in [guard_canary, body_canary, code_canary, diagnostic_canary] {
+        assert!(!persisted_text.contains(canary));
+    }
+    println!("safe_projection_evidence={}", evidence_path.display());
 }

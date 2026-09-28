@@ -7,8 +7,10 @@
 use std::os::unix::process::CommandExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, io,
-    io::Read,
+    fmt,
+    fs::File,
+    io,
+    io::{Read, Write},
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -79,6 +81,76 @@ const SECRET_GET_MAX_STDOUT_BYTES: usize = 4097;
 #[cfg(test)]
 const SECRET_GET_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const ERROR_ENVELOPE_SCHEMA: &str = "fwc.n8n.error.v1";
+const EXECUTE_WRAPPER_RECEIPT_SCHEMA: &str = "fwc.n8n.execute-wrapper-receipt.v1";
+const EXECUTE_WRAPPER_RECEIPT_MAX_BYTES: usize = 4096;
+const SAFE_EXECUTE_WRAPPER_ERROR_CODES: &[&str] = &[
+    "unsupported_platform",
+    "invalid_envelope",
+    "credential_empty",
+    "credential_oversized",
+    "credential_invalid_utf8",
+    "credential_invalid_header",
+    "envelope_encode_failed",
+    "envelope_too_large",
+    "bundle_invalid",
+    "credential_channel_failed",
+    "request_cgroup_failed",
+    "supervisor_gate_failed",
+    "process_spawn_failed",
+    "stdin_unavailable",
+    "stdout_unavailable",
+    "stderr_unavailable",
+    "credential_write_failed",
+    "stdin_write_failed",
+    "output_read_failed",
+    "output_too_large",
+    "process_wait_failed",
+    "timeout",
+    "child_failed",
+    "host_connector_not_found",
+    "host_invalid_input",
+    "host_preflight_denied",
+    "host_connector_unavailable",
+    "host_connector_frame_limit",
+    "host_internal",
+    "host_n8n_input_failed",
+    "host_n8n_config_failed",
+    "host_n8n_plan_failed",
+    "host_n8n_credential_failed",
+    "host_n8n_policy_failed",
+    "host_n8n_runtime_state_failed",
+    "host_n8n_manifest_failed",
+    "host_n8n_capability_failed",
+    "host_n8n_invoke_failed",
+    "teardown_failed",
+    "process_group_present",
+    "io_worker_failed",
+    "output_empty",
+    "output_invalid",
+    "output_trailing",
+    "unknown_outcome",
+    "official_mcp_plan_failed",
+    "official_mcp_catalog_blocked",
+    "official_mcp_response_invalid",
+    "invalid_operation_input",
+    "stale_precondition",
+    "readback_mismatch",
+    "deadline_exceeded",
+    "bundle_unavailable",
+    "credential_broker_rejected",
+    "credential_broker_unavailable",
+    "credential_broker_io_failed",
+    "credential_broker_protocol_failed",
+    "credential_broker_response_invalid",
+    "credential_backend_failed",
+    "credential_invalid",
+    "provider_unavailable",
+    "provider_unauthorized",
+    "provider_forbidden",
+    "provider_not_found",
+    "provider_conflict",
+    "provider_rate_limited",
+];
 
 fn unarchive_request_timeout_ms(deadline_ms: u64) -> Option<u64> {
     let reserve_ms = u64::try_from(UNARCHIVE_READBACK_RESERVE.as_millis()).ok()?;
@@ -401,6 +473,20 @@ struct ErrorEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic: Option<&'static str>,
     correlation_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteWrapperReceipt {
+    schema: &'static str,
+    operation: &'static str,
+    phase: &'static str,
+    provider_attempt_classification: &'static str,
+    status: &'static str,
+    code: Option<&'static str>,
+    diagnostic: Option<&'static str>,
+    request_correlation_id: String,
+    observed_correlation_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -763,6 +849,255 @@ where
     }
 }
 
+fn execute_wrapper_receipt_file_name(correlation_id: &str) -> Result<String, AppError> {
+    let parsed =
+        Uuid::parse_str(correlation_id).map_err(|_| AppError::new("invalid_correlation_id"))?;
+    Ok(format!("wrapper-{parsed}.receipt.json"))
+}
+
+fn safe_execute_wrapper_error_code(code: &'static str) -> &'static str {
+    SAFE_EXECUTE_WRAPPER_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == code)
+        .unwrap_or("other")
+}
+
+fn safe_execute_wrapper_result_status(value: &Value) -> &'static str {
+    match value.get("status").and_then(Value::as_str) {
+        Some("verified") => "verified",
+        Some("failed") => "failed",
+        Some("unknown") => "unknown",
+        _ => "ok",
+    }
+}
+
+fn valid_observed_correlation(correlation_id: Option<&str>) -> Option<String> {
+    correlation_id
+        .filter(|correlation_id| Uuid::parse_str(correlation_id).is_ok())
+        .map(ToOwned::to_owned)
+}
+
+fn execute_wrapper_receipt(
+    request_correlation_id: &str,
+    result: &Result<Value, AppError>,
+) -> ExecuteWrapperReceipt {
+    let (status, code, diagnostic, observed_correlation_id) = match result {
+        Ok(response) => (
+            safe_execute_wrapper_result_status(response),
+            None,
+            None,
+            valid_observed_correlation(
+                response
+                    .get("correlationId")
+                    .or_else(|| response.get("correlation_id"))
+                    .or_else(|| response.pointer("/result/correlationId"))
+                    .or_else(|| response.pointer("/result/correlation_id"))
+                    .and_then(Value::as_str),
+            ),
+        ),
+        Err(error) => (
+            "error",
+            Some(safe_execute_wrapper_error_code(error.code)),
+            error_envelope_diagnostic(error.diagnostic),
+            valid_observed_correlation(error.correlation_id.as_deref()),
+        ),
+    };
+    ExecuteWrapperReceipt {
+        schema: EXECUTE_WRAPPER_RECEIPT_SCHEMA,
+        operation: "n8n.workflows.execute",
+        phase: "wrapper_dispatch_returned",
+        provider_attempt_classification: "unknown",
+        status,
+        code,
+        diagnostic,
+        request_correlation_id: request_correlation_id.to_owned(),
+        observed_correlation_id,
+    }
+}
+
+#[cfg(all(target_os = "linux", not(test)))]
+fn open_execute_wrapper_filesystem_root() -> Result<File, AppError> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    let root = open("/", OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|_| AppError::new("execute_receipt_unavailable"))?;
+    Ok(File::from(root))
+}
+
+#[cfg(all(not(target_os = "linux"), not(test)))]
+fn open_execute_wrapper_filesystem_root() -> Result<File, AppError> {
+    Err(AppError::new("execute_receipt_unavailable"))
+}
+
+#[cfg(target_os = "linux")]
+fn open_execute_wrapper_receipt_directory_at(
+    filesystem_root: &File,
+    owner_uid: u32,
+) -> Result<File, AppError> {
+    fn open_private_subdirectory_at(
+        parent: &File,
+        relative_path: &std::path::Path,
+        owner_uid: u32,
+    ) -> Result<File, AppError> {
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+        let directory = File::from(
+            openat2(
+                parent,
+                relative_path,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+            )
+            .map_err(|_| AppError::new("execute_receipt_unavailable"))?,
+        );
+        verify_execute_wrapper_receipt_directory(&directory, owner_uid)?;
+        Ok(directory)
+    }
+
+    let user_runtime = open_private_subdirectory_at(
+        filesystem_root,
+        std::path::Path::new(&format!("run/user/{owner_uid}")),
+        owner_uid,
+    )?;
+    let connector_runtime =
+        open_private_subdirectory_at(&user_runtime, std::path::Path::new("fwc-n8n"), owner_uid)?;
+    open_private_subdirectory_at(
+        &connector_runtime,
+        std::path::Path::new("receipts"),
+        owner_uid,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_execute_wrapper_receipt_directory_at(
+    _filesystem_root: &File,
+    _owner_uid: u32,
+) -> Result<File, AppError> {
+    Err(AppError::new("execute_receipt_unavailable"))
+}
+
+#[cfg(unix)]
+fn verify_execute_wrapper_receipt_directory(
+    directory: &File,
+    owner_uid: u32,
+) -> Result<(), AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = directory
+        .metadata()
+        .map_err(|_| AppError::new("execute_receipt_unavailable"))?;
+    if !metadata.is_dir()
+        || metadata.uid() != owner_uid
+        || metadata.mode() & 0o777 != 0o700
+        || metadata.mode() & 0o7000 != 0
+    {
+        return Err(AppError::new("execute_receipt_unavailable"));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_execute_wrapper_receipt_directory(
+    _directory: &File,
+    _owner_uid: u32,
+) -> Result<(), AppError> {
+    Err(AppError::new("execute_receipt_unavailable"))
+}
+
+#[cfg(unix)]
+fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
+    Ok(rustix::process::geteuid().as_raw())
+}
+
+#[cfg(not(unix))]
+fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
+    Err(AppError::new("execute_receipt_unavailable"))
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_execute_wrapper_receipt_absent(
+    directory: &File,
+    file_name: &str,
+) -> Result<(), AppError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    use rustix::io::Errno;
+
+    match openat(
+        directory,
+        file_name,
+        OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(existing) => {
+            drop(existing);
+            Err(AppError::new("execute_receipt_already_exists"))
+        }
+        Err(Errno::NOENT) => Ok(()),
+        Err(_) => Err(AppError::new("execute_receipt_unavailable")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ensure_execute_wrapper_receipt_absent(
+    _directory: &File,
+    _file_name: &str,
+) -> Result<(), AppError> {
+    Err(AppError::new("execute_receipt_unavailable"))
+}
+
+#[cfg(target_os = "linux")]
+fn persist_execute_wrapper_receipt(
+    directory: &File,
+    file_name: &str,
+    receipt: &ExecuteWrapperReceipt,
+) -> Result<(), AppError> {
+    use rustix::fs::{Mode, OFlags, fsync, openat};
+    use std::os::unix::fs::MetadataExt;
+
+    let owner_uid = rustix::process::geteuid().as_raw();
+    let mut bytes =
+        serde_json::to_vec(receipt).map_err(|_| AppError::new("execute_receipt_persist_failed"))?;
+    bytes.push(b'\n');
+    if bytes.len() > EXECUTE_WRAPPER_RECEIPT_MAX_BYTES {
+        return Err(AppError::new("execute_receipt_persist_failed"));
+    }
+    let fd = openat(
+        directory,
+        file_name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::RUSR | Mode::WUSR,
+    )
+    .map_err(|_| AppError::new("execute_receipt_persist_failed"))?;
+    let mut file = File::from(fd);
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| AppError::new("execute_receipt_persist_failed"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| AppError::new("execute_receipt_persist_failed"))?;
+    if !metadata.is_file()
+        || metadata.uid() != owner_uid
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.mode() & 0o7000 != 0
+        || metadata.nlink() != 1
+        || metadata.len() != bytes.len() as u64
+    {
+        return Err(AppError::new("execute_receipt_persist_failed"));
+    }
+    fsync(directory).map_err(|_| AppError::new("execute_receipt_persist_failed"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn persist_execute_wrapper_receipt(
+    _directory: &File,
+    _file_name: &str,
+    _receipt: &ExecuteWrapperReceipt,
+) -> Result<(), AppError> {
+    Err(AppError::new("execute_receipt_persist_failed"))
+}
+
 fn run_once_from_bytes_at<F>(
     operation: &str,
     bytes: &[u8],
@@ -772,9 +1107,45 @@ fn run_once_from_bytes_at<F>(
 where
     F: FnOnce(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
 {
+    run_once_from_bytes_at_with_receipt_io(
+        operation,
+        bytes,
+        request_started_at,
+        None,
+        dispatch,
+        persist_execute_wrapper_receipt,
+    )
+}
+
+fn run_once_from_bytes_at_with_receipt_io<F, P>(
+    operation: &str,
+    bytes: &[u8],
+    request_started_at: Instant,
+    receipt_filesystem_root_override: Option<&File>,
+    dispatch: F,
+    persist_receipt: P,
+) -> Result<Value, AppError>
+where
+    F: FnOnce(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
+    P: FnOnce(&File, &str, &ExecuteWrapperReceipt) -> Result<(), AppError>,
+{
     let operation = HostRunOnceOperation::parse(operation)?;
     let input = parse_host_run_once_input(bytes)?;
-    let envelope = build_host_run_once_envelope(operation, input)?;
+    let mut envelope = build_host_run_once_envelope(operation, input)?;
+    let is_execute = operation == HostRunOnceOperation::WorkflowsExecute;
+    let request_correlation_id = if is_execute {
+        Some(
+            envelope
+                .correlation_id
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+        )
+    } else {
+        envelope.correlation_id.clone()
+    };
+    if is_execute {
+        envelope.correlation_id = request_correlation_id.clone();
+    }
     let deadline_ms = envelope
         .deadline_ms
         .ok_or_else(|| AppError::new("invalid_deadline"))?;
@@ -782,9 +1153,73 @@ where
         .checked_add(std::time::Duration::from_millis(deadline_ms))
         .ok_or_else(|| AppError::new("deadline_exceeded"))?;
     ensure_request_deadline(request_deadline_at)?;
-    let request_correlation_id = envelope.correlation_id.clone();
-    dispatch(envelope, request_deadline_at)
-        .map_err(|error| error.with_correlation_id(request_correlation_id))
+    let receipt_file_name = if is_execute {
+        Some(
+            execute_wrapper_receipt_file_name(
+                request_correlation_id
+                    .as_deref()
+                    .expect("execute request correlation is assigned"),
+            )
+            .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?,
+        )
+    } else {
+        None
+    };
+
+    #[cfg(not(test))]
+    let production_filesystem_root = if is_execute && receipt_filesystem_root_override.is_none() {
+        Some(
+            open_execute_wrapper_filesystem_root()
+                .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(test)]
+    let production_filesystem_root: Option<File> = None;
+    let filesystem_root = receipt_filesystem_root_override.or(production_filesystem_root.as_ref());
+    let receipt_directory = if is_execute {
+        if let Some(filesystem_root) = filesystem_root {
+            let owner_uid = current_execute_wrapper_receipt_owner()
+                .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?;
+            Some(
+                open_execute_wrapper_receipt_directory_at(filesystem_root, owner_uid)
+                    .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let (Some(directory), Some(file_name)) =
+        (receipt_directory.as_ref(), receipt_file_name.as_deref())
+    {
+        ensure_execute_wrapper_receipt_absent(directory, file_name)
+            .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?;
+    }
+
+    let result = dispatch(envelope, request_deadline_at);
+    if is_execute && let Some(directory) = receipt_directory.as_ref() {
+        let receipt = execute_wrapper_receipt(
+            request_correlation_id
+                .as_deref()
+                .expect("execute request correlation is assigned"),
+            &result,
+        );
+        persist_receipt(
+            directory,
+            receipt_file_name
+                .as_deref()
+                .expect("execute receipt filename is assigned"),
+            &receipt,
+        )
+        .map_err(|_| {
+            AppError::with_diagnostic("unknown_outcome", Some("execute_receipt_persist_failed"))
+                .with_correlation_id(request_correlation_id.clone())
+        })?;
+    }
+    result.map_err(|error| error.with_correlation_id(request_correlation_id))
 }
 
 #[cfg(test)]
@@ -1280,6 +1715,7 @@ fn lifecycle_get_envelope(envelope: &HostRunOnceEnvelope) -> Result<HostRunOnceE
 }
 
 const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
+    "execute_receipt_persist_failed",
     "lifecycle_provider_rejected",
     "lifecycle_provider_status_rejected",
     "lifecycle_provider_error_field",
@@ -3863,6 +4299,40 @@ mod tests {
         })
     }
 
+    #[cfg(target_os = "linux")]
+    fn prepare_execute_receipt_tree(
+        filesystem_root: &std::path::Path,
+        receipts_mode: u32,
+        receipts_symlink: bool,
+    ) -> PathBuf {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let run = filesystem_root.join("run");
+        let user_parent = run.join("user");
+        let user_runtime = user_parent.join(rustix::process::geteuid().as_raw().to_string());
+        let connector_runtime = user_runtime.join("fwc-n8n");
+        fs::create_dir_all(&connector_runtime).expect("create fixture runtime tree");
+        for directory in [&run, &user_parent, &user_runtime, &connector_runtime] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .expect("secure fixture directory");
+        }
+
+        let receipts = connector_runtime.join("receipts");
+        if receipts_symlink {
+            let target = connector_runtime.join("receipts-target");
+            fs::create_dir(&target).expect("create receipt symlink target");
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o700))
+                .expect("secure receipt symlink target");
+            std::os::unix::fs::symlink("receipts-target", &receipts)
+                .expect("create receipt directory symlink");
+        } else {
+            fs::create_dir(&receipts).expect("create fixture receipts directory");
+            fs::set_permissions(&receipts, fs::Permissions::from_mode(receipts_mode))
+                .expect("set fixture receipts mode");
+        }
+        receipts
+    }
+
     fn execute_host_envelope_fixture() -> HostRunOnceEnvelope {
         let operation =
             HostRunOnceOperation::parse("n8n.workflows.execute").expect("execute operation");
@@ -4246,6 +4716,287 @@ mod tests {
                 .expect_err("invalid triggerNodeName");
             assert_eq!(error.code, "invalid_operation_input");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execute_wrapper_receipt_is_safe_once_only_and_fails_closed() {
+        use std::{cell::Cell, fs, os::unix::fs::MetadataExt};
+
+        let receipt_root = tempfile::tempdir().expect("receipt test directory");
+        let receipt_path = prepare_execute_receipt_tree(receipt_root.path(), 0o700, false);
+        let receipts_directory_path = receipt_path.clone();
+        let filesystem_root =
+            File::open(receipt_root.path()).expect("open fixture filesystem root");
+        let receipt_directory = open_execute_wrapper_receipt_directory_at(
+            &filesystem_root,
+            rustix::process::geteuid().as_raw(),
+        )
+        .expect("open receipt directory with the production opener");
+        let receipt_metadata = receipt_directory
+            .metadata()
+            .expect("receipt directory metadata");
+        assert_eq!(
+            (receipt_metadata.uid(), receipt_metadata.mode() & 0o777),
+            (rustix::process::geteuid().as_raw(), 0o700)
+        );
+        let request_correlation_id = "11111111-2222-4333-8444-555555555555";
+        let observed_correlation_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let payload_canary = "PRIVATE-EXECUTE-PAYLOAD-CANARY";
+        let diagnostic_canary = "PRIVATE-EXECUTE-DIAGNOSTIC-CANARY";
+        let mut input = execute_input_fixture();
+        input["inputs"]["items"][2] = json!(payload_canary);
+        let bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": input,
+            "deadline_ms": 1000,
+            "correlation_id": request_correlation_id
+        }))
+        .expect("execute request bytes");
+        let dispatch_count = Cell::new(0);
+        let error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |envelope, _| {
+                dispatch_count.set(dispatch_count.get() + 1);
+                assert_eq!(
+                    envelope.correlation_id.as_deref(),
+                    Some(request_correlation_id)
+                );
+                Err(
+                    AppError::with_diagnostic("process_spawn_failed", Some(diagnostic_canary))
+                        .with_correlation_id(Some(observed_correlation_id.to_owned())),
+                )
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("the controlled executor error remains an error");
+
+        assert_eq!(error.code, "process_spawn_failed");
+        assert_eq!(
+            error.correlation_id.as_deref(),
+            Some(observed_correlation_id)
+        );
+        assert_eq!(dispatch_count.get(), 1, "executor runs once");
+        let receipt_path =
+            receipts_directory_path.join(format!("wrapper-{request_correlation_id}.receipt.json"));
+        let persisted = fs::read(&receipt_path).expect("persisted execute receipt");
+        let metadata = fs::metadata(&receipt_path).expect("receipt metadata");
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        let receipt: Value = serde_json::from_slice(&persisted).expect("receipt JSON");
+        assert_eq!(receipt["schema"], EXECUTE_WRAPPER_RECEIPT_SCHEMA);
+        assert_eq!(receipt["operation"], "n8n.workflows.execute");
+        assert_eq!(receipt["phase"], "wrapper_dispatch_returned");
+        assert_eq!(receipt["providerAttemptClassification"], "unknown");
+        assert_eq!(receipt["status"], "error");
+        assert_eq!(receipt["code"], "process_spawn_failed");
+        assert_eq!(receipt["diagnostic"], Value::Null);
+        assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
+        assert_eq!(receipt["observedCorrelationId"], observed_correlation_id);
+        let persisted_text = String::from_utf8(persisted.clone()).expect("receipt UTF-8");
+        assert!(!persisted_text.contains(payload_canary));
+        assert!(!persisted_text.contains(diagnostic_canary));
+
+        let code_canary = "PRIVATE-EXECUTE-CODE-CANARY";
+        let code_diagnostic_canary = "PRIVATE-EXECUTE-DIAGNOSTIC-CANARY";
+        let code_canary_correlation_id = "33333333-4444-4555-8666-777777777777";
+        let code_canary_bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": execute_input_fixture(),
+            "deadline_ms": 1000,
+            "correlation_id": code_canary_correlation_id
+        }))
+        .expect("code-canary request bytes");
+        let _raw_error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &code_canary_bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |_, _| {
+                Err(AppError::with_diagnostic(
+                    code_canary,
+                    Some(code_diagnostic_canary),
+                ))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("arbitrary executor error remains an error");
+        let code_canary_receipt_path = receipts_directory_path
+            .join(format!("wrapper-{code_canary_correlation_id}.receipt.json"));
+        let code_canary_receipt =
+            fs::read(&code_canary_receipt_path).expect("persisted arbitrary-code execute receipt");
+        let code_canary_receipt_json: Value =
+            serde_json::from_slice(&code_canary_receipt).expect("arbitrary-code receipt JSON");
+        assert_eq!(code_canary_receipt_json["code"], "other");
+        assert_eq!(code_canary_receipt_json["diagnostic"], Value::Null);
+        let code_canary_receipt_text =
+            String::from_utf8(code_canary_receipt).expect("arbitrary-code receipt UTF-8");
+        assert!(!code_canary_receipt_text.contains(code_canary));
+        assert!(!code_canary_receipt_text.contains(code_diagnostic_canary));
+
+        let replay_error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |_, _| {
+                dispatch_count.set(dispatch_count.get() + 1);
+                Ok(json!({"status": "verified"}))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("existing receipt blocks overwrite and replay");
+        assert_eq!(replay_error.code, "execute_receipt_already_exists");
+        assert_eq!(dispatch_count.get(), 1, "existing receipt prevents retry");
+        assert_eq!(
+            fs::read(&receipt_path).expect("receipt remains unchanged"),
+            persisted
+        );
+
+        let failed_root = tempfile::tempdir().expect("persistence failure directory");
+        prepare_execute_receipt_tree(failed_root.path(), 0o700, false);
+        let failed_filesystem_root =
+            File::open(failed_root.path()).expect("open failure filesystem root");
+        let failed_correlation_id = "22222222-3333-4444-8555-666666666666";
+        let failed_bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": execute_input_fixture(),
+            "deadline_ms": 1000,
+            "correlation_id": failed_correlation_id
+        }))
+        .expect("failure-case request bytes");
+        let failed_dispatch_count = Cell::new(0);
+        let persistence_attempt_count = Cell::new(0);
+        let persistence_error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &failed_bytes,
+            Instant::now(),
+            Some(&failed_filesystem_root),
+            |_, _| {
+                failed_dispatch_count.set(failed_dispatch_count.get() + 1);
+                Err(AppError::new("unknown_outcome"))
+            },
+            |_, _, _| {
+                persistence_attempt_count.set(persistence_attempt_count.get() + 1);
+                Err(AppError::new("execute_receipt_persist_failed"))
+            },
+        )
+        .expect_err("receipt persistence failure remains unknown");
+        assert_eq!(persistence_error.code, "unknown_outcome");
+        assert_eq!(
+            persistence_error.diagnostic,
+            Some("execute_receipt_persist_failed")
+        );
+        assert_eq!(
+            persistence_error.correlation_id.as_deref(),
+            Some(failed_correlation_id)
+        );
+        assert_eq!(
+            failed_dispatch_count.get(),
+            1,
+            "failed persistence does not retry executor"
+        );
+        assert_eq!(
+            persistence_attempt_count.get(),
+            1,
+            "failed persistence is attempted once"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execute_wrapper_receipt_opener_rejects_symlink_permissions_and_fifo() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        fn assert_rejected_before_dispatch(
+            filesystem_root_path: PathBuf,
+            correlation_id: &'static str,
+            expected_code: &'static str,
+        ) {
+            let filesystem_root =
+                File::open(filesystem_root_path).expect("open fixture filesystem root");
+            let bytes = serde_json::to_vec(&json!({
+                "server_id": "eec",
+                "input": execute_input_fixture(),
+                "deadline_ms": 1000,
+                "correlation_id": correlation_id
+            }))
+            .expect("execute request bytes");
+            let dispatch_count = Arc::new(AtomicUsize::new(0));
+            let worker_dispatch_count = Arc::clone(&dispatch_count);
+            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                let result = run_once_from_bytes_at_with_receipt_io(
+                    "n8n.workflows.execute",
+                    &bytes,
+                    Instant::now(),
+                    Some(&filesystem_root),
+                    move |_, _| {
+                        worker_dispatch_count.fetch_add(1, Ordering::SeqCst);
+                        Ok(json!({"status": "verified"}))
+                    },
+                    persist_execute_wrapper_receipt,
+                )
+                .map(|_| ())
+                .map_err(|error| error.code.to_owned());
+                let _ = sender.send(result);
+            });
+
+            let result = receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("receipt preflight must return promptly");
+            assert_eq!(
+                result.expect_err("unsafe receipt target is rejected"),
+                expected_code
+            );
+            worker.join().expect("receipt preflight worker completes");
+            assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
+        }
+
+        let wrong_mode_root = tempfile::tempdir().expect("wrong-mode receipt root");
+        prepare_execute_receipt_tree(wrong_mode_root.path(), 0o750, false);
+        assert_rejected_before_dispatch(
+            wrong_mode_root.path().to_path_buf(),
+            "44444444-5555-4666-8777-888888888888",
+            "execute_receipt_unavailable",
+        );
+
+        let symlink_root = tempfile::tempdir().expect("symlink receipt root");
+        prepare_execute_receipt_tree(symlink_root.path(), 0o700, true);
+        assert_rejected_before_dispatch(
+            symlink_root.path().to_path_buf(),
+            "55555555-6666-4777-8888-999999999999",
+            "execute_receipt_unavailable",
+        );
+
+        let fifo_root = tempfile::tempdir().expect("FIFO receipt root");
+        let fifo_receipts_path = prepare_execute_receipt_tree(fifo_root.path(), 0o700, false);
+        let fifo_filesystem_root =
+            File::open(fifo_root.path()).expect("open FIFO fixture filesystem root");
+        let fifo_directory = open_execute_wrapper_receipt_directory_at(
+            &fifo_filesystem_root,
+            rustix::process::geteuid().as_raw(),
+        )
+        .expect("open FIFO fixture receipt directory with production opener");
+        let fifo_correlation_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let fifo_file_name =
+            execute_wrapper_receipt_file_name(fifo_correlation_id).expect("FIFO receipt name");
+        rustix::fs::mkfifoat(
+            &fifo_directory,
+            fifo_file_name.as_str(),
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .expect("create existing FIFO receipt target");
+        assert!(fifo_receipts_path.join(&fifo_file_name).exists());
+        assert_rejected_before_dispatch(
+            fifo_root.path().to_path_buf(),
+            fifo_correlation_id,
+            "execute_receipt_already_exists",
+        );
     }
 
     #[test]

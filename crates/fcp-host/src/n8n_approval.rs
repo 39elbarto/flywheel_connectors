@@ -1430,24 +1430,27 @@ fn bounded_execute_json(value: &Value, depth: usize) -> bool {
             object.len() <= 64
                 && object.iter().all(|(key, value)| {
                     let lowered = key.to_ascii_lowercase();
+                    let canonical_webhook_data =
+                        depth == 0 && key == "webhookData" && value.is_object();
                     key.len() <= 128
-                        && ![
-                            "secret",
-                            "token",
-                            "credential",
-                            "header",
-                            "authorization",
-                            "cookie",
-                            "api_key",
-                            "apikey",
-                            "password",
-                            "url",
-                            "command",
-                            "path",
-                            "data",
-                        ]
-                        .iter()
-                        .any(|marker| lowered.contains(marker))
+                        && (canonical_webhook_data
+                            || ![
+                                "secret",
+                                "token",
+                                "credential",
+                                "header",
+                                "authorization",
+                                "cookie",
+                                "api_key",
+                                "apikey",
+                                "password",
+                                "url",
+                                "command",
+                                "path",
+                                "data",
+                            ]
+                            .iter()
+                            .any(|marker| lowered.contains(marker)))
                         && bounded_execute_json(value, depth + 1)
                 })
         }
@@ -1896,38 +1899,44 @@ mod tests {
         let mut request = N8nApprovalIssueRequest {
             schema: APPROVAL_REQUEST_SCHEMA.to_owned(),
             server: N8nApprovalServer::Eec,
-            workflow_id: "workflow-1".to_owned(),
+            workflow_id: "kXVmpnLGECl1aHLy".to_owned(),
             operation: N8nLifecycleOperation::Execute,
             input: json!({
-                "id": "workflow-1",
+                "id": "kXVmpnLGECl1aHLy",
                 "mode": "manual",
-                "versionId": "version-1",
-                "triggerNodeName": "Webhook Trigger",
-                "inputs": {"webhook": {"event": "ready"}},
+                "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+                "triggerNodeName": "FWC Acceptance Webhook",
+                "inputs": {
+                    "webhookData": {
+                        "method": "POST",
+                        "query": {},
+                        "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                    }
+                },
                 "guard": {
-                    "approvalRef": "approval-execute",
-                    "idempotencyKey": "00000000-0000-4000-8000-000000000009",
+                    "approvalRef": "c062ed09-a26e-442a-93c7-0ad140937490",
+                    "idempotencyKey": "77224c33-f137-4bab-919a-1801377cf9e8",
                     "inputClass": "bounded_json",
-                    "sideEffectSummary": "run one manually approved workflow",
+                    "sideEffectSummary": "One isolated manual execution record on the inactive webhook fixture; no graph connections or downstream actions.",
                     "precondition": {
-                        "versionId": "version-1",
+                        "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
                         "activeVersionId": null,
                         "active": false,
                         "isArchived": false,
-                        "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        "stateDigest": "blake3-256:fd614137799a0ab364ff82fbaa04cea00379bcd57b3357e62f33c58c99bca80b"
                     }
                 }
             }),
             official_mcp_tool: "execute_workflow".to_owned(),
             official_mcp_resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_owned(),
             official_mcp_payload_digest:
-                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+                "sha256:1504202e414defdaf892754772136916f950038837af32f5715b1045d48184fd".to_owned(),
             parent_binding_sha256: String::new(),
             expires_at_ms: NOW + MAX_APPROVAL_TTL_MS,
         };
         request.parent_binding_sha256 = n8n_parent_binding_digest(
             request.server,
-            "fwc-n8n://eec/workflows/workflow%2D1",
+            "fwc-n8n://eec/workflows/kXVmpnLGECl1aHLy",
             request.operation.operation_id(),
             &request.input,
         )
@@ -1944,6 +1953,10 @@ mod tests {
         };
         assert_eq!(scope.connector_id, "fcp.mcp-bridge");
         assert_eq!(scope.method_pattern, OFFICIAL_MCP_WRAPPER_OPERATION);
+        assert_eq!(
+            request.official_mcp_payload_digest,
+            "sha256:1504202e414defdaf892754772136916f950038837af32f5715b1045d48184fd"
+        );
         assert_eq!(
             scope.input_hash,
             Some(
@@ -2007,8 +2020,34 @@ mod tests {
         assert!(build_unsigned_n8n_approval_token(&changed_version, NOW).is_err());
 
         let mut changed_input = request.clone();
-        changed_input.input["inputs"]["webhook"]["event"] = json!("changed");
+        changed_input.input["inputs"]["webhookData"]["body"]["fcpAcceptance"] = json!("changed");
         assert!(build_unsigned_n8n_approval_token(&changed_input, NOW).is_err());
+
+        for rejected_inputs in [
+            json!({"WebhookData": {"body": {"fcpAcceptance": "x"}}}),
+            json!({"webhookdata": {"body": {"fcpAcceptance": "x"}}}),
+            json!({"webhookData": "not-an-object"}),
+            json!({"nested": {"webhookData": {"body": {"fcpAcceptance": "x"}}}}),
+            json!({"webhookData": {"headers": {"content-type": "application/json"}}}),
+            json!({"webhookData": {"body": {"accessToken": "secret-canary"}}}),
+            json!({"webhookData": {"body": {"data": "secret-canary"}}}),
+            json!({"webhookData": {"body": {"apiSecret": "secret-canary"}}}),
+        ] {
+            let mut invalid = request.clone();
+            invalid.input["inputs"] = rejected_inputs;
+            invalid.parent_binding_sha256 = n8n_parent_binding_digest(
+                invalid.server,
+                "fwc-n8n://eec/workflows/kXVmpnLGECl1aHLy",
+                invalid.operation.operation_id(),
+                &invalid.input,
+            )
+            .expect("recompute exact mutated parent binding");
+            assert!(
+                build_unsigned_n8n_approval_token(&invalid, NOW).is_err(),
+                "issuer accepted marker-bearing execute inputs: {}",
+                invalid.input["inputs"]
+            );
+        }
 
         let mut changed_server = request.clone();
         changed_server.server = N8nApprovalServer::Hetzner;

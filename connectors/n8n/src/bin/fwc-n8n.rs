@@ -4006,24 +4006,27 @@ fn bounded_execute_json(value: &Value, depth: usize) -> bool {
             object.len() <= 64
                 && object.iter().all(|(key, value)| {
                     let lowered = key.to_ascii_lowercase();
+                    let canonical_webhook_data =
+                        depth == 0 && key == "webhookData" && value.is_object();
                     key.len() <= 128
-                        && ![
-                            "secret",
-                            "token",
-                            "credential",
-                            "header",
-                            "authorization",
-                            "cookie",
-                            "api_key",
-                            "apikey",
-                            "password",
-                            "url",
-                            "command",
-                            "path",
-                            "data",
-                        ]
-                        .iter()
-                        .any(|marker| lowered.contains(marker))
+                        && (canonical_webhook_data
+                            || ![
+                                "secret",
+                                "token",
+                                "credential",
+                                "header",
+                                "authorization",
+                                "cookie",
+                                "api_key",
+                                "apikey",
+                                "password",
+                                "url",
+                                "command",
+                                "path",
+                                "data",
+                            ]
+                            .iter()
+                            .any(|marker| lowered.contains(marker)))
                         && bounded_execute_json(value, depth + 1)
                 })
         }
@@ -4559,19 +4562,19 @@ mod tests {
     #[test]
     fn execute_fixture_proves_preflight_single_provider_and_independent_readback() {
         let baseline = json!({
-            "id": "workflow-1",
-            "versionId": "version-1",
+            "id": "kXVmpnLGECl1aHLy",
+            "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
             "activeVersionId": null,
             "active": false,
             "isArchived": false,
-            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            "stateDigest": "blake3-256:fd614137799a0ab364ff82fbaa04cea00379bcd57b3357e62f33c58c99bca80b"
         });
         let provider = json!({
             "status": "ok",
             "result": {
                 "structuredContent": {
                     "success": true,
-                    "workflowId": "workflow-1",
+                    "workflowId": "kXVmpnLGECl1aHLy",
                     "executionId": "execution-1",
                     "initialStatus": "accepted"
                 }
@@ -4581,8 +4584,8 @@ mod tests {
             "status": "ok",
             "result": {
                 "id": "execution-1",
-                "workflowId": "workflow-1",
-                "workflowVersionId": "version-1",
+                "workflowId": "kXVmpnLGECl1aHLy",
+                "workflowVersionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
                 "mode": "manual",
                 "status": "running"
             }
@@ -4597,8 +4600,8 @@ mod tests {
                     "status": "ok",
                     "result": {
                         "id": "execution-1",
-                        "workflowId": "workflow-1",
-                        "workflowVersionId": "version-1",
+                        "workflowId": "kXVmpnLGECl1aHLy",
+                        "workflowVersionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
                         "mode": "manual",
                         "status": "success"
                     }
@@ -4607,8 +4610,37 @@ mod tests {
             .into_iter()
             .collect(),
         };
-        let input =
-            json!({"server_id": "eec", "input": execute_input_fixture(), "deadline_ms": 5000});
+        let high_level_input = json!({
+            "id": "kXVmpnLGECl1aHLy",
+            "mode": "manual",
+            "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+            "triggerNodeName": "FWC Acceptance Webhook",
+            "inputs": {
+                "webhookData": {
+                    "method": "POST",
+                    "query": {},
+                    "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                }
+            },
+            "guard": {
+                "approvalRef": "c062ed09-a26e-442a-93c7-0ad140937490",
+                "idempotencyKey": "77224c33-f137-4bab-919a-1801377cf9e8",
+                "inputClass": "bounded_json",
+                "sideEffectSummary": "One isolated manual execution record on the inactive webhook fixture; no graph connections or downstream actions.",
+                "precondition": {
+                    "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:fd614137799a0ab364ff82fbaa04cea00379bcd57b3357e62f33c58c99bca80b"
+                }
+            }
+        });
+        let input = json!({
+            "server_id": "eec",
+            "input": high_level_input,
+            "deadline_ms": 5000
+        });
         let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
         let started = Instant::now();
         let result = run_once_from_bytes_at(
@@ -4618,6 +4650,26 @@ mod tests {
             |envelope, deadline| {
                 assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
                 execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                    if purpose == BrokerCredentialPurpose::OfficialMcp {
+                        assert_eq!(request.operation, HostRunOnceOperation::WorkflowsExecute);
+                        assert_eq!(request.input["id"], "kXVmpnLGECl1aHLy");
+                        assert_eq!(request.input["mode"], "manual");
+                        assert_eq!(
+                            request.input["versionId"],
+                            "32385eab-f3ad-4bab-a545-62104f95f42c"
+                        );
+                        assert_eq!(request.input["triggerNodeName"], "FWC Acceptance Webhook");
+                        assert_eq!(
+                            request.input["inputs"],
+                            json!({
+                                "webhookData": {
+                                    "method": "POST",
+                                    "query": {},
+                                    "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                                }
+                            })
+                        );
+                    }
                     probe.dispatch(request, purpose, deadline)
                 })
             },
@@ -4627,8 +4679,8 @@ mod tests {
         assert_eq!(result["status"], "verified");
         assert_eq!(result["executionStatus"], "success");
         assert_eq!(result["mode"], "manual");
-        assert_eq!(result["workflowId"], "workflow-1");
-        assert_eq!(result["versionId"], "version-1");
+        assert_eq!(result["workflowId"], "kXVmpnLGECl1aHLy");
+        assert_eq!(result["versionId"], "32385eab-f3ad-4bab-a545-62104f95f42c");
         assert_eq!(result["readback"], "independent_execution_get");
         assert_eq!(
             probe
@@ -4889,7 +4941,7 @@ mod tests {
                 "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
                 "triggerNodeName": trigger_node_name,
                 "inputs": {
-                    "webhook": {
+                    "webhookData": {
                         "method": "POST",
                         "query": {},
                         "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
@@ -4935,6 +4987,16 @@ mod tests {
                 assert_eq!(envelope.input["triggerNodeName"], "FWC Acceptance Webhook");
                 assert_eq!(envelope.input["mode"], "manual");
                 assert_eq!(envelope.input["versionId"], "32385eab-f3ad-4bab-a545-62104f95f42c");
+                assert_eq!(
+                    envelope.input["inputs"],
+                    json!({
+                        "webhookData": {
+                            "method": "POST",
+                            "query": {},
+                            "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                        }
+                    })
+                );
                 Ok(json!({"status": "verified", "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c"}))
             },
             persist_execute_wrapper_receipt,
@@ -4980,6 +5042,61 @@ mod tests {
         assert_eq!(invalid_receipt["phase"], "wrapper_input_rejected");
         assert_eq!(invalid_receipt["code"], "invalid_operation_input");
         println!("invalid_trigger_receipt={}", invalid_receipt_path.display());
+
+        let rejected_inputs = [
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb1",
+                json!({"WebhookData": {"body": {"fcpAcceptance": "x"}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb2",
+                json!({"webhookdata": {"body": {"fcpAcceptance": "x"}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb3",
+                json!({"webhookData": "not-an-object"}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb4",
+                json!({"nested": {"webhookData": {"body": {"fcpAcceptance": "x"}}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb5",
+                json!({"webhookData": {"headers": {"content-type": "application/json"}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb6",
+                json!({"webhookData": {"body": {"accessToken": "secret-canary"}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb7",
+                json!({"webhookData": {"body": {"data": "secret-canary"}}}),
+            ),
+            (
+                "77777777-8888-4999-8aaa-bbbbbbbbbbb8",
+                json!({"webhookData": {"body": {"apiSecret": "secret-canary"}}}),
+            ),
+        ];
+        for (correlation_id, inputs) in rejected_inputs {
+            let mut invalid_input = build_input(correlation_id, "FWC Acceptance Webhook");
+            invalid_input["inputs"] = inputs;
+            let invalid_bytes = make_bytes(correlation_id, invalid_input);
+            let dispatch_count = Cell::new(0);
+            let error = run_once_from_bytes_at_with_receipt_io(
+                "n8n.workflows.execute",
+                &invalid_bytes,
+                Instant::now(),
+                Some(&filesystem_root),
+                |_, _| {
+                    dispatch_count.set(dispatch_count.get() + 1);
+                    Ok(json!({"status": "verified"}))
+                },
+                persist_execute_wrapper_receipt,
+            )
+            .expect_err("noncanonical or marker-bearing webhook inputs reject before dispatch");
+            assert_eq!(error.code, "invalid_operation_input");
+            assert_eq!(dispatch_count.get(), 0);
+        }
     }
 
     #[test]

@@ -2462,7 +2462,29 @@ mod tests {
         let request = fixture["invoke_request"].clone();
         assert_eq!(request["operation"], OP_TOOLS_CALL);
         assert_eq!(request["input"]["name"], "execute_workflow");
+        assert_eq!(
+            request["input"]["arguments"],
+            json!({
+                "workflowId": "kXVmpnLGECl1aHLy",
+                "executionMode": "manual",
+                "triggerNodeName": "FWC Acceptance Webhook",
+                "inputs": {
+                    "webhookData": {
+                        "method": "POST",
+                        "query": {},
+                        "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                    }
+                }
+            })
+        );
         assert_eq!(request["approval_tokens"].as_array().map(Vec::len), Some(1));
+        let expected_payload_digest =
+            hex::decode("1504202e414defdaf892754772136916f950038837af32f5715b1045d48184fd")
+                .expect("canonical EEC payload digest");
+        assert_eq!(
+            request["approval_tokens"][0]["scope"]["input_hash"],
+            serde_json::json!(expected_payload_digest)
+        );
         assert!(
             request["context"]["request_tags"][N8N_TYPED_APPROVAL_PARENT_BINDING_TAG]
                 .as_str()
@@ -2515,7 +2537,7 @@ mod tests {
         let mut changed_trigger = request.clone();
         changed_trigger["input"]["arguments"]["triggerNodeName"] = json!("Changed Fixture Trigger");
         let mut changed_payload = request.clone();
-        changed_payload["input"]["arguments"]["inputs"]["webhook"]["body"]["fixture"] =
+        changed_payload["input"]["arguments"]["inputs"]["webhookData"]["body"]["fcpAcceptance"] =
             json!("changed offline payload");
         let mut changed_token = request.clone();
         changed_token["approval_tokens"][0]["scope"]["input_hash"] = json!(vec![0_u8; 32]);

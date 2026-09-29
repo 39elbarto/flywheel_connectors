@@ -35842,15 +35842,15 @@ done"#;
         );
 
         let high_level_input = json!({
-            "id": "fixture-workflow-20260929",
+            "id": "kXVmpnLGECl1aHLy",
             "mode": "manual",
-            "versionId": "fixture-version-1",
-            "triggerNodeName": "Fixture Manual Trigger",
+            "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+            "triggerNodeName": "FWC Acceptance Webhook",
             "inputs": {
-                "webhook": {
+                "webhookData": {
                     "method": "POST",
                     "query": {},
-                    "body": {"fixture": "offline"}
+                    "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
                 }
             },
             "guard": {
@@ -35859,7 +35859,7 @@ done"#;
                 "inputClass": "bounded_json",
                 "sideEffectSummary": "synthetic offline bridge approval fixture",
                 "precondition": {
-                    "versionId": "fixture-version-1",
+                    "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
                     "activeVersionId": null,
                     "active": false,
                     "isArchived": false,
@@ -35888,6 +35888,12 @@ done"#;
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let payload_digest =
             mcp_tools_call_payload_digest(&plan.input).expect("synthetic MCP payload digest");
+        let expected_payload_digest: [u8; 32] =
+            hex::decode("1504202e414defdaf892754772136916f950038837af32f5715b1045d48184fd")
+                .expect("canonical EEC payload digest")
+                .try_into()
+                .expect("payload digest size");
+        assert_eq!(payload_digest, expected_payload_digest);
         let parent_binding = plan.parent_binding_hash.expect("execute parent binding");
         let issue_request = N8nApprovalIssueRequest {
             schema: "fwc.n8n.owner-approval-request.v1".to_string(),

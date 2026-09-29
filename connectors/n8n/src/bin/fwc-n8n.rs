@@ -2821,9 +2821,9 @@ fn verify_execution_readback(
 }
 
 fn terminal_execute_readback<T>(result: Result<T, AppError>) -> Result<T, AppError> {
-    result.map_err(|error| {
-        AppError::with_diagnostic("unknown_outcome", error.diagnostic)
-            .with_correlation_id(error.correlation_id)
+    result.map_err(|mut error| {
+        error.code = "unknown_outcome";
+        error
     })
 }
 
@@ -5321,21 +5321,23 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "consumes the retained host marker produced from the MCP Bridge mock fixture"]
-    fn retained_host_marker_reaches_cli_error_projection_and_receipt() {
+    fn execute_workflow_rpc_provenance_survives_terminal_cli_projection_and_receipt() {
         use std::{cell::Cell, fs, io::Write, os::unix::fs::OpenOptionsExt};
 
-        for (phase, expected_label, expected_code, request_correlation_id) in [
+        for (phase, expected_label, expected_code, request_correlation_id, source_correlation_id) in [
             (
                 "DISCOVERY",
                 "external.mcp.discovery_jsonrpc_error",
                 -32011,
-                "c8d93a20-1a84-4910-9f39-c38c0e43d4bf",
+                "96e25abd-3867-4a3c-9895-f7b1734e5342",
+                "a0d3728a-a49f-49ef-bf6c-8f5b4d1d14c2",
             ),
             (
                 "EXECUTE",
                 "external.mcp.execute_call_jsonrpc_error",
                 -32017,
-                "c7d55088-f26d-47ad-a115-28d2838c5360",
+                "fd6bda4c-d8b2-4a61-8ed6-6bdc701c87bc",
+                "708d1cf7-284d-4972-82c0-64a16f726a01",
             ),
         ] {
             let marker_path = std::env::var_os(format!("FCP_MCP_RPC_HOST_{phase}_FIXTURE"))
@@ -5350,12 +5352,23 @@ mod tests {
                     "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {expected_label} rpc_code={expected_code}\n"
                 )
             );
-            let stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"invoke_unknown"}"#;
+            let stdout = serde_json::to_vec(&json!({
+                "schema": "fwc.n8n.error.v1",
+                "status": "error",
+                "code": "host_n8n_invoke_failed",
+                "diagnostic": "invoke_unknown",
+                "correlationId": source_correlation_id
+            }))
+            .expect("bounded synthetic host error envelope");
             let bridge_error =
-                fwc_n8n_bridge::child_failure_with_stderr(stdout, marker.as_bytes(), None);
+                fwc_n8n_bridge::child_failure_with_stderr(&stdout, marker.as_bytes(), None);
             let app_error = map_host_bridge_error(bridge_error, true);
             assert_eq!(app_error.code, "unknown_outcome");
             assert_eq!(app_error.diagnostic, Some(expected_label));
+            assert_eq!(
+                app_error.correlation_id.as_deref(),
+                Some(source_correlation_id)
+            );
             let (expected_phase, _) = match expected_label {
                 "external.mcp.discovery_jsonrpc_error" => ("discovery", "jsonrpc_error"),
                 "external.mcp.execute_call_jsonrpc_error" => ("execute_call", "jsonrpc_error"),
@@ -5370,30 +5383,102 @@ mod tests {
             let bytes = serde_json::to_vec(&json!({
                 "server_id": "eec",
                 "input": execute_input_fixture(),
-                "deadline_ms": 1000,
+                "deadline_ms": 5000,
                 "correlation_id": request_correlation_id
             }))
-            .expect("bounded synthetic execute request");
-            let dispatch_count = Cell::new(0);
+            .expect("bounded synthetic execute request with valid precondition");
+            let outer_dispatch_count = Cell::new(0);
+            let mut official_mcp_bridge_attempts = 0;
+            let mut execution_get_calls = 0;
+            let mut bridge_operations = Vec::new();
+            let mut mapped_error = Some(app_error);
+            let baseline = json!({
+                "id": "workflow-1",
+                "versionId": "version-1",
+                "activeVersionId": null,
+                "active": false,
+                "isArchived": false,
+                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+            });
             let error = run_once_from_bytes_at_with_receipt_io(
                 "n8n.workflows.execute",
                 &bytes,
                 Instant::now(),
                 Some(&filesystem_root),
-                |_, _| {
-                    dispatch_count.set(dispatch_count.get() + 1);
-                    Err(app_error)
+                |envelope, deadline| {
+                    outer_dispatch_count.set(outer_dispatch_count.get() + 1);
+                    execute_workflow_execute_with_bridge(
+                        envelope,
+                        deadline,
+                        |request, purpose, _| {
+                            let purpose_label = match purpose {
+                                BrokerCredentialPurpose::RestApi => "rest",
+                                BrokerCredentialPurpose::OfficialMcp => "official_mcp",
+                            };
+                            bridge_operations
+                                .push((purpose_label, request.operation.as_str().to_owned()));
+                            match purpose {
+                                BrokerCredentialPurpose::RestApi
+                                    if request.operation == HostRunOnceOperation::WorkflowsGet =>
+                                {
+                                    Ok(json!({"status": "ok", "result": baseline}))
+                                }
+                                BrokerCredentialPurpose::RestApi => {
+                                    if request.operation == HostRunOnceOperation::ExecutionsGet {
+                                        execution_get_calls += 1;
+                                    }
+                                    Err(AppError::new("unexpected_readback_call"))
+                                }
+                                BrokerCredentialPurpose::OfficialMcp => {
+                                    official_mcp_bridge_attempts += 1;
+                                    assert_eq!(
+                                        request.operation,
+                                        HostRunOnceOperation::WorkflowsExecute
+                                    );
+                                    Err(mapped_error
+                                        .take()
+                                        .expect("one injected mapped MCP bridge error"))
+                                }
+                            }
+                        },
+                    )
                 },
                 persist_execute_wrapper_receipt,
             )
-            .expect_err("synthetic provider error remains unknown");
-            assert_eq!(dispatch_count.get(), 1, "one attempt; no retry");
+            .expect_err("terminally mapped execute bridge error remains unknown");
+            assert_eq!(
+                outer_dispatch_count.get(),
+                1,
+                "one outer dispatch; no retry"
+            );
+            assert_eq!(
+                official_mcp_bridge_attempts, 1,
+                "one execute bridge attempt"
+            );
+            assert_eq!(
+                execution_get_calls, 0,
+                "failed execute never reads executions"
+            );
+            assert_eq!(
+                bridge_operations,
+                vec![
+                    ("rest", "n8n.workflows.get".to_owned()),
+                    ("official_mcp", "n8n.workflows.execute".to_owned()),
+                ],
+                "valid baseline precedes one failing execute call"
+            );
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some(expected_label));
+            assert_eq!(error.rpc_phase, Some(expected_phase));
+            assert_eq!(error.rpc_code, Some(expected_code));
+            assert_eq!(error.correlation_id.as_deref(), Some(source_correlation_id));
             let error_json = serde_json::to_value(error_envelope(&error, request_correlation_id))
                 .expect("safe CLI error projection");
             assert_eq!(error_json["code"], "unknown_outcome");
             assert_eq!(error_json["diagnostic"], expected_label);
             assert_eq!(error_json["rpcPhase"], expected_phase);
             assert_eq!(error_json["rpcCode"], expected_code);
+            assert_eq!(error_json["correlationId"], source_correlation_id);
 
             let receipt_path = receipts_directory_path
                 .join(format!("wrapper-{request_correlation_id}.receipt.json"));
@@ -5404,7 +5489,7 @@ mod tests {
             assert_eq!(receipt["rpcPhase"], expected_phase);
             assert_eq!(receipt["rpcCode"], expected_code);
             assert_eq!(receipt["diagnostic"], expected_label);
-            assert_eq!(receipt["observedCorrelationId"], Value::Null);
+            assert_eq!(receipt["observedCorrelationId"], source_correlation_id);
             assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
 
             let mut stdout_bytes = Vec::new();
@@ -5422,7 +5507,7 @@ mod tests {
             assert_eq!(error_json["diagnostic"], expected_label);
             assert_eq!(error_json["rpcPhase"], expected_phase);
             assert_eq!(error_json["rpcCode"], expected_code);
-            assert_eq!(error_json["correlationId"], request_correlation_id);
+            assert_eq!(error_json["correlationId"], source_correlation_id);
             let stdout_text =
                 String::from_utf8(stdout_bytes.clone()).expect("CLI stdout is UTF-8 JSON");
             assert_eq!(stdout_text.as_bytes(), stdout_bytes.as_slice());
@@ -5430,7 +5515,9 @@ mod tests {
             let artifact = serde_json::to_vec(&json!({
                 "stdoutBytes": stdout_text,
                 "executeReceipt": receipt,
-                "outerDispatchCount": dispatch_count.get(),
+                "outerDispatchCount": outer_dispatch_count.get(),
+                "officialMcpBridgeAttempts": official_mcp_bridge_attempts,
+                "executionGetCalls": execution_get_calls,
                 "receiptPath": receipt_path
             }))
             .expect("wrapper-only offline evidence");

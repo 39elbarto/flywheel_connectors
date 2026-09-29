@@ -37,19 +37,19 @@ any bounded, authorized implementation, then `.25`, then `.26`.
 
 ## Default owner and authority
 
-These role and model assignments are defaults for this workflow; direct user
-instructions prevail.
+These role and model assignments are defaults for this workflow effective
+2026-09-30; direct user instructions prevail.
 
 | Role | Default launch | Responsibility |
 | --- | --- | --- |
-| Coordinator | Current user-selected session (currently `gpt-6-luna`, high) | Defines bounded tasks, assigns ownership, accepts evidence-backed results, and coordinates handoffs. It does not micromanage each implementer shell command. |
-| Implementer | New Codex worker: `gpt-6-luna`, high effort | Owns assigned files and produces the observable change and tests in the specified checkout. |
-| Reviewer | `gpt-6-sol`, medium effort | Reviews the diff and evidence read-only, separating blockers from nonblocking findings. |
+| Coordinator | Codex `gpt-6.1-sol`, medium effort | Defines bounded tasks, assigns ownership, accepts evidence-backed results, and coordinates handoffs. It does not micromanage each implementer shell command. |
+| Implementer | All future Codex implementers: `gpt-6.1-sol`, low effort | Owns assigned files and produces the observable change and tests in the specified checkout. |
+| Reviewer | Separate Codex reviewer: `gpt-6.1-sol`, medium effort | Reviews the diff and evidence read-only, separating blockers from nonblocking findings. |
 | Consultant | Retained Astra/SilverDune session when requested | Gives advisory input when consulted; does not take coordinator authority or live-operation permission. |
 
-These are role defaults, not permanent agent identities. Reuse the already
-assigned coordinator/reviewer sessions; do not create duplicates merely to
-match a model label. For launches, check that `launch.requested` matches
+These are role defaults, not permanent agent identities. Reuse active workers
+and the already assigned coordinator/reviewer sessions; do not restart them or
+create duplicates merely to match a model label. For launches, check that `launch.requested` matches
 `launch.effective`; `--terminal` cannot be combined with `--model` or
 `--effort`. A user instruction can change the assignment or scope.
 

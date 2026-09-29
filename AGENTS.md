@@ -66,9 +66,12 @@ holder. Do not bypass the conflict by creating an untracked parallel copy.
 ## n8n-Specific Coordination
 
 n8n work uses coordinator, implementer, and reviewer roles; follow the single
-[n8n workflow runbook](docs/runbooks/n8n_agent_workflow.md). New implementers
-default to Codex `gpt-6-luna` at high effort and reviewers to `gpt-6-sol` at
-medium effort. Reuse the already assigned coordinator/reviewer sessions; check
+[n8n workflow runbook](docs/runbooks/n8n_agent_workflow.md). Effective 2026-09-30,
+the coordinator defaults to Codex `gpt-6.1-sol` at medium effort, all future
+implementers to `gpt-6.1-sol` at low effort, and separate reviewers to
+`gpt-6.1-sol` at medium effort. Direct user choices override these defaults.
+The Astra consultant assignment is unchanged. Reuse active workers and the
+already assigned coordinator/reviewer sessions without model-only restarts; check
 `launch.requested` against `launch.effective`. `--terminal` cannot be combined
 with `--model` or `--effort`. Direct user instructions retain authority; these
 defaults do not grant live-operation or key-rotation scope.

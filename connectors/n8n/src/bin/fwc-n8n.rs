@@ -136,6 +136,7 @@ const SAFE_EXECUTE_WRAPPER_ERROR_CODES: &[&str] = &[
     "stale_precondition",
     "readback_mismatch",
     "deadline_exceeded",
+    "invalid_deadline",
     "bundle_unavailable",
     "credential_broker_rejected",
     "credential_broker_unavailable",
@@ -855,6 +856,23 @@ fn execute_wrapper_receipt_file_name(correlation_id: &str) -> Result<String, App
     Ok(format!("wrapper-{parsed}.receipt.json"))
 }
 
+fn validated_execute_receipt_correlation(input: &HostRunOnceInput) -> Option<String> {
+    let _workflow_id = host_run_once_input_id(&input.input, "id").ok()?;
+    let object = input.input.as_object()?;
+    if object.get("mode").and_then(Value::as_str) != Some("manual") {
+        return None;
+    }
+    object
+        .get("versionId")
+        .and_then(Value::as_str)
+        .filter(|version_id| {
+            !version_id.is_empty() && version_id.len() <= 256 && version_id.trim() == *version_id
+        })?;
+    let correlation_id = input.correlation_id.as_deref()?;
+    Uuid::parse_str(correlation_id).ok()?;
+    Some(correlation_id.to_owned())
+}
+
 fn safe_execute_wrapper_error_code(code: &'static str) -> &'static str {
     SAFE_EXECUTE_WRAPPER_ERROR_CODES
         .iter()
@@ -880,6 +898,7 @@ fn valid_observed_correlation(correlation_id: Option<&str>) -> Option<String> {
 
 fn execute_wrapper_receipt(
     request_correlation_id: &str,
+    phase: &'static str,
     result: &Result<Value, AppError>,
 ) -> ExecuteWrapperReceipt {
     let (status, code, diagnostic, observed_correlation_id) = match result {
@@ -906,7 +925,7 @@ fn execute_wrapper_receipt(
     ExecuteWrapperReceipt {
         schema: EXECUTE_WRAPPER_RECEIPT_SCHEMA,
         operation: "n8n.workflows.execute",
-        phase: "wrapper_dispatch_returned",
+        phase,
         provider_attempt_classification: "unknown",
         status,
         code,
@@ -1014,6 +1033,81 @@ fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
 #[cfg(not(unix))]
 fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
     Err(AppError::new("execute_receipt_unavailable"))
+}
+
+fn open_execute_wrapper_receipt_directory_for_request(
+    filesystem_root_override: Option<&File>,
+    request_correlation_id: &str,
+) -> Result<Option<File>, AppError> {
+    #[cfg(not(test))]
+    let production_filesystem_root =
+        if filesystem_root_override.is_none() {
+            Some(open_execute_wrapper_filesystem_root().map_err(|error| {
+                error.with_correlation_id(Some(request_correlation_id.to_owned()))
+            })?)
+        } else {
+            None
+        };
+    #[cfg(test)]
+    let production_filesystem_root: Option<File> = None;
+
+    let filesystem_root = filesystem_root_override.or(production_filesystem_root.as_ref());
+    let Some(filesystem_root) = filesystem_root else {
+        return Ok(None);
+    };
+    let owner_uid = current_execute_wrapper_receipt_owner()
+        .map_err(|error| error.with_correlation_id(Some(request_correlation_id.to_owned())))?;
+    open_execute_wrapper_receipt_directory_at(filesystem_root, owner_uid)
+        .map(Some)
+        .map_err(|error| error.with_correlation_id(Some(request_correlation_id.to_owned())))
+}
+
+fn persist_execute_wrapper_input_error<P>(
+    error: AppError,
+    request_correlation_id: &str,
+    filesystem_root_override: Option<&File>,
+    persist_receipt: P,
+) -> AppError
+where
+    P: FnOnce(&File, &str, &ExecuteWrapperReceipt) -> Result<(), AppError>,
+{
+    let error_code = error.code;
+    let observed_correlation_id = Uuid::new_v4().to_string();
+    let receipt_file_name = match execute_wrapper_receipt_file_name(request_correlation_id) {
+        Ok(file_name) => file_name,
+        Err(_) => return error,
+    };
+    let directory = match open_execute_wrapper_receipt_directory_for_request(
+        filesystem_root_override,
+        request_correlation_id,
+    ) {
+        Ok(Some(directory)) => directory,
+        Ok(None) => return error,
+        Err(_) => {
+            return AppError::with_diagnostic(error_code, Some("execute_receipt_persist_failed"))
+                .with_correlation_id(Some(observed_correlation_id));
+        }
+    };
+    if ensure_execute_wrapper_receipt_absent(&directory, &receipt_file_name).is_err() {
+        return AppError::with_diagnostic(error_code, Some("execute_receipt_persist_failed"))
+            .with_correlation_id(Some(observed_correlation_id));
+    }
+
+    let error_result: Result<Value, AppError> =
+        Err(error.with_correlation_id(Some(observed_correlation_id.clone())));
+    let receipt = execute_wrapper_receipt(
+        request_correlation_id,
+        "wrapper_input_rejected",
+        &error_result,
+    );
+    if persist_receipt(&directory, &receipt_file_name, &receipt).is_err() {
+        return AppError::with_diagnostic(error_code, Some("execute_receipt_persist_failed"))
+            .with_correlation_id(Some(observed_correlation_id));
+    }
+    match error_result {
+        Err(error) => error,
+        Ok(_) => AppError::new("unknown_outcome"),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1131,8 +1225,27 @@ where
 {
     let operation = HostRunOnceOperation::parse(operation)?;
     let input = parse_host_run_once_input(bytes)?;
-    let mut envelope = build_host_run_once_envelope(operation, input)?;
     let is_execute = operation == HostRunOnceOperation::WorkflowsExecute;
+    let early_execute_correlation_id = if is_execute {
+        validated_execute_receipt_correlation(&input)
+    } else {
+        None
+    };
+    let mut envelope = match build_host_run_once_envelope(operation, input) {
+        Ok(envelope) => envelope,
+        Err(error) if is_execute => {
+            if let Some(request_correlation_id) = early_execute_correlation_id {
+                return Err(persist_execute_wrapper_input_error(
+                    error,
+                    &request_correlation_id,
+                    receipt_filesystem_root_override,
+                    persist_receipt,
+                ));
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let request_correlation_id = if is_execute {
         Some(
             envelope
@@ -1165,30 +1278,13 @@ where
     } else {
         None
     };
-
-    #[cfg(not(test))]
-    let production_filesystem_root = if is_execute && receipt_filesystem_root_override.is_none() {
-        Some(
-            open_execute_wrapper_filesystem_root()
-                .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?,
-        )
-    } else {
-        None
-    };
-    #[cfg(test)]
-    let production_filesystem_root: Option<File> = None;
-    let filesystem_root = receipt_filesystem_root_override.or(production_filesystem_root.as_ref());
     let receipt_directory = if is_execute {
-        if let Some(filesystem_root) = filesystem_root {
-            let owner_uid = current_execute_wrapper_receipt_owner()
-                .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?;
-            Some(
-                open_execute_wrapper_receipt_directory_at(filesystem_root, owner_uid)
-                    .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?,
-            )
-        } else {
-            None
-        }
+        open_execute_wrapper_receipt_directory_for_request(
+            receipt_filesystem_root_override,
+            request_correlation_id
+                .as_deref()
+                .expect("execute request correlation is assigned"),
+        )?
     } else {
         None
     };
@@ -1205,6 +1301,7 @@ where
             request_correlation_id
                 .as_deref()
                 .expect("execute request correlation is assigned"),
+            "wrapper_dispatch_returned",
             &result,
         );
         persist_receipt(
@@ -4716,6 +4813,128 @@ mod tests {
                 .expect_err("invalid triggerNodeName");
             assert_eq!(error.code, "invalid_operation_input");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execute_wrapper_receipt_captures_validated_early_input_rejection() {
+        use std::{cell::Cell, fs, os::unix::fs::MetadataExt};
+
+        let receipt_root = tempfile::tempdir().expect("receipt test directory");
+        let receipts_directory_path =
+            prepare_execute_receipt_tree(receipt_root.path(), 0o700, false);
+        let filesystem_root =
+            File::open(receipt_root.path()).expect("open fixture filesystem root");
+        let request_correlation_id = "11111111-2222-4333-8444-555555555555";
+        let guard_canary = "PRIVATE-EARLY-GUARD-CANARY";
+        let input_canary = "PRIVATE-EARLY-INPUT-CANARY";
+        let mut input = execute_input_fixture();
+        input["inputs"]["items"][2] = json!(input_canary);
+        input["guard"]["unexpectedField"] = json!(guard_canary);
+        let bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": input,
+            "deadline_ms": 1000,
+            "correlation_id": request_correlation_id
+        }))
+        .expect("execute request bytes");
+        let dispatch_count = Cell::new(0);
+        let error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |_, _| {
+                dispatch_count.set(dispatch_count.get() + 1);
+                Ok(json!({"status": "verified"}))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("unknown guard field fails before execute dispatch");
+
+        assert_eq!(error.code, "invalid_operation_input");
+        assert_eq!(dispatch_count.get(), 0, "early validation never dispatches");
+        let observed_correlation_id = error
+            .correlation_id
+            .as_deref()
+            .expect("CLI error correlation is assigned");
+        assert!(Uuid::parse_str(observed_correlation_id).is_ok());
+        assert_ne!(observed_correlation_id, request_correlation_id);
+        let cli_error = serde_json::to_value(error_envelope(&error, "unused-fallback"))
+            .expect("actual CLI error envelope");
+        assert_eq!(cli_error["code"], "invalid_operation_input");
+        assert_eq!(cli_error["correlationId"], observed_correlation_id);
+
+        let receipt_path =
+            receipts_directory_path.join(format!("wrapper-{request_correlation_id}.receipt.json"));
+        let persisted = fs::read(&receipt_path).expect("persisted early execute receipt");
+        let metadata = fs::metadata(&receipt_path).expect("execute receipt metadata");
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        let receipt: Value = serde_json::from_slice(&persisted).expect("execute receipt JSON");
+        assert_eq!(receipt.as_object().map(serde_json::Map::len), Some(9));
+        assert_eq!(receipt["schema"], EXECUTE_WRAPPER_RECEIPT_SCHEMA);
+        assert_eq!(receipt["operation"], "n8n.workflows.execute");
+        assert_eq!(receipt["phase"], "wrapper_input_rejected");
+        assert_eq!(receipt["providerAttemptClassification"], "unknown");
+        assert_eq!(receipt["status"], "error");
+        assert_eq!(receipt["code"], "invalid_operation_input");
+        assert_eq!(receipt["diagnostic"], Value::Null);
+        assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
+        assert_eq!(receipt["observedCorrelationId"], observed_correlation_id);
+        let persisted_text = String::from_utf8(persisted).expect("receipt UTF-8");
+        assert!(!persisted_text.contains(guard_canary));
+        assert!(!persisted_text.contains(input_canary));
+        assert!(!persisted_text.contains("workflowId"));
+        assert!(!persisted_text.contains("inputs"));
+        println!("early_execute_receipt={}", receipt_path.display());
+
+        let deadline_correlation_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let deadline_bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": execute_input_fixture(),
+            "deadline_ms": 0,
+            "correlation_id": deadline_correlation_id
+        }))
+        .expect("invalid-deadline execute request bytes");
+        let deadline_error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &deadline_bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |_, _| {
+                dispatch_count.set(dispatch_count.get() + 1);
+                Ok(json!({"status": "verified"}))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("zero deadline fails before execute dispatch");
+        assert_eq!(deadline_error.code, "invalid_deadline");
+        assert_eq!(dispatch_count.get(), 0, "invalid deadline never dispatches");
+        let deadline_observed_correlation_id = deadline_error
+            .correlation_id
+            .as_deref()
+            .expect("CLI error correlation is assigned");
+        let deadline_receipt_path =
+            receipts_directory_path.join(format!("wrapper-{deadline_correlation_id}.receipt.json"));
+        let deadline_receipt_bytes =
+            fs::read(&deadline_receipt_path).expect("persisted invalid-deadline receipt");
+        let deadline_receipt: Value =
+            serde_json::from_slice(&deadline_receipt_bytes).expect("invalid-deadline receipt JSON");
+        assert_eq!(deadline_receipt["code"], "invalid_deadline");
+        assert_eq!(
+            deadline_receipt["requestCorrelationId"],
+            deadline_correlation_id
+        );
+        assert_eq!(
+            deadline_receipt["observedCorrelationId"],
+            deadline_observed_correlation_id
+        );
+        println!(
+            "invalid_deadline_execute_receipt={}",
+            deadline_receipt_path.display()
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -6557,6 +6557,7 @@ async fn reconfigure_succeeds() {
 
 #[test]
 fn fwc_n8n_run_once_execute_error_is_safely_projected_and_persisted() {
+    // The CLI subprocess covers stdout projection; the receipt test uses an injected isolated root.
     let requested_correlation_id = "11111111-2222-4333-8444-555555555555";
     let guard_canary = "PRIVATE-GUARD-CANARY-ONLY-IN-REQUEST";
     let body_canary = "PRIVATE-BODY-CANARY-ONLY-IN-REQUEST";
@@ -6564,7 +6565,7 @@ fn fwc_n8n_run_once_execute_error_is_safely_projected_and_persisted() {
         "server_id": "eec",
         "input": {
             "id": "offline-workflow",
-            "mode": "manual",
+            "mode": "production",
             "versionId": "offline-version",
             "inputs": {
                 "webhook": {

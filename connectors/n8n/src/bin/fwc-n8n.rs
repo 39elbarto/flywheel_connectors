@@ -473,6 +473,10 @@ struct ErrorEnvelope {
     code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_code: Option<i32>,
     correlation_id: String,
 }
 
@@ -486,6 +490,10 @@ struct ExecuteWrapperReceipt {
     status: &'static str,
     code: Option<&'static str>,
     diagnostic: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rpc_code: Option<i32>,
     request_correlation_id: String,
     observed_correlation_id: Option<String>,
 }
@@ -495,6 +503,8 @@ struct AppError {
     code: &'static str,
     diagnostic: Option<&'static str>,
     correlation_id: Option<String>,
+    rpc_phase: Option<&'static str>,
+    rpc_code: Option<i32>,
 }
 
 impl AppError {
@@ -503,6 +513,8 @@ impl AppError {
             code,
             diagnostic: None,
             correlation_id: None,
+            rpc_phase: None,
+            rpc_code: None,
         }
     }
 
@@ -511,6 +523,8 @@ impl AppError {
             code,
             diagnostic,
             correlation_id: None,
+            rpc_phase: None,
+            rpc_code: None,
         }
     }
 
@@ -518,6 +532,34 @@ impl AppError {
         if self.correlation_id.is_none() {
             self.correlation_id = correlation_id;
         }
+        self
+    }
+
+    fn with_rpc_provenance(
+        mut self,
+        diagnostic: Option<&'static str>,
+        phase: Option<&'static str>,
+        code: Option<i32>,
+    ) -> Self {
+        let provenance = match (diagnostic, phase) {
+            (Some("external.mcp.discovery_jsonrpc_error"), Some("discovery")) => Some("discovery"),
+            (Some("external.mcp.discovery_tool_result_error"), Some("discovery")) => {
+                Some("discovery")
+            }
+            (Some("external.mcp.execute_call_jsonrpc_error"), Some("execute_call")) => {
+                Some("execute_call")
+            }
+            (Some("external.mcp.execute_call_tool_result_error"), Some("execute_call")) => {
+                Some("execute_call")
+            }
+            _ => None,
+        };
+        self.rpc_phase = provenance;
+        self.rpc_code = match (diagnostic, provenance, code) {
+            (Some("external.mcp.discovery_jsonrpc_error"), Some("discovery"), code)
+            | (Some("external.mcp.execute_call_jsonrpc_error"), Some("execute_call"), code) => code,
+            _ => None,
+        };
         self
     }
 }
@@ -533,30 +575,37 @@ fn main() {
                     std::process::exit(1);
                 }
             } else {
-                print_error("output_encoding_failed", None, &correlation_id);
+                print_error(&AppError::new("output_encoding_failed"), &correlation_id);
                 std::process::exit(1);
             }
         }
         Err(error) => {
-            print_error(
-                error.code,
-                error.diagnostic,
-                error
-                    .correlation_id
-                    .as_deref()
-                    .unwrap_or(correlation_id.as_str()),
-            );
+            let error_correlation_id = error
+                .correlation_id
+                .as_deref()
+                .unwrap_or(correlation_id.as_str());
+            print_error(&error, error_correlation_id);
             std::process::exit(1);
         }
     }
 }
 
-fn print_error(code: &'static str, diagnostic: Option<&'static str>, correlation_id: &str) {
-    let envelope = error_envelope(&AppError::with_diagnostic(code, diagnostic), correlation_id);
-    let encoded = serde_json::to_string(&envelope).unwrap_or_else(|_| {
-        "{\"schema\":\"fwc.n8n.error.v1\",\"status\":\"error\",\"code\":\"output_encoding_failed\"}".to_string()
+fn print_error(error: &AppError, correlation_id: &str) {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    let _ = write_error_output(&mut output, error, correlation_id);
+}
+
+fn write_error_output<W: Write>(
+    output: &mut W,
+    error: &AppError,
+    correlation_id: &str,
+) -> io::Result<()> {
+    let encoded = serde_json::to_vec(&error_envelope(error, correlation_id)).unwrap_or_else(|_| {
+        b"{\"schema\":\"fwc.n8n.error.v1\",\"status\":\"error\",\"code\":\"output_encoding_failed\"}".to_vec()
     });
-    println!("{encoded}");
+    output.write_all(&encoded)?;
+    output.write_all(b"\n")
 }
 
 fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
@@ -565,6 +614,8 @@ fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
         status: "error",
         code: error.code.to_string(),
         diagnostic: error.diagnostic,
+        rpc_phase: error.rpc_phase,
+        rpc_code: error.rpc_code,
         correlation_id: error
             .correlation_id
             .as_deref()
@@ -901,9 +952,11 @@ fn execute_wrapper_receipt(
     phase: &'static str,
     result: &Result<Value, AppError>,
 ) -> ExecuteWrapperReceipt {
-    let (status, code, diagnostic, observed_correlation_id) = match result {
+    let (status, code, diagnostic, rpc_phase, rpc_code, observed_correlation_id) = match result {
         Ok(response) => (
             safe_execute_wrapper_result_status(response),
+            None,
+            None,
             None,
             None,
             valid_observed_correlation(
@@ -919,6 +972,8 @@ fn execute_wrapper_receipt(
             "error",
             Some(safe_execute_wrapper_error_code(error.code)),
             error_envelope_diagnostic(error.diagnostic),
+            error.rpc_phase,
+            error.rpc_code,
             valid_observed_correlation(error.correlation_id.as_deref()),
         ),
     };
@@ -930,6 +985,8 @@ fn execute_wrapper_receipt(
         status,
         code,
         diagnostic,
+        rpc_phase,
+        rpc_code,
         request_correlation_id: request_correlation_id.to_owned(),
         observed_correlation_id,
     }
@@ -1748,11 +1805,13 @@ fn map_host_bridge_error(error: fwc_n8n_bridge::BridgeError, lifecycle: bool) ->
     } else {
         owned_egress_stage_diagnostic(error.diagnostic())
     };
-    AppError::with_diagnostic(code, diagnostic).with_correlation_id(
-        error
-            .correlation_id()
-            .map(|correlation_id| correlation_id.to_string()),
-    )
+    AppError::with_diagnostic(code, diagnostic)
+        .with_rpc_provenance(error.diagnostic(), error.rpc_phase(), error.rpc_code())
+        .with_correlation_id(
+            error
+                .correlation_id()
+                .map(|correlation_id| correlation_id.to_string()),
+        )
 }
 
 fn owned_egress_stage_diagnostic(value: Option<&str>) -> Option<&'static str> {
@@ -1827,6 +1886,10 @@ const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "provider_unavailable",
     "validation_failed",
     "invoke_unknown",
+    "external.mcp.discovery_jsonrpc_error",
+    "external.mcp.discovery_tool_result_error",
+    "external.mcp.execute_call_jsonrpc_error",
+    "external.mcp.execute_call_tool_result_error",
     "owned.egress_stage.host_authorization_binding",
     "owned.egress_stage.credential_lease",
     "owned.egress_stage.policy_preflight",
@@ -1890,7 +1953,20 @@ fn normalize_error_envelope(response: &Value, fallback_code: &'static str) -> Op
         .and_then(Value::as_str)
         .filter(|value| Uuid::parse_str(value).is_ok())
         .map(ToOwned::to_owned);
-    Some(AppError::with_diagnostic(code, diagnostic).with_correlation_id(correlation_id))
+    let phase = match object.get("rpcPhase").and_then(Value::as_str) {
+        Some("discovery") => Some("discovery"),
+        Some("execute_call") => Some("execute_call"),
+        _ => None,
+    };
+    let rpc_code = object
+        .get("rpcCode")
+        .and_then(Value::as_i64)
+        .and_then(|code| i32::try_from(code).ok());
+    Some(
+        AppError::with_diagnostic(code, diagnostic)
+            .with_rpc_provenance(diagnostic, phase, rpc_code)
+            .with_correlation_id(correlation_id),
+    )
 }
 
 fn response_result(response: Value, unknown_code: &'static str) -> Result<Value, AppError> {
@@ -5244,6 +5320,133 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "consumes the retained host marker produced from the MCP Bridge mock fixture"]
+    fn retained_host_marker_reaches_cli_error_projection_and_receipt() {
+        use std::{cell::Cell, fs, io::Write, os::unix::fs::OpenOptionsExt};
+
+        for (phase, expected_label, expected_code, request_correlation_id) in [
+            (
+                "DISCOVERY",
+                "external.mcp.discovery_jsonrpc_error",
+                -32011,
+                "c8d93a20-1a84-4910-9f39-c38c0e43d4bf",
+            ),
+            (
+                "EXECUTE",
+                "external.mcp.execute_call_jsonrpc_error",
+                -32017,
+                "c7d55088-f26d-47ad-a115-28d2838c5360",
+            ),
+        ] {
+            let marker_path = std::env::var_os(format!("FCP_MCP_RPC_HOST_{phase}_FIXTURE"))
+                .expect("explicit retained host marker fixture path");
+            let output_path = std::env::var_os(format!("FCP_MCP_RPC_WRAPPER_{phase}_FIXTURE"))
+                .expect("explicit retained wrapper evidence path");
+            let marker =
+                fs::read_to_string(marker_path).expect("read exact host diagnostic marker");
+            assert_eq!(
+                marker,
+                format!(
+                    "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {expected_label} rpc_code={expected_code}\n"
+                )
+            );
+            let stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"invoke_unknown"}"#;
+            let bridge_error =
+                fwc_n8n_bridge::child_failure_with_stderr(stdout, marker.as_bytes(), None);
+            let app_error = map_host_bridge_error(bridge_error, true);
+            assert_eq!(app_error.code, "unknown_outcome");
+            assert_eq!(app_error.diagnostic, Some(expected_label));
+            let (expected_phase, _) = match expected_label {
+                "external.mcp.discovery_jsonrpc_error" => ("discovery", "jsonrpc_error"),
+                "external.mcp.execute_call_jsonrpc_error" => ("execute_call", "jsonrpc_error"),
+                _ => unreachable!("the two fixed external labels above are exhaustive"),
+            };
+            assert_eq!(app_error.rpc_phase, Some(expected_phase));
+            assert_eq!(app_error.rpc_code, Some(expected_code));
+
+            let receipt_root = tempfile::tempdir().expect("retained receipt root").keep();
+            let receipts_directory_path = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+            let filesystem_root = File::open(&receipt_root).expect("open receipt root");
+            let bytes = serde_json::to_vec(&json!({
+                "server_id": "eec",
+                "input": execute_input_fixture(),
+                "deadline_ms": 1000,
+                "correlation_id": request_correlation_id
+            }))
+            .expect("bounded synthetic execute request");
+            let dispatch_count = Cell::new(0);
+            let error = run_once_from_bytes_at_with_receipt_io(
+                "n8n.workflows.execute",
+                &bytes,
+                Instant::now(),
+                Some(&filesystem_root),
+                |_, _| {
+                    dispatch_count.set(dispatch_count.get() + 1);
+                    Err(app_error)
+                },
+                persist_execute_wrapper_receipt,
+            )
+            .expect_err("synthetic provider error remains unknown");
+            assert_eq!(dispatch_count.get(), 1, "one attempt; no retry");
+            let error_json = serde_json::to_value(error_envelope(&error, request_correlation_id))
+                .expect("safe CLI error projection");
+            assert_eq!(error_json["code"], "unknown_outcome");
+            assert_eq!(error_json["diagnostic"], expected_label);
+            assert_eq!(error_json["rpcPhase"], expected_phase);
+            assert_eq!(error_json["rpcCode"], expected_code);
+
+            let receipt_path = receipts_directory_path
+                .join(format!("wrapper-{request_correlation_id}.receipt.json"));
+            let receipt_bytes = fs::read(&receipt_path).expect("read persisted CLI receipt");
+            let receipt: Value = serde_json::from_slice(&receipt_bytes).expect("safe receipt JSON");
+            assert_eq!(receipt["providerAttemptClassification"], "unknown");
+            assert_eq!(receipt["status"], "error");
+            assert_eq!(receipt["rpcPhase"], expected_phase);
+            assert_eq!(receipt["rpcCode"], expected_code);
+            assert_eq!(receipt["diagnostic"], expected_label);
+            assert_eq!(receipt["observedCorrelationId"], Value::Null);
+            assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
+
+            let mut stdout_bytes = Vec::new();
+            write_error_output(&mut stdout_bytes, &error, request_correlation_id)
+                .expect("production main error writer");
+            assert!(stdout_bytes.ends_with(b"\n"));
+            assert!(
+                !stdout_bytes
+                    .windows(b"SECRET-CANARY".len())
+                    .any(|window| { window == b"SECRET-CANARY" })
+            );
+            let error_json: Value =
+                serde_json::from_slice(&stdout_bytes).expect("production CLI stdout envelope");
+            assert_eq!(error_json["code"], "unknown_outcome");
+            assert_eq!(error_json["diagnostic"], expected_label);
+            assert_eq!(error_json["rpcPhase"], expected_phase);
+            assert_eq!(error_json["rpcCode"], expected_code);
+            assert_eq!(error_json["correlationId"], request_correlation_id);
+            let stdout_text =
+                String::from_utf8(stdout_bytes.clone()).expect("CLI stdout is UTF-8 JSON");
+            assert_eq!(stdout_text.as_bytes(), stdout_bytes.as_slice());
+
+            let artifact = serde_json::to_vec(&json!({
+                "stdoutBytes": stdout_text,
+                "executeReceipt": receipt,
+                "outerDispatchCount": dispatch_count.get(),
+                "receiptPath": receipt_path
+            }))
+            .expect("wrapper-only offline evidence");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            let mut output = options
+                .open(output_path)
+                .expect("create retained wrapper artifact without overwrite");
+            output.write_all(&artifact).expect("write wrapper evidence");
+            output.sync_all().expect("sync wrapper evidence");
+            println!("mcp_rpc_wrapper_evidence={}", receipt_path.display());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn execute_wrapper_receipt_opener_rejects_symlink_permissions_and_fifo() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -7174,6 +7377,8 @@ mod tests {
                 status: "error",
                 code: error.code.to_string(),
                 diagnostic: error.diagnostic,
+                rpc_phase: error.rpc_phase,
+                rpc_code: error.rpc_code,
                 correlation_id: "test".to_string(),
             })
             .expect("safe error envelope");
@@ -7194,6 +7399,8 @@ mod tests {
             status: "error",
             code: result_error.code.to_string(),
             diagnostic: result_error.diagnostic,
+            rpc_phase: result_error.rpc_phase,
+            rpc_code: result_error.rpc_code,
             correlation_id: "test".to_string(),
         })
         .expect("safe error envelope");
@@ -7288,6 +7495,8 @@ mod tests {
                 status: "error",
                 code: error.code.to_owned(),
                 diagnostic: error.diagnostic,
+                rpc_phase: error.rpc_phase,
+                rpc_code: error.rpc_code,
                 correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             })
             .expect("general error envelope remains redacted");
@@ -7363,6 +7572,8 @@ mod tests {
             status: "error",
             code: error.code.to_owned(),
             diagnostic: error.diagnostic,
+            rpc_phase: error.rpc_phase,
+            rpc_code: error.rpc_code,
             correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
         })
         .expect("safe error envelope");
@@ -7916,6 +8127,8 @@ mod tests {
             status: "error",
             code: error.code.to_string(),
             diagnostic: error.diagnostic,
+            rpc_phase: error.rpc_phase,
+            rpc_code: error.rpc_code,
             correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
         })
         .expect("safe error envelope");
@@ -7929,6 +8142,8 @@ mod tests {
             status: "error",
             code: without_diagnostic.code.to_string(),
             diagnostic: without_diagnostic.diagnostic,
+            rpc_phase: without_diagnostic.rpc_phase,
+            rpc_code: without_diagnostic.rpc_code,
             correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
         })
         .expect("error envelope without diagnostic");

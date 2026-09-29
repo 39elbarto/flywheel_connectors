@@ -18,7 +18,7 @@ use serde_json::json;
 use tracing::instrument;
 
 use crate::{
-    error::{McpBridgeError, McpBridgeResult},
+    error::{McpBridgeError, McpBridgeResult, McpErrorKind},
     protocol::{
         ClientCapabilities, ClientInfo, HttpHeaderPlan, LegacySession, McpMethod,
         Modern400Decision, ProtocolEra, ProtocolVersion, classify_modern_400,
@@ -971,9 +971,10 @@ fn decode_rpc_response(
         }
     })?;
     if let Some(error) = parsed.error {
-        return Err(McpBridgeError::McpError {
-            code: error.code,
-            message: "MCP JSON-RPC provider error".into(),
+        return Err(McpBridgeError::ProviderResponse {
+            phase: None,
+            kind: McpErrorKind::JsonRpc,
+            rpc_code: i32::try_from(error.code).ok(),
         });
     }
     let result = parsed.result.unwrap_or(serde_json::Value::Null);
@@ -983,9 +984,10 @@ fn decode_rpc_response(
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        return Err(McpBridgeError::McpError {
-            code: -32000,
-            message: "MCP tool returned an error result".into(),
+        return Err(McpBridgeError::ProviderResponse {
+            phase: None,
+            kind: McpErrorKind::ToolResult,
+            rpc_code: None,
         });
     }
     Ok(result)
@@ -1588,10 +1590,44 @@ mod tests {
         .expect_err("an MCP tool error result must not be returned as success data");
         assert!(matches!(
             error,
-            McpBridgeError::McpError {
-                code: -32000,
-                message
-            } if message == "MCP tool returned an error result"
+            McpBridgeError::ProviderResponse {
+                phase: None,
+                kind: McpErrorKind::ToolResult,
+                rpc_code: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn response_parser_preserves_only_bounded_jsonrpc_code_not_provider_message() {
+        let error = decode_rpc_response(
+            "application/json",
+            br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32017,"message":"SECRET-CANARY"}}"#,
+            1,
+        )
+        .expect_err("JSON-RPC provider errors remain errors");
+        assert!(matches!(
+            error,
+            McpBridgeError::ProviderResponse {
+                phase: None,
+                kind: McpErrorKind::JsonRpc,
+                rpc_code: Some(-32017),
+            }
+        ));
+
+        let out_of_range = decode_rpc_response(
+            "application/json",
+            br#"{"jsonrpc":"2.0","id":1,"error":{"code":2147483648,"message":"SECRET-CANARY"}}"#,
+            1,
+        )
+        .expect_err("out-of-range JSON-RPC code remains an error");
+        assert!(matches!(
+            out_of_range,
+            McpBridgeError::ProviderResponse {
+                phase: None,
+                kind: McpErrorKind::JsonRpc,
+                rpc_code: None,
+            }
         ));
     }
 

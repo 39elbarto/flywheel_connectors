@@ -4313,6 +4313,9 @@ fn owned_rpc_result(response: Value) -> HostResult<Value> {
             if let Some(provenance) = child_external_provenance_diagnostic(error) {
                 emit_n8n_run_once_external_provenance_diagnostic(provenance);
             }
+            if let Some(provenance) = child_mcp_rpc_error_provenance(error) {
+                emit_n8n_run_once_mcp_error_provenance(provenance);
+            }
         }
         emit_n8n_run_once_child_error_diagnostic(child_diagnostic);
         emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::RpcChildError);
@@ -13602,6 +13605,8 @@ const N8N_RUN_ONCE_CHILD_ERROR_DIAGNOSTIC_PREFIX: &str = "FCP-N8N-CHILD-ERROR-DI
 #[cfg(target_os = "linux")]
 const N8N_RUN_ONCE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX: &str =
     "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 ";
+#[cfg(target_os = "linux")]
+const MCP_BRIDGE_ERROR_PROVENANCE_PREFIX: &str = "FCP-MCP-BRIDGE-PROVENANCE/v1 ";
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13831,6 +13836,86 @@ fn child_external_provenance_diagnostic(
         }
         _ => None,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn child_mcp_rpc_error_provenance(error: &Value) -> Option<N8nRunOnceMcpErrorProvenance> {
+    if child_error_diagnostic(error) != N8nRunOnceChildErrorDiagnostic::External
+        || error.get("retryable").and_then(Value::as_bool) != Some(false)
+        || error
+            .get("retry_after_ms")
+            .is_some_and(|value| !value.is_null())
+    {
+        return None;
+    }
+    let details = error.get("details")?.as_object()?;
+    if details.get("service").and_then(Value::as_str) != Some("mcp-bridge")
+        || !details.get("status_code")?.is_null()
+    {
+        return None;
+    }
+    let message = error.get("message").and_then(Value::as_str)?;
+    let marker = message.strip_prefix("External service error: mcp-bridge - ")?;
+    N8nRunOnceMcpErrorProvenance::parse(marker)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct N8nRunOnceMcpErrorProvenance {
+    label: &'static str,
+    rpc_code: Option<i32>,
+}
+
+#[cfg(target_os = "linux")]
+impl N8nRunOnceMcpErrorProvenance {
+    fn parse(message: &str) -> Option<Self> {
+        let marker = message.strip_prefix(MCP_BRIDGE_ERROR_PROVENANCE_PREFIX)?;
+        let (label, rpc_code) = match marker.split_once(" rpc_code=") {
+            Some((label, raw_code)) => {
+                if raw_code.is_empty() || raw_code.contains(char::is_whitespace) {
+                    return None;
+                }
+                let code = raw_code.parse::<i32>().ok()?;
+                if code.to_string() != raw_code {
+                    return None;
+                }
+                (label, Some(code))
+            }
+            None => (marker, None),
+        };
+        let (allowed_label, is_jsonrpc) = match label {
+            "discovery_jsonrpc_error" => ("discovery_jsonrpc_error", true),
+            "discovery_tool_result_error" => ("discovery_tool_result_error", false),
+            "execute_call_jsonrpc_error" => ("execute_call_jsonrpc_error", true),
+            "execute_call_tool_result_error" => ("execute_call_tool_result_error", false),
+            _ => return None,
+        };
+        if rpc_code.is_some() && !is_jsonrpc {
+            return None;
+        }
+        Some(Self {
+            label: allowed_label,
+            rpc_code,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn n8n_run_once_mcp_error_provenance(error: &FcpError) -> Option<N8nRunOnceMcpErrorProvenance> {
+    let FcpError::External {
+        service,
+        message,
+        status_code: None,
+        retryable: false,
+        retry_after: None,
+    } = error
+    else {
+        return None;
+    };
+    if service != "mcp-bridge" {
+        return None;
+    }
+    N8nRunOnceMcpErrorProvenance::parse(message)
 }
 
 #[cfg(target_os = "linux")]
@@ -14077,6 +14162,27 @@ fn emit_n8n_run_once_external_provenance_diagnostic(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn emit_n8n_run_once_mcp_error_provenance(diagnostic: N8nRunOnceMcpErrorProvenance) {
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!("{}", n8n_run_once_mcp_error_provenance_line(diagnostic));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn n8n_run_once_mcp_error_provenance_line(diagnostic: N8nRunOnceMcpErrorProvenance) -> String {
+    match diagnostic.rpc_code {
+        Some(code) => format!(
+            "{N8N_RUN_ONCE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}external.mcp.{} rpc_code={code}",
+            diagnostic.label
+        ),
+        None => format!(
+            "{N8N_RUN_ONCE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}external.mcp.{}",
+            diagnostic.label
+        ),
+    }
+}
+
 fn n8n_run_once_dispatch_diagnostic(status: StatusCode) -> N8nRunOnceInvokeDiagnostic {
     if status.is_client_error() {
         N8nRunOnceInvokeDiagnostic::Dispatch4xx
@@ -14140,6 +14246,14 @@ const fn n8n_run_once_response_diagnostic(error: &FcpError) -> N8nRunOnceInvokeD
 
 fn accept_n8n_run_once_invoke_response(response: InvokeResponse) -> HostResult<InvokeResponse> {
     if !matches!(response.status, InvokeStatus::Ok) || response.error.is_some() {
+        #[cfg(target_os = "linux")]
+        if let Some(provenance) = response
+            .error
+            .as_ref()
+            .and_then(n8n_run_once_mcp_error_provenance)
+        {
+            emit_n8n_run_once_mcp_error_provenance(provenance);
+        }
         let diagnostic = response.error.as_ref().map_or(
             N8nRunOnceInvokeDiagnostic::ResponseInternal,
             n8n_run_once_response_diagnostic,
@@ -23697,6 +23811,114 @@ mod tests {
             }),
         ] {
             assert_eq!(child_external_provenance_diagnostic(&error), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_rpc_result_preserves_only_exact_mcp_error_marker() {
+        let bridge_error = FcpError::External {
+            service: "mcp-bridge".into(),
+            message: "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_jsonrpc_error rpc_code=-32017"
+                .into(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        };
+        let serialized = serde_json::to_value(bridge_error.to_response())
+            .expect("serialized safe external error");
+        assert_eq!(
+            child_mcp_rpc_error_provenance(&serialized),
+            Some(N8nRunOnceMcpErrorProvenance {
+                label: "execute_call_jsonrpc_error",
+                rpc_code: Some(-32017),
+            })
+        );
+        assert!(owned_rpc_result(json!({"error": serialized})).is_err());
+        assert_eq!(
+            n8n_run_once_mcp_error_provenance_line(N8nRunOnceMcpErrorProvenance {
+                label: "execute_call_jsonrpc_error",
+                rpc_code: Some(-32017),
+            }),
+            "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error rpc_code=-32017"
+        );
+
+        for malformed in [
+            FcpError::External {
+                service: "mcp-bridge".into(),
+                message:
+                    "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_tool_result_error rpc_code=-32000"
+                        .into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            FcpError::External {
+                service: "mcp-bridge".into(),
+                message:
+                    "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_jsonrpc_error rpc_code=2147483648"
+                        .into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            FcpError::External {
+                service: "mcp-bridge".into(),
+                message: "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_jsonrpc_error secret-canary"
+                    .into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+        ] {
+            let response =
+                serde_json::to_value(malformed.to_response()).expect("serialized malformed marker");
+            assert_eq!(child_mcp_rpc_error_provenance(&response), None);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "consumes the retained fixtures written by the MCP Bridge mock test"]
+    fn retained_bridge_error_flows_through_owned_rpc_result_and_emits_host_marker() {
+        use std::{fs, io::Write, os::unix::fs::OpenOptionsExt};
+
+        for (phase, expected_label, expected_code) in [
+            ("DISCOVERY", "discovery_jsonrpc_error", -32011),
+            ("EXECUTE", "execute_call_jsonrpc_error", -32017),
+        ] {
+            let input_path = std::env::var_os(format!("FCP_MCP_RPC_BRIDGE_{phase}_FIXTURE"))
+                .expect("explicit retained bridge fixture path");
+            let output_path = std::env::var_os(format!("FCP_MCP_RPC_HOST_{phase}_FIXTURE"))
+                .expect("explicit retained host marker path");
+            let bytes = fs::read(input_path).expect("read MCP Bridge generated error response");
+            let bridge_error: Value =
+                serde_json::from_slice(&bytes).expect("serialized MCP Bridge FcpError response");
+            assert_eq!(child_external_status_code(&bridge_error), None);
+            let host_result = owned_rpc_result(json!({"error": bridge_error.clone()}));
+            assert!(host_result.is_err(), "provider error remains an error");
+            let provenance = child_mcp_rpc_error_provenance(&bridge_error)
+                .expect("strictly parsed bridge provenance");
+            assert_eq!(provenance.label, expected_label);
+            assert_eq!(provenance.rpc_code, Some(expected_code));
+            let marker = n8n_run_once_mcp_error_provenance_line(provenance);
+            assert_eq!(
+                marker,
+                format!(
+                    "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.{expected_label} rpc_code={expected_code}"
+                )
+            );
+
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true).mode(0o600);
+            let mut output = options
+                .open(output_path)
+                .expect("create retained host marker without overwrite");
+            output
+                .write_all(marker.as_bytes())
+                .expect("write safe host marker");
+            output.write_all(b"\n").expect("terminate host marker");
+            output.sync_all().expect("sync host marker");
         }
     }
 

@@ -10,6 +10,44 @@ use thiserror::Error;
 /// Result alias for MCP Bridge operations.
 pub type McpBridgeResult<T> = Result<T, McpBridgeError>;
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Internal provenance phase for decoded MCP provider errors.
+pub enum McpErrorPhase {
+    /// Failure while discovering tools.
+    Discovery,
+    /// Failure while executing a tool call.
+    ExecuteCall,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Internal provenance kind for decoded MCP provider errors.
+pub enum McpErrorKind {
+    /// A JSON-RPC error object with its bounded numeric code, if representable.
+    JsonRpc,
+    /// An MCP result object whose `isError` flag is true.
+    ToolResult,
+}
+
+impl McpErrorPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Discovery => "discovery",
+            Self::ExecuteCall => "execute_call",
+        }
+    }
+}
+
+impl McpErrorKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::JsonRpc => "jsonrpc_error",
+            Self::ToolResult => "tool_result_error",
+        }
+    }
+}
+
 /// MCP Bridge-specific errors.
 #[derive(Error, Debug)]
 pub enum McpBridgeError {
@@ -36,6 +74,15 @@ pub enum McpBridgeError {
     /// MCP server returned a JSON-RPC error
     #[error("MCP server error ({code}): {message}")]
     McpError { code: i64, message: String },
+
+    /// A decoder-classified provider error. The phase is attached at the
+    /// operation boundary that knows whether this was discovery or execution.
+    #[error("MCP provider returned an error response")]
+    ProviderResponse {
+        phase: Option<McpErrorPhase>,
+        kind: McpErrorKind,
+        rpc_code: Option<i32>,
+    },
 
     /// Rate limited (429)
     #[error("Rate limited, retry after {retry_after_ms}ms")]
@@ -74,6 +121,7 @@ impl McpBridgeError {
             }
             Self::Json(_) => "MCP response was not valid JSON".into(),
             Self::McpError { code, .. } => format!("MCP JSON-RPC provider error ({code})"),
+            Self::ProviderResponse { .. } => "MCP provider returned an error response".into(),
             Self::RateLimited { .. } => "MCP provider rate limited the request".into(),
             Self::Unauthorized => "MCP provider authentication failed".into(),
             Self::Forbidden => "MCP provider denied the request".into(),
@@ -83,6 +131,13 @@ impl McpBridgeError {
                 message,
             } => safe_api_summary(*status_code, message),
         }
+    }
+
+    pub(crate) const fn with_provider_error_phase(mut self, provider_phase: McpErrorPhase) -> Self {
+        if let Self::ProviderResponse { phase, .. } = &mut self {
+            *phase = Some(provider_phase);
+        }
+        self
     }
 
     #[must_use]
@@ -170,6 +225,24 @@ impl McpBridgeError {
                 retryable: false,
                 retry_after: None,
             },
+            Self::ProviderResponse {
+                phase: Some(provider_phase),
+                kind,
+                rpc_code,
+            } => FcpError::External {
+                service: "mcp-bridge".into(),
+                message: provider_error_provenance_marker(*provider_phase, *kind, *rpc_code),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
+            Self::ProviderResponse { phase: None, .. } => FcpError::External {
+                service: "mcp-bridge".into(),
+                message: "MCP provider returned an error response".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            },
             Self::Api {
                 status_code,
                 message: _,
@@ -209,6 +282,20 @@ impl McpBridgeError {
                 retry_after: None,
             },
         }
+    }
+}
+
+fn provider_error_provenance_marker(
+    phase: McpErrorPhase,
+    kind: McpErrorKind,
+    rpc_code: Option<i32>,
+) -> String {
+    let label = format!("{}_{}", phase.label(), kind.label());
+    match (kind, rpc_code) {
+        (McpErrorKind::JsonRpc, Some(code)) => {
+            format!("FCP-MCP-BRIDGE-PROVENANCE/v1 {label} rpc_code={code}")
+        }
+        _ => format!("FCP-MCP-BRIDGE-PROVENANCE/v1 {label}"),
     }
 }
 
@@ -759,6 +846,50 @@ mod tests {
         .to_fcp_error()
         {
             FcpError::External { service, .. } => assert_eq!(service, "mcp-bridge"),
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_provider_error_marker_is_static_and_carries_only_bounded_jsonrpc_code() {
+        let error = McpBridgeError::ProviderResponse {
+            phase: Some(McpErrorPhase::ExecuteCall),
+            kind: McpErrorKind::JsonRpc,
+            rpc_code: Some(-32_001),
+        };
+        assert!(!error.is_retryable());
+        match error.to_fcp_error() {
+            FcpError::External {
+                service,
+                message,
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(service, "mcp-bridge");
+                assert_eq!(
+                    message,
+                    "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_jsonrpc_error rpc_code=-32001"
+                );
+                assert_eq!(status_code, None);
+                assert!(!retryable);
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_result_provenance_has_no_synthetic_rpc_code() {
+        let error = McpBridgeError::ProviderResponse {
+            phase: Some(McpErrorPhase::Discovery),
+            kind: McpErrorKind::ToolResult,
+            rpc_code: None,
+        };
+        match error.to_fcp_error() {
+            FcpError::External { message, .. } => assert_eq!(
+                message,
+                "FCP-MCP-BRIDGE-PROVENANCE/v1 discovery_tool_result_error"
+            ),
             other => panic!("expected External, got {other:?}"),
         }
     }

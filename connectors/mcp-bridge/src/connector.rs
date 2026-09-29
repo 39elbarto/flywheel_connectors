@@ -22,7 +22,7 @@ use tracing::{info, instrument};
 
 use crate::{
     client::{McpAuth, McpClient, McpClientMetrics},
-    error::{McpBridgeError, McpBridgeResult},
+    error::{McpBridgeError, McpBridgeResult, McpErrorPhase},
     protocol::{
         AuthMode, CapabilitySnapshot, MAX_TOOL_COUNT, ProtocolEra, ProtocolVersion, ServerId,
         ToolClass, ToolObservation,
@@ -1125,7 +1125,10 @@ impl McpBridgeConnector {
         client: &McpClient,
         context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, McpBridgeError> {
-        let data = client.tools_list_with_context(context).await?;
+        let data = client
+            .tools_list_with_context(context)
+            .await
+            .map_err(|error| error.with_provider_error_phase(McpErrorPhase::Discovery))?;
         let data = self.annotate_catalog(data, "tools", "tool", true)?;
         self.attach_capability_snapshot(data, client).await
     }
@@ -1152,7 +1155,10 @@ impl McpBridgeConnector {
         } else {
             arguments
         };
-        let data = client.tools_call_with_context(name, &args, context).await?;
+        let data = client
+            .tools_call_with_context(name, &args, context)
+            .await
+            .map_err(|error| error.with_provider_error_phase(McpErrorPhase::ExecuteCall))?;
         Ok(data)
     }
 
@@ -2312,6 +2318,7 @@ fn validate_server_id(server_id: &str) -> FcpResult<()> {
 mod tests {
     use super::*;
     use fcp_prelude::ExecutionScope;
+    use serde_json::Value;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -2577,6 +2584,153 @@ mod tests {
         assert_eq!(call["method"], "tools/call");
         assert_eq!(call["params"]["name"], "execute_workflow");
         assert_eq!(call["params"]["arguments"], request["input"]["arguments"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn provider_error_phase_matches_actual_discovery_and_execute_calls() {
+        let discovery_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32011, "message": "DISCOVERY-SECRET-CANARY"}
+            })))
+            .expect(1)
+            .mount(&discovery_server)
+            .await;
+        let mut discovery_connector = McpBridgeConnector::new();
+        discovery_connector
+            .handle_configure(json!({
+                "server_id": "eec",
+                "mcp_url": format!("{}/mcp", discovery_server.uri())
+            }))
+            .await
+            .expect("configure discovery mock");
+        let discovery_error = discovery_connector
+            .invoke_tools_list(
+                discovery_connector.client_ref().expect("discovery client"),
+                None,
+            )
+            .await
+            .expect_err("discovery response must remain an error");
+        assert!(matches!(
+            discovery_error,
+            McpBridgeError::ProviderResponse {
+                phase: Some(McpErrorPhase::Discovery),
+                kind: crate::error::McpErrorKind::JsonRpc,
+                rpc_code: Some(-32011),
+            }
+        ));
+        let discovery_requests = discovery_server.received_requests().await.unwrap();
+        assert_eq!(discovery_requests.len(), 1);
+        let discovery_request: Value =
+            serde_json::from_slice(&discovery_requests[0].body).expect("discovery JSON-RPC");
+        assert_eq!(discovery_request["method"], "tools/list");
+        assert_eq!(
+            discovery_requests
+                .iter()
+                .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+                .filter(|request| request["method"] == "tools/call")
+                .count(),
+            0
+        );
+        assert!(
+            !discovery_error
+                .to_fcp_error()
+                .to_string()
+                .contains("DISCOVERY-SECRET-CANARY")
+        );
+
+        let execute_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32017, "message": "EXECUTE-SECRET-CANARY"}
+            })))
+            .expect(1)
+            .mount(&execute_server)
+            .await;
+        let mut execute_connector = McpBridgeConnector::new();
+        execute_connector
+            .handle_configure(json!({
+                "server_id": "eec",
+                "mcp_url": format!("{}/mcp", execute_server.uri())
+            }))
+            .await
+            .expect("configure execute mock");
+        let context = HostEgressContext {
+            connector_id: "fcp.mcp-bridge".into(),
+            operation_id: OP_TOOLS_CALL.into(),
+            resource_uri: "fcp-mcp-bridge://eec/tools/execute_workflow".into(),
+            zone_id: ZoneId::work().to_string(),
+            request_id: "offline-mcp-execute-error".into(),
+            correlation_id: None,
+            capability_token_cbor_b64: String::new(),
+        };
+        let execute_error = execute_connector
+            .invoke_tools_call(
+                execute_connector.client_ref().expect("execute client"),
+                &json!({"name": "execute_workflow", "arguments": {}}),
+                context,
+            )
+            .await
+            .expect_err("tool error result must remain an error");
+        assert!(matches!(
+            &execute_error,
+            McpBridgeError::ProviderResponse {
+                phase: Some(McpErrorPhase::ExecuteCall),
+                kind: crate::error::McpErrorKind::JsonRpc,
+                rpc_code: Some(-32017),
+            }
+        ));
+        let execute_requests = execute_server.received_requests().await.unwrap();
+        assert_eq!(execute_requests.len(), 1);
+        let execute_request: Value =
+            serde_json::from_slice(&execute_requests[0].body).expect("execute JSON-RPC");
+        assert_eq!(execute_request["method"], "tools/call");
+        assert_eq!(
+            execute_requests
+                .iter()
+                .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
+                .filter(|request| request["method"] == "tools/call")
+                .count(),
+            1
+        );
+        println!("mcp_rpc_mock_counts discovery_tools_call=0 execute_tools_call=1");
+        let external_error = execute_error.to_fcp_error();
+        assert!(!external_error.to_string().contains("EXECUTE-SECRET-CANARY"));
+        #[cfg(unix)]
+        for (fixture_env, error) in [
+            (
+                "FCP_MCP_RPC_BRIDGE_DISCOVERY_FIXTURE",
+                discovery_error.to_fcp_error(),
+            ),
+            ("FCP_MCP_RPC_BRIDGE_EXECUTE_FIXTURE", external_error),
+        ] {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            if let Some(fixture_path) = std::env::var_os(fixture_env) {
+                let fixture = serde_json::to_vec(&error.to_response())
+                    .expect("bridge-generated external error response");
+                assert!(
+                    !fixture
+                        .windows(b"SECRET-CANARY".len())
+                        .any(|window| { window == b"SECRET-CANARY" })
+                );
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create_new(true).mode(0o600);
+                let mut file = options
+                    .open(fixture_path)
+                    .expect("create retained bridge error fixture without overwrite");
+                file.write_all(&fixture)
+                    .expect("write bridge error fixture");
+                file.sync_all().expect("sync bridge error fixture");
+            }
+        }
     }
 
     #[test]

@@ -208,6 +208,8 @@ pub struct BridgeError {
     code: BridgeErrorCode,
     diagnostic: Option<&'static str>,
     correlation_id: Option<Uuid>,
+    rpc_phase: Option<&'static str>,
+    rpc_code: Option<i32>,
 }
 
 impl BridgeError {
@@ -216,6 +218,8 @@ impl BridgeError {
             code,
             diagnostic: None,
             correlation_id: None,
+            rpc_phase: None,
+            rpc_code: None,
         }
     }
 
@@ -236,10 +240,32 @@ impl BridgeError {
         self.correlation_id
     }
 
+    pub const fn rpc_phase(self) -> Option<&'static str> {
+        self.rpc_phase
+    }
+
+    pub const fn rpc_code(self) -> Option<i32> {
+        self.rpc_code
+    }
+
     const fn with_correlation_id(mut self, correlation_id: Option<Uuid>) -> Self {
         self.correlation_id = correlation_id;
         self
     }
+
+    const fn with_rpc_provenance(mut self, provenance: ChildMcpRpcProvenance) -> Self {
+        self.diagnostic = Some(provenance.label);
+        self.rpc_phase = Some(provenance.phase);
+        self.rpc_code = provenance.rpc_code;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ChildMcpRpcProvenance {
+    label: &'static str,
+    phase: &'static str,
+    rpc_code: Option<i32>,
 }
 
 impl fmt::Debug for BridgeError {
@@ -1126,6 +1152,7 @@ fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
     child_invoke_diagnostic(stderr)
         .or_else(|| child_plan_diagnostic(stderr))
         .or_else(|| child_external_provenance_diagnostic(stderr))
+        .or_else(|| child_mcp_rpc_provenance(stderr).map(|provenance| provenance.label))
         .or_else(|| {
             if generic_host_fallback {
                 owned_egress_stage.or(host_error).or(host_error_detail)
@@ -1175,7 +1202,9 @@ pub(super) fn child_failure_with_stderr(
         }
         existing => existing.or(fallback_diagnostic),
     };
-    error.with_diagnostic(diagnostic)
+    let error = error.with_diagnostic(diagnostic);
+    child_mcp_rpc_provenance(stderr)
+        .map_or(error, |provenance| error.with_rpc_provenance(provenance))
 }
 
 #[cfg(target_os = "linux")]
@@ -1298,6 +1327,18 @@ fn emit_child_invoke_diagnostic(stderr: &[u8]) {
     if let Some(label) = child_external_provenance_diagnostic(stderr) {
         eprintln!("{BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{label}");
     }
+    if let Some(provenance) = child_mcp_rpc_provenance(stderr) {
+        match provenance.rpc_code {
+            Some(code) => eprintln!(
+                "{BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{} rpc_code={code}",
+                provenance.label
+            ),
+            None => eprintln!(
+                "{BRIDGE_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX}{}",
+                provenance.label
+            ),
+        }
+    }
     if let Some(label) = child_host_error_diagnostic(stderr) {
         eprintln!("{BRIDGE_HOST_ERROR_DIAGNOSTIC_PREFIX}{label}");
     }
@@ -1364,6 +1405,56 @@ fn child_external_provenance_diagnostic(stderr: &[u8]) -> Option<&'static str> {
             }
             _ => None,
         }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn child_mcp_rpc_provenance(stderr: &[u8]) -> Option<ChildMcpRpcProvenance> {
+    stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        let marker = line.strip_prefix(CHILD_EXTERNAL_PROVENANCE_DIAGNOSTIC_PREFIX)?;
+        let marker = std::str::from_utf8(marker).ok()?;
+        let (label, rpc_code) = match marker.split_once(" rpc_code=") {
+            Some((label, raw_code)) => {
+                if raw_code.is_empty() || raw_code.contains(char::is_whitespace) {
+                    return None;
+                }
+                let code = raw_code.parse::<i32>().ok()?;
+                if code.to_string() != raw_code {
+                    return None;
+                }
+                (label, Some(code))
+            }
+            None => (marker, None),
+        };
+        let (label, phase, is_jsonrpc) = match label {
+            "external.mcp.discovery_jsonrpc_error" => {
+                ("external.mcp.discovery_jsonrpc_error", "discovery", true)
+            }
+            "external.mcp.discovery_tool_result_error" => (
+                "external.mcp.discovery_tool_result_error",
+                "discovery",
+                false,
+            ),
+            "external.mcp.execute_call_jsonrpc_error" => (
+                "external.mcp.execute_call_jsonrpc_error",
+                "execute_call",
+                true,
+            ),
+            "external.mcp.execute_call_tool_result_error" => (
+                "external.mcp.execute_call_tool_result_error",
+                "execute_call",
+                false,
+            ),
+            _ => return None,
+        };
+        if rpc_code.is_some() && !is_jsonrpc {
+            return None;
+        }
+        Some(ChildMcpRpcProvenance {
+            label,
+            phase,
+            rpc_code,
+        })
     })
 }
 
@@ -2869,6 +2960,34 @@ mod tests {
             BridgeError::new(BridgeErrorCode::HostN8nInvokeFailed).diagnostic(),
             None
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_rpc_provenance_parser_accepts_only_exact_phase_kind_and_bounded_code() {
+        let stderr = b"noise\nFCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error rpc_code=-32017\n";
+        let provenance = child_mcp_rpc_provenance(stderr).expect("bounded MCP provenance");
+        assert_eq!(provenance.label, "external.mcp.execute_call_jsonrpc_error");
+        assert_eq!(provenance.phase, "execute_call");
+        assert_eq!(provenance.rpc_code, Some(-32017));
+        let parsed = child_failure_with_stderr(
+            br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"invoke_unknown"}"#,
+            stderr,
+            None,
+        );
+        assert_eq!(parsed.diagnostic(), Some(provenance.label));
+        assert_eq!(parsed.rpc_phase(), Some("execute_call"));
+        assert_eq!(parsed.rpc_code(), Some(-32017));
+        assert!(!format!("{parsed:?}").contains("noise"));
+
+        for malformed in [
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_tool_result_error rpc_code=-32000".as_slice(),
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error rpc_code=2147483648",
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error rpc_code=-032017",
+            b"FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error secret-canary",
+        ] {
+            assert_eq!(child_mcp_rpc_provenance(malformed), None);
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -217,6 +217,66 @@ outcome is a stop state, not a retry. The reviewer's blocker/nonblocking finding
 RC evidence when applicable, and the dated handoff markers are retained with
 the Agent Mail history.
 
+## Bounded manual acceptance for the two disposable `.25` workflows
+
+This section records the user's current explicit `.25` authorization for only
+these isolated fixtures; it grants no standing permission. Every write still
+requires its own fresh exact approval. Another workflow or a bulk scope needs
+separate explicit authorization:
+
+| Server | Workflow ID and approved workflow version | Manual trigger and input |
+| --- | --- | --- |
+| `eec` | `kXVmpnLGECl1aHLy` / `32385eab-f3ad-4bab-a545-62104f95f42c` | `FWC Acceptance Webhook`; `inputs.webhookData` is exactly `{"method":"POST","query":{},"body":{"fcpAcceptance":"nqm81.25-eec-manual-noop"}}`. |
+| `hetzner` | `uQXXNMWE2lzlCgag` / `b22acfe1-ecca-45c8-97a1-b10420dfb241` | `Manual Trigger`; omit `inputs` entirely. |
+
+Run EEC first. Require a fresh full-graph read for the exact fixture: the
+workflow is inactive and unarchived, has no credentials or connections, and
+matches the recorded safe graph/invariant digests. For Hetzner, require EEC
+PASS—including its separate execution readback—before taking a fresh Hetzner
+baseline or changing its MCP availability. Recheck the full graph before and
+after each fixture's manual execution.
+
+To enable MCP availability, use the typed `n8n.mcp_access.reconcile` operation
+with `scope: workflow_ids`, exactly one approved workflow ID, `desired: true`,
+and `dryRun: true`. Before any apply, record the original `availableInMCP`
+value; if the provider omits it, record the semantic value as `false`. If the
+plan says the workflow is already available, record that original state and
+skip apply even when its current digest differs from the old false-state
+baseline pin. If it is not available, require the exact
+approved pre-change workflow version and dry-run digest, issue a fresh approval
+with a TTL of at most 45 seconds, parent binding `fwc-n8n://<server>` over the
+exact high-level apply input, and a guard containing `approvalRef`, the pinned
+`dryRunDigest`, and `idempotencyKey`; then apply once. After any apply result,
+independently read the workflow and run a new dry-run readback.
+Validate the returned receipt's target and internal digest consistency; the
+post-change digest may differ from the pre-change pin. After a proven pre-write
+read failure, continue only if evidence shows issuer and apply were not reached,
+a scoped read-only GET succeeds, and the coordinator/reviewer explicitly
+approves a new claim; preserve the old claim. An unknown apply or readback
+outcome stops execution: preserve the claim and evidence, do not retry or
+replay, and limit follow-up to read-only reconciliation.
+
+For execution, obtain a fresh approval bound to the server, exact workflow and
+version, manual mode, trigger, exact input, and current baseline. Keep FCP's
+workflow-version binding in the approval and independent readback; do not add
+provider `versionId` or `wait` arguments. Invoke `n8n.workflows.execute` once.
+These checks bind the approval and readback to observed values; they do not
+promise to eliminate provider-side time-of-check/time-of-use races.
+Require a verified response with an execution ID, then issue a separate
+`n8n.executions.get` using that execution ID and workflow ID. PASS requires the
+readback to match the approved workflow version and manual mode and to show a
+terminal successful status. A missing ID, mismatch, timeout, unknown result,
+or failed readback is STOP; do not retry or infer that no execution occurred.
+
+Any later MCP disable is a separate typed `desired: false` change with a fresh
+approval and readback. Never silently restore availability, especially after
+an unknown outcome. Teardown is complete only after owned child, cgroup, and
+channel teardown succeeds before reporting success; the installed path uses
+anonymous sockets and creates no mutable handshake state directory. Retained
+receipts, claims, and fixtures are not cleanup targets. Do not gate this procedure on
+the numeric package version; retain the operation-schema, approval, target,
+workflow-version, and readback checks above.
+
 ## Failure modes and edge cases
 
 - **Missing or conflicting reservation:** do not edit; narrow the reservation

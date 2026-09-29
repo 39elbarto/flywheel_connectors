@@ -49,7 +49,6 @@ readonly HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_OUTPUT_
 readonly HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
-readonly LOCAL_MCP_PACKAGE_VERSION="2.87.0"
 readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
 readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
 readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
@@ -165,7 +164,7 @@ write_local_mcp_policy() {
   require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
   python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
     "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
-    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PACKAGE_VERSION" "$LOCAL_MCP_PROTOCOL_VERSION" \
+    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" \
     -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
 import json
 import pathlib
@@ -184,7 +183,6 @@ second_separator = args.index("--", first_separator + 1)
     package_metadata_path,
     wrapper_path,
     package_id,
-    package_version,
     protocol_version,
 ) = args[:first_separator]
 catalog_tools = args[first_separator + 1 : second_separator]
@@ -204,8 +202,9 @@ try:
     package = json.loads(package_metadata)
 except json.JSONDecodeError as error:
     raise SystemExit("installed n8n-mcp package metadata is not valid JSON") from error
-if package.get("name") != package_id or package.get("version") != package_version:
-    raise SystemExit("installed n8n-mcp package identity does not match reviewed pins")
+observed_version = package.get("version")
+if package.get("name") != package_id or not isinstance(observed_version, str) or not observed_version:
+    raise SystemExit("installed n8n-mcp package name or version is invalid")
 
 request_frames = [
     {
@@ -341,7 +340,7 @@ if observed_digests != catalog_digests:
 stage_policy = pathlib.Path(stage) / "policy/local-mcp.json"
 policy = {
     "package_id": package_id,
-    "package_version": package_version,
+    "package_version": observed_version,
     "launcher_path": node_path,
     "launcher_digest": blake3_path(node_path),
     "runtime_executable": node_path,

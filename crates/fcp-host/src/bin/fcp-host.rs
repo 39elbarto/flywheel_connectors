@@ -394,7 +394,9 @@ const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983";
+#[cfg(test)]
 const N8N_OFFICIAL_MCP_EEC_N8N_VERSION: &str = "2.38.4";
+#[cfg(test)]
 const N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION: &str = "2.34.6";
 const N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS: &str = "owner_provisioned";
 const N8N_OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS: &str = "unavailable_unproven_schema";
@@ -11560,12 +11562,7 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         return false;
     };
     let server_id = config.get("server_id").and_then(Value::as_str);
-    let expected_n8n_version = match server_id {
-        Some("eec") => N8N_OFFICIAL_MCP_EEC_N8N_VERSION,
-        Some("hetzner") => N8N_OFFICIAL_MCP_HETZNER_N8N_VERSION,
-        _ => return false,
-    };
-    if policy.get("n8n_version").and_then(Value::as_str) != Some(expected_n8n_version) {
+    if !matches!(server_id, Some("eec") | Some("hetzner")) {
         return false;
     }
     if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
@@ -36163,7 +36160,7 @@ done"#;
     }
 
     #[test]
-    fn n8n_official_mcp_lifecycle_schema_binding_accepts_verified_servers_and_rejects_drift() {
+    fn n8n_contract_invariants_official_mcp_lifecycle_version_and_schema_pins() {
         let eec = ManagedConnectorConfig {
             id: "fcp.mcp-bridge".to_string(),
             binary: "/bin/true".to_string(),
@@ -36255,11 +36252,11 @@ done"#;
             N8N_OFFICIAL_MCP_UNPUBLISH_TOOL
         ));
 
-        let mut predecessor = eec;
-        predecessor.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
-            json!("2.34.4");
-        assert!(!official_mcp_policy_allows_tool(
-            &predecessor,
+        let mut different_version = eec;
+        different_version.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!("99.7.1");
+        assert!(official_mcp_policy_allows_tool(
+            &different_version,
             N8N_OFFICIAL_MCP_PUBLISH_TOOL
         ));
     }
@@ -36304,7 +36301,7 @@ done"#;
     }
 
     #[test]
-    fn n8n_official_mcp_execute_owner_binding_is_exact_per_server() {
+    fn n8n_contract_invariants_execute_owner_binding_and_informational_version() {
         let config = run_once_n8n_official_mcp_lifecycle_test_config();
         let input = N8nReadOnlyRunOnceInput {
             schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
@@ -36400,6 +36397,30 @@ done"#;
             Some(&signing_key.verifying_key()),
         )
         .expect("exact execute approval verifies");
+        let mut different_version_config = config.clone();
+        different_version_config.config.as_mut().expect("config")["capability_policy"]["n8n_version"] =
+            json!("99.7.1");
+        let different_version_plan =
+            build_n8n_official_mcp_run_once_plan(input.clone(), &different_version_config)
+                .expect("same approved schema contract accepts an informational version change");
+        assert_eq!(different_version_plan.input, plan.input);
+        assert_eq!(
+            different_version_plan.parent_binding_hash,
+            plan.parent_binding_hash
+        );
+        validate_external_n8n_approval(
+            Some(&approval),
+            "chat-execute-approval",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &ZoneId::work(),
+            mcp_tools_call_payload_digest(&different_version_plan.input)
+                .expect("same contract execute MCP payload hash"),
+            &official_mcp_approval_constraints(&different_version_plan)
+                .expect("same contract execute approval constraints"),
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("existing exact approval remains valid for identical approved contract");
         let original_parent = plan.parent_binding_hash.expect("execute parent binding");
         let mut changed_trigger = input.clone();
         changed_trigger.input["triggerNodeName"] = json!("Other Trigger");

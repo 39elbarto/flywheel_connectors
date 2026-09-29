@@ -1003,9 +1003,7 @@ fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError>
     let metadata: Value =
         serde_json::from_slice(&bytes).map_err(|_| LocalMcpError::PackageIdentity)?;
     let name = metadata.get("name").and_then(Value::as_str);
-    let version = metadata.get("version").and_then(Value::as_str);
-    let expected_version = policy.package_version.to_string();
-    if name != Some(policy.package_id.as_str()) || version != Some(expected_version.as_str()) {
+    if name != Some(policy.package_id.as_str()) {
         return Err(LocalMcpError::PackageIdentity);
     }
     Ok(())
@@ -1071,9 +1069,15 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejects_unknown_tool_and_schema_drift() {
+    fn n8n_contract_invariants_catalog_schema_and_name_pins() {
         let policy = test_policy();
-        let mut result = json!({"tools": []});
+        let expected_tools: Vec<Value> = LOCAL_MCP_CATALOG_TOOLS
+            .iter()
+            .map(|name| json!({"name": name, "inputSchema": {"type": "object"}}))
+            .collect();
+        let mut result = json!({"tools": expected_tools});
+        assert!(validate_catalog(&policy, &result).is_ok());
+        result["tools"][0]["inputSchema"] = json!({"type": "string"});
         assert!(matches!(
             validate_catalog(&policy, &result),
             Err(LocalMcpError::CatalogMismatch)
@@ -1083,6 +1087,40 @@ mod tests {
             validate_catalog(&policy, &result),
             Err(LocalMcpError::CatalogMismatch)
         ));
+    }
+
+    #[test]
+    fn n8n_contract_invariants_local_mcp_version_digest_and_name_pins() {
+        let directory = tempfile::tempdir()
+            .expect("package metadata directory")
+            .keep();
+        let path = directory.join("package.json");
+        let mut policy = test_policy();
+        policy.package_metadata_path = path.to_string_lossy().into_owned();
+
+        let accepted_metadata = br#"{"name":"test-provider","version":"99.7.1"}"#;
+        std::fs::write(&path, accepted_metadata).expect("write package metadata");
+        policy.package_metadata_digest = blake3::hash(accepted_metadata).to_hex().to_string();
+        assert!(verify_package_metadata(&policy).is_ok());
+
+        let changed_metadata = br#"{"name":"test-provider","version":"1.0.0"}"#;
+        std::fs::write(&path, changed_metadata).expect("write changed package metadata");
+        assert!(matches!(
+            verify_package_metadata(&policy),
+            Err(LocalMcpError::PackageIdentity)
+        ));
+
+        let wrong_name_metadata = br#"{"name":"other-provider","version":"99.7.1"}"#;
+        std::fs::write(&path, wrong_name_metadata).expect("write wrong-name package metadata");
+        policy.package_metadata_digest = blake3::hash(wrong_name_metadata).to_hex().to_string();
+        assert!(matches!(
+            verify_package_metadata(&policy),
+            Err(LocalMcpError::PackageIdentity)
+        ));
+        std::fs::write(&path, accepted_metadata).expect("restore accepted package metadata");
+        policy.package_metadata_digest = blake3::hash(accepted_metadata).to_hex().to_string();
+        assert!(verify_package_metadata(&policy).is_ok());
+        println!("package_metadata_version_evidence={}", path.display());
     }
 
     fn test_policy() -> LocalMcpPolicy {

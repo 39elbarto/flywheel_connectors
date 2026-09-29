@@ -3323,7 +3323,14 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::WorkflowsArchive => (&["id", "guard"], &["id", "guard"]),
         HostRunOnceOperation::WorkflowsUnarchive => (&["id", "guard"], &["id", "guard"]),
         HostRunOnceOperation::WorkflowsExecute => (
-            &["id", "mode", "versionId", "inputs", "guard"],
+            &[
+                "id",
+                "mode",
+                "versionId",
+                "triggerNodeName",
+                "inputs",
+                "guard",
+            ],
             &["id", "mode", "versionId", "guard"],
         ),
         HostRunOnceOperation::WorkflowsDeleteDisposable => (
@@ -4786,6 +4793,117 @@ mod tests {
             })
             .expect_err("production execution is outside the manual-only path");
         assert_eq!(error.code, "invalid_operation_input");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn n8n_contract_invariants_explicit_trigger_node_name_dispatches_and_invalid_trigger_fails_closed()
+     {
+        use std::cell::Cell;
+
+        let receipt_root = tempfile::tempdir().expect("receipt test directory").keep();
+        let receipts_directory_path = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+        let filesystem_root = File::open(&receipt_root).expect("open fixture filesystem root");
+        let valid_correlation_id = "11111111-2222-4333-8444-555555555555";
+        let invalid_correlation_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+        let build_input = |correlation_id: &str, trigger_node_name: &str| {
+            json!({
+                "id": "kXVmpnLGECl1aHLy",
+                "mode": "manual",
+                "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+                "triggerNodeName": trigger_node_name,
+                "inputs": {
+                    "webhook": {
+                        "method": "POST",
+                        "query": {},
+                        "body": {"fcpAcceptance": "nqm81.25-eec-manual-noop"}
+                    }
+                },
+                "guard": {
+                    "approvalRef": "c062ed09-a26e-442a-93c7-0ad140937490",
+                    "idempotencyKey": correlation_id,
+                    "inputClass": "bounded_json",
+                    "sideEffectSummary": "One isolated manual execution record on the inactive webhook fixture; no graph connections or downstream actions.",
+                    "precondition": {
+                        "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
+                        "activeVersionId": null,
+                        "active": false,
+                        "isArchived": false,
+                        "stateDigest": "blake3-256:fd614137799a0ab364ff82fbaa04cea00379bcd57b3357e62f33c58c99bca80b"
+                    }
+                }
+            })
+        };
+        let make_bytes = |correlation_id: &str, input: Value| {
+            serde_json::to_vec(&json!({
+                "server_id": "eec",
+                "input": input,
+                "deadline_ms": 1000,
+                "correlation_id": correlation_id
+            }))
+            .expect("approved execute envelope bytes")
+        };
+
+        let valid_bytes = make_bytes(
+            valid_correlation_id,
+            build_input(valid_correlation_id, "FWC Acceptance Webhook"),
+        );
+        let valid_dispatch_count = Cell::new(0);
+        let result = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &valid_bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |envelope, _| {
+                valid_dispatch_count.set(valid_dispatch_count.get() + 1);
+                assert_eq!(envelope.input["triggerNodeName"], "FWC Acceptance Webhook");
+                assert_eq!(envelope.input["mode"], "manual");
+                assert_eq!(envelope.input["versionId"], "32385eab-f3ad-4bab-a545-62104f95f42c");
+                Ok(json!({"status": "verified", "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c"}))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect("explicit trigger passes the actual run-once boundary");
+        assert_eq!(result["status"], "verified");
+        assert_eq!(valid_dispatch_count.get(), 1);
+        let valid_receipt_path =
+            receipts_directory_path.join(format!("wrapper-{valid_correlation_id}.receipt.json"));
+        let valid_receipt: Value = serde_json::from_slice(
+            &std::fs::read(&valid_receipt_path).expect("persisted dispatch receipt"),
+        )
+        .expect("dispatch receipt JSON");
+        assert_eq!(valid_receipt["phase"], "wrapper_dispatch_returned");
+        assert_eq!(valid_receipt["requestCorrelationId"], valid_correlation_id);
+        println!("trigger_dispatch_receipt={}", valid_receipt_path.display());
+
+        let invalid_bytes = make_bytes(
+            invalid_correlation_id,
+            build_input(invalid_correlation_id, " FWC Acceptance Webhook"),
+        );
+        let invalid_dispatch_count = Cell::new(0);
+        let error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &invalid_bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |_, _| {
+                invalid_dispatch_count.set(invalid_dispatch_count.get() + 1);
+                Ok(json!({"status": "verified"}))
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("invalid trigger is rejected before dispatch");
+        assert_eq!(error.code, "invalid_operation_input");
+        assert_eq!(invalid_dispatch_count.get(), 0);
+        let invalid_receipt_path =
+            receipts_directory_path.join(format!("wrapper-{invalid_correlation_id}.receipt.json"));
+        let invalid_receipt: Value = serde_json::from_slice(
+            &std::fs::read(&invalid_receipt_path).expect("persisted invalid-trigger receipt"),
+        )
+        .expect("invalid-trigger receipt JSON");
+        assert_eq!(invalid_receipt["phase"], "wrapper_input_rejected");
+        assert_eq!(invalid_receipt["code"], "invalid_operation_input");
+        println!("invalid_trigger_receipt={}", invalid_receipt_path.display());
     }
 
     #[test]

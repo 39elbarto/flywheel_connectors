@@ -569,8 +569,7 @@ fn main() {
     let result = execute(Cli::parse());
     match result {
         Ok(value) => {
-            if let Ok(encoded) = serde_json::to_string(&value) {
-                println!("{encoded}");
+            if write_success_output(&mut io::stdout().lock(), &value).is_ok() {
                 if value.get("status").and_then(Value::as_str) == Some("failed") {
                     std::process::exit(1);
                 }
@@ -588,6 +587,11 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn write_success_output<W: Write>(output: &mut W, value: &Value) -> Result<(), serde_json::Error> {
+    serde_json::to_writer(&mut *output, value)?;
+    output.write_all(b"\n").map_err(serde_json::Error::io)
 }
 
 fn print_error(error: &AppError, correlation_id: &str) {
@@ -2678,86 +2682,68 @@ fn decode_official_mcp_execute_result(
     response: Value,
     workflow_id: &str,
 ) -> Result<Value, AppError> {
-    let provider_failed = response.get("status").and_then(Value::as_str) != Some("ok")
-        || response.get("error").is_some_and(|value| !value.is_null());
-    let mut result = response
+    let protocol_error = || AppError::with_diagnostic("unknown_outcome", Some("response_protocol"));
+    let shape_error =
+        || AppError::with_diagnostic("unknown_outcome", Some("lifecycle_response_shape"));
+    if response.get("status").and_then(Value::as_str) != Some("ok")
+        || response.get("error").is_some_and(|value| !value.is_null())
+    {
+        return Err(protocol_error());
+    }
+    let result = response
         .get("result")
         .cloned()
         .filter(Value::is_object)
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
-    if let Some(structured) = result.get("structuredContent").cloned() {
-        result = structured;
-    } else if let Some(content) = result.get("content").and_then(Value::as_array) {
-        let text = content
-            .iter()
-            .find_map(|item| {
-                (item.get("type").and_then(Value::as_str) == Some("text"))
-                    .then(|| item.get("text").and_then(Value::as_str))
-                    .flatten()
-            })
-            .ok_or_else(|| AppError::new("unknown_outcome"))?;
-        result = serde_json::from_str(text).map_err(|_| AppError::new("unknown_outcome"))?;
+        .ok_or_else(shape_error)?;
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(protocol_error());
     }
-    let object = result
-        .as_object()
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+    let structured = match result.get("structuredContent") {
+        Some(value) if value.is_object() => Some(value.clone()),
+        Some(_) => return Err(shape_error()),
+        None => None,
+    };
+    let result = match structured {
+        Some(structured) => structured,
+        None => {
+            let content = result
+                .get("content")
+                .and_then(Value::as_array)
+                .ok_or_else(shape_error)?;
+            let text = content
+                .iter()
+                .find_map(|item| {
+                    (item.get("type").and_then(Value::as_str) == Some("text"))
+                        .then(|| item.get("text").and_then(Value::as_str))
+                        .flatten()
+                })
+                .ok_or_else(shape_error)?;
+            serde_json::from_str::<Value>(text).map_err(|_| shape_error())?
+        }
+    };
+    let object = result.as_object().ok_or_else(shape_error)?;
     let execution_id = object
         .get("executionId")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| AppError::new("unknown_outcome"))?;
+        .ok_or_else(shape_error)?;
     if execution_id.len() > 256 || execution_id.chars().any(char::is_control) {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(shape_error());
     }
-    if object
-        .get("workflowId")
-        .and_then(Value::as_str)
-        .is_some_and(|value| value != workflow_id)
+    if object.get("status").and_then(Value::as_str) != Some("started")
+        || object.get("error").is_some_and(|value| !value.is_null())
+        || object
+            .get("workflowId")
+            .is_some_and(|value| value.as_str() != Some(workflow_id))
     {
-        return Err(AppError::new("unknown_outcome"));
+        return Err(shape_error());
     }
-    let provider_failed = provider_failed
-        || object.get("success").and_then(Value::as_bool) != Some(true)
-        || object.get("error").is_some_and(|value| !value.is_null());
-    let initial_status = object
-        .get("initialStatus")
-        .or_else(|| object.get("status"))
-        .and_then(Value::as_str)
-        .filter(|status| {
-            status.len() <= 64
-                && matches!(
-                    *status,
-                    "accepted"
-                        | "new"
-                        | "running"
-                        | "success"
-                        | "error"
-                        | "waiting"
-                        | "canceled"
-                        | "crashed"
-                )
-        });
-    if provider_failed {
-        let mut normalized = json!({
-            "success": false,
-            "providerFailure": true,
-            "workflowId": workflow_id,
-            "executionId": execution_id,
-        });
-        if let Some(initial_status) = initial_status {
-            normalized["initialStatus"] = json!(initial_status);
-        }
-        return Ok(normalized);
-    }
-    if object.get("workflowId").and_then(Value::as_str) != Some(workflow_id) {
-        return Err(AppError::new("unknown_outcome"));
-    }
-    let initial_status = initial_status.ok_or_else(|| AppError::new("unknown_outcome"))?;
+    // n8n reports only that it accepted the request. Its execution GET remains
+    // authoritative, so normalize this pending signal to the existing output enum.
     Ok(json!({
-        "success": true,
         "workflowId": workflow_id,
         "executionId": execution_id,
-        "initialStatus": initial_status,
+        "initialStatus": "accepted",
     }))
 }
 
@@ -2916,11 +2902,6 @@ where
         Some("error" | "canceled" | "crashed") => "failed",
         _ => "unknown",
     };
-    if provider.get("providerFailure").and_then(Value::as_bool) == Some(true)
-        && status == "verified"
-    {
-        return Err(AppError::new("unknown_outcome"));
-    }
     let initial_status = provider
         .get("initialStatus")
         .and_then(Value::as_str)
@@ -4532,6 +4513,41 @@ mod tests {
         .expect("execute envelope")
     }
 
+    fn official_started_response(execution_id: &str) -> Value {
+        let output = json!({"executionId": execution_id, "status": "started"});
+        json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": output.clone(),
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&output).expect("provider output text")
+                }]
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn retain_test_bytes_once(path: &std::path::Path, bytes: &[u8]) {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("create retained test evidence once");
+        file.write_all(bytes).expect("write retained test evidence");
+        file.sync_all().expect("sync retained test evidence");
+        let metadata = file.metadata().expect("test evidence metadata");
+        assert!(metadata.is_file());
+        assert_eq!(metadata.mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        let directory = path.parent().expect("evidence parent");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .expect("secure retained evidence directory");
+    }
+
     struct ExecuteSequenceProbe {
         calls: Vec<(String, String, String)>,
         responses: std::collections::VecDeque<Result<Value, AppError>>,
@@ -4559,6 +4575,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn execute_fixture_proves_preflight_single_provider_and_independent_readback() {
         let baseline = json!({
@@ -4569,33 +4586,18 @@ mod tests {
             "isArchived": false,
             "stateDigest": "blake3-256:fd614137799a0ab364ff82fbaa04cea00379bcd57b3357e62f33c58c99bca80b"
         });
-        let provider = json!({
-            "status": "ok",
-            "result": {
-                "structuredContent": {
-                    "success": true,
-                    "workflowId": "kXVmpnLGECl1aHLy",
-                    "executionId": "execution-1",
-                    "initialStatus": "accepted"
-                }
-            }
-        });
-        let readback = json!({
-            "status": "ok",
-            "result": {
-                "id": "execution-1",
-                "workflowId": "kXVmpnLGECl1aHLy",
-                "workflowVersionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
-                "mode": "manual",
-                "status": "running"
-            }
-        });
+        let mut provider = official_started_response("execution-1");
+        let provider_text = {
+            let output = &mut provider["result"]["structuredContent"];
+            output["providerOnlyCanary"] = json!("PRIVATE-PROVIDER-OUTPUT-CANARY");
+            serde_json::to_string(output).expect("provider output text")
+        };
+        provider["result"]["content"][0]["text"] = json!(provider_text);
         let mut probe = ExecuteSequenceProbe {
             calls: Vec::new(),
             responses: [
                 Ok(json!({"status": "ok", "result": baseline})),
                 Ok(provider),
-                Ok(readback.clone()),
                 Ok(json!({
                     "status": "ok",
                     "result": {
@@ -4639,14 +4641,19 @@ mod tests {
         let input = json!({
             "server_id": "eec",
             "input": high_level_input,
-            "deadline_ms": 5000
+            "deadline_ms": 5000,
+            "correlation_id": "5fbf08c4-511d-4dd7-b217-3aa5bd22d1aa"
         });
         let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
+        let receipt_root = tempfile::tempdir().expect("execute receipt root").keep();
+        let receipts_directory = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+        let filesystem_root = File::open(&receipt_root).expect("open execute receipt root");
         let started = Instant::now();
-        let result = run_once_from_bytes_at(
+        let result = run_once_from_bytes_at_with_receipt_io(
             "n8n.workflows.execute",
             &bytes,
             started,
+            Some(&filesystem_root),
             |envelope, deadline| {
                 assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
                 execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
@@ -4673,15 +4680,63 @@ mod tests {
                     probe.dispatch(request, purpose, deadline)
                 })
             },
+            persist_execute_wrapper_receipt,
         )
         .expect("fixture execution path");
 
         assert_eq!(result["status"], "verified");
         assert_eq!(result["executionStatus"], "success");
+        assert_eq!(result["initialStatus"], "accepted");
         assert_eq!(result["mode"], "manual");
         assert_eq!(result["workflowId"], "kXVmpnLGECl1aHLy");
         assert_eq!(result["versionId"], "32385eab-f3ad-4bab-a545-62104f95f42c");
         assert_eq!(result["readback"], "independent_execution_get");
+        let mut stdout_bytes = Vec::new();
+        write_success_output(&mut stdout_bytes, &result).expect("actual success stdout writer");
+        assert_eq!(stdout_bytes.last(), Some(&b'\n'));
+        let stdout_result: Value = serde_json::from_slice(&stdout_bytes).expect("stdout JSON");
+        assert_eq!(stdout_result, result);
+        assert_eq!(stdout_result["status"], "verified");
+        assert_eq!(stdout_result["executionId"], "execution-1");
+        assert_eq!(stdout_result["workflowId"], "kXVmpnLGECl1aHLy");
+        assert_eq!(stdout_result["mode"], "manual");
+        assert_eq!(
+            stdout_result["versionId"],
+            "32385eab-f3ad-4bab-a545-62104f95f42c"
+        );
+        assert_eq!(stdout_result["executionStatus"], "success");
+        assert!(
+            !stdout_bytes
+                .windows(b"PRIVATE-PROVIDER-OUTPUT-CANARY".len())
+                .any(|window| window == b"PRIVATE-PROVIDER-OUTPUT-CANARY")
+        );
+        let stdout_path = receipt_root.join("stdout-verified.json");
+        retain_test_bytes_once(&stdout_path, &stdout_bytes);
+        let stdout_digest = hex::encode(Sha256::digest(&stdout_bytes));
+        println!("started_readback_stdout={}", stdout_path.display());
+        println!("started_readback_stdout_sha256={stdout_digest}");
+        let receipt_path =
+            receipts_directory.join("wrapper-5fbf08c4-511d-4dd7-b217-3aa5bd22d1aa.receipt.json");
+        let receipt_bytes = std::fs::read(&receipt_path).expect("persisted native receipt");
+        let receipt: Value = serde_json::from_slice(&receipt_bytes).expect("receipt JSON");
+        assert_eq!(receipt["status"], "verified");
+        assert_eq!(receipt["phase"], "wrapper_dispatch_returned");
+        assert_eq!(receipt["providerAttemptClassification"], "unknown");
+        assert_eq!(
+            receipt["requestCorrelationId"],
+            "5fbf08c4-511d-4dd7-b217-3aa5bd22d1aa"
+        );
+        assert_eq!(receipt["observedCorrelationId"], Value::Null);
+        assert!(
+            !receipt_bytes
+                .windows(b"PRIVATE-PROVIDER-OUTPUT-CANARY".len())
+                .any(|window| window == b"PRIVATE-PROVIDER-OUTPUT-CANARY")
+        );
+        println!("started_readback_receipt={}", receipt_path.display());
+        println!(
+            "started_readback_stdout_sha256={}",
+            hex::encode(Sha256::digest(&stdout_bytes))
+        );
         assert_eq!(
             probe
                 .calls
@@ -4691,7 +4746,6 @@ mod tests {
             vec![
                 ("rest", "n8n.workflows.get"),
                 ("official_mcp", "n8n.workflows.execute"),
-                ("rest", "n8n.executions.get"),
                 ("rest", "n8n.executions.get"),
             ]
         );
@@ -4704,26 +4758,54 @@ mod tests {
             1
         );
         assert!(probe.calls[2].2.contains("executions"));
-        assert_eq!(probe.calls[2].2, probe.calls[3].2);
     }
 
     #[test]
     fn execute_handle_and_post_readback_failures_are_bounded_unknown() {
+        let output = json!({"executionId": "execution-1", "status": "started"});
         let response = json!({
             "status": "ok",
             "result": {
-                "structuredContent": {
-                    "success": true,
-                    "workflowId": "workflow-1",
-                    "executionId": "execution-1",
-                    "initialStatus": "accepted"
-                }
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&output).expect("provider output text")
+                }]
             }
         });
         let handle =
             decode_official_mcp_execute_result(response, "workflow-1").expect("typed handle");
         assert_eq!(handle["workflowId"], "workflow-1");
         assert_eq!(handle["initialStatus"], "accepted");
+        assert_eq!(handle["executionId"], "execution-1");
+        let wrong_provider_workflow = json!({
+            "status": "ok",
+            "result": {
+                "structuredContent": {
+                    "executionId": "execution-1",
+                    "status": "started",
+                    "workflowId": "other-workflow"
+                }
+            }
+        });
+        let mismatch = decode_official_mcp_execute_result(wrong_provider_workflow, "workflow-1")
+            .expect_err("optional provider workflow identity must match request");
+        assert_eq!(mismatch.code, "unknown_outcome");
+        assert_eq!(mismatch.diagnostic, Some("lifecycle_response_shape"));
+        for execution_id in [String::new(), "invalid\nid".to_owned(), "x".repeat(257)] {
+            let invalid = json!({
+                "status": "ok",
+                "result": {
+                    "structuredContent": {
+                        "executionId": execution_id,
+                        "status": "started"
+                    }
+                }
+            });
+            let error = decode_official_mcp_execute_result(invalid, "workflow-1")
+                .expect_err("invalid ID preserves the bounded existing checks");
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(error.diagnostic, Some("lifecycle_response_shape"));
+        }
 
         let input = execute_input_fixture();
         let readback = json!({
@@ -4771,6 +4853,109 @@ mod tests {
     }
 
     #[test]
+    fn execute_readback_identity_and_transport_failures_do_not_retry() {
+        let baseline = json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        });
+        let valid_readback = json!({
+            "id": "execution-1",
+            "workflowId": "workflow-1",
+            "workflowVersionId": "version-1",
+            "mode": "manual",
+            "status": "success"
+        });
+
+        for (field, wrong_value) in [
+            ("workflowId", "other-workflow"),
+            ("workflowVersionId", "other-version"),
+            ("mode", "production"),
+        ] {
+            let mut wrong_readback = valid_readback.clone();
+            wrong_readback[field] = json!(wrong_value);
+            let mut probe = ExecuteSequenceProbe {
+                calls: Vec::new(),
+                responses: [
+                    Ok(json!({"status": "ok", "result": baseline.clone()})),
+                    Ok(official_started_response("execution-1")),
+                    Ok(json!({"status": "ok", "result": wrong_readback})),
+                ]
+                .into_iter()
+                .collect(),
+            };
+            let error = execute_workflow_execute_with_bridge(
+                execute_host_envelope_fixture(),
+                Instant::now() + Duration::from_secs(5),
+                |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+            )
+            .expect_err("readback identity mismatch stays unknown");
+            assert_eq!(error.code, "unknown_outcome");
+            assert_eq!(probe.calls.len(), 3, "one baseline, execute, and readback");
+            assert_eq!(
+                probe
+                    .calls
+                    .iter()
+                    .filter(|call| call.0 == "official_mcp")
+                    .count(),
+                1,
+                "execute is never retried"
+            );
+            assert_eq!(
+                probe
+                    .calls
+                    .iter()
+                    .filter(|call| call.1 == "n8n.executions.get")
+                    .count(),
+                1,
+                "identity mismatch follows one bounded readback"
+            );
+        }
+
+        let mut probe = ExecuteSequenceProbe {
+            calls: Vec::new(),
+            responses: [
+                Ok(json!({"status": "ok", "result": baseline})),
+                Ok(official_started_response("execution-1")),
+                Err(AppError::with_diagnostic(
+                    "provider_unavailable",
+                    Some("response_upstream_timeout"),
+                )),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let error = execute_workflow_execute_with_bridge(
+            execute_host_envelope_fixture(),
+            Instant::now() + Duration::from_secs(5),
+            |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
+        )
+        .expect_err("readback transport failure stays unknown");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("response_upstream_timeout"));
+        assert_eq!(probe.calls.len(), 3, "readback failure is not retried");
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .filter(|call| call.0 == "official_mcp")
+                .count(),
+            1
+        );
+        assert_eq!(
+            probe
+                .calls
+                .iter()
+                .filter(|call| call.1 == "n8n.executions.get")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn execute_post_dispatch_nonterminal_deadline_is_unknown_without_retry() {
         let baseline = json!({
             "id": "workflow-1",
@@ -4780,17 +4965,7 @@ mod tests {
             "isArchived": false,
             "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
         });
-        let provider = json!({
-            "status": "ok",
-            "result": {
-                "structuredContent": {
-                    "success": true,
-                    "workflowId": "workflow-1",
-                    "executionId": "execution-1",
-                    "initialStatus": "running"
-                }
-            }
-        });
+        let provider = official_started_response("execution-1");
         let mut probe = ExecuteSequenceProbe {
             calls: Vec::new(),
             responses: [
@@ -4855,17 +5030,7 @@ mod tests {
                 "isArchived": false,
                 "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
             });
-            let provider = json!({
-                "status": "ok",
-                "result": {
-                    "structuredContent": {
-                        "success": true,
-                        "workflowId": "workflow-1",
-                        "executionId": "execution-1",
-                        "initialStatus": "accepted"
-                    }
-                }
-            });
+            let provider = official_started_response("execution-1");
             let mut probe = ExecuteSequenceProbe {
                 calls: Vec::new(),
                 responses: [
@@ -5778,7 +5943,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_provider_failure_with_id_reads_back_terminal_failure_without_retry() {
+    fn execute_started_handle_uses_independent_terminal_failure_readback() {
         let baseline = json!({
             "id": "workflow-1",
             "versionId": "version-1",
@@ -5787,18 +5952,7 @@ mod tests {
             "isArchived": false,
             "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
         });
-        let provider = json!({
-            "status": "ok",
-            "result": {
-                "structuredContent": {
-                    "success": false,
-                    "workflowId": "workflow-1",
-                    "executionId": "execution-1",
-                    "initialStatus": "accepted",
-                    "error": "provider failure must remain redacted"
-                }
-            }
-        });
+        let provider = official_started_response("execution-1");
         let readback = json!({
             "status": "ok",
             "result": {
@@ -5874,11 +6028,6 @@ mod tests {
         assert_eq!(response["executionStatus"], "error");
         assert_eq!(response["retry"], "never_automatic");
         assert_eq!(response["readback"], "independent_execution_get");
-        assert!(
-            !serialized
-                .windows(b"provider failure must remain redacted".len())
-                .any(|window| window == b"provider failure must remain redacted")
-        );
         assert_eq!(probe.calls.len(), 3, "baseline, execute, one readback");
         assert_eq!(
             probe
@@ -5903,8 +6052,9 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn execute_provider_failure_without_initial_status_fails_closed_after_readback() {
+    fn execute_null_id_provider_error_fails_closed_before_readback_and_persists_safe_shape() {
         let baseline = json!({
             "id": "workflow-1",
             "versionId": "version-1",
@@ -5913,25 +6063,19 @@ mod tests {
             "isArchived": false,
             "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
         });
+        let provider_output = json!({
+            "executionId": null,
+            "status": "error",
+            "error": "PRIVATE-PROVIDER-ERROR-CANARY"
+        });
         let provider = json!({
             "status": "ok",
             "result": {
-                "structuredContent": {
-                    "success": false,
-                    "workflowId": "workflow-1",
-                    "executionId": "execution-1",
-                    "error": "provider failure must remain redacted"
-                }
-            }
-        });
-        let readback = json!({
-            "status": "ok",
-            "result": {
-                "id": "execution-1",
-                "workflowId": "workflow-1",
-                "workflowVersionId": "version-1",
-                "mode": "manual",
-                "status": "error"
+                "structuredContent": provider_output.clone(),
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string(&provider_output).expect("provider output text")
+                }]
             }
         });
         let mut probe = ExecuteSequenceProbe {
@@ -5939,30 +6083,43 @@ mod tests {
             responses: [
                 Ok(json!({"status": "ok", "result": baseline})),
                 Ok(provider),
-                Ok(readback),
             ]
             .into_iter()
             .collect(),
         };
+        let receipt_root = tempfile::tempdir()
+            .expect("execute error receipt root")
+            .keep();
+        let receipts_directory = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+        let filesystem_root = File::open(&receipt_root).expect("open execute error receipt root");
+        let correlation_id = "0c6d77aa-d41b-4496-8c5a-eab8df8c9671";
         let input = json!({
             "server_id": "eec",
             "input": execute_input_fixture(),
-            "deadline_ms": 5000
+            "deadline_ms": 5000,
+            "correlation_id": correlation_id
         });
         let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
-        let error = run_once_from_bytes_at(
+        let error = run_once_from_bytes_at_with_receipt_io(
             "n8n.workflows.execute",
             &bytes,
             Instant::now(),
+            Some(&filesystem_root),
             |envelope, deadline| {
                 execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
                     probe.dispatch(request, purpose, deadline)
                 })
             },
+            persist_execute_wrapper_receipt,
         )
-        .expect_err("provider failure without a declared initial status is unknown");
+        .expect_err("provider catch with null execution ID is unknown");
         assert_eq!(error.code, "unknown_outcome");
-        assert_eq!(probe.calls.len(), 3, "baseline, one execute, one readback");
+        assert_eq!(error.diagnostic, Some("lifecycle_response_shape"));
+        assert_eq!(
+            probe.calls.len(),
+            2,
+            "baseline and one execute; no readback"
+        );
         assert_eq!(
             probe
                 .calls
@@ -5972,19 +6129,42 @@ mod tests {
             1,
             "provider attempt must not be retried"
         );
-        let encoded_error = serde_json::to_vec(&error_envelope(
-            &error,
-            "00000000-0000-4000-8000-000000000001",
-        ))
-        .expect("serialized unknown outcome error");
-        let response: Value = serde_json::from_slice(&encoded_error).expect("error JSON");
+        assert!(
+            !probe
+                .calls
+                .iter()
+                .any(|(_, operation, _)| operation == "n8n.executions.get")
+        );
+        let receipt_path =
+            receipts_directory.join(format!("wrapper-{correlation_id}.receipt.json"));
+        let receipt_bytes = std::fs::read(&receipt_path).expect("persisted native error receipt");
+        let receipt: Value = serde_json::from_slice(&receipt_bytes).expect("receipt JSON");
+        assert_eq!(receipt["status"], "error");
+        assert_eq!(receipt["code"], "unknown_outcome");
+        assert_eq!(receipt["diagnostic"], "lifecycle_response_shape");
+        let mut stdout_bytes = Vec::new();
+        write_error_output(&mut stdout_bytes, &error, correlation_id)
+            .expect("actual error stdout writer");
+        let response: Value = serde_json::from_slice(&stdout_bytes).expect("error JSON");
         assert_eq!(response["schema"], ERROR_ENVELOPE_SCHEMA);
         assert_eq!(response["status"], "error");
         assert_eq!(response["code"], "unknown_outcome");
-        assert!(
-            !encoded_error
-                .windows(b"provider failure must remain redacted".len())
-                .any(|window| window == b"provider failure must remain redacted")
+        assert_eq!(response["diagnostic"], "lifecycle_response_shape");
+        assert!(SAFE_ERROR_DIAGNOSTICS.contains(&"lifecycle_response_shape"));
+        for serialized in [&receipt_bytes, &stdout_bytes] {
+            assert!(
+                !serialized
+                    .windows(b"PRIVATE-PROVIDER-ERROR-CANARY".len())
+                    .any(|window| window == b"PRIVATE-PROVIDER-ERROR-CANARY")
+            );
+        }
+        let stdout_path = receipt_root.join("stdout-null-id-error.json");
+        retain_test_bytes_once(&stdout_path, &stdout_bytes);
+        println!("null_id_error_receipt={}", receipt_path.display());
+        println!("null_id_error_stdout={}", stdout_path.display());
+        println!(
+            "null_id_error_stdout_sha256={}",
+            hex::encode(Sha256::digest(&stdout_bytes))
         );
     }
 
@@ -5994,18 +6174,14 @@ mod tests {
             "status": "ok",
             "result": {
                 "structuredContent": {
-                    "success": true,
-                    "workflowId": "workflow-1",
                     "executionId": "execution-1"
                 }
             }
         });
-        assert_eq!(
-            decode_official_mcp_execute_result(response, "workflow-1")
-                .expect_err("missing status must be denied")
-                .code,
-            "unknown_outcome"
-        );
+        let error = decode_official_mcp_execute_result(response, "workflow-1")
+            .expect_err("missing status must be denied");
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some("lifecycle_response_shape"));
     }
 
     #[test]

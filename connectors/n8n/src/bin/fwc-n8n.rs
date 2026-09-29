@@ -4820,11 +4820,9 @@ mod tests {
     fn execute_wrapper_receipt_captures_validated_early_input_rejection() {
         use std::{cell::Cell, fs, os::unix::fs::MetadataExt};
 
-        let receipt_root = tempfile::tempdir().expect("receipt test directory");
-        let receipts_directory_path =
-            prepare_execute_receipt_tree(receipt_root.path(), 0o700, false);
-        let filesystem_root =
-            File::open(receipt_root.path()).expect("open fixture filesystem root");
+        let receipt_root = tempfile::tempdir().expect("receipt test directory").keep();
+        let receipts_directory_path = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+        let filesystem_root = File::open(&receipt_root).expect("open fixture filesystem root");
         let request_correlation_id = "11111111-2222-4333-8444-555555555555";
         let guard_canary = "PRIVATE-EARLY-GUARD-CANARY";
         let input_canary = "PRIVATE-EARLY-INPUT-CANARY";

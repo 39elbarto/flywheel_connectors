@@ -1410,7 +1410,7 @@ impl McpBridgeConnector {
             })?;
         let now_ms = current_time_ms();
         let typed_target = if operation == OP_TOOLS_CALL {
-            typed_owner_approval_target(target, params)?
+            typed_owner_approval_target(operation, target, params)?
         } else {
             None
         };
@@ -1786,9 +1786,16 @@ fn non_empty_resource_component<'a>(value: &'a str, field: &str) -> McpBridgeRes
 }
 
 fn typed_owner_approval_target(
+    operation: &str,
     target: &ApprovalTarget,
     params: &serde_json::Value,
 ) -> FcpResult<Option<ApprovalTarget>> {
+    if operation != OP_TOOLS_CALL {
+        return Err(FcpError::CapabilityDenied {
+            capability: operation.to_string(),
+            reason: "n8n owner approval context is only valid for MCP tools/call".into(),
+        });
+    }
     let tags = params
         .get("context")
         .and_then(serde_json::Value::as_object)
@@ -1796,10 +1803,53 @@ fn typed_owner_approval_target(
         .and_then(serde_json::Value::as_object);
     let parent_binding = tags.and_then(|tags| tags.get(N8N_TYPED_APPROVAL_PARENT_BINDING_TAG));
     let typed_plan = tags.and_then(|tags| tags.get(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG));
-    let (Some(parent_binding), Some(typed_plan)) = (parent_binding, typed_plan) else {
-        if parent_binding.is_none() && typed_plan.is_none() {
-            return Ok(None);
+
+    if parent_binding.is_none() && typed_plan.is_none() {
+        return Ok(None);
+    }
+    if let (Some(parent_binding), None) = (parent_binding, typed_plan) {
+        let parent_binding = parent_binding
+            .as_str()
+            .filter(|value| is_lower_hex_digest(value))
+            .ok_or_else(|| FcpError::CapabilityDenied {
+                capability: OP_TOOLS_CALL.to_string(),
+                reason: "execute owner approval parent binding is invalid".into(),
+            })?;
+        if target
+            .normalized_input
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            != Some("execute_workflow")
+        {
+            return Err(FcpError::CapabilityDenied {
+                capability: OP_TOOLS_CALL.to_string(),
+                reason: "parent-only owner approval is restricted to execute_workflow".into(),
+            });
         }
+        let mut normalized_input =
+            target
+                .normalized_input
+                .as_object()
+                .cloned()
+                .ok_or_else(|| FcpError::Internal {
+                    message: "MCP approval target is not an object".into(),
+                })?;
+        normalized_input.insert(
+            "operation".to_string(),
+            serde_json::Value::String(N8N_APPROVAL_WRAPPER_OPERATION.to_string()),
+        );
+        normalized_input.insert(
+            "parent_binding_sha256".to_string(),
+            serde_json::Value::String(parent_binding.to_string()),
+        );
+        return Ok(Some(ApprovalTarget {
+            resource_uri: target.resource_uri.clone(),
+            normalized_input: serde_json::Value::Object(normalized_input),
+            payload_digest: target.payload_digest,
+        }));
+    }
+
+    let (Some(parent_binding), Some(typed_plan)) = (parent_binding, typed_plan) else {
         return Err(FcpError::CapabilityDenied {
             capability: OP_TOOLS_CALL.to_string(),
             reason: "typed owner approval context is incomplete".into(),
@@ -2262,6 +2312,10 @@ fn validate_server_id(server_id: &str) -> FcpResult<()> {
 mod tests {
     use super::*;
     use fcp_prelude::ExecutionScope;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     fn strict_mcp_bridge_manifest() -> Result<ConnectorManifest, String> {
         ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
@@ -2373,6 +2427,156 @@ mod tests {
             &target,
             2_000,
         ));
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    #[ignore = "consumes a retained host fixture only when explicitly run with an SSD path"]
+    async fn host_execute_fixture_passes_parent_only_bridge_gate_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture_path = std::env::var_os("FCP_N8N_EXECUTE_APPROVAL_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .expect("host test must provide the retained SSD fixture path");
+        assert!(fixture_path.starts_with("/srv/dev-ssd/fcp/tmp"));
+        let metadata = std::fs::symlink_metadata(&fixture_path)
+            .expect("retained host-generated fixture must exist");
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert!(metadata.len() <= 128 * 1024);
+        let fixture: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&fixture_path).expect("read retained host fixture"),
+        )
+        .expect("host fixture JSON");
+        assert_eq!(
+            fixture["schema"],
+            "fcp.n8n.execute-approval-bridge-fixture.v1"
+        );
+        let request = fixture["invoke_request"].clone();
+        assert_eq!(request["operation"], OP_TOOLS_CALL);
+        assert_eq!(request["input"]["name"], "execute_workflow");
+        assert_eq!(request["approval_tokens"].as_array().map(Vec::len), Some(1));
+        assert!(
+            request["context"]["request_tags"][N8N_TYPED_APPROVAL_PARENT_BINDING_TAG]
+                .as_str()
+                .is_some()
+        );
+        assert!(
+            request["context"]["request_tags"]
+                .get(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG)
+                .is_none()
+        );
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": "offline fixture"}],
+                    "isError": false
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connector = McpBridgeConnector::new();
+        connector
+            .handle_configure(json!({
+                "server_id": "eec",
+                "mcp_url": format!("{}/mcp", server.uri())
+            }))
+            .await
+            .expect("configure loopback fake MCP endpoint");
+        // This focused test skips the handshake; keep the production zone gate intact.
+        connector.zone_id = Some(ZoneId::work());
+
+        let gate = |candidate: &serde_json::Value| -> FcpResult<ApprovalTarget> {
+            let operation = candidate["operation"].as_str().expect("fixture operation");
+            let input = &candidate["input"];
+            let resources = connector.resource_uris_for_operation(operation, input)?;
+            let target = connector.approval_target(operation, input, &resources)?;
+            connector.require_execution_approval(operation, &target, candidate)?;
+            Ok(typed_owner_approval_target(operation, &target, candidate)?.unwrap_or(target))
+        };
+
+        let mut changed_parent = request.clone();
+        changed_parent["context"]["request_tags"][N8N_TYPED_APPROVAL_PARENT_BINDING_TAG] =
+            json!("b".repeat(64));
+        let mut changed_trigger = request.clone();
+        changed_trigger["input"]["arguments"]["triggerNodeName"] = json!("Changed Fixture Trigger");
+        let mut changed_payload = request.clone();
+        changed_payload["input"]["arguments"]["inputs"]["webhook"]["body"]["fixture"] =
+            json!("changed offline payload");
+        let mut changed_token = request.clone();
+        changed_token["approval_tokens"][0]["scope"]["input_hash"] = json!(vec![0_u8; 32]);
+        let mut parent_only_archive = request.clone();
+        parent_only_archive["input"]["name"] = json!("archive_workflow");
+        for (label, candidate) in [
+            ("parent", changed_parent),
+            ("trigger", changed_trigger),
+            ("payload", changed_payload),
+            ("token", changed_token),
+            ("parent-only archive", parent_only_archive),
+        ] {
+            assert!(gate(&candidate).is_err(), "{label} mutation must be denied");
+            assert!(
+                server.received_requests().await.unwrap().is_empty(),
+                "{label} mutation must be denied before MCP tools/call"
+            );
+        }
+
+        let valid_target = gate(&request).expect("actual host-built execute parent binding");
+        assert!(
+            typed_owner_approval_target(
+                OP_TOOLS_CALL,
+                &valid_target,
+                &json!({"context": {"request_tags": {}}})
+            )
+            .expect("missing n8n context remains generic")
+            .is_none()
+        );
+        assert_eq!(
+            valid_target
+                .normalized_input
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(7)
+        );
+        assert_eq!(
+            valid_target.normalized_input["operation"],
+            N8N_APPROVAL_WRAPPER_OPERATION
+        );
+        assert!(
+            valid_target
+                .normalized_input
+                .get("typed_plan_sha256")
+                .is_none()
+        );
+        let egress_context = HostEgressContext {
+            connector_id: "fcp.mcp-bridge".into(),
+            operation_id: OP_TOOLS_CALL.into(),
+            resource_uri: valid_target.resource_uri.clone(),
+            zone_id: ZoneId::work().to_string(),
+            request_id: "offline-host-execute-fixture".into(),
+            correlation_id: None,
+            capability_token_cbor_b64: String::new(),
+        };
+        let client = connector.client_ref().expect("configured fake MCP client");
+        let result = connector
+            .invoke_tools_call(client, &request["input"], egress_context)
+            .await
+            .expect("one actual MCP tools/call to wiremock");
+        assert_eq!(result["isError"], false);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let call: serde_json::Value =
+            serde_json::from_slice(&requests[0].body).expect("wiremock request JSON");
+        assert_eq!(call["method"], "tools/call");
+        assert_eq!(call["params"]["name"], "execute_workflow");
+        assert_eq!(call["params"]["arguments"], request["input"]["arguments"]);
     }
 
     #[test]

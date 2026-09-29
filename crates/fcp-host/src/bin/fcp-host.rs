@@ -14706,7 +14706,7 @@ fn build_n8n_official_mcp_invoke_request(
         parent_binding_hash: plan.parent_binding_hash,
         typed_plan_digest: typed_approval.map(|binding| binding.plan_digest.clone()),
     };
-    let context = typed_approval.map(|typed_approval| {
+    let context = if let Some(typed_approval) = typed_approval {
         let mut request_tags = std::collections::HashMap::new();
         if let Some(parent_binding_hash) = plan.parent_binding_hash {
             request_tags.insert(
@@ -14718,11 +14718,27 @@ fn build_n8n_official_mcp_invoke_request(
             N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG.to_string(),
             typed_approval.plan_digest.clone(),
         );
-        InvokeContext {
+        Some(InvokeContext {
             request_tags,
             ..InvokeContext::default()
-        }
-    });
+        })
+    } else if plan.operation.as_str() == N8N_OFFICIAL_MCP_CALL_OPERATION
+        && plan.input.get("name").and_then(Value::as_str) == Some(N8N_OFFICIAL_MCP_EXECUTE_TOOL)
+    {
+        plan.parent_binding_hash.map(|parent_binding_hash| {
+            let mut request_tags = std::collections::HashMap::new();
+            request_tags.insert(
+                N8N_TYPED_APPROVAL_PARENT_BINDING_TAG.to_string(),
+                hex::encode(parent_binding_hash),
+            );
+            InvokeContext {
+                request_tags,
+                ..InvokeContext::default()
+            }
+        })
+    } else {
+        None
+    };
     let request = InvokeRequest {
         r#type: "invoke".to_string(),
         id: request_id,
@@ -35582,6 +35598,159 @@ done"#;
             }
         });
         config
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "writes a retained host-to-bridge fixture only when explicitly run with an SSD path"]
+    fn n8n_execute_bridge_fixture_uses_actual_host_builder() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let fixture_path = std::env::var_os("FCP_N8N_EXECUTE_APPROVAL_FIXTURE_PATH")
+            .map(PathBuf::from)
+            .expect("fixture path must be supplied explicitly by the SSD test invocation");
+        assert!(fixture_path.is_absolute());
+        assert!(fixture_path.starts_with("/srv/dev-ssd/fcp/tmp"));
+        assert!(
+            !fixture_path.exists(),
+            "retained fixture path already exists; choose a new path"
+        );
+
+        let high_level_input = json!({
+            "id": "fixture-workflow-20260929",
+            "mode": "manual",
+            "versionId": "fixture-version-1",
+            "triggerNodeName": "Fixture Manual Trigger",
+            "inputs": {
+                "webhook": {
+                    "method": "POST",
+                    "query": {},
+                    "body": {"fixture": "offline"}
+                }
+            },
+            "guard": {
+                "approvalRef": "fixture-approved-execute",
+                "idempotencyKey": "4be6bbd7-c953-498c-a5ab-415d8c140038",
+                "inputClass": "bounded_json",
+                "sideEffectSummary": "synthetic offline bridge approval fixture",
+                "precondition": {
+                    "versionId": "fixture-version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": format!("blake3-256:{}", "a".repeat(64))
+                }
+            }
+        });
+        let run_once_input = N8nReadOnlyRunOnceInput {
+            schema: N8N_READ_ONLY_RUN_ONCE_SCHEMA.to_string(),
+            server_id: N8nReadOnlyServerId::Eec,
+            operation: "n8n.workflows.execute".to_string(),
+            zone_id: ZoneId::work().to_string(),
+            resource_uri: "fwc-mcp-bridge://eec/tools/execute%5Fworkflow".to_string(),
+            input: high_level_input.clone(),
+            approval_token: None,
+            deadline_ms: Some(30_000),
+            correlation_id: None,
+        };
+        let mut plan = build_n8n_official_mcp_run_once_plan(
+            run_once_input,
+            &run_once_n8n_official_mcp_lifecycle_test_config(),
+        )
+        .expect("synthetic execute input should produce an actual host plan");
+
+        let now_ms = n8n_run_once_now_ms();
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let payload_digest =
+            mcp_tools_call_payload_digest(&plan.input).expect("synthetic MCP payload digest");
+        let parent_binding = plan.parent_binding_hash.expect("execute parent binding");
+        let issue_request = N8nApprovalIssueRequest {
+            schema: "fwc.n8n.owner-approval-request.v1".to_string(),
+            server: N8nApprovalServer::Eec,
+            workflow_id: high_level_input["id"]
+                .as_str()
+                .expect("fixture workflow id")
+                .to_string(),
+            operation: N8nLifecycleOperation::Execute,
+            input: high_level_input,
+            official_mcp_tool: N8N_OFFICIAL_MCP_EXECUTE_TOOL.to_string(),
+            official_mcp_resource_uri: plan.resource_uri.clone(),
+            official_mcp_payload_digest: format!("sha256:{}", hex::encode(payload_digest)),
+            parent_binding_sha256: hex::encode(parent_binding),
+            expires_at_ms: now_ms.saturating_add(60_000),
+        };
+        let mut approval = build_unsigned_n8n_approval_token(&issue_request, now_ms)
+            .expect("actual issuer builder should accept the exact host plan");
+        approval.signature = Some(
+            signing_key
+                .sign(&approval_token_signing_bytes(&approval).expect("approval signing bytes"))
+                .to_bytes()
+                .to_vec(),
+        );
+        let constraints =
+            official_mcp_approval_constraints(&plan).expect("host execute approval constraints");
+        assert_eq!(constraints.len(), 7);
+        validate_external_n8n_approval(
+            Some(&approval),
+            "fixture-approved-execute",
+            "fcp.mcp-bridge",
+            N8N_APPROVAL_WRAPPER_OPERATION,
+            &plan.zone_id,
+            payload_digest,
+            &constraints,
+            Some(&signing_key.verifying_key()),
+        )
+        .expect("synthetic exact execute approval signature and constraints");
+        plan.approval_token = Some(approval);
+
+        let instance_id = fcp_core::InstanceId::new();
+        let capability_token = test_capability_token_for_instance(
+            &signing_key,
+            "mcp.tools.write",
+            N8N_OFFICIAL_MCP_CALL_OPERATION,
+            ZoneId::work().as_str(),
+            &instance_id,
+        );
+        let (request, _) = build_n8n_official_mcp_invoke_request(plan, capability_token, None);
+        assert_eq!(request.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
+        let request_tags = &request
+            .context
+            .as_ref()
+            .expect("execute parent-only context")
+            .request_tags;
+        assert_eq!(
+            request_tags.get(N8N_TYPED_APPROVAL_PARENT_BINDING_TAG),
+            Some(&hex::encode(parent_binding))
+        );
+        assert!(!request_tags.contains_key(N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG));
+
+        let fixture = json!({
+            "schema": "fcp.n8n.execute-approval-bridge-fixture.v1",
+            "invoke_request": serde_json::to_value(&request)
+                .expect("serialize actual host invoke request")
+        });
+        let fixture_bytes = serde_json::to_vec(&fixture).expect("serialize fixture JSON");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&fixture_path)
+            .expect("create retained SSD fixture without overwriting");
+        file.write_all(&fixture_bytes)
+            .expect("write retained fixture");
+        file.sync_all().expect("sync retained fixture");
+        std::fs::File::open(fixture_path.parent().expect("fixture parent"))
+            .expect("open fixture directory")
+            .sync_all()
+            .expect("sync fixture directory");
+        assert_eq!(
+            std::fs::symlink_metadata(&fixture_path)
+                .expect("fixture metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
     }
 
     fn typed_official_mcp_test_fixture() -> (N8nReadOnlyRunOncePlan, InvokeRequest) {

@@ -1047,7 +1047,7 @@ fn pool_builder_add_to_tracker() {
         .enforcement(RateLimitEnforcement::Hard)
         .build();
 
-    tracker.add_pool(pool);
+    tracker.add_pool(pool).expect("add pool");
     let status = tracker.pool_status("test-pool").unwrap();
     assert_eq!(status.limit, 3);
     assert_eq!(status.remaining, 3);

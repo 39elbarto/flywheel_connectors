@@ -968,10 +968,24 @@ fn read_identity_unchecked(pid: u32) -> Result<ProcessIdentity, ProcessGroupErro
 #[cfg(target_os = "linux")]
 fn read_proc_stat(pid: u32) -> Result<ProcSnapshot, ProcessGroupError> {
     let contents = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let close = contents
-        .rfind(')')
+    parse_proc_stat(pid, &contents)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_stat(pid: u32, contents: &str) -> Result<ProcSnapshot, ProcessGroupError> {
+    if contents.len() > 16 * 1024 {
+        return Err(ProcessGroupError::IdentityMismatch);
+    }
+    let (reported_pid, command) = contents
+        .split_once(" (")
         .ok_or(ProcessGroupError::IdentityMismatch)?;
-    let fields: Vec<&str> = contents[close + 2..].split_whitespace().collect();
+    if reported_pid.parse::<u32>().ok() != Some(pid) {
+        return Err(ProcessGroupError::IdentityMismatch);
+    }
+    let (_, suffix) = command
+        .rsplit_once(") ")
+        .ok_or(ProcessGroupError::IdentityMismatch)?;
+    let fields: Vec<&str> = suffix.split_whitespace().collect();
     let state = fields
         .first()
         .filter(|value| value.len() == 1)
@@ -2269,6 +2283,48 @@ mod tests {
         assert!(stat.pgid > 1);
         assert!(stat.session_id > 1);
         assert!(stat.start_time_ticks > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_parser_rejects_malformed_without_panicking() {
+        for input in [
+            "",
+            "7 (comm)",
+            "7 (comm)é",
+            "7 (comm)R 1 2 3",
+            "7 comm) R 1 2 3",
+            "wrong (comm) R 1 2 3",
+            "8 (comm) R 1 2 3",
+            "7 (comm) R 1 2 3",
+            "7 (comm) R 1 bad 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 11",
+            "7 (comm) R 1 2 bad 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 11",
+            "7 (comm) R 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 bad",
+        ] {
+            assert!(matches!(
+                parse_proc_stat(7, input),
+                Err(ProcessGroupError::IdentityMismatch)
+            ));
+        }
+        assert!(matches!(
+            parse_proc_stat(7, &"x".repeat(16 * 1024 + 1)),
+            Err(ProcessGroupError::IdentityMismatch)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_parser_preserves_nested_command_and_identity_fields() {
+        let stat = parse_proc_stat(
+            7,
+            "7 (nested (é) command)) S 1 22 33 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 99",
+        )
+        .expect("valid stat with nested command");
+        assert_eq!(stat.pid, 7);
+        assert_eq!(stat.state, b'S');
+        assert_eq!(stat.pgid, 22);
+        assert_eq!(stat.session_id, 33);
+        assert_eq!(stat.start_time_ticks, 99);
     }
 
     #[cfg(target_os = "linux")]

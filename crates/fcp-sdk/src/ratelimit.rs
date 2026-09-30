@@ -54,6 +54,17 @@ pub struct RateLimitError {
 }
 
 impl RateLimitError {
+    fn poisoned_state() -> Self {
+        Self {
+            pool_id: "tracker-state".to_owned(),
+            limit: 0,
+            current: 0,
+            retry_after_ms: 0,
+            enforcement: RateLimitEnforcement::Hard,
+            message: "Rate limit pool lock poisoned; rejecting fail-closed".to_owned(),
+        }
+    }
+
     /// Convert to an FCP-standard error with retry-after hints.
     #[must_use]
     pub fn into_fcp_error(self) -> FcpError {
@@ -576,10 +587,13 @@ impl RateLimitTracker {
 
     /// Add a pool to the tracker.
     ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned (indicates a prior panic during pool access).
-    pub fn add_pool(&self, pool: RateLimitPool) {
-        let mut pools = self.pools.write().expect("lock poisoned");
+    /// # Errors
+    /// Returns a hard error without changing state if the pool lock is poisoned.
+    pub fn add_pool(&self, pool: RateLimitPool) -> Result<(), RateLimitError> {
+        let mut pools = self
+            .pools
+            .write()
+            .map_err(|_| RateLimitError::poisoned_state())?;
         let checkpoint = self
             .checkpoint_store
             .as_ref()
@@ -592,6 +606,7 @@ impl RateLimitTracker {
         pools.insert(pool_id, pool_state);
         self.persist_locked_pools(&pools);
         drop(pools);
+        Ok(())
     }
 
     /// Try to consume requests for an operation.
@@ -611,11 +626,12 @@ impl RateLimitTracker {
     /// `operation_map` and `pools` consistent; inconsistencies are
     /// treated as a configuration error, not a free pass.
     ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
+    /// A poisoned pool lock returns a hard error even for an unmapped operation.
     pub fn try_consume(&self, operation: &str, amount: u32) -> Option<RateLimitError> {
+        let Ok(mut pools) = self.pools.write() else {
+            return Some(RateLimitError::poisoned_state());
+        };
         let pool_ids = self.operation_map.get(operation)?;
-        let mut pools = self.pools.write().expect("lock poisoned");
 
         // Fail-closed guard: reject up-front if any referenced pool is
         // missing, so the subsequent phases operate on a consistent set.
@@ -736,10 +752,13 @@ impl RateLimitTracker {
 
     /// Reset all pools (for testing).
     ///
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    pub fn reset_all(&self) {
-        let mut pools = self.pools.write().expect("lock poisoned");
+    /// # Errors
+    /// Returns a hard error without changing state if the pool lock is poisoned.
+    pub fn reset_all(&self) -> Result<(), RateLimitError> {
+        let mut pools = self
+            .pools
+            .write()
+            .map_err(|_| RateLimitError::poisoned_state())?;
         for state in pools.values_mut() {
             state.prev_count = 0;
             state.curr_count = 0;
@@ -747,6 +766,7 @@ impl RateLimitTracker {
         }
         self.persist_locked_pools(&pools);
         drop(pools);
+        Ok(())
     }
 
     // The caller retains its pool lock throughout both snapshot and persistence.
@@ -1121,7 +1141,7 @@ mod tests {
         assert!(tracker.pool_status("dynamic").is_none());
 
         let pool = test_pool("dynamic", 5, 30);
-        tracker.add_pool(pool);
+        tracker.add_pool(pool).expect("add pool");
 
         let status = tracker.pool_status("dynamic").unwrap();
         assert_eq!(status.limit, 5);
@@ -1143,7 +1163,7 @@ mod tests {
         assert!(tracker.try_consume("op", 1).is_some());
 
         // Reset
-        tracker.reset_all();
+        tracker.reset_all().expect("reset pools");
         assert!(tracker.try_consume("op", 1).is_none());
         let status = tracker.pool_status("api").unwrap();
         assert_eq!(status.remaining, 2); // 3 - 1
@@ -1547,14 +1567,14 @@ mod tests {
         let tracker = RateLimitTracker::new();
 
         let pool_v1 = test_pool("api", 10, 60);
-        tracker.add_pool(pool_v1);
+        tracker.add_pool(pool_v1).expect("add first pool");
 
         let status1 = tracker.pool_status("api").unwrap();
         assert_eq!(status1.limit, 10);
 
         // Replace with different limit
         let pool_v2 = test_pool("api", 50, 120);
-        tracker.add_pool(pool_v2);
+        tracker.add_pool(pool_v2).expect("replace pool");
 
         let status2 = tracker.pool_status("api").unwrap();
         assert_eq!(status2.limit, 50);
@@ -1583,7 +1603,7 @@ mod tests {
         let before_b = tracker.pool_status("b").unwrap();
         assert_eq!(before_b.remaining, 5);
 
-        tracker.reset_all();
+        tracker.reset_all().expect("reset pools");
 
         let after_a = tracker.pool_status("a").unwrap();
         assert_eq!(after_a.remaining, 10);
@@ -1892,9 +1912,15 @@ mod tests {
     fn tracker_add_multiple_pools() {
         let tracker = RateLimitTracker::new();
 
-        tracker.add_pool(test_pool("pool_1", 10, 60));
-        tracker.add_pool(test_pool("pool_2", 20, 120));
-        tracker.add_pool(test_pool("pool_3", 30, 180));
+        tracker
+            .add_pool(test_pool("pool_1", 10, 60))
+            .expect("add first pool");
+        tracker
+            .add_pool(test_pool("pool_2", 20, 120))
+            .expect("add second pool");
+        tracker
+            .add_pool(test_pool("pool_3", 30, 180))
+            .expect("add third pool");
 
         let all = tracker.all_pool_statuses();
         assert_eq!(all.len(), 3);
@@ -2296,7 +2322,7 @@ mod tests {
         tracker.try_consume("op", 10);
         assert!(tracker.is_limited("op"));
 
-        tracker.reset_all();
+        tracker.reset_all().expect("reset pools");
         assert!(!tracker.is_limited("op"));
         let status = tracker.pool_status("api").unwrap();
         assert_eq!(status.remaining, 10);
@@ -2338,7 +2364,7 @@ mod tests {
     #[test]
     fn tracker_clone_shares_pools_via_arc() {
         let tracker = RateLimitTracker::new();
-        tracker.add_pool(test_pool("p", 10, 60));
+        tracker.add_pool(test_pool("p", 10, 60)).expect("add pool");
         let cloned = tracker.clone();
 
         // Both should see the same pool
@@ -2666,6 +2692,94 @@ mod tests {
     }
 
     #[test]
+    fn poisoned_tracker_rejects_without_mutation_persistence_or_admission() {
+        let state_dir = unique_state_dir("poison-fail-closed");
+        let declarations = RateLimitDeclarations {
+            limits: vec![test_pool("api", 100, 60)],
+            tool_pool_map: HashMap::from([("send".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = RateLimitTracker::from_declarations_with_state_dir(&declarations, &state_dir);
+        assert!(tracker.try_consume("send", 5).is_none());
+        assert!(tracker.try_consume("unmapped", 1).is_none());
+        let store = tracker.checkpoint_store.as_ref().expect("checkpoint store");
+        let persisted = fs::read(&store.path).expect("persisted checkpoint");
+        let modified = fs::metadata(&store.path)
+            .expect("checkpoint metadata")
+            .modified()
+            .expect("checkpoint modification time");
+        let before = {
+            let pools = tracker.pools.read().expect("healthy pool state");
+            let state = pools.get("api").expect("api pool");
+            (
+                serde_json::to_value(&state.config).expect("pool config"),
+                state.prev_count,
+                state.curr_count,
+                state.window_start,
+            )
+        };
+        let poison_pools = Arc::clone(&tracker.pools);
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = poison_pools.write().expect("lock before synthetic poison");
+                panic!("synthetic pool lock poison");
+            })
+            .join()
+            .is_err()
+        );
+        for error in [
+            tracker
+                .add_pool(test_pool("api", 1, 1))
+                .expect_err("reject replacement"),
+            tracker
+                .add_pool(test_pool("new", 1, 1))
+                .expect_err("reject addition"),
+            tracker.reset_all().expect_err("reject reset"),
+            tracker.reset_all().expect_err("still reject reset"),
+            tracker
+                .try_consume("send", 1)
+                .expect("deny mapped operation"),
+            tracker
+                .try_consume("unmapped", 1)
+                .expect("deny unmapped operation"),
+            tracker
+                .try_consume("", 0)
+                .expect("deny even zero-cost unknown operation"),
+        ] {
+            assert!(!error.is_soft());
+            assert!(matches!(error.enforcement, RateLimitEnforcement::Hard));
+            assert_eq!(error.pool_id, "tracker-state");
+            assert_eq!(
+                error.message,
+                "Rate limit pool lock poisoned; rejecting fail-closed"
+            );
+        }
+        let poisoned = tracker.pools.read().expect_err("poison remains set");
+        let pools = poisoned.get_ref();
+        assert_eq!(pools.len(), 1);
+        let state = pools.get("api").expect("original pool remains");
+        assert_eq!(
+            (
+                serde_json::to_value(&state.config).expect("unchanged pool config"),
+                state.prev_count,
+                state.curr_count,
+                state.window_start,
+            ),
+            before
+        );
+        assert_eq!(
+            fs::read(&store.path).expect("retained checkpoint"),
+            persisted
+        );
+        assert_eq!(
+            fs::metadata(&store.path)
+                .expect("retained checkpoint metadata")
+                .modified()
+                .expect("modification time"),
+            modified
+        );
+    }
+
+    #[test]
     fn add_and_reset_retain_pool_lock_until_checkpoint_persistence_finishes() {
         let state_dir = unique_state_dir("pool-lock-persist");
         let declarations = RateLimitDeclarations {
@@ -2682,9 +2796,11 @@ mod tests {
             let worker_tracker = Arc::clone(&tracker);
             let worker = std::thread::spawn(move || {
                 if reset {
-                    worker_tracker.reset_all();
+                    worker_tracker.reset_all().expect("reset pools");
                 } else {
-                    worker_tracker.add_pool(test_pool("extra", 100, 60));
+                    worker_tracker
+                        .add_pool(test_pool("extra", 100, 60))
+                        .expect("add pool");
                 }
             });
             let deadline = Instant::now() + Duration::from_secs(2);

@@ -53,6 +53,9 @@ readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
 readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
 readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
 readonly LOCAL_MCP_PROTOCOL_VERSION="2024-11-05"
+# Explicit reviewed baselines are optional; absent baselines retain raw-only
+# behavior. Never enroll ambient tools/list as reviewed compatibility policy.
+readonly REVIEWED_SCHEMA_BASELINES="${FWC_N8N_REVIEWED_SCHEMA_BASELINES:-}"
 readonly LOCAL_MCP_CATALOG_TOOLS=(
   "tools_documentation"
   "search_nodes"
@@ -156,6 +159,104 @@ require_fixed_local_mcp_file() {
   fi
 }
 
+# Pure producer boundary also exercised offline. It emits only catalog policy
+# bindings and never discovers a provider, installs, signs or approves anything.
+assemble_local_catalog_bindings() {
+  local source_binary="$1"
+  python3 - "$source_binary" "${LOCAL_MCP_CATALOG_TOOLS[@]}" 3<&0 <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+MAX_BYTES = 262144
+binary = sys.argv[1]
+names = sys.argv[2:]
+
+def fail():
+    raise SystemExit("local catalog policy binding invalid")
+
+def unique_object(pairs):
+    value = {}
+    for key, child in pairs:
+        if key in value:
+            fail()
+        value[key] = child
+    return value
+
+raw = os.fdopen(3, "rb").read(MAX_BYTES + 1)
+if len(raw) > MAX_BYTES:
+    fail()
+request = json.loads(raw, object_pairs_hook=unique_object)
+pins = request["expected_catalog"]
+baselines = request.get("reviewed_baselines", {})
+catalog = request["catalog"]
+if (set(pins) != set(names) or not isinstance(baselines, dict)
+    or not set(baselines).issubset(pins)
+    or not isinstance(catalog, dict) or not isinstance(catalog.get("tools"), list)
+    or catalog.get("nextCursor") is not None):
+    fail()
+
+def invoke(command, value):
+    try:
+        result = subprocess.run([binary, command], input=json.dumps(value).encode(),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=True)
+        if len(result.stdout) > MAX_BYTES:
+            fail()
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        fail()
+
+observed = {}
+for tool in catalog["tools"]:
+    if (not isinstance(tool, dict) or not isinstance(tool.get("name"), str)
+        or not tool["name"] or len(tool["name"]) > 256
+        or any(character.isspace() or ord(character) < 32 for character in tool["name"])
+        or tool["name"] in observed or not isinstance(tool.get("inputSchema"), dict)
+        or ("outputSchema" in tool and not isinstance(tool["outputSchema"], dict))
+        or any(field in tool and not isinstance(tool[field], str) for field in ("title", "description"))
+        or any(field in tool and not isinstance(tool[field], dict) for field in ("annotations", "_meta"))):
+        fail()
+    observed[tool["name"]] = tool
+if not set(names).issubset(observed):
+    fail()
+
+# Default pins are the reviewed legacy contract: no outputSchema. Discovery
+# cannot change these pins. Present output requires an explicit reviewed baseline.
+absence = invoke("schema-projection", {"input_schema": {}, "output_schema": None})["output_schema_digest"]
+output_pins = dict.fromkeys(names, absence)
+profiles = {}
+for name, baseline in baselines.items():
+    if (not isinstance(baseline, dict) or baseline.get("integrity") != "blake3"
+        or baseline.get("input_schema_digest") != pins[name]):
+        fail()
+    profiles[name] = invoke("reviewed-schema-profile", baseline)
+    output_pins[name] = baseline["output_schema_digest"]
+
+for name in names:
+    tool = observed[name]
+    # Observation produces digests only, never an approved baseline.
+    projection = invoke("schema-projection", {
+        "input_schema": tool["inputSchema"], "output_schema": tool.get("outputSchema"),
+    })
+    if name in profiles:
+        if any(projection[field] != profiles[name][field] for field in (
+            "profile", "input_compatibility_digest", "output_compatibility_digest"
+        )):
+            fail()
+    elif (projection["input_schema_digest"] != pins[name]
+          or projection["output_schema_digest"] != output_pins[name]):
+        fail()
+
+policy = {"expected_catalog": pins, "expected_output_catalog": output_pins,
+    "reviewed_schemas": profiles, "callable_tools": names}
+encoded = json.dumps(policy, sort_keys=True, separators=(",", ":"))
+if len(encoded.encode()) > MAX_BYTES:
+    fail()
+print(encoded)
+PY
+}
+
 write_local_mcp_policy() {
   local stage_root="$1"
   local hash_helper="$2"
@@ -164,7 +265,7 @@ write_local_mcp_policy() {
   require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
   python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
     "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
-    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" \
+    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" \
     -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
 import json
 import pathlib
@@ -172,6 +273,7 @@ import selectors
 import subprocess
 import sys
 import time
+import os
 
 args = sys.argv[1:]
 first_separator = args.index("--")
@@ -184,6 +286,7 @@ second_separator = args.index("--", first_separator + 1)
     wrapper_path,
     package_id,
     protocol_version,
+    assembler_path,
 ) = args[:first_separator]
 catalog_tools = args[first_separator + 1 : second_separator]
 catalog_digests = args[second_separator + 1 :]
@@ -314,28 +417,14 @@ if (
 ):
     raise SystemExit("local n8n-mcp catalog discovery returned an invalid handshake")
 
-tools = catalog["result"]["tools"]
-observed_tools = {}
-for tool in tools:
-    if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
-        raise SystemExit("installed n8n-mcp catalog has a malformed tool map")
-    name = tool["name"]
-    if name in observed_tools:
-        raise SystemExit("installed n8n-mcp catalog has duplicate tool names")
-    observed_tools[name] = tool
-if len(observed_tools) != len(catalog_tools) or set(observed_tools) != set(catalog_tools):
-    raise SystemExit("installed n8n-mcp catalog names do not match reviewed pins")
-
-observed_digests = []
-for name in catalog_tools:
-    tool = observed_tools[name]
-    schema = tool.get("inputSchema")
-    if not isinstance(schema, dict):
-        raise SystemExit("installed n8n-mcp catalog has a malformed input schema")
-    canonical = json.dumps(schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    observed_digests.append(blake3_bytes(canonical))
-if observed_digests != catalog_digests:
-    raise SystemExit("installed n8n-mcp catalog schemas do not match reviewed pins")
+baseline_path = os.environ.get("FWC_N8N_REVIEWED_SCHEMA_BASELINES", "")
+baselines = json.loads(pathlib.Path(baseline_path).read_text()).get("local", {}) if baseline_path else {}
+bindings = json.loads(subprocess.check_output(
+    ["bash", assembler_path, "--offline-catalog-bindings", str(pathlib.Path(stage) / "bin/fwc-n8n")],
+    input=json.dumps({"expected_catalog": dict(zip(catalog_tools, catalog_digests)),
+        "reviewed_baselines": baselines, "catalog": catalog["result"]}).encode(),
+    stderr=subprocess.DEVNULL, timeout=180,
+))
 
 stage_policy = pathlib.Path(stage) / "policy/local-mcp.json"
 policy = {
@@ -351,8 +440,7 @@ policy = {
     "fixed_args": [wrapper_path],
     "fixed_env": {"N8N_MCP_TELEMETRY_DISABLED": "true"},
     "allowed_methods": ["initialize", "notifications/initialized", "tools/list", "tools/call"],
-    "expected_catalog": dict(zip(catalog_tools, catalog_digests)),
-    "callable_tools": catalog_tools,
+    **bindings,
     "max_frame_bytes": 262144,
     "max_request_bytes": 65536,
     "max_result_bytes": 262144,
@@ -480,6 +568,8 @@ write_inventory_and_request() {
 import json
 import pathlib
 import sys
+import os
+import subprocess
 
 (
     stage,
@@ -590,6 +680,19 @@ for server in ("eec", "hetzner"):
         schema = lifecycle[server].get(tool["name"])
         if schema is not None:
             tool["input_schema_digest"], tool["output_schema_digest"] = schema
+        baseline_path = os.environ.get("FWC_N8N_REVIEWED_SCHEMA_BASELINES", "")
+        if baseline_path:
+            baselines = json.loads(pathlib.Path(baseline_path).read_text())
+            baseline = baselines.get(server, {}).get(tool["name"])
+            if baseline is not None:
+                if (baseline.get("integrity") != "sha256"
+                    or baseline.get("input_schema_digest") != tool["input_schema_digest"]
+                    or baseline.get("output_schema_digest") != tool["output_schema_digest"]):
+                    raise SystemExit("reviewed official schema baseline pin mismatch")
+                tool["reviewed_schemas"] = json.loads(subprocess.check_output(
+                    [str(stage / "bin/fwc-n8n"), "reviewed-schema-profile"],
+                    input=json.dumps(baseline).encode(), stderr=subprocess.DEVNULL,
+                ))
     archive_schema = official["config"]["capability_policy"]["archive_workflow_schema"]
     archive_schema["input_schema_digest"], archive_schema["output_schema_digest"] = lifecycle[server][
         "archive_workflow"
@@ -667,6 +770,11 @@ PY
 }
 
 main() {
+  if [[ "${1:-}" == "--offline-catalog-bindings" ]]; then
+    [[ "$#" == 2 && -f "$2" && -x "$2" ]] || die "offline catalog bindings require an explicit source binary"
+    assemble_local_catalog_bindings "$2"
+    return $?
+  fi
   local release_id=""
   TARGET_DIR="${SSD_ROOT}/targets/n8n-release"
   while [[ $# -gt 0 ]]; do

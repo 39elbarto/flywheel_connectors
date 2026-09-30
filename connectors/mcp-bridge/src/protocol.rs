@@ -978,6 +978,14 @@ pub struct ToolObservation {
     input_schema_digest: String,
     output_schema_digest: String,
     class: ToolClass,
+    compatibility: Option<SchemaCompatibilityDigests>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchemaCompatibilityDigests {
+    pub profile: String,
+    pub input: String,
+    pub output: String,
 }
 
 impl ToolObservation {
@@ -993,6 +1001,19 @@ impl ToolObservation {
             input_schema_digest: digest_json(input_schema)?,
             output_schema_digest: digest_json(output_schema)?,
             class,
+            compatibility: match (
+                fcp_manifest::mcp_schema_compatibility_digest(Some(input_schema)),
+                fcp_manifest::mcp_schema_compatibility_digest(
+                    (!output_schema.is_null()).then_some(output_schema),
+                ),
+            ) {
+                (Some(input), Some(output)) => Some(SchemaCompatibilityDigests {
+                    profile: fcp_manifest::MCP_SCHEMA_COMPATIBILITY_PROFILE.into(),
+                    input,
+                    output,
+                }),
+                _ => None,
+            },
         })
     }
 
@@ -1010,6 +1031,7 @@ impl ToolObservation {
             input_schema_digest: input_schema_digest.to_string(),
             output_schema_digest: output_schema_digest.to_string(),
             class,
+            compatibility: None,
         })
     }
 }
@@ -1031,6 +1053,8 @@ pub struct ToolCapability {
     pub output_schema_digest: String,
     pub class: ToolClass,
     pub status: ToolStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<SchemaCompatibilityDigests>,
 }
 
 impl fmt::Debug for ToolCapability {
@@ -1143,8 +1167,13 @@ impl CapabilitySnapshot {
                         || default_tool_status(observation.class),
                         |old| {
                             if old.class == observation.class
-                                && old.input_schema_digest == observation.input_schema_digest
-                                && old.output_schema_digest == observation.output_schema_digest
+                                && if let Some(reviewed) = &old.compatibility {
+                                    observation.compatibility.as_ref() == Some(reviewed)
+                                } else {
+                                    old.input_schema_digest == observation.input_schema_digest
+                                        && old.output_schema_digest
+                                            == observation.output_schema_digest
+                                }
                             {
                                 old.status
                             } else {
@@ -1158,6 +1187,7 @@ impl CapabilitySnapshot {
                     output_schema_digest: observation.output_schema_digest,
                     class: observation.class,
                     status,
+                    compatibility: observation.compatibility,
                 }
             })
             .collect();

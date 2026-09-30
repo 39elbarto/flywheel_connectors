@@ -841,6 +841,40 @@ expect_success() {
   validate_plan >/dev/null
 }
 
+run_compatibility_self_test() {
+  local binary="$1" input output baseline profile metadata changed invalid
+  [[ -f "$binary" && -x "$binary" ]] || { emit_self_test_failure; return 1; }
+  input='{"description":"reviewed","type":"object"}'
+  output='{"description":"reviewed output","type":"object"}'
+  baseline="$(jq -nc --argjson input "$input" --argjson output "$output" \
+    --arg in_digest "sha256:$(printf '%s' "$input" | /usr/bin/sha256sum | cut -d ' ' -f1)" \
+    --arg out_digest "sha256:$(printf '%s' "$output" | /usr/bin/sha256sum | cut -d ' ' -f1)" \
+    '{integrity:"sha256",input_schema:$input,output_schema:$output,input_schema_digest:$in_digest,output_schema_digest:$out_digest}')"
+  profile="$(printf '%s' "$baseline" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile)" || { emit_self_test_failure; return 1; }
+  jq -e '.profile == "mcp-schema-descriptions-v1" and (.input_compatibility_digest|length)==64 and (.output_compatibility_digest|length)==64' <<<"$profile" >/dev/null || return 1
+  metadata='{"description":"changed","type":"object"}'
+  baseline="$(jq --argjson input "$metadata" \
+    --arg digest "sha256:$(printf '%s' "$metadata" | /usr/bin/sha256sum | cut -d ' ' -f1)" \
+    '.input_schema=$input | .input_schema_digest=$digest' <<<"$baseline")"
+  changed="$(printf '%s' "$baseline" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile)" || return 1
+  [[ "$(jq -r '.input_compatibility_digest' <<<"$profile")" == "$(jq -r '.input_compatibility_digest' <<<"$changed")" ]] || return 1
+  metadata='{"default":{},"description":"changed","type":"object"}'
+  baseline="$(jq --argjson input "$metadata" \
+    --arg digest "sha256:$(printf '%s' "$metadata" | /usr/bin/sha256sum | cut -d ' ' -f1)" \
+    '.input_schema=$input | .input_schema_digest=$digest' <<<"$baseline")"
+  changed="$(printf '%s' "$baseline" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile)" || return 1
+  [[ "$(jq -r '.input_compatibility_digest' <<<"$profile")" != "$(jq -r '.input_compatibility_digest' <<<"$changed")" ]] || return 1
+  invalid="$(jq '.output_schema_digest="tampered"' <<<"$baseline")"
+  if printf '%s' "$invalid" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile >/dev/null 2>&1; then return 1; fi
+  invalid="$(jq '.output_schema=null' <<<"$baseline")"
+  if printf '%s' "$invalid" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile >/dev/null 2>&1; then return 1; fi
+  invalid="$(jq '.output_schema.type="string"' <<<"$baseline")"
+  if printf '%s' "$invalid" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile >/dev/null 2>&1; then return 1; fi
+  baseline="$(jq '.input_schema_digest="tampered"' <<<"$baseline")"
+  if printf '%s' "$baseline" | /usr/bin/timeout 10 "$binary" reviewed-schema-profile >/dev/null 2>&1; then return 1; fi
+  printf '{"schema":"%s","verdict":"pass","mode":"compatibility-self-test","acceptance":false,"cases":7}\n' "$SCHEMA"
+}
+
 run_self_test() {
   SELF_TEST=1
   local base=""
@@ -910,7 +944,7 @@ run_self_test() {
 }
 
 usage() {
-  printf '%s\n' "usage: n8n_acceptance_preflight.sh [--self-test] [PLAN.json]"
+  printf '%s\n' "usage: n8n_acceptance_preflight.sh [--self-test] [PLAN.json] | --compatibility-self-test SOURCE_BINARY"
 }
 
 main() {
@@ -919,6 +953,11 @@ main() {
     usage
     emit_failure "input_arguments_invalid"
     return 1
+  fi
+  if [[ "${1:-}" == "--compatibility-self-test" ]]; then
+    [[ "$#" == 2 ]] || { emit_failure "input_arguments_invalid"; return 1; }
+    run_compatibility_self_test "$2"
+    return $?
   fi
   if [[ "${1:-}" == "--self-test" ]]; then
     if [[ "$#" -ne 1 ]]; then

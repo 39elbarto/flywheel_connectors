@@ -14,6 +14,39 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+**Compatible-update source contract (`flywheel_connectors-nqm81.34`):**
+Numeric upstream versions are diagnostic; exact approved staged versions and
+artifact/trust hashes remain binding. Local catalog validation covers the whole
+response, but compatibility is checked for every requested sequence tool before
+the first call. The public callable set remains closed. Unrelated valid catalog
+changes do not disable a compatible operation.
+
+The optional immutable `reviewed_schemas` extension carries an explicit
+`mcp-schema-descriptions-v1` profile, reviewed original input/output schemas and
+serialized input/output compatibility digests. The original raw integrity pins
+are checked before compatibility projection. Only `description`, `title` and
+`$comment` at actual schema nodes are omitted; user property names, default/const/
+enum payloads, references, required fields, output presence and unknown keywords
+are never erased. Missing output is distinct from a present invalid null schema.
+No live observation is auto-enrolled. Unknown tools gain no authority. A changed
+operation/server is blocked independently unless shared trust/transport fails.
+Approval bindings, independent readback including exact `workflowVersionId`,
+one-attempt/no-fallback semantics and owned-process teardown remain unchanged.
+
+The existing assembler accepts explicit reviewed baseline maps via
+`FWC_N8N_REVIEWED_SCHEMA_BASELINES`; `fwc-n8n reviewed-schema-profile` validates
+their raw pins and emits the serialized profile for immutable staging. Policies
+without reviewed baselines retain raw-only checks.
+Local `expected_output_catalog` pins distinguish absence from presence; omitted
+legacy entries bind absence. Both raw input and output pins are verified before
+minting a local reviewed profile. Observational `schema-projection` cannot mint
+one. The assembler's pure `--offline-catalog-bindings SOURCE_BINARY` boundary
+uses the same producer as normal staging, with synthetic input and no discovery.
+Offline CLI, bundle,
+provision, update, supervisor and loopback/process runs validate separate
+boundaries. The bounded preflight script's `--compatibility-self-test` reports
+`acceptance:false`; installed-provider/live upgrade acceptance is unverified.
+
 **Current installed release/read-only smoke boundary (2026-09-18):**
 `/usr/local/lib/fwc-n8n/current` resolves to
 `release-20260917-74b9b97c0-rc2` (git revision

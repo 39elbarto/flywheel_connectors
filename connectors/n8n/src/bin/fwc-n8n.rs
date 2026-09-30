@@ -174,6 +174,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Produce a compatibility profile from an explicitly reviewed, raw-pinned baseline.
+    #[command(name = "reviewed-schema-profile")]
+    ReviewedSchemaProfile,
+    /// Observe raw and compatibility digests without producing a reviewed baseline.
+    #[command(name = "schema-projection")]
+    SchemaProjection,
     /// Resolve a target query read from stdin without contacting a provider.
     Resolve,
     /// Route a public operation using target/capability input read from stdin.
@@ -630,6 +636,39 @@ fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
 
 fn execute(cli: Cli) -> Result<Value, AppError> {
     match cli.command {
+        Command::SchemaProjection => {
+            let observation: McpSchemaObservation = read_stdin_json()?;
+            Ok(json!({
+                "profile": fcp_manifest::MCP_SCHEMA_COMPATIBILITY_PROFILE,
+                "input_schema_digest": fcp_manifest::local_mcp_schema_digest(&observation.input_schema),
+                "output_schema_digest": fcp_manifest::local_mcp_output_schema_digest(observation.output_schema.as_ref()),
+                "input_compatibility_digest": fcp_manifest::mcp_schema_compatibility_digest(Some(&observation.input_schema)),
+                "output_compatibility_digest": fcp_manifest::mcp_schema_compatibility_digest(observation.output_schema.as_ref()),
+            }))
+        }
+        Command::ReviewedSchemaProfile => {
+            let baseline: ReviewedSchemaBaseline = read_stdin_json()?;
+            let schemas = fcp_manifest::ReviewedMcpSchemas::from_reviewed(
+                baseline.input_schema,
+                baseline.output_schema,
+            )
+            .ok_or_else(|| AppError::new("reviewed_schema_invalid"))?;
+            let valid = match baseline.integrity.as_str() {
+                "sha256" => schemas.binds_sha256(
+                    &baseline.input_schema_digest,
+                    &baseline.output_schema_digest,
+                ),
+                "blake3" => schemas.binds_blake3(
+                    &baseline.input_schema_digest,
+                    &baseline.output_schema_digest,
+                ),
+                _ => false,
+            };
+            if !valid {
+                return Err(AppError::new("reviewed_schema_integrity_mismatch"));
+            }
+            serde_json::to_value(schemas).map_err(|_| AppError::new("output_encoding_failed"))
+        }
         Command::Resolve => {
             let query: TargetQuery = read_stdin_json()?;
             let resolution = TargetResolver::resolve(&query)
@@ -653,6 +692,23 @@ fn execute(cli: Cli) -> Result<Value, AppError> {
             "bundleAvailable": fwc_n8n_bundle::verify_current_release_bundle().is_ok(),
         })),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpSchemaObservation {
+    input_schema: Value,
+    output_schema: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewedSchemaBaseline {
+    integrity: String,
+    input_schema: Value,
+    output_schema: Option<Value>,
+    input_schema_digest: String,
+    output_schema_digest: String,
 }
 
 fn run_update_review(command: UpdateReviewCommand) -> Result<Value, AppError> {
@@ -9655,6 +9711,7 @@ mod tests {
             tools: vec![fcp_n8n::update::ToolSnapshot {
                 name: "search_nodes".to_string(),
                 schema_digest: format!("schema-{version}"),
+                reviewed_schemas: None,
                 description_digest: "description-search-nodes".to_string(),
                 impact: fcp_n8n::update::ToolImpact::Read,
                 permissions: BTreeSet::new(),

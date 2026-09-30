@@ -17,6 +17,48 @@
 > **n8n public REST API**: https://docs.n8n.io/api/
 > **n8n API reference**: https://docs.n8n.io/api/api-reference/
 
+## Compatible upstream updates (`flywheel_connectors-nqm81.34`)
+
+Remote n8n version strings are diagnostic. Exact staged local package versions,
+binary/package hashes, signed inventories, owner approvals and workflow version
+preconditions remain binding. Known MCP protocol profiles remain wire contracts;
+an unknown profile is rejected. Update protocol sets ignore order and duplicates.
+
+The local supervisor validates every catalog entry and preflights every requested
+tool before the first call. Unrelated valid tools and unrequested schema drift
+do not disable a reviewed route; new tools never enter the closed callable set.
+Malformed, duplicate, oversized or incomplete catalogs fail before dispatch.
+
+Immutable policies can opt into `mcp-schema-descriptions-v1` through
+`reviewed_schemas`. The extension stores an explicitly reviewed baseline and
+separate serialized input/output compatibility digests, alongside existing raw
+integrity pins. Consumers verify the baseline against those pins before using
+the compatibility digests. Only schema-node `description`, `title` and `$comment`
+are omitted. Defaults, required fields, formats, references, output presence,
+unknown keywords and literal payloads remain significant. Raw-only policies stay
+strict; current discovery is never auto-approved. Schema conflicts block the
+affected tool/server, while shared transport/trust failures fail the request.
+
+`fwc-n8n reviewed-schema-profile` is an offline artifact producer accepting a
+raw-pinned reviewed baseline on stdin. `FWC_N8N_REVIEWED_SCHEMA_BASELINES` supplies
+explicit `local`, `eec` and `hetzner` baseline maps to the existing release
+assembler; omitted maps retain strict raw-only behavior. Profiles are carried
+inside the normal immutable policy/inventory/bundle and exact approval path.
+The producer grants no approval, provider access, installation or release switch.
+Local policies also bind `expected_output_catalog`; absent legacy entries mean
+that `outputSchema` must be absent. Present output schemas require independently
+reviewed output integrity pins. `schema-projection` emits observational digests
+only. The assembler's `--offline-catalog-bindings SOURCE_BINARY` exercises its
+actual catalog binding producer with synthetic stdin, without provider discovery.
+
+Offline regression boundaries are the real local supervisor process, MCP
+loopback/process tests, actual CLI profile production, immutable bundle and
+provision checks, update diff tests, and the independent execution GET projection
+of `workflowVersionId`. They are separate runs, not one provider E2E. The bounded
+`scripts/e2e/n8n_acceptance_preflight.sh --compatibility-self-test SOURCE_BINARY`
+checks profile production with synthetic schemas and reports `acceptance:false`.
+Installed-provider and before/after live upgrade acceptance remain unverified.
+
 ## Purpose
 
 This document fixes the operator-facing contract for `fcp.n8n`. The connector exposes bounded workflow, project, tag, execution, credential-metadata, and n8n 2.19+ folder reads, plus guarded draft creation/update, typed REST activation, typed official-MCP publish/unpublish/archive writes, a typed REST unarchive path, and a narrowly scoped disposable-workflow REST delete. Execution reads include the unchanged metadata-only `n8n.executions.get` contract and the separately named `n8n.executions.diagnostics` projection for bounded node errors. The `n8n.workflows.execute` seam validates its bounded manual/production contract and is admitted only by the immutable owner-provisioned EEC/Hetzner `execute_workflow` schema bindings; no live execution acceptance is claimed. Each enabled write validates exact target, UUID idempotency, full state precondition, and current-chat approval, then uses only its exact owner-approved provider path with an independent typed readback; activation is REST-only on EEC/Hetzner with fixed REST-API credential purpose and no automatic retry, while direct routes outside an explicitly guarded contract remain fail-closed and no legacy endpoint is guessed. Disposable delete additionally requires a host-issued receipt proving the same workflow was created through the bounded draft path.

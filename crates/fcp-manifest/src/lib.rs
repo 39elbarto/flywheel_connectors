@@ -539,6 +539,209 @@ pub fn local_mcp_schema_digest(schema: &serde_json::Value) -> String {
     .to_string()
 }
 
+/// Raw local output integrity pin, with distinct domains for absence/presence.
+#[must_use]
+pub fn local_mcp_output_schema_digest(schema: Option<&serde_json::Value>) -> String {
+    local_mcp_schema_digest(&schema.map_or_else(
+        || serde_json::json!({"absent_output_schema": true}),
+        |schema| serde_json::json!({"present_output_schema": schema}),
+    ))
+}
+
+/// Explicit opt-in projection for reviewed MCP JSON Schemas. Raw artifact and
+/// schema digests remain integrity pins; this profile is only for compatibility.
+pub const MCP_SCHEMA_COMPATIBILITY_PROFILE: &str = "mcp-schema-descriptions-v1";
+
+/// Reviewed schemas carried inside the immutable signed policy. Keeping the
+/// originals lets consumers verify the existing raw pins before projecting.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedMcpSchemas {
+    pub profile: String,
+    pub input_schema: serde_json::Value,
+    pub output_schema: Option<serde_json::Value>,
+    pub input_compatibility_digest: String,
+    pub output_compatibility_digest: String,
+}
+
+impl std::fmt::Debug for ReviewedMcpSchemas {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReviewedMcpSchemas { <redacted> }")
+    }
+}
+
+/// Produce a domain-separated compatibility pin; `None` is output absence,
+/// never a JSON Schema null value.
+#[must_use]
+pub fn mcp_schema_compatibility_digest(schema: Option<&serde_json::Value>) -> Option<String> {
+    let projected = match schema {
+        Some(schema) => serde_json::json!({"schema": mcp_schema_compatibility_projection(schema)?}),
+        None => serde_json::json!({"absent_output": true}),
+    };
+    Some(local_mcp_schema_digest(&serde_json::json!({
+        "profile": MCP_SCHEMA_COMPATIBILITY_PROFILE, "projection": projected,
+    })))
+}
+
+/// Preserve the canonical raw SHA-256 pin used by official MCP inventories.
+///
+/// # Panics
+/// Panics only if a JSON value cannot be serialized as JSON.
+#[must_use]
+pub fn mcp_schema_integrity_digest(value: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&canonical_json(value)).expect("JSON is serializable");
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+impl ReviewedMcpSchemas {
+    /// Verify both independently supplied local integrity pins, including output presence.
+    #[must_use]
+    pub fn binds_blake3(&self, input: &str, output: &str) -> bool {
+        self.matches(&self.input_schema, self.output_schema.as_ref())
+            && local_mcp_schema_digest(&self.input_schema) == input
+            && local_mcp_output_schema_digest(self.output_schema.as_ref()) == output
+    }
+    /// Check the separately pinned raw SHA-256 schemas used by official MCP.
+    #[must_use]
+    pub fn binds_sha256(&self, input: &str, output: &str) -> bool {
+        self.matches(&self.input_schema, self.output_schema.as_ref())
+            && mcp_schema_integrity_digest(&self.input_schema) == input
+            && mcp_schema_integrity_digest(
+                self.output_schema
+                    .as_ref()
+                    .unwrap_or(&serde_json::Value::Null),
+            ) == output
+    }
+    /// Producer for an explicitly reviewed baseline, never ambient discovery.
+    #[must_use]
+    pub fn from_reviewed(
+        input: serde_json::Value,
+        output: Option<serde_json::Value>,
+    ) -> Option<Self> {
+        Some(Self {
+            profile: MCP_SCHEMA_COMPATIBILITY_PROFILE.into(),
+            input_compatibility_digest: mcp_schema_compatibility_digest(Some(&input))?,
+            output_compatibility_digest: mcp_schema_compatibility_digest(output.as_ref())?,
+            input_schema: input,
+            output_schema: output,
+        })
+    }
+
+    #[must_use]
+    pub fn matches(&self, input: &serde_json::Value, output: Option<&serde_json::Value>) -> bool {
+        if self.profile != MCP_SCHEMA_COMPATIBILITY_PROFILE {
+            return false;
+        }
+        mcp_schema_compatibility_digest(Some(&self.input_schema)).as_ref()
+            == Some(&self.input_compatibility_digest)
+            && mcp_schema_compatibility_digest(self.output_schema.as_ref()).as_ref()
+                == Some(&self.output_compatibility_digest)
+            && mcp_schema_compatibility_digest(Some(input)).as_ref()
+                == Some(&self.input_compatibility_digest)
+            && mcp_schema_compatibility_digest(output).as_ref()
+                == Some(&self.output_compatibility_digest)
+    }
+}
+
+/// Validate the optional signed official-tool compatibility extension without
+/// weakening the original four-field integrity and authority contract.
+#[must_use]
+pub fn valid_reviewed_mcp_tool_fields(tool: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let base = [
+        "name",
+        "class",
+        "input_schema_digest",
+        "output_schema_digest",
+    ];
+    if !base.iter().all(|field| tool.contains_key(*field)) {
+        return false;
+    }
+    if tool.len() == 4 {
+        return true;
+    }
+    if tool.len() != 5 {
+        return false;
+    }
+    let Some(value) = tool.get("reviewed_schemas") else {
+        return false;
+    };
+    let Ok(schemas) = serde_json::from_value::<ReviewedMcpSchemas>(value.clone()) else {
+        return false;
+    };
+    match (
+        tool.get("input_schema_digest")
+            .and_then(serde_json::Value::as_str),
+        tool.get("output_schema_digest")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (Some(input), Some(output)) => schemas.binds_sha256(input, output),
+        _ => false,
+    }
+}
+
+/// Project only known schema positions, never arbitrary instance payloads.
+/// Unknown keywords fail closed rather than acquiring annotation semantics.
+#[must_use]
+pub fn mcp_schema_compatibility_projection(
+    schema: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    use serde_json::Value;
+    match schema {
+        Value::Bool(_) => Some(schema.clone()),
+        Value::Object(object) => {
+            let mut projected = serde_json::Map::new();
+            for (key, value) in object {
+                let child = match key.as_str() {
+                    "description" | "title" | "$comment" => {
+                        if !value.is_string() {
+                            return None;
+                        }
+                        continue;
+                    }
+                    "properties" | "patternProperties" | "$defs" | "definitions" => {
+                        let children = value.as_object()?;
+                        let mut map = serde_json::Map::new();
+                        for (name, child) in children {
+                            map.insert(name.clone(), mcp_schema_compatibility_projection(child)?);
+                        }
+                        Value::Object(map)
+                    }
+                    "items"
+                    | "additionalProperties"
+                    | "additionalItems"
+                    | "contains"
+                    | "propertyNames"
+                    | "not"
+                    | "if"
+                    | "then"
+                    | "else"
+                    | "unevaluatedProperties"
+                    | "unevaluatedItems" => mcp_schema_compatibility_projection(value)?,
+                    "allOf" | "anyOf" | "oneOf" | "prefixItems" => Value::Array(
+                        value
+                            .as_array()?
+                            .iter()
+                            .map(mcp_schema_compatibility_projection)
+                            .collect::<Option<Vec<_>>>()?,
+                    ),
+                    "$schema" | "$id" | "$ref" | "$anchor" | "$dynamicRef" | "$dynamicAnchor"
+                    | "type" | "required" | "enum" | "const" | "default" | "format" | "minimum"
+                    | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf"
+                    | "minLength" | "maxLength" | "pattern" | "minItems" | "maxItems"
+                    | "uniqueItems" | "minContains" | "maxContains" | "minProperties"
+                    | "maxProperties" | "dependentRequired" | "readOnly" | "writeOnly"
+                    | "deprecated" | "contentEncoding" | "contentMediaType" => value.clone(),
+                    _ => return None,
+                };
+                projected.insert(key.clone(), child);
+            }
+            Some(Value::Object(projected))
+        }
+        _ => None,
+    }
+}
+
 fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(object) => {
@@ -580,6 +783,11 @@ pub struct LocalMcpPolicy {
     pub fixed_env: BTreeMap<String, String>,
     pub allowed_methods: Vec<String>,
     pub expected_catalog: BTreeMap<String, String>,
+    /// Omitted legacy entries pin output absence, never arbitrary output.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_output_catalog: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reviewed_schemas: BTreeMap<String, ReviewedMcpSchemas>,
     pub callable_tools: Vec<String>,
     pub max_frame_bytes: u32,
     pub max_request_bytes: u32,
@@ -603,6 +811,32 @@ impl LocalMcpPolicy {
         reason = "the fixed local MCP policy is validated as one fail-closed contract"
     )]
     pub fn validate(&self) -> Result<(), ManifestError> {
+        for (name, digest) in &self.expected_output_catalog {
+            if !self.expected_catalog.contains_key(name) {
+                return Err(ManifestError::Invalid {
+                    field: "local_mcp.expected_output_catalog",
+                    message: "must only contain reviewed callable tools".into(),
+                });
+            }
+            validate_digest(digest, "local_mcp.expected_output_catalog")?;
+        }
+        for (name, schemas) in &self.reviewed_schemas {
+            let absent_output = local_mcp_output_schema_digest(None);
+            let output_pin = self
+                .expected_output_catalog
+                .get(name)
+                .unwrap_or(&absent_output);
+            if self
+                .expected_catalog
+                .get(name)
+                .is_none_or(|input_pin| !schemas.binds_blake3(input_pin, output_pin))
+            {
+                return Err(ManifestError::Invalid {
+                    field: "local_mcp.reviewed_schemas",
+                    message: "must bind a known reviewed profile to the exact integrity pin".into(),
+                });
+            }
+        }
         if self.package_id.is_empty()
             || self
                 .package_id
@@ -3425,6 +3659,55 @@ macro_rules! embed_manifest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reviewed_schema_profile_preserves_payloads_and_significant_keywords() {
+        use serde_json::json;
+        let input = json!({"type":"object", "description":"baseline", "properties": {
+            "description": {"type":"string", "description":"annotation"},
+            "default": {"const":{"description":"payload", "default":"payload"}}
+        }, "required":["description"], "additionalProperties":false});
+        let output = json!({"type":"object", "properties":{"result":{"type":"string"}}});
+        let reviewed =
+            super::ReviewedMcpSchemas::from_reviewed(input.clone(), Some(output.clone())).unwrap();
+        let encoded = serde_json::to_value(&reviewed).unwrap();
+        assert!(encoded["input_compatibility_digest"].is_string());
+        assert!(encoded["output_compatibility_digest"].is_string());
+        let decoded: super::ReviewedMcpSchemas = serde_json::from_value(encoded).unwrap();
+        let mut changed = input.clone();
+        changed["description"] = json!("hostile-canary");
+        changed["properties"]["description"]["description"] = json!("new annotation");
+        assert!(decoded.matches(&changed, Some(&output)));
+        assert!(!format!("{decoded:?}").contains("payload"));
+        for (key, value) in [
+            ("required", json!([])),
+            ("default", json!({})),
+            ("format", json!("uri")),
+            ("additionalProperties", json!(true)),
+            ("unknown", json!("annotation")),
+        ] {
+            let mut semantic = changed.clone();
+            semantic[key] = value;
+            assert!(!decoded.matches(&semantic, Some(&output)), "{key}");
+        }
+        changed["properties"]["default"]["const"]["description"] = json!("different payload");
+        assert!(!decoded.matches(&changed, Some(&output)));
+        assert!(!decoded.matches(&input, None));
+        assert!(!decoded.matches(&input, Some(&json!(null))));
+        let input_pin = super::local_mcp_schema_digest(&input);
+        let output_pin = super::local_mcp_output_schema_digest(Some(&output));
+        let absent_pin = super::local_mcp_output_schema_digest(None);
+        assert_ne!(output_pin, absent_pin);
+        assert!(decoded.binds_blake3(&input_pin, &output_pin));
+        assert!(!decoded.binds_blake3(&input_pin, &absent_pin));
+        assert!(!decoded.binds_blake3(&input_pin, &"0".repeat(64)));
+        let absent = super::ReviewedMcpSchemas::from_reviewed(input.clone(), None).unwrap();
+        assert!(absent.binds_blake3(&input_pin, &absent_pin));
+        assert!(!absent.binds_blake3(&input_pin, &output_pin));
+        assert!(super::ReviewedMcpSchemas::from_reviewed(json!(null), None).is_none());
+        let mut tampered = decoded;
+        tampered.input_compatibility_digest = "0".repeat(64);
+        assert!(!tampered.matches(&input, Some(&output)));
+    }
     use super::*;
     use chrono::Utc;
     use serde_json::json;

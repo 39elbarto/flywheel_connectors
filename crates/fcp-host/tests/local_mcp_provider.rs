@@ -54,6 +54,121 @@ fn normal_request_runs_all_catalog_tools_and_tears_down() {
 }
 
 #[test]
+fn compatible_catalog_and_reviewed_profile_run_in_real_process() {
+    for mode in ["catalog-added", "catalog-metadata"] {
+        let fixture = Fixture::new(mode);
+        let mut policy = fixture.policy();
+        if mode == "catalog-metadata" {
+            policy.reviewed_schemas.insert(
+                "tools_documentation".into(),
+                fcp_manifest::ReviewedMcpSchemas::from_reviewed(json!({"type":"object"}), None)
+                    .unwrap(),
+            );
+        }
+        // Exercise the serialized immutable policy consumer, not just matches().
+        let policy = serde_json::from_slice(&serde_json::to_vec(&policy).unwrap()).unwrap();
+        let result = LocalMcpProvider::new(policy)
+            .unwrap()
+            .run_once(one_call())
+            .unwrap();
+        assert_eq!(result.status, LocalMcpResultStatus::Completed, "{mode}");
+        assert_eq!(result.responses.len(), 1);
+        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        assert!(!format!("{result:?}").contains("schema-secret-canary"));
+    }
+}
+
+#[test]
+fn raw_only_output_pins_and_legacy_absence_run_through_supervisor() {
+    let output = json!({"type":"object"});
+    for (mode, pin_present, succeeds) in [
+        ("normal", false, true),
+        ("catalog-output-present", false, false),
+        ("catalog-output-present", true, true),
+        ("catalog-output-changed", true, false),
+        ("catalog-output-unknown", false, false),
+        ("catalog-output-unknown", true, false),
+        ("normal", true, false),
+        ("catalog-output-unrelated", false, true),
+    ] {
+        let fixture = Fixture::new(mode);
+        let mut policy = fixture.policy();
+        policy.expected_output_catalog = LOCAL_MCP_CATALOG_TOOLS
+            .iter()
+            .map(|name| {
+                (
+                    (*name).into(),
+                    fcp_manifest::local_mcp_output_schema_digest(None),
+                )
+            })
+            .collect();
+        if pin_present {
+            policy.expected_output_catalog.insert(
+                "tools_documentation".into(),
+                fcp_manifest::local_mcp_output_schema_digest(Some(&output)),
+            );
+        }
+        let policy = serde_json::from_slice(&serde_json::to_vec(&policy).unwrap()).unwrap();
+        let result = LocalMcpProvider::new(policy)
+            .unwrap()
+            .run_once(one_call())
+            .unwrap();
+        assert_eq!(
+            result.status == LocalMcpResultStatus::Completed,
+            succeeds,
+            "{mode} pin_present={pin_present}"
+        );
+        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        if !succeeds {
+            assert!(result.responses.is_empty());
+            assert_eq!(result.shutdown.stderr_bytes, 0);
+            assert_eq!(result.result_code, "catalog_mismatch");
+        }
+    }
+}
+
+#[test]
+fn sequence_catalog_preflight_rejects_later_conflict_before_any_call() {
+    for mode in [
+        "catalog-later-changed",
+        "catalog-duplicate",
+        "catalog-malformed",
+        "catalog-oversized",
+    ] {
+        let fixture = Fixture::new(mode);
+        let result = fixture
+            .provider()
+            .run_once(LocalMcpRequest {
+                correlation_id: "sequence-preflight".into(),
+                calls: vec![
+                    LocalMcpCall {
+                        tool: "tools_documentation".into(),
+                        arguments: json!({}),
+                    },
+                    LocalMcpCall {
+                        tool: "search_nodes".into(),
+                        arguments: json!({}),
+                    },
+                ],
+            })
+            .unwrap();
+        assert_eq!(result.status, LocalMcpResultStatus::Failed, "{mode}");
+        assert!(result.responses.is_empty());
+        // Every fixture call emits a stderr marker: zero proves no first call.
+        assert_eq!(result.shutdown.stderr_bytes, 0, "{mode}");
+        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        assert_eq!(
+            result.result_code,
+            if mode == "catalog-oversized" {
+                "frame_too_large"
+            } else {
+                "catalog_mismatch"
+            }
+        );
+    }
+}
+
+#[test]
 fn seccomp_denies_socket_attempt_while_stdio_remains_functional() {
     let fixture = Fixture::new("socket");
     let result = fixture
@@ -416,6 +531,8 @@ fn installed_n8n_mcp_catalog_and_read_only_calls_run_through_supervisor() {
             .map(|method| (*method).into())
             .collect(),
         expected_catalog,
+        expected_output_catalog: BTreeMap::new(),
+        reviewed_schemas: BTreeMap::new(),
         callable_tools: LOCAL_MCP_CATALOG_TOOLS
             .iter()
             .map(|tool| (*tool).into())
@@ -578,6 +695,8 @@ impl Fixture {
                 .map(|method| (*method).into())
                 .collect(),
             expected_catalog,
+            expected_output_catalog: BTreeMap::new(),
+            reviewed_schemas: BTreeMap::new(),
             callable_tools: LOCAL_MCP_CATALOG_TOOLS
                 .iter()
                 .map(|tool| (*tool).into())
@@ -681,11 +800,33 @@ while IFS= read -r line; do
         printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"unexpected","inputSchema":{"type":"object"}}]}}\n' "$id"
       elif [ "$mode" = schema ]; then
         printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"string"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-added ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"}},{"name":"new_tool","inputSchema":{"type":"object"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-metadata ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object","description":"schema-secret-canary"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-output-present ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"},"outputSchema":{"type":"object"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-output-changed ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"},"outputSchema":{"type":"string"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-output-unknown ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"},"outputSchema":{"type":"object","unknownKeyword":true}}]}}\n' "$id"
+      elif [ "$mode" = catalog-output-unrelated ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"}},{"name":"new-tool","inputSchema":{"type":"object"},"outputSchema":{"unknownKeyword":true}}]}}\n' "$id"
+      elif [ "$mode" = catalog-later-changed ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"}},{"name":"search_nodes","inputSchema":{"type":"string"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-duplicate ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"}},{"name":"tools_documentation","inputSchema":{"type":"object"}}]}}\n' "$id"
+      elif [ "$mode" = catalog-malformed ]; then
+        printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"tools_documentation","inputSchema":{"type":"object"}},{"name":"unrelated","inputSchema":null}]}}\n' "$id"
+      elif [ "$mode" = catalog-oversized ]; then
+        head -c 2000 /dev/zero | tr '\000' x
+        exit 0
       else
         printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":%s}}\n' "$id" "$tools"
       fi
       ;;
     *'"method":"tools/call"'*)
+      case "$mode" in catalog-*) printf 'call-dispatched\n' >&2;; esac
       case "$mode" in
         timeout)
           sleep 2

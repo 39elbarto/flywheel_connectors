@@ -96,6 +96,7 @@ struct ApprovedTool {
     class: ToolClass,
     input_schema_digest: String,
     output_schema_digest: String,
+    reviewed_schemas: Option<fcp_manifest::ReviewedMcpSchemas>,
 }
 
 #[derive(Debug, Clone)]
@@ -399,7 +400,11 @@ impl CapabilityPolicy {
             if object.keys().any(|key| {
                 !matches!(
                     key.as_str(),
-                    "name" | "class" | "input_schema_digest" | "output_schema_digest"
+                    "name"
+                        | "class"
+                        | "input_schema_digest"
+                        | "output_schema_digest"
+                        | "reviewed_schemas"
                 )
             }) {
                 return Err(invalid_policy(
@@ -438,6 +443,14 @@ impl CapabilityPolicy {
                 class,
                 input_schema_digest,
                 output_schema_digest,
+                reviewed_schemas: object
+                    .get("reviewed_schemas")
+                    .map(|value| {
+                        serde_json::from_value(value.clone()).map_err(|_| {
+                            invalid_policy("approved_tools.reviewed_schemas is invalid")
+                        })
+                    })
+                    .transpose()?,
             });
         }
 
@@ -1659,7 +1672,7 @@ fn capability_observations(
             .get("inputSchema")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if !input_schema.is_null() && !input_schema.is_object() {
+        if !input_schema.is_object() {
             return Err(McpBridgeError::InvalidInput(
                 "MCP tools/list returned a malformed inputSchema".into(),
             ));
@@ -1668,7 +1681,7 @@ fn capability_observations(
             .get("outputSchema")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
-        if !output_schema.is_null() && !output_schema.is_object() {
+        if object.get("outputSchema").is_some() && !output_schema.is_object() {
             return Err(McpBridgeError::InvalidInput(
                 "MCP tools/list returned a malformed outputSchema".into(),
             ));
@@ -1715,6 +1728,31 @@ fn reviewed_policy_snapshot(
         .approved_tools
         .iter()
         .map(|approved| {
+            if let Some(schemas) = &approved.reviewed_schemas {
+                if !schemas.binds_sha256(
+                    &approved.input_schema_digest,
+                    &approved.output_schema_digest,
+                ) {
+                    return Err(McpBridgeError::InvalidInput(
+                        "capability_policy compatibility profile is invalid".into(),
+                    ));
+                }
+                let observation = ToolObservation::from_schemas(
+                    &approved.name,
+                    &schemas.input_schema,
+                    schemas
+                        .output_schema
+                        .as_ref()
+                        .unwrap_or(&serde_json::Value::Null),
+                    approved.class,
+                )
+                .map_err(|_| {
+                    McpBridgeError::InvalidInput(
+                        "capability_policy reviewed schemas are invalid".into(),
+                    )
+                })?;
+                return Ok(observation);
+            }
             ToolObservation::from_digests(
                 &approved.name,
                 &approved.input_schema_digest,
@@ -3920,6 +3958,99 @@ mod tests {
     }
 
     #[test]
+    fn reviewed_profile_policy_consumes_pins_and_isolates_schema_conflicts() {
+        let input = json!({"type":"object", "description":"old", "properties":{"id":{"type":"string"}}, "required":["id"]});
+        let output = json!({"type":"object", "description":"old output"});
+        let (input_digest, output_digest) = schema_digests(&input, &output);
+        let mut approved = policy_tool("approved", "write", &input_digest, &output_digest);
+        approved["reviewed_schemas"] = serde_json::to_value(
+            fcp_manifest::ReviewedMcpSchemas::from_reviewed(input.clone(), Some(output.clone()))
+                .unwrap(),
+        )
+        .unwrap();
+        let params = policy_params("eec", json!([approved]));
+        let config = McpBridgeConfig::from_params(&params).unwrap();
+        let policy = config.capability_policy.as_ref().unwrap();
+        let mut changed_input = input;
+        changed_input["description"] = json!("secret-schema-canary");
+        let mut changed_output = output;
+        changed_output["description"] = json!("secret-output-canary");
+        let catalog = json!({"tools":[
+            {"name":"approved", "inputSchema":changed_input, "outputSchema":changed_output},
+            {"name":"new_tool", "inputSchema":{"type":"object"}}
+        ]});
+        let snapshot = build_capability_snapshot(
+            &catalog,
+            policy,
+            ProtocolEra::Modern,
+            ProtocolVersion::V20260728,
+        )
+        .unwrap();
+        assert!(!snapshot.tool_call_is_blocked("approved"));
+        assert!(snapshot.tool_call_is_blocked("new_tool"));
+        assert_ne!(
+            snapshot
+                .tools
+                .iter()
+                .find(|tool| tool.name == "approved")
+                .unwrap()
+                .input_schema_digest,
+            input_digest
+        );
+        assert!(!format!("{config:?} {snapshot:?}").contains("secret-schema-canary"));
+        let mut semantic = catalog.clone();
+        semantic["tools"][0]["inputSchema"]["required"] = json!([]);
+        assert!(
+            build_capability_snapshot(
+                &semantic,
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728
+            )
+            .unwrap()
+            .tool_call_is_blocked("approved")
+        );
+        let mut absent = catalog.clone();
+        absent["tools"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("outputSchema");
+        assert!(
+            build_capability_snapshot(
+                &absent,
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728
+            )
+            .unwrap()
+            .tool_call_is_blocked("approved")
+        );
+        let mut malformed = catalog;
+        malformed["tools"][1]["inputSchema"] = json!(null);
+        assert!(
+            build_capability_snapshot(
+                &malformed,
+                policy,
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728
+            )
+            .is_err()
+        );
+        let mut tampered = params;
+        tampered["capability_policy"]["approved_tools"][0]["reviewed_schemas"]["input_compatibility_digest"] =
+            json!("bad");
+        let config = McpBridgeConfig::from_params(&tampered).unwrap();
+        assert!(
+            reviewed_policy_snapshot(
+                config.capability_policy.as_ref().unwrap(),
+                ProtocolEra::Modern,
+                ProtocolVersion::V20260728
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn capability_snapshot_exact_approval_and_unknown_classification() {
         let input_schema = json!({"type": "object"});
         let output_schema = serde_json::Value::Null;
@@ -3938,7 +4069,7 @@ mod tests {
         let snapshot = build_capability_snapshot(
             &json!({
                 "tools": [
-                    {"name": "approved", "inputSchema": input_schema, "outputSchema": null},
+                    {"name": "approved", "inputSchema": input_schema},
                     {"name": "unlisted", "description": "read this", "inputSchema": {"type": "object"}}
                 ]
             }),
@@ -3987,8 +4118,7 @@ mod tests {
             &json!({
                 "tools": [{
                     "name": "approved",
-                    "inputSchema": {"type": "array"},
-                    "outputSchema": null
+                    "inputSchema": {"type": "array"}
                 }]
             }),
             config.capability_policy.as_ref().unwrap(),

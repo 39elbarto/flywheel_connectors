@@ -55,6 +55,8 @@ fn provider() -> LocalMcpProvider {
             .map(|method| (*method).into())
             .collect(),
         expected_catalog,
+        expected_output_catalog: BTreeMap::new(),
+        reviewed_schemas: BTreeMap::new(),
         callable_tools: LOCAL_MCP_CATALOG_TOOLS
             .iter()
             .map(|tool| (*tool).into())

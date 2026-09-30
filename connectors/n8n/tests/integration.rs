@@ -53,14 +53,31 @@ fn run_fwc_n8n_cli_once_bounded(
     input: &[u8],
     launch_count: &AtomicUsize,
 ) -> Result<(ExitStatus, Vec<u8>), &'static str> {
+    run_fwc_n8n_command_once_bounded(input, launch_count, &["run-once", "n8n.workflows.execute"])
+}
+
+fn run_fwc_n8n_command_once_bounded(
+    input: &[u8],
+    launch_count: &AtomicUsize,
+    args: &[&str],
+) -> Result<(ExitStatus, Vec<u8>), &'static str> {
+    run_source_command_once_bounded(env!("CARGO_BIN_EXE_fwc-n8n"), input, launch_count, args)
+}
+
+fn run_source_command_once_bounded(
+    executable: &str,
+    input: &[u8],
+    launch_count: &AtomicUsize,
+    args: &[&str],
+) -> Result<(ExitStatus, Vec<u8>), &'static str> {
     let deadline = Instant::now()
         .checked_add(RUN_ONCE_CLI_TIMEOUT)
         .ok_or("child_timeout_unrepresentable")?;
     launch_count.fetch_add(1, Ordering::SeqCst);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fwc-n8n"))
-        .arg("run-once")
-        .arg("n8n.workflows.execute")
+    let mut child = Command::new(executable)
+        .args(args)
         .env_clear()
+        .env("PATH", "/usr/bin:/bin")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -137,6 +154,163 @@ fn run_fwc_n8n_cli_once_bounded(
         return Err("child_stdout_unavailable");
     };
     Ok((status, bytes))
+}
+
+#[test]
+fn actual_cli_reviewed_schema_profile_producer_and_consumer() {
+    let input = json!({"type":"object", "description":"reviewed baseline", "required":["id"], "properties":{"id":{"type":"string"}}});
+    let baseline = json!({"integrity":"blake3", "input_schema":input, "output_schema":null,
+        "input_schema_digest":fcp_manifest::local_mcp_schema_digest(&input),
+        "output_schema_digest":fcp_manifest::local_mcp_output_schema_digest(None)});
+    let launches = AtomicUsize::new(0);
+    let (status, bytes) = run_fwc_n8n_command_once_bounded(
+        &serde_json::to_vec(&baseline).unwrap(),
+        &launches,
+        &["reviewed-schema-profile"],
+    )
+    .unwrap();
+    assert!(status.success());
+    let profile: fcp_manifest::ReviewedMcpSchemas = serde_json::from_slice(&bytes).unwrap();
+    let mut metadata = input;
+    metadata["description"] = json!("changed metadata");
+    assert!(profile.matches(&metadata, None));
+    metadata["required"] = json!([]);
+    assert!(!profile.matches(&metadata, None));
+    let mut tampered = baseline.clone();
+    tampered["input_schema_digest"] = json!("0".repeat(64));
+    let (status, bytes) = run_fwc_n8n_command_once_bounded(
+        &serde_json::to_vec(&tampered).unwrap(),
+        &launches,
+        &["reviewed-schema-profile"],
+    )
+    .unwrap();
+    assert!(!status.success());
+    assert!(!String::from_utf8_lossy(&bytes).contains("reviewed baseline"));
+    let output =
+        json!({"type":"object", "properties":{"result":{"type":"string"}}, "required":["result"]});
+    let mut present = baseline.clone();
+    present["output_schema"] = output.clone();
+    present["output_schema_digest"] =
+        json!(fcp_manifest::local_mcp_output_schema_digest(Some(&output)));
+    let (status, bytes) = run_fwc_n8n_command_once_bounded(
+        &serde_json::to_vec(&present).unwrap(),
+        &launches,
+        &["reviewed-schema-profile"],
+    )
+    .unwrap();
+    assert!(status.success());
+    let profile: fcp_manifest::ReviewedMcpSchemas = serde_json::from_slice(&bytes).unwrap();
+    assert!(profile.matches(&profile.input_schema, Some(&output)));
+    let mut garbage_pin = baseline.clone();
+    garbage_pin["output_schema_digest"] = json!("garbage");
+    let mut added = baseline;
+    added["output_schema"] = output;
+    let mut removed = present.clone();
+    removed["output_schema"] = json!(null);
+    let mut semantic = present;
+    semantic["output_schema"]["required"] = json!([]);
+    for invalid in [garbage_pin, added, removed, semantic] {
+        let (status, bytes) = run_fwc_n8n_command_once_bounded(
+            &serde_json::to_vec(&invalid).unwrap(),
+            &launches,
+            &["reviewed-schema-profile"],
+        )
+        .unwrap();
+        assert!(!status.success());
+        assert!(!String::from_utf8_lossy(&bytes).contains("reviewed baseline"));
+    }
+    assert_eq!(launches.load(Ordering::SeqCst), 7);
+}
+
+#[test]
+fn actual_assembler_catalog_producer_checks_output_integrity_and_presence() {
+    let input = json!({"type":"object"});
+    let names = fcp_manifest::LOCAL_MCP_CATALOG_TOOLS;
+    let pins: serde_json::Map<String, Value> = names
+        .iter()
+        .map(|name| {
+            (
+                (*name).into(),
+                json!(fcp_manifest::local_mcp_schema_digest(&input)),
+            )
+        })
+        .collect();
+    let tools: Vec<Value> = names
+        .iter()
+        .map(|name| json!({"name":name,"inputSchema":input}))
+        .collect();
+    let request = json!({"expected_catalog":pins, "catalog":{"tools":tools}});
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../scripts/n8n_release_assembler.sh"
+    );
+    let args = [
+        script,
+        "--offline-catalog-bindings",
+        env!("CARGO_BIN_EXE_fwc-n8n"),
+    ];
+    let launches = AtomicUsize::new(0);
+    let invoke = |request: &Value| {
+        run_source_command_once_bounded(
+            "/bin/bash",
+            &serde_json::to_vec(request).unwrap(),
+            &launches,
+            &args,
+        )
+        .unwrap()
+    };
+    let (status, bytes) = invoke(&request);
+    assert!(status.success());
+    let policy: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(policy["reviewed_schemas"], json!({}));
+    for name in names {
+        assert_eq!(
+            policy["expected_output_catalog"][name],
+            fcp_manifest::local_mcp_output_schema_digest(None)
+        );
+    }
+    for output in [
+        json!({"type":"object"}),
+        json!({"type":"string"}),
+        json!({"unknownKeyword":true}),
+        json!(null),
+    ] {
+        let mut drift = request.clone();
+        drift["catalog"]["tools"][0]["outputSchema"] = output;
+        assert!(!invoke(&drift).0.success());
+    }
+    let output = json!({"type":"object", "properties":{"result":{"type":"string"}}});
+    let baseline = json!({"integrity":"blake3", "input_schema":input, "output_schema":output,
+        "input_schema_digest":fcp_manifest::local_mcp_schema_digest(&input),
+        "output_schema_digest":fcp_manifest::local_mcp_output_schema_digest(Some(&output))});
+    let mut reviewed = request;
+    reviewed["reviewed_baselines"] = json!({names[0]:baseline});
+    reviewed["catalog"]["tools"][0]["outputSchema"] = output.clone();
+    reviewed["catalog"]["tools"][0]["outputSchema"]["description"] =
+        json!("compatible output annotation");
+    let (status, bytes) = invoke(&reviewed);
+    assert!(status.success());
+    let policy: Value = serde_json::from_slice(&bytes).unwrap();
+    let profile: fcp_manifest::ReviewedMcpSchemas =
+        serde_json::from_value(policy["reviewed_schemas"][names[0]].clone()).unwrap();
+    assert!(profile.binds_blake3(
+        &fcp_manifest::local_mcp_schema_digest(&input),
+        &fcp_manifest::local_mcp_output_schema_digest(Some(&output))
+    ));
+    let mut wrong_pin = reviewed.clone();
+    wrong_pin["reviewed_baselines"][names[0]]["output_schema_digest"] = json!("garbage");
+    let mut missing = reviewed.clone();
+    missing["catalog"]["tools"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("outputSchema");
+    let mut semantic = reviewed.clone();
+    semantic["catalog"]["tools"][0]["outputSchema"]["type"] = json!("string");
+    let mut changed_baseline = reviewed;
+    changed_baseline["reviewed_baselines"][names[0]]["output_schema"]["type"] = json!("string");
+    for invalid in [wrong_pin, missing, semantic, changed_baseline] {
+        assert!(!invoke(&invalid).0.success());
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -5791,6 +5965,8 @@ async fn executions_get() {
             "startedAt": "2025-03-01T08:00:00.000Z",
             "stoppedAt": "2025-03-01T08:00:05.000Z",
             "workflowId": "1001",
+            "workflowVersionId": "reviewed-workflow-version",
+            "data": {"canary":"execution-secret-canary"},
             "status": "success",
         })))
         .mount(&server)
@@ -5807,6 +5983,8 @@ async fn executions_get() {
     assert_eq!(result["id"], "50001");
     assert_eq!(result["finished"], true);
     assert_eq!(result["status"], "success");
+    assert_eq!(result["workflowVersionId"], "reviewed-workflow-version");
+    assert!(!result.to_string().contains("execution-secret-canary"));
     let request = &server.received_requests().await.unwrap()[0];
     assert_eq!(request.url.path(), "/api/v1/executions/50001");
     assert_eq!(request.url.query(), None);

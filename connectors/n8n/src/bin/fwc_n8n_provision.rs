@@ -2511,10 +2511,10 @@ fn validate_inventory(
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
-        if tool.len() != expected_tool_fields.len()
+        if !fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
             || !tool
                 .keys()
-                .all(|key| expected_tool_fields.contains(key.as_str()))
+                .all(|key| expected_tool_fields.contains(key.as_str()) || key == "reviewed_schemas")
             || !APPROVED_TOOLS.contains(&name)
             || tool.get("class").and_then(Value::as_str) != Some("write")
         {
@@ -6152,5 +6152,56 @@ mod tests {
             )
             .expect("provision receipt refresh");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioning_consumes_reviewed_profile_without_relaxing_raw_binding() {
+        let fixture = Fixture::new();
+        let path = fixture.stage.join("inventory/eec-official-mcp.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        let input = serde_json::json!({"type":"object", "description":"reviewed"});
+        let output = serde_json::json!({"type":"object"});
+        let input_digest = fcp_manifest::mcp_schema_integrity_digest(&input);
+        let output_digest = fcp_manifest::mcp_schema_integrity_digest(&output);
+        let mut binding = fixture.request().bindings[0].clone();
+        binding.archive_input_schema_digest = input_digest.clone();
+        binding.archive_output_schema_digest = output_digest.clone();
+        let policy = &mut value[0]["config"]["capability_policy"];
+        let archive = policy["approved_tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == "archive_workflow")
+            .unwrap();
+        archive["input_schema_digest"] = serde_json::json!(input_digest);
+        archive["output_schema_digest"] = serde_json::json!(output_digest);
+        archive["reviewed_schemas"] = serde_json::to_value(
+            fcp_manifest::ReviewedMcpSchemas::from_reviewed(input, Some(output)).unwrap(),
+        )
+        .unwrap();
+        policy["archive_workflow_schema"]["input_schema_digest"] = serde_json::json!(input_digest);
+        policy["archive_workflow_schema"]["output_schema_digest"] =
+            serde_json::json!(output_digest);
+        let release_root = fixture.releases.join(&fixture.release_id);
+        validate_inventory(
+            &value,
+            ServerId::Eec,
+            &release_root,
+            &binding,
+            LifecycleSchemaMode::CurrentPerServer,
+        )
+        .unwrap();
+        binding.archive_input_schema_digest = "sha256:wrong".into();
+        assert!(
+            validate_inventory(
+                &value,
+                ServerId::Eec,
+                &release_root,
+                &binding,
+                LifecycleSchemaMode::CurrentPerServer
+            )
+            .is_err()
+        );
     }
 }

@@ -23,6 +23,7 @@ ipnet = "2.9"
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 toml = "1.0"
 thiserror.workspace = true
 

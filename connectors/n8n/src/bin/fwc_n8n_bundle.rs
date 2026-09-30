@@ -756,7 +756,7 @@ fn verify_inventory_binding(
                         let Some(tool) = tool.as_object() else {
                             return false;
                         };
-                        tool.len() == 4
+                        fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
                             && tool.get("name").and_then(Value::as_str) == Some(name)
                             && tool.get("class").and_then(Value::as_str) == Some("write")
                             && tool.get("input_schema_digest").and_then(Value::as_str)
@@ -782,7 +782,7 @@ fn verify_inventory_binding(
                         let Some(tool) = tool.as_object() else {
                             return false;
                         };
-                        tool.len() == 4
+                        fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
                             && tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
                             && tool.get("class").and_then(Value::as_str) == Some("write")
                             && valid_digest(tool.get("input_schema_digest"))
@@ -1564,6 +1564,48 @@ mod tests {
             BundleErrorCode::NotBundleExecutable | BundleErrorCode::Permissions
         ));
         assert!(!format!("{error:?}").contains(executable.to_string_lossy().as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn immutable_bundle_consumes_reviewed_profile_and_rejects_tampering() {
+        let fixture = ReleaseFixture::new();
+        let path = fixture.artifact("inventory/eec-official-mcp.json");
+        let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let input = serde_json::json!({"type":"object", "description":"reviewed archive"});
+        let output = serde_json::json!({"type":"object"});
+        let input_digest = fcp_manifest::mcp_schema_integrity_digest(&input);
+        let output_digest = fcp_manifest::mcp_schema_integrity_digest(&output);
+        let policy = &mut value[0]["config"]["capability_policy"];
+        let archive = policy["approved_tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == "archive_workflow")
+            .unwrap();
+        archive["input_schema_digest"] = serde_json::json!(input_digest);
+        archive["output_schema_digest"] = serde_json::json!(output_digest);
+        archive["reviewed_schemas"] = serde_json::to_value(
+            fcp_manifest::ReviewedMcpSchemas::from_reviewed(input, Some(output)).unwrap(),
+        )
+        .unwrap();
+        policy["archive_workflow_schema"]["input_schema_digest"] = serde_json::json!(input_digest);
+        policy["archive_workflow_schema"]["output_schema_digest"] =
+            serde_json::json!(output_digest);
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        fixture.write_receipt(None);
+        verify_release_bundle_for_owner(&fixture.executable, fixture.owner)
+            .expect("reviewed immutable profile");
+        value[0]["config"]["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == "archive_workflow")
+            .unwrap()["reviewed_schemas"]["output_compatibility_digest"] =
+            serde_json::json!("tampered");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        fixture.write_receipt(None);
+        assert!(verify_release_bundle_for_owner(&fixture.executable, fixture.owner).is_err());
     }
 
     #[cfg(unix)]

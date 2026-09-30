@@ -78,6 +78,8 @@ impl ToolImpact {
 pub struct ToolSnapshot {
     pub name: String,
     pub schema_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_schemas: Option<fcp_manifest::ReviewedMcpSchemas>,
     pub description_digest: String,
     pub impact: ToolImpact,
     #[serde(default)]
@@ -119,6 +121,12 @@ impl ComponentSnapshot {
         }
         for protocol in &self.provenance.protocol_versions {
             validate_atom("protocol_version", protocol)?;
+            if !matches!(
+                protocol.as_str(),
+                "2024-11-05" | "2025-06-18" | "2025-11-25" | "2026-07-28"
+            ) {
+                return Err(UpdateError::InvalidSnapshot("unsupported_protocol_profile"));
+            }
         }
         if self.dependencies.len() > MAX_DEPENDENCIES {
             return Err(UpdateError::InvalidSnapshot("too_many_dependencies"));
@@ -131,6 +139,18 @@ impl ComponentSnapshot {
             return Err(UpdateError::InvalidSnapshot("too_many_tools"));
         }
         for tool in &self.tools {
+            if let Some(schemas) = &tool.reviewed_schemas {
+                if !schemas.matches(&schemas.input_schema, schemas.output_schema.as_ref())
+                    || tool.schema_digest
+                        != fcp_manifest::local_mcp_schema_digest(&serde_json::json!({
+                            "input": schemas.input_schema, "output": schemas.output_schema,
+                        }))
+                {
+                    return Err(UpdateError::InvalidSnapshot(
+                        "reviewed_schema_integrity_mismatch",
+                    ));
+                }
+            }
             validate_identifier("tool_name", &tool.name)?;
             validate_atom("schema_digest", &tool.schema_digest)?;
             validate_atom("description_digest", &tool.description_digest)?;
@@ -823,9 +843,11 @@ fn diff_snapshots(current: &ComponentSnapshot, candidate: &ComponentSnapshot) ->
             (old != new).then(|| ChangedTool {
                 name: (*name).to_string(),
                 changes: [
-                    (old.schema_digest != new.schema_digest).then_some(ToolChange::Schema),
-                    (old.description_digest != new.description_digest)
-                        .then_some(ToolChange::Description),
+                    (!tool_schemas_compatible(old, new)).then_some(ToolChange::Schema),
+                    (old.description_digest != new.description_digest
+                        || (old.schema_digest != new.schema_digest
+                            && tool_schemas_compatible(old, new)))
+                    .then_some(ToolChange::Description),
                     (old.impact != new.impact).then_some(ToolChange::Impact),
                     (old.permissions != new.permissions).then_some(ToolChange::Permissions),
                 ]
@@ -902,6 +924,30 @@ fn diff_snapshots(current: &ComponentSnapshot, candidate: &ComponentSnapshot) ->
     }
 }
 
+fn tool_schemas_compatible(old: &ToolSnapshot, new: &ToolSnapshot) -> bool {
+    match (&old.reviewed_schemas, &new.reviewed_schemas) {
+        (Some(old), Some(new)) => {
+            old.profile == new.profile
+                && old.input_compatibility_digest == new.input_compatibility_digest
+                && old.output_compatibility_digest == new.output_compatibility_digest
+        }
+        (None, None) => old.schema_digest == new.schema_digest,
+        _ => false,
+    }
+}
+
+impl ToolSnapshot {
+    /// Produce a snapshot from reviewed schemas with both integrity and compatibility pins.
+    #[must_use]
+    pub fn with_reviewed_schemas(mut self, schemas: fcp_manifest::ReviewedMcpSchemas) -> Self {
+        self.schema_digest = fcp_manifest::local_mcp_schema_digest(&serde_json::json!({
+            "input": schemas.input_schema, "output": schemas.output_schema,
+        }));
+        self.reviewed_schemas = Some(schemas);
+        self
+    }
+}
+
 fn validate_atom(field: &'static str, value: &str) -> Result<(), UpdateError> {
     if value.is_empty()
         || value.len() > MAX_ATOM_BYTES
@@ -948,10 +994,90 @@ fn canonical_digest<T: Serialize>(value: &T) -> Result<String, UpdateError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn protocol_profile_sets_ignore_order_and_duplicates_but_not_wire_changes() {
+        let mut current = snapshot("1.0.0", vec![tool("reviewed", ToolImpact::Read)]);
+        current.provenance.protocol_versions =
+            BTreeSet::from(["2024-11-05".into(), "2025-06-18".into()]);
+        let current = current.normalize_and_validate().unwrap();
+        let mut encoded = serde_json::to_value(&current).unwrap();
+        encoded["provenance"]["protocolVersions"] =
+            serde_json::json!(["2025-06-18", "2024-11-05", "2025-06-18"]);
+        let candidate: ComponentSnapshot = serde_json::from_value(encoded).unwrap();
+        let candidate = candidate.normalize_and_validate().unwrap();
+        assert!(
+            !diff_snapshots(&current, &candidate)
+                .flags
+                .contains(&UpdateFlag::ProtocolChanged)
+        );
+        let mut changed = candidate;
+        changed.provenance.protocol_versions.remove("2024-11-05");
+        let diff = diff_snapshots(&current, &changed);
+        assert!(diff.flags.contains(&UpdateFlag::ProtocolChanged));
+        assert!(diff.flags.contains(&UpdateFlag::Breaking));
+    }
+
+    #[test]
+    fn reviewed_update_snapshot_metadata_is_compatible_but_semantics_are_not() {
+        let input = serde_json::json!({"type":"object", "description":"old", "properties":{"id":{"type":"string"}}, "required":["id"]});
+        let output = serde_json::json!({"type":"object", "description":"old"});
+        let original =
+            fcp_manifest::ReviewedMcpSchemas::from_reviewed(input.clone(), Some(output.clone()))
+                .unwrap();
+        let current = snapshot(
+            "1.0.0",
+            vec![tool("reviewed", ToolImpact::Write).with_reviewed_schemas(original)],
+        );
+        let mut metadata_input = input.clone();
+        metadata_input["description"] = serde_json::json!("new");
+        let mut metadata_output = output.clone();
+        metadata_output["description"] = serde_json::json!("new");
+        let reviewed = fcp_manifest::ReviewedMcpSchemas::from_reviewed(
+            metadata_input.clone(),
+            Some(metadata_output),
+        )
+        .unwrap();
+        let candidate = snapshot(
+            "99.0.0",
+            vec![tool("reviewed", ToolImpact::Write).with_reviewed_schemas(reviewed)],
+        );
+        let current = current.normalize_and_validate().unwrap();
+        let candidate = candidate.normalize_and_validate().unwrap();
+        assert!(
+            !diff_snapshots(&current, &candidate)
+                .flags
+                .contains(&UpdateFlag::Breaking)
+        );
+        metadata_input["required"] = serde_json::json!([]);
+        let changed = snapshot(
+            "100.0.0",
+            vec![
+                tool("reviewed", ToolImpact::Write).with_reviewed_schemas(
+                    fcp_manifest::ReviewedMcpSchemas::from_reviewed(metadata_input, Some(output))
+                        .unwrap(),
+                ),
+            ],
+        )
+        .normalize_and_validate()
+        .unwrap();
+        assert!(
+            diff_snapshots(&current, &changed)
+                .flags
+                .contains(&UpdateFlag::Breaking)
+        );
+        let mut unknown = candidate.clone();
+        unknown.provenance.protocol_versions.insert("future".into());
+        assert!(unknown.normalize_and_validate().is_err());
+        let encoded = serde_json::to_vec(&candidate).unwrap();
+        let decoded: ComponentSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.normalize_and_validate().unwrap(), candidate);
+    }
+
     fn tool(name: &str, impact: ToolImpact) -> ToolSnapshot {
         ToolSnapshot {
             name: name.to_string(),
             schema_digest: format!("schema-{name}"),
+            reviewed_schemas: None,
             description_digest: format!("description-{name}"),
             impact,
             permissions: BTreeSet::from([format!("permission-{name}")]),

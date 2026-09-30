@@ -556,7 +556,7 @@ impl LocalMcpSession {
                 cancelled,
                 LocalMcpPhase::Startup,
             )?;
-            validate_catalog(policy, &catalog)
+            validate_catalog(policy, request, &catalog)
         })();
         self.startup_latency_ms = elapsed_ms(startup_started.elapsed());
         startup_result?;
@@ -910,26 +910,80 @@ fn read_bounded_frame(
     }
 }
 
-fn validate_catalog(policy: &LocalMcpPolicy, result: &Value) -> Result<(), LocalMcpError> {
+fn validate_catalog(
+    policy: &LocalMcpPolicy,
+    request: &LocalMcpRequest,
+    result: &Value,
+) -> Result<(), LocalMcpError> {
     let tools = result
         .get("tools")
         .and_then(Value::as_array)
         .ok_or(LocalMcpError::CatalogMismatch)?;
-    if tools.len() != policy.expected_catalog.len() {
+    if result
+        .get("nextCursor")
+        .is_some_and(|cursor| !cursor.is_null())
+    {
         return Err(LocalMcpError::CatalogMismatch);
     }
     let mut seen = BTreeMap::new();
     for tool in tools {
-        let name = tool
+        let object = tool.as_object().ok_or(LocalMcpError::CatalogMismatch)?;
+        let name = object
             .get("name")
             .and_then(Value::as_str)
             .ok_or(LocalMcpError::CatalogMismatch)?;
-        let schema = tool
+        if name.is_empty()
+            || name.len() > 256
+            || name
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+            || object.get("title").is_some_and(|value| !value.is_string())
+            || object
+                .get("annotations")
+                .is_some_and(|value| !value.is_object())
+            || object.get("_meta").is_some_and(|value| !value.is_object())
+            || object
+                .get("description")
+                .is_some_and(|value| !value.is_string())
+            || object
+                .get("outputSchema")
+                .is_some_and(|value| !value.is_object())
+        {
+            return Err(LocalMcpError::CatalogMismatch);
+        }
+        let schema = object
             .get("inputSchema")
+            .filter(|value| value.is_object())
             .ok_or(LocalMcpError::CatalogMismatch)?;
-        seen.insert(name.to_string(), local_mcp_schema_digest(schema));
+        if seen
+            .insert(name.to_string(), (schema, object.get("outputSchema")))
+            .is_some()
+        {
+            return Err(LocalMcpError::CatalogMismatch);
+        }
     }
-    if seen != policy.expected_catalog {
+    // Preflight the entire sequence before its first call. Unrequested tools
+    // never gain authority and do not disable an unrelated reviewed route.
+    if request.calls.iter().any(|call| {
+        let Some((input, output)) = seen.get(&call.tool) else {
+            return true;
+        };
+        let Some(pin) = policy.expected_catalog.get(&call.tool) else {
+            return true;
+        };
+        policy.reviewed_schemas.get(&call.tool).map_or_else(
+            || {
+                &local_mcp_schema_digest(input) != pin
+                    || fcp_manifest::local_mcp_output_schema_digest(*output)
+                        != policy
+                            .expected_output_catalog
+                            .get(&call.tool)
+                            .cloned()
+                            .unwrap_or_else(|| fcp_manifest::local_mcp_output_schema_digest(None))
+            },
+            |reviewed| !reviewed.matches(input, *output),
+        )
+    }) {
         return Err(LocalMcpError::CatalogMismatch);
     }
     Ok(())
@@ -1076,17 +1130,62 @@ mod tests {
             .map(|name| json!({"name": name, "inputSchema": {"type": "object"}}))
             .collect();
         let mut result = json!({"tools": expected_tools});
-        assert!(validate_catalog(&policy, &result).is_ok());
+        let request = LocalMcpRequest {
+            correlation_id: "catalog-test".into(),
+            calls: vec![LocalMcpCall {
+                tool: LOCAL_MCP_CATALOG_TOOLS[0].into(),
+                arguments: json!({}),
+            }],
+        };
+        assert!(validate_catalog(&policy, &request, &result).is_ok());
         result["tools"][0]["inputSchema"] = json!({"type": "string"});
         assert!(matches!(
-            validate_catalog(&policy, &result),
+            validate_catalog(&policy, &request, &result),
             Err(LocalMcpError::CatalogMismatch)
         ));
         result["tools"] = json!([{"name":"unexpected","inputSchema":{}}]);
         assert!(matches!(
-            validate_catalog(&policy, &result),
+            validate_catalog(&policy, &request, &result),
             Err(LocalMcpError::CatalogMismatch)
         ));
+    }
+
+    #[test]
+    fn catalog_preflights_requested_subset_but_validates_unrelated_entries() {
+        let policy = test_policy();
+        let request = LocalMcpRequest {
+            correlation_id: "catalog-subset".into(),
+            calls: vec![LocalMcpCall {
+                tool: LOCAL_MCP_CATALOG_TOOLS[0].into(),
+                arguments: json!({}),
+            }],
+        };
+        let valid = json!({"tools":[
+            {"name":LOCAL_MCP_CATALOG_TOOLS[0], "inputSchema":{"type":"object"}},
+            {"name":LOCAL_MCP_CATALOG_TOOLS[1], "inputSchema":{"type":"string"}},
+            {"name":"new-tool", "inputSchema":{"type":"object"}}
+        ]});
+        assert!(validate_catalog(&policy, &request, &valid).is_ok());
+        let mut sequence = request.clone();
+        sequence.calls.push(LocalMcpCall {
+            tool: LOCAL_MCP_CATALOG_TOOLS[1].into(),
+            arguments: json!({}),
+        });
+        assert!(validate_catalog(&policy, &sequence, &valid).is_err());
+        for malformed in [
+            json!(null),
+            json!({}),
+            json!({"tools":{}}),
+            json!({"tools":[]}),
+            json!({"tools":[null]}),
+            json!({"tools":[{"name":"x", "inputSchema":null}]}),
+            json!({"tools":[{"name":"x", "inputSchema":{}, "outputSchema":null}]}),
+        ] {
+            assert!(validate_catalog(&policy, &request, &malformed).is_err());
+        }
+        let mut incomplete = valid;
+        incomplete["nextCursor"] = json!("more");
+        assert!(validate_catalog(&policy, &request, &incomplete).is_err());
     }
 
     #[test]
@@ -1150,6 +1249,8 @@ mod tests {
                 .map(|value| (*value).into())
                 .collect(),
             expected_catalog,
+            expected_output_catalog: BTreeMap::new(),
+            reviewed_schemas: BTreeMap::new(),
             callable_tools: LOCAL_MCP_CATALOG_TOOLS
                 .iter()
                 .map(|value| (*value).into())

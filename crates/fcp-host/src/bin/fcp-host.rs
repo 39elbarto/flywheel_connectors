@@ -11604,7 +11604,7 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         };
         let tool_matches = |tool: &Value, name: &str, input: &str, output: &str| {
             tool.as_object().is_some_and(|tool| {
-                tool.len() == 4
+                fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
                     && tool.get("name").and_then(Value::as_str) == Some(name)
                     && tool.get("class").and_then(Value::as_str) == Some("write")
                     && tool.get("input_schema_digest").and_then(Value::as_str) == Some(input)
@@ -11620,7 +11620,7 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
                     .iter()
                     .find(|tool| {
                         tool.as_object().is_some_and(|tool| {
-                            tool.len() == 4
+                            fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
                                 && tool.get("name").and_then(Value::as_str)
                                     == Some("archive_workflow")
                                 && tool.get("class").and_then(Value::as_str) == Some("write")
@@ -11710,7 +11710,7 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
                 let Some(tool) = tool.as_object() else {
                     return false;
                 };
-                tool.len() == 4
+                fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
                     && tool.get("name").and_then(Value::as_str) == Some(tool_name)
                     && tool.get("class").and_then(Value::as_str) == Some("write")
                     && if tool_name == N8N_OFFICIAL_MCP_ARCHIVE_TOOL {
@@ -36658,6 +36658,44 @@ done"#;
         assert!(official_mcp_policy_allows_tool(
             &different_version,
             N8N_OFFICIAL_MCP_PUBLISH_TOOL
+        ));
+    }
+
+    #[test]
+    fn n8n_official_mcp_reviewed_profile_keeps_exact_inventory_authority() {
+        let mut config = run_once_n8n_official_mcp_lifecycle_test_config();
+        let input = json!({"type":"object", "description":"reviewed"});
+        let output = json!({"type":"object"});
+        let input_digest = fcp_manifest::mcp_schema_integrity_digest(&input);
+        let output_digest = fcp_manifest::mcp_schema_integrity_digest(&output);
+        let policy = &mut config.config.as_mut().unwrap()["capability_policy"];
+        let archive = policy["approved_tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == "archive_workflow")
+            .unwrap();
+        archive["input_schema_digest"] = json!(input_digest);
+        archive["output_schema_digest"] = json!(output_digest);
+        archive["reviewed_schemas"] = serde_json::to_value(
+            fcp_manifest::ReviewedMcpSchemas::from_reviewed(input, Some(output)).unwrap(),
+        )
+        .unwrap();
+        policy["archive_workflow_schema"]["input_schema_digest"] = json!(input_digest);
+        policy["archive_workflow_schema"]["output_schema_digest"] = json!(output_digest);
+        assert!(official_mcp_policy_allows_tool(
+            &config,
+            N8N_OFFICIAL_MCP_ARCHIVE_TOOL
+        ));
+        config.config.as_mut().unwrap()["capability_policy"]["approved_tools"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|tool| tool["name"] == "archive_workflow")
+            .unwrap()["reviewed_schemas"]["profile"] = json!("unknown");
+        assert!(!official_mcp_policy_allows_tool(
+            &config,
+            N8N_OFFICIAL_MCP_ARCHIVE_TOOL
         ));
     }
 

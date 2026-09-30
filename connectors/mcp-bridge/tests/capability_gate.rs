@@ -435,7 +435,7 @@ fn production_shaped_invoke_request(
 }
 
 fn process_config(server_id: &str, mock_url: &str, tool_name: &str, input_schema: &Value) -> Value {
-    json!({
+    let mut config = json!({
         "server_id": server_id,
         "mcp_url": mcp_endpoint(mock_url),
         "api_key": "synthetic-process-test-key",
@@ -445,7 +445,12 @@ fn process_config(server_id: &str, mock_url: &str, tool_name: &str, input_schema
             input_schema,
             &Value::Null,
         )["capability_policy"].clone(),
-    })
+    });
+    config["capability_policy"]["approved_tools"][0]["reviewed_schemas"] = serde_json::to_value(
+        fcp_manifest::ReviewedMcpSchemas::from_reviewed(input_schema.clone(), None).unwrap(),
+    )
+    .unwrap();
+    config
 }
 
 fn capability_token(input: &Value, instance_id: &str) -> CapabilityToken {
@@ -947,14 +952,16 @@ async fn typed_n8n_archive_expired_approval_denies_before_provider_call() {
 async fn typed_n8n_archive_isolated_from_execute_schema_drift() {
     for (server_id, archive_drifted) in [("eec", false), ("hetzner", true)] {
         let server = MockServer::start().await;
-        let reviewed_archive_schema = json!({"type": "object"});
+        let reviewed_archive_schema = json!({"type": "object", "description":"reviewed"});
         let reviewed_execute_schema = json!({"type": "object"});
         let drifted_archive_schema = json!({"type": "array"});
         let drifted_execute_schema = json!({"type": "array"});
+        let compatible_archive_schema =
+            json!({"type":"object", "description":"schema-secret-canary"});
         let archive_catalog_schema = if archive_drifted {
             &drifted_archive_schema
         } else {
-            &reviewed_archive_schema
+            &compatible_archive_schema
         };
         let execute_catalog_schema = if archive_drifted {
             &reviewed_execute_schema
@@ -983,16 +990,22 @@ async fn typed_n8n_archive_isolated_from_execute_schema_drift() {
             .mount(&server)
             .await;
 
-        let (connector, instance_id) = setup_connector_with_server_params(
-            &server.uri(),
+        let mut policy = policy_for_archive_execute_server(
             server_id,
-            policy_for_archive_execute_server(
-                server_id,
-                &reviewed_archive_schema,
-                &reviewed_execute_schema,
-            ),
-        )
-        .await;
+            &reviewed_archive_schema,
+            &reviewed_execute_schema,
+        );
+        policy["capability_policy"]["approved_tools"][0]["reviewed_schemas"] =
+            serde_json::to_value(
+                fcp_manifest::ReviewedMcpSchemas::from_reviewed(
+                    reviewed_archive_schema.clone(),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let (connector, instance_id) =
+            setup_connector_with_server_params(&server.uri(), server_id, policy).await;
         let provider_input = json!({
             "name": "archive_workflow",
             "arguments": {"workflowId": "workflow-1"}
@@ -1090,6 +1103,7 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
     ] {
         let server = MockServer::start().await;
         let input_schema = json!({"type": "object"});
+        let observed_schema = json!({"type":"object", "description":"compatible-schema-canary"});
         let provider_input = if action == "publish" {
             json!({
                 "name": tool_name,
@@ -1112,7 +1126,7 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
                 ResponseTemplate::new(200).set_body_json(json!({
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "result": {"tools": [{"name": tool_name, "inputSchema": input_schema}]}
+                    "result": {"tools": [{"name": tool_name, "inputSchema": observed_schema}]}
                 })),
                 ResponseTemplate::new(200).set_body_json(json!({
                     "jsonrpc": "2.0",
@@ -1320,7 +1334,7 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
     assert_eq!(response["result"]["error"]["category"], "External");
     assert_eq!(
         response["result"]["error"]["message"],
-        "MCP JSON-RPC provider error (-32077)"
+        "FCP-MCP-BRIDGE-PROVENANCE/v1 execute_call_jsonrpc_error rpc_code=-32077"
     );
     assert!(
         response["result"]["error"]["message"]

@@ -106,6 +106,8 @@ fn test_policy() -> LocalMcpPolicy {
             .iter()
             .map(|tool| ((*tool).into(), "0".repeat(64)))
             .collect(),
+        reviewed_schemas: BTreeMap::new(),
+        expected_output_catalog: BTreeMap::new(),
         callable_tools: LOCAL_MCP_CATALOG_TOOLS
             .iter()
             .map(|value| (*value).into())

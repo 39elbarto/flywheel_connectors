@@ -6533,6 +6533,7 @@ mod tests {
             vec![ToolSnapshot {
                 name: "search_nodes".to_string(),
                 schema_digest: "sha256:schema".to_string(),
+                reviewed_schemas: None,
                 description_digest: "sha256:description".to_string(),
                 impact: ToolImpact::Read,
                 permissions: BTreeSet::new(),
@@ -7357,6 +7358,7 @@ mod tests {
                 }
                 .to_string(),
                 schema_digest: "blake3-256-schema".to_string(),
+                reviewed_schemas: None,
                 description_digest: "blake3-256-description".to_string(),
                 impact: if write {
                     ToolImpact::Write

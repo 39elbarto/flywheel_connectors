@@ -167,7 +167,7 @@ impl McpAccessReconciliationLedger {
     pub fn production() -> Result<Self, McpAccessLedgerError> {
         let ledger = Self {
             root: PathBuf::from(MCP_ACCESS_LEDGER_ROOT),
-            expected_owner: current_effective_uid()?,
+            expected_owner: current_effective_uid(),
         };
         ledger.open_verified_root()?;
         Ok(ledger)
@@ -205,7 +205,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn begin(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
     ) -> Result<McpAccessLedgerBegin, McpAccessLedgerError> {
         self.begin_for_request(binding, None)
@@ -213,7 +213,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn begin_for_request(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
         expectation: Option<&McpAccessReceiptExpectation>,
     ) -> Result<McpAccessLedgerBegin, McpAccessLedgerError> {
@@ -232,7 +232,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(not(target_os = "linux"))]
     pub fn begin(
-        &mut self,
+        &self,
         _binding: &McpAccessLedgerBinding,
     ) -> Result<McpAccessLedgerBegin, McpAccessLedgerError> {
         Err(McpAccessLedgerError::Unavailable)
@@ -240,7 +240,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(not(target_os = "linux"))]
     pub fn begin_for_request(
-        &mut self,
+        &self,
         _binding: &McpAccessLedgerBinding,
         _expectation: Option<&McpAccessReceiptExpectation>,
     ) -> Result<McpAccessLedgerBegin, McpAccessLedgerError> {
@@ -308,7 +308,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn commit(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
         receipt: &Value,
     ) -> Result<(), McpAccessLedgerError> {
@@ -317,7 +317,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn commit_for_request(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
         receipt: &Value,
         expectation: Option<&McpAccessReceiptExpectation>,
@@ -368,7 +368,7 @@ impl McpAccessReconciliationLedger {
             } else {
                 let _ = flock(&root, FlockOperation::NonBlockingUnlock);
                 return Err(McpAccessLedgerError::Collision);
-            };
+            }
             let _ = flock(&root, FlockOperation::NonBlockingUnlock);
             return Ok(());
         }
@@ -408,7 +408,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(not(target_os = "linux"))]
     pub fn commit(
-        &mut self,
+        &self,
         _binding: &McpAccessLedgerBinding,
         _receipt: &Value,
     ) -> Result<(), McpAccessLedgerError> {
@@ -417,7 +417,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(not(target_os = "linux"))]
     pub fn commit_for_request(
-        &mut self,
+        &self,
         _binding: &McpAccessLedgerBinding,
         _receipt: &Value,
         _expectation: Option<&McpAccessReceiptExpectation>,
@@ -427,7 +427,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn append_receipt(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
         receipt: &Value,
     ) -> Result<(), McpAccessLedgerError> {
@@ -436,7 +436,7 @@ impl McpAccessReconciliationLedger {
 
     #[cfg(target_os = "linux")]
     pub fn append_receipt_for_request(
-        &mut self,
+        &self,
         binding: &McpAccessLedgerBinding,
         receipt: &Value,
         expectation: Option<&McpAccessReceiptExpectation>,
@@ -455,7 +455,7 @@ impl McpAccessReconciliationLedger {
         if let Some(existing) = read_mcp_access_record(&root, &final_name, self.expected_owner)? {
             let matches = existing.state == "committed"
                 && existing.binding_digest == binding.binding_digest
-                && existing.receipt == Some(receipt.clone());
+                && existing.receipt == Some(receipt);
             let _ = flock(&root, FlockOperation::NonBlockingUnlock);
             return if matches {
                 Ok(())
@@ -641,9 +641,8 @@ fn now_unix_ms() -> Result<u64, McpAccessLedgerError> {
 }
 
 #[cfg(target_os = "linux")]
-fn current_effective_uid() -> Result<u32, McpAccessLedgerError> {
-    u32::try_from(rustix::process::geteuid().as_raw())
-        .map_err(|_| McpAccessLedgerError::Unavailable)
+fn current_effective_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
 }
 
 fn canonical_json(value: &Value) -> Value {
@@ -866,9 +865,9 @@ fn validate_mcp_access_receipt(
         || receipt.plan_digest.len() > MCP_ACCESS_RECEIPT_MAX_DIGEST_LENGTH
         || receipt.readback_digest.len() > MCP_ACCESS_RECEIPT_MAX_DIGEST_LENGTH
         || receipt.receipt_digest.len() > MCP_ACCESS_RECEIPT_MAX_DIGEST_LENGTH
-        || !validate_digest(&receipt.plan_digest).is_ok()
-        || !validate_digest(&receipt.readback_digest).is_ok()
-        || !validate_digest(&receipt.receipt_digest).is_ok()
+        || validate_digest(&receipt.plan_digest).is_err()
+        || validate_digest(&receipt.readback_digest).is_err()
+        || validate_digest(&receipt.receipt_digest).is_err()
         || receipt.approval_digest.as_deref().is_some_and(|digest| {
             digest.len() > MCP_ACCESS_RECEIPT_MAX_DIGEST_LENGTH || validate_digest(digest).is_err()
         })
@@ -1114,13 +1113,10 @@ fn write_mcp_access_record(
         let _ = cleanup_temporary_record(root, name);
         return Err(McpAccessLedgerError::Unavailable);
     }
-    let metadata = match file.metadata() {
-        Ok(metadata) => metadata,
-        Err(_) => {
-            drop(file);
-            let _ = cleanup_temporary_record(root, name);
-            return Err(McpAccessLedgerError::Unavailable);
-        }
+    let Ok(metadata) = file.metadata() else {
+        drop(file);
+        let _ = cleanup_temporary_record(root, name);
+        return Err(McpAccessLedgerError::Unavailable);
     };
     if let Err(error) = verify_mcp_record_metadata(&metadata, expected_owner) {
         drop(file);
@@ -1144,9 +1140,9 @@ fn scan_mcp_access_records(
 ) -> Result<usize, McpAccessLedgerError> {
     use rustix::fs::Dir;
 
-    let mut directory = Dir::read_from(root).map_err(|_| McpAccessLedgerError::Corrupt)?;
+    let directory = Dir::read_from(root).map_err(|_| McpAccessLedgerError::Corrupt)?;
     let mut count = 0_usize;
-    while let Some(entry) = directory.next() {
+    for entry in directory {
         let entry = entry.map_err(|_| McpAccessLedgerError::Corrupt)?;
         let name = entry
             .file_name()
@@ -1177,10 +1173,10 @@ fn reap_expired_committed_records(
 ) -> Result<(), McpAccessLedgerError> {
     use rustix::fs::{AtFlags, Dir, unlinkat};
 
-    let mut directory = Dir::read_from(root).map_err(|_| McpAccessLedgerError::Corrupt)?;
+    let directory = Dir::read_from(root).map_err(|_| McpAccessLedgerError::Corrupt)?;
     let mut expired = Vec::new();
     let mut count = 0_usize;
-    while let Some(entry) = directory.next() {
+    for entry in directory {
         let entry = entry.map_err(|_| McpAccessLedgerError::Corrupt)?;
         count = count
             .checked_add(1)
@@ -1197,17 +1193,15 @@ fn reap_expired_committed_records(
         }
         let _ = record_key_digest_from_name(name)?;
         match read_mcp_access_record(root, name, expected_owner) {
-            Ok(Some(_)) => {}
-            Ok(None) => return Err(McpAccessLedgerError::Corrupt),
+            Ok(Some(_)) | Err(McpAccessLedgerError::Unknown) => {}
             Err(McpAccessLedgerError::Expired)
-                if name.ends_with(".json") || name.contains(".outcome-") =>
+                if name.strip_suffix(".json").is_some() || name.contains(".outcome-") =>
             {
                 expired.push(name.to_owned());
             }
-            Err(McpAccessLedgerError::Expired) => {
+            Ok(None) | Err(McpAccessLedgerError::Expired) => {
                 return Err(McpAccessLedgerError::Corrupt);
             }
-            Err(McpAccessLedgerError::Unknown) => {}
             Err(error) => return Err(error),
         }
     }
@@ -1536,7 +1530,8 @@ mod tests {
         "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn ledger_root() -> tempfile::TempDir {
-        let root = tempfile::tempdir().expect("temporary ledger root");
+        let mut root = tempfile::tempdir().expect("temporary ledger root");
+        root.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private ledger root");
         root
@@ -1596,7 +1591,7 @@ mod tests {
     fn mcp_access_ledger_claim_commit_replay_and_collision_are_atomic() {
         let root = ledger_root();
         let owner = fs::metadata(root.path()).expect("metadata").uid();
-        let mut ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
+        let ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
             .expect("ledger");
         let binding = mcp_binding("00000000-0000-4000-8000-000000000101");
         let receipt = mcp_receipt("changed:updated_and_verified");
@@ -1640,7 +1635,7 @@ mod tests {
     fn mcp_access_ledger_pending_claim_is_unknown_and_not_retried() {
         let root = ledger_root();
         let owner = fs::metadata(root.path()).expect("metadata").uid();
-        let mut ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
+        let ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
             .expect("ledger");
         let binding = mcp_binding("00000000-0000-4000-8000-000000000102");
         assert_eq!(
@@ -1654,7 +1649,7 @@ mod tests {
     fn mcp_access_ledger_rejects_malformed_tail_and_redacts_receipt() {
         let root = ledger_root();
         let owner = fs::metadata(root.path()).expect("metadata").uid();
-        let mut ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
+        let ledger = McpAccessReconciliationLedger::for_test(root.path().to_path_buf(), owner)
             .expect("ledger");
         let binding = mcp_binding("00000000-0000-4000-8000-000000000103");
         let receipt = mcp_receipt("exception:provider_unknown_outcome");
@@ -1782,7 +1777,6 @@ mod tests {
         .expect("forged filename fixture");
         drop(root_fd);
 
-        let mut ledger = ledger;
         assert_eq!(
             ledger.begin(&mcp_binding("00000000-0000-4000-8000-000000000106")),
             Err(McpAccessLedgerError::Corrupt)
@@ -1819,7 +1813,6 @@ mod tests {
             .expect("bounded fixture record");
         }
         drop(root_fd);
-        let mut ledger = ledger;
         assert_eq!(
             ledger.append_receipt(
                 &mcp_binding("00000000-0000-4000-8000-000000009999"),
@@ -1860,7 +1853,6 @@ mod tests {
         .expect("expired fixture");
         drop(root_fd);
 
-        let mut ledger = ledger;
         let replacement = mcp_binding("00000000-0000-4000-8000-000000009997");
         assert_eq!(
             ledger.begin(&replacement),
@@ -1897,7 +1889,6 @@ mod tests {
         write_mcp_access_record(&root_fd, &pending, &record, owner).expect("pending fixture");
         drop(root_fd);
 
-        let mut ledger = ledger;
         assert_eq!(ledger.begin(&binding), Err(McpAccessLedgerError::Unknown));
         assert!(root.path().join(pending).is_file());
     }
@@ -1927,7 +1918,6 @@ mod tests {
         assert_eq!(scan_mcp_access_records(&root_fd, owner), Ok(1));
         drop(root_fd);
 
-        let mut ledger = ledger;
         let fresh_binding = mcp_binding("00000000-0000-4000-8000-000000009994");
         assert_eq!(
             ledger.begin(&fresh_binding),

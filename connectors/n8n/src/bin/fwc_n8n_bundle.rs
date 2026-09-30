@@ -111,7 +111,7 @@ const LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST: &str =
 const LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST: &str =
     PREVIOUS_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST;
 
-pub(crate) fn legacy_official_mcp_lifecycle_schema_digests(
+pub fn legacy_official_mcp_lifecycle_schema_digests(
     tool_name: &str,
 ) -> Option<(&'static str, &'static str)> {
     match tool_name {
@@ -437,7 +437,7 @@ pub fn verify_current_release_bundle() -> Result<(), BundleError> {
 /// The ordinary runtime/status verifier below continues to derive its
 /// executable from `current_exe()` and remains current-policy-only.
 #[cfg(unix)]
-pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
+pub fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
     let current = fs::canonicalize(Path::new(FIXED_CURRENT_PATH))
         .map_err(|_| BundleError::new(BundleErrorCode::Metadata))?;
     let releases_root = fs::canonicalize(Path::new(FIXED_INSTALL_ROOT).join("releases"))
@@ -449,7 +449,7 @@ pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
+pub fn verify_fixed_current_release_bundle() -> Result<(), BundleError> {
     Err(BundleError::new(BundleErrorCode::UnsupportedPlatform))
 }
 
@@ -474,23 +474,13 @@ fn verify_release_bundle(
     expected_owner: u32,
     allow_owner_bootstrap_policy: bool,
 ) -> Result<VerifiedBundle, BundleError> {
-    let executable = verify_file(executable, expected_owner, true)?;
-    if executable.file_name().and_then(|name| name.to_str()) != Some("fwc-n8n") {
-        return Err(BundleError::new(BundleErrorCode::NotBundleExecutable));
-    }
-
+    let executable = verify_bundle_layout(executable, expected_owner)?;
     let bin = executable
         .parent()
-        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("bin"))
         .ok_or_else(|| BundleError::new(BundleErrorCode::Layout))?;
     let root = bin
         .parent()
         .ok_or_else(|| BundleError::new(BundleErrorCode::Layout))?;
-    verify_directory(root, expected_owner)?;
-    verify_directory(bin, expected_owner)?;
-    for directory in ["manifests", "inventory", "policy"] {
-        verify_directory(&root.join(directory), expected_owner)?;
-    }
 
     let receipt_path = root.join(RECEIPT_FILE);
     verify_file(&receipt_path, expected_owner, false)?;
@@ -580,6 +570,29 @@ fn verify_release_bundle(
         zone_policy_digest,
         local_mcp_policy,
     })
+}
+
+#[cfg(unix)]
+fn verify_bundle_layout(executable: &Path, expected_owner: u32) -> Result<PathBuf, BundleError> {
+    let executable = verify_file(executable, expected_owner, true)?;
+    if executable.file_name().and_then(|name| name.to_str()) != Some("fwc-n8n") {
+        return Err(BundleError::new(BundleErrorCode::NotBundleExecutable));
+    }
+
+    let bin = executable
+        .parent()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("bin"))
+        .ok_or_else(|| BundleError::new(BundleErrorCode::Layout))?;
+    let root = bin
+        .parent()
+        .ok_or_else(|| BundleError::new(BundleErrorCode::Layout))?;
+    verify_directory(root, expected_owner)?;
+    verify_directory(bin, expected_owner)?;
+    for directory in ["manifests", "inventory", "policy"] {
+        verify_directory(&root.join(directory), expected_owner)?;
+    }
+
+    Ok(executable)
 }
 
 #[cfg(unix)]
@@ -714,320 +727,328 @@ fn verify_inventory_binding(
         return Err(BundleError::new(BundleErrorCode::InventoryBinding));
     }
     if expected_connector_id == "fcp.mcp-bridge" {
-        let (expected_url, expected_host, expected_port) = match expected_server_id {
-            "eec" => (
-                "https://n8n.europeaneyecenter.com/mcp-server/http",
-                "n8n.europeaneyecenter.com",
-                443,
-            ),
-            "hetzner" => (
-                "https://n8nhet.levilaser.com:8443/mcp-server/http",
-                "n8nhet.levilaser.com",
-                8443,
-            ),
-            _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
-        };
-        let lifecycle_schema =
-            |tool_name: &str| official_mcp_lifecycle_schema_digests(expected_server_id, tool_name);
-        let exact_network = |operation: &str| {
-            let exact_host = entry
-                .pointer(&format!(
-                    "/operation_network_constraints/{operation}/host_allow"
-                ))
-                .and_then(Value::as_array)
-                .is_some_and(|hosts| hosts.len() == 1 && hosts[0].as_str() == Some(expected_host));
-            let exact_port = entry
-                .pointer(&format!(
-                    "/operation_network_constraints/{operation}/port_allow"
-                ))
-                .and_then(Value::as_array)
-                .is_some_and(|ports| ports.len() == 1 && ports[0].as_u64() == Some(expected_port));
-            exact_host && exact_port
-        };
-        let exact_approved_tool = |policy: &serde_json::Map<String, Value>,
-                                   name: &str,
-                                   input_digest: &str,
-                                   output_digest: &str| {
-            policy
-                .get("approved_tools")
-                .and_then(Value::as_array)
-                .is_some_and(|tools| {
-                    tools.iter().any(|tool| {
-                        let Some(tool) = tool.as_object() else {
-                            return false;
-                        };
-                        fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
-                            && tool.get("name").and_then(Value::as_str) == Some(name)
-                            && tool.get("class").and_then(Value::as_str) == Some("write")
-                            && tool.get("input_schema_digest").and_then(Value::as_str)
-                                == Some(input_digest)
-                            && tool.get("output_schema_digest").and_then(Value::as_str)
-                                == Some(output_digest)
-                    })
-                })
-        };
-        let archive_approved_tool = |policy: &serde_json::Map<String, Value>| {
-            let valid_digest = |value: Option<&Value>| {
-                value.and_then(Value::as_str).is_some_and(|digest| {
-                    digest.len() == 71
-                        && digest.starts_with("sha256:")
-                        && digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-            };
-            policy
-                .get("approved_tools")
-                .and_then(Value::as_array)
-                .is_some_and(|tools| {
-                    tools.iter().any(|tool| {
-                        let Some(tool) = tool.as_object() else {
-                            return false;
-                        };
-                        fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
-                            && tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
-                            && tool.get("class").and_then(Value::as_str) == Some("write")
-                            && valid_digest(tool.get("input_schema_digest"))
-                            && valid_digest(tool.get("output_schema_digest"))
-                    })
-                })
-        };
-        let archive_schema_binding_matches = |policy: &serde_json::Map<String, Value>| {
-            let Some(binding) = policy
-                .get("archive_workflow_schema")
-                .and_then(Value::as_object)
-            else {
-                return false;
-            };
-            if binding.len() != 2 {
-                return false;
-            }
-            let Some(tool) = policy
-                .get("approved_tools")
-                .and_then(Value::as_array)
-                .and_then(|tools| {
-                    tools.iter().find(|tool| {
-                        tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
-                    })
-                })
-                .and_then(Value::as_object)
-            else {
-                return false;
-            };
-            binding.get("input_schema_digest") == tool.get("input_schema_digest")
-                && binding.get("output_schema_digest") == tool.get("output_schema_digest")
-        };
-        let execute_schema_owner = |policy: &serde_json::Map<String, Value>| {
-            let Some(schema) = policy
-                .get("execute_workflow_schema")
-                .and_then(Value::as_object)
-            else {
-                return false;
-            };
-            if schema.len() != 3 {
-                return false;
-            }
-            let (expected_input, expected_output) = if expected_server_id == "eec" {
-                (
-                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
-                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
-                )
-            } else {
-                (
-                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
-                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
-                )
-            };
-            let owner_shape = schema.get("status").and_then(Value::as_str)
-                == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
-                && schema.get("input_schema_digest").and_then(Value::as_str)
-                    == Some(expected_input)
-                && schema.get("output_schema_digest").and_then(Value::as_str)
-                    == Some(expected_output);
-            owner_shape
-        };
-        let predecessor_execute_schema_owner = |policy: &serde_json::Map<String, Value>| {
-            let Some(schema) = policy
-                .get("execute_workflow_schema")
-                .and_then(Value::as_object)
-            else {
-                return false;
-            };
-            if schema.len() != 3 {
-                return false;
-            }
-            let (expected_input, expected_output) = if expected_server_id == "eec" {
-                (
-                    PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
-                    PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
-                )
-            } else {
-                (
-                    PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
-                    PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
-                )
-            };
-            schema.get("status").and_then(Value::as_str) == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
-                && schema.get("input_schema_digest").and_then(Value::as_str) == Some(expected_input)
-                && schema.get("output_schema_digest").and_then(Value::as_str)
-                    == Some(expected_output)
-        };
-        let execute_schema_sentinel = |policy: &serde_json::Map<String, Value>| {
-            policy
-                .get("execute_workflow_schema")
-                .and_then(Value::as_object)
-                .is_some_and(|schema| {
-                    schema.len() == 3
-                        && schema.get("status").and_then(Value::as_str)
-                            == Some(OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS)
-                        && schema.get("input_schema_digest") == Some(&Value::Null)
-                        && schema.get("output_schema_digest") == Some(&Value::Null)
-                })
-        };
-        let exact_policy = entry
-            .pointer("/config/capability_policy")
-            .and_then(Value::as_object)
-            .is_some_and(|policy| {
-                let owner_tools = policy
-                    .get("approved_tools")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tools| {
-                        tools.len() == 4
-                            && tools.iter().all(|tool| {
-                                matches!(
-                                    tool.get("name").and_then(Value::as_str),
-                                    Some("archive_workflow")
-                                        | Some("publish_workflow")
-                                        | Some("unpublish_workflow")
-                                        | Some("execute_workflow")
-                                )
-                            })
-                            && exact_approved_tool(
-                                policy,
-                                "execute_workflow",
-                                if expected_server_id == "eec" {
-                                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC
-                                } else {
-                                    OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER
-                                },
-                                if expected_server_id == "eec" {
-                                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
-                                } else {
-                                    OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER
-                                },
-                            )
-                    });
-                let predecessor_owner_tools = policy
-                    .get("approved_tools")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tools| {
-                        tools.len() == 4
-                            && tools.iter().all(|tool| {
-                                matches!(
-                                    tool.get("name").and_then(Value::as_str),
-                                    Some("archive_workflow")
-                                        | Some("publish_workflow")
-                                        | Some("unpublish_workflow")
-                                        | Some("execute_workflow")
-                                )
-                            })
-                            && exact_approved_tool(
-                                policy,
-                                "execute_workflow",
-                                if expected_server_id == "eec" {
-                                    PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC
-                                } else {
-                                    PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER
-                                },
-                                if expected_server_id == "eec" {
-                                    PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC
-                                } else {
-                                    PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER
-                                },
-                            )
-                    });
-                let sentinel_tools = policy
-                    .get("approved_tools")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tools| tools.len() == 3);
-                let previous_eec_policy = allow_owner_bootstrap_policy
-                    && expected_server_id == "eec"
-                    && policy.len() == 6
-                    && previous_eec_official_mcp_lifecycle_schema_digests("publish_workflow")
-                        .is_some_and(|(input, output)| {
-                            exact_approved_tool(policy, "publish_workflow", input, output)
-                        })
-                    && previous_eec_official_mcp_lifecycle_schema_digests("unpublish_workflow")
-                        .is_some_and(|(input, output)| {
-                            exact_approved_tool(policy, "unpublish_workflow", input, output)
-                        })
-                    && archive_approved_tool(policy)
-                    && archive_schema_binding_matches(policy)
-                    && predecessor_owner_tools
-                    && predecessor_execute_schema_owner(policy);
-                let legacy_policy = allow_owner_bootstrap_policy
-                    && expected_server_id == "eec"
-                    && policy.len() == 4
-                    && !policy.contains_key("archive_workflow_schema")
-                    && !policy.contains_key("execute_workflow_schema")
-                    && policy
-                        .get("approved_tools")
-                        .and_then(Value::as_array)
-                        .is_some_and(|tools| {
-                            tools.len() == 2
-                                && exact_approved_tool(
-                                    policy,
-                                    "publish_workflow",
-                                    LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
-                                    LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
-                                )
-                                && exact_approved_tool(
-                                    policy,
-                                    "unpublish_workflow",
-                                    LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
-                                    LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
-                                )
-                        });
-                (policy.len() == 6 || legacy_policy)
-                    && valid_n8n_version_diagnostic(policy.get("n8n_version"))
-                    && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
-                    && policy
-                        .get("api_scope_digest")
-                        .and_then(Value::as_str)
-                        .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
-                    && (legacy_policy
-                        || previous_eec_policy
-                        || (lifecycle_schema("publish_workflow").is_some_and(|(input, output)| {
-                            exact_approved_tool(policy, "publish_workflow", input, output)
-                        }) && lifecycle_schema("unpublish_workflow").is_some_and(
-                            |(input, output)| {
-                                exact_approved_tool(policy, "unpublish_workflow", input, output)
-                            },
-                        ) && archive_approved_tool(policy)
-                            && archive_schema_binding_matches(policy)
-                            && ((owner_tools && execute_schema_owner(policy))
-                                || (sentinel_tools && execute_schema_sentinel(policy)))))
-            });
-        if !exact("/config/mcp_url", expected_url)
-            || !exact("/config/security/description_scan", "block")
-            || !exact_policy
-            || !exact_network("mcp.tools.list")
-            || !exact_network("mcp.tools.call")
-            || entry
-                .pointer("/allowed_operations")
-                .and_then(Value::as_array)
-                .is_none_or(|operations| {
-                    operations.len() != 2
-                        || !operations
-                            .iter()
-                            .any(|value| value.as_str() == Some("mcp.tools.list"))
-                        || !operations
-                            .iter()
-                            .any(|value| value.as_str() == Some("mcp.tools.call"))
-                })
-        {
-            return Err(BundleError::new(BundleErrorCode::InventoryBinding));
-        }
+        verify_official_inventory_binding(entry, expected_server_id, allow_owner_bootstrap_policy)?;
     }
     Ok(())
+}
+
+fn verify_official_inventory_binding(
+    entry: &Value,
+    expected_server_id: &str,
+    allow_owner_bootstrap_policy: bool,
+) -> Result<(), BundleError> {
+    let exact = |pointer: &str, expected: &str| {
+        entry.pointer(pointer).and_then(Value::as_str) == Some(expected)
+    };
+    let (expected_url, expected_host, expected_port) = match expected_server_id {
+        "eec" => (
+            "https://n8n.europeaneyecenter.com/mcp-server/http",
+            "n8n.europeaneyecenter.com",
+            443,
+        ),
+        "hetzner" => (
+            "https://n8nhet.levilaser.com:8443/mcp-server/http",
+            "n8nhet.levilaser.com",
+            8443,
+        ),
+        _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
+    };
+    let exact_network = |operation: &str| {
+        let exact_host = entry
+            .pointer(&format!(
+                "/operation_network_constraints/{operation}/host_allow"
+            ))
+            .and_then(Value::as_array)
+            .is_some_and(|hosts| hosts.len() == 1 && hosts[0].as_str() == Some(expected_host));
+        let exact_port = entry
+            .pointer(&format!(
+                "/operation_network_constraints/{operation}/port_allow"
+            ))
+            .and_then(Value::as_array)
+            .is_some_and(|ports| ports.len() == 1 && ports[0].as_u64() == Some(expected_port));
+        exact_host && exact_port
+    };
+    let exact_policy = entry
+        .pointer("/config/capability_policy")
+        .and_then(Value::as_object)
+        .is_some_and(|policy| {
+            inventory_policy_matches(policy, expected_server_id, allow_owner_bootstrap_policy)
+        });
+    if !exact("/config/mcp_url", expected_url)
+        || !exact("/config/security/description_scan", "block")
+        || !exact_policy
+        || !exact_network("mcp.tools.list")
+        || !exact_network("mcp.tools.call")
+        || entry
+            .pointer("/allowed_operations")
+            .and_then(Value::as_array)
+            .is_none_or(|operations| {
+                operations.len() != 2
+                    || !operations
+                        .iter()
+                        .any(|value| value.as_str() == Some("mcp.tools.list"))
+                    || !operations
+                        .iter()
+                        .any(|value| value.as_str() == Some("mcp.tools.call"))
+            })
+    {
+        return Err(BundleError::new(BundleErrorCode::InventoryBinding));
+    }
+    Ok(())
+}
+
+fn exact_approved_tool(
+    policy: &serde_json::Map<String, Value>,
+    name: &str,
+    input_digest: &str,
+    output_digest: &str,
+) -> bool {
+    policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                let Some(tool) = tool.as_object() else {
+                    return false;
+                };
+                fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
+                    && tool.get("name").and_then(Value::as_str) == Some(name)
+                    && tool.get("class").and_then(Value::as_str) == Some("write")
+                    && tool.get("input_schema_digest").and_then(Value::as_str) == Some(input_digest)
+                    && tool.get("output_schema_digest").and_then(Value::as_str)
+                        == Some(output_digest)
+            })
+        })
+}
+
+fn archive_approved_tool(policy: &serde_json::Map<String, Value>) -> bool {
+    let valid_digest = |value: Option<&Value>| {
+        value.and_then(Value::as_str).is_some_and(|digest| {
+            digest.len() == 71
+                && digest.starts_with("sha256:")
+                && digest[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+    };
+    policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                let Some(tool) = tool.as_object() else {
+                    return false;
+                };
+                fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
+                    && tool.get("name").and_then(Value::as_str) == Some("archive_workflow")
+                    && tool.get("class").and_then(Value::as_str) == Some("write")
+                    && valid_digest(tool.get("input_schema_digest"))
+                    && valid_digest(tool.get("output_schema_digest"))
+            })
+        })
+}
+
+fn archive_schema_binding_matches(policy: &serde_json::Map<String, Value>) -> bool {
+    let Some(binding) = policy
+        .get("archive_workflow_schema")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    if binding.len() != 2 {
+        return false;
+    }
+    let Some(tool) = policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .and_then(|tools| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some("archive_workflow"))
+        })
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    binding.get("input_schema_digest") == tool.get("input_schema_digest")
+        && binding.get("output_schema_digest") == tool.get("output_schema_digest")
+}
+
+fn execute_schema_owner(policy: &serde_json::Map<String, Value>, expected_server_id: &str) -> bool {
+    let Some(schema) = policy
+        .get("execute_workflow_schema")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    if schema.len() != 3 {
+        return false;
+    }
+    let (expected_input, expected_output) = if expected_server_id == "eec" {
+        (
+            OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+            OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+        )
+    } else {
+        (
+            OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+            OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )
+    };
+    schema.get("status").and_then(Value::as_str) == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+        && schema.get("input_schema_digest").and_then(Value::as_str) == Some(expected_input)
+        && schema.get("output_schema_digest").and_then(Value::as_str) == Some(expected_output)
+}
+
+fn predecessor_execute_schema_owner(
+    policy: &serde_json::Map<String, Value>,
+    expected_server_id: &str,
+) -> bool {
+    let Some(schema) = policy
+        .get("execute_workflow_schema")
+        .and_then(Value::as_object)
+    else {
+        return false;
+    };
+    if schema.len() != 3 {
+        return false;
+    }
+    let (expected_input, expected_output) = if expected_server_id == "eec" {
+        (
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+        )
+    } else {
+        (
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        )
+    };
+    schema.get("status").and_then(Value::as_str) == Some(OFFICIAL_MCP_EXECUTE_POLICY_STATUS)
+        && schema.get("input_schema_digest").and_then(Value::as_str) == Some(expected_input)
+        && schema.get("output_schema_digest").and_then(Value::as_str) == Some(expected_output)
+}
+
+fn execute_schema_sentinel(policy: &serde_json::Map<String, Value>) -> bool {
+    policy
+        .get("execute_workflow_schema")
+        .and_then(Value::as_object)
+        .is_some_and(|schema| {
+            schema.len() == 3
+                && schema.get("status").and_then(Value::as_str)
+                    == Some(OFFICIAL_MCP_EXECUTE_SENTINEL_STATUS)
+                && schema.get("input_schema_digest") == Some(&Value::Null)
+                && schema.get("output_schema_digest") == Some(&Value::Null)
+        })
+}
+
+fn inventory_policy_matches(
+    policy: &serde_json::Map<String, Value>,
+    expected_server_id: &str,
+    allow_owner_bootstrap_policy: bool,
+) -> bool {
+    let lifecycle_schema =
+        |tool_name: &str| official_mcp_lifecycle_schema_digests(expected_server_id, tool_name);
+    let owner_tools = inventory_owner_tools(policy, expected_server_id, false);
+    let predecessor_owner_tools = inventory_owner_tools(policy, expected_server_id, true);
+    let sentinel_tools = policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.len() == 3);
+    let previous_eec_policy = allow_owner_bootstrap_policy
+        && expected_server_id == "eec"
+        && policy.len() == 6
+        && previous_eec_official_mcp_lifecycle_schema_digests("publish_workflow").is_some_and(
+            |(input, output)| exact_approved_tool(policy, "publish_workflow", input, output),
+        )
+        && previous_eec_official_mcp_lifecycle_schema_digests("unpublish_workflow").is_some_and(
+            |(input, output)| exact_approved_tool(policy, "unpublish_workflow", input, output),
+        )
+        && archive_approved_tool(policy)
+        && archive_schema_binding_matches(policy)
+        && predecessor_owner_tools
+        && predecessor_execute_schema_owner(policy, expected_server_id);
+    let legacy_policy = allow_owner_bootstrap_policy
+        && expected_server_id == "eec"
+        && policy.len() == 4
+        && !policy.contains_key("archive_workflow_schema")
+        && !policy.contains_key("execute_workflow_schema")
+        && policy
+            .get("approved_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| {
+                tools.len() == 2
+                    && exact_approved_tool(
+                        policy,
+                        "publish_workflow",
+                        LEGACY_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST,
+                        LEGACY_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST,
+                    )
+                    && exact_approved_tool(
+                        policy,
+                        "unpublish_workflow",
+                        LEGACY_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST,
+                        LEGACY_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST,
+                    )
+            });
+    (policy.len() == 6 || legacy_policy)
+        && valid_n8n_version_diagnostic(policy.get("n8n_version"))
+        && policy.get("auth_mode").and_then(Value::as_str) == Some("access_token")
+        && policy
+            .get("api_scope_digest")
+            .and_then(Value::as_str)
+            .is_some_and(|digest| !digest.is_empty() && digest.len() <= 256)
+        && (legacy_policy
+            || previous_eec_policy
+            || (lifecycle_schema("publish_workflow").is_some_and(|(input, output)| {
+                exact_approved_tool(policy, "publish_workflow", input, output)
+            }) && lifecycle_schema("unpublish_workflow").is_some_and(|(input, output)| {
+                exact_approved_tool(policy, "unpublish_workflow", input, output)
+            }) && archive_approved_tool(policy)
+                && archive_schema_binding_matches(policy)
+                && ((owner_tools && execute_schema_owner(policy, expected_server_id))
+                    || (sentinel_tools && execute_schema_sentinel(policy)))))
+}
+
+fn inventory_owner_tools(
+    policy: &serde_json::Map<String, Value>,
+    server: &str,
+    previous: bool,
+) -> bool {
+    let digests = match (server == "eec", previous) {
+        (true, false) => (
+            OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+            OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+        ),
+        (false, false) => (
+            OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+            OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        ),
+        (true, true) => (
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+        ),
+        (false, true) => (
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+            PREVIOUS_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+        ),
+    };
+    policy
+        .get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| {
+            tools.len() == 4
+                && tools.iter().all(|tool| {
+                    matches!(
+                        tool.get("name").and_then(Value::as_str),
+                        Some(
+                            "archive_workflow"
+                                | "publish_workflow"
+                                | "unpublish_workflow"
+                                | "execute_workflow"
+                        )
+                    )
+                })
+                && exact_approved_tool(policy, "execute_workflow", digests.0, digests.1)
+        })
 }
 
 fn read_bounded_json(path: &Path, max_bytes: usize) -> Result<Value, BundleError> {
@@ -1055,7 +1076,7 @@ fn verify_release_bundle(
 
 #[cfg(test)]
 #[allow(dead_code)]
-pub(crate) fn verify_release_bundle_for_owner(
+pub fn verify_release_bundle_for_owner(
     executable: &Path,
     expected_owner: u32,
 ) -> Result<VerifiedBundle, BundleError> {
@@ -1476,7 +1497,9 @@ mod tests {
     #[cfg(unix)]
     impl Drop for ReleaseFixture {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+            if std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_none() {
+                let _ = fs::remove_dir_all(&self.root);
+            }
         }
     }
 
@@ -2225,7 +2248,11 @@ mod tests {
         );
 
         let linked = ReleaseFixture::new();
-        fs::remove_file(linked.artifact("bin/fcp-host")).expect("remove link target");
+        fs::rename(
+            linked.artifact("bin/fcp-host"),
+            linked.root.with_extension("retained-fcp-host"),
+        )
+        .expect("retain link target");
         symlink("fcp-n8n", linked.artifact("bin/fcp-host")).expect("create artifact symlink");
         assert_eq!(
             verify_release_bundle_for_owner(&linked.executable, linked.owner)
@@ -2235,7 +2262,11 @@ mod tests {
         );
 
         let hard_linked = ReleaseFixture::new();
-        fs::remove_file(hard_linked.artifact("bin/fcp-host")).expect("remove hard-link target");
+        fs::rename(
+            hard_linked.artifact("bin/fcp-host"),
+            hard_linked.root.with_extension("retained-fcp-host"),
+        )
+        .expect("retain hard-link target");
         fs::hard_link(
             hard_linked.artifact("bin/fcp-n8n"),
             hard_linked.artifact("bin/fcp-host"),
@@ -2249,7 +2280,11 @@ mod tests {
         );
 
         let missing = ReleaseFixture::new();
-        fs::remove_file(missing.artifact("inventory/eec.json")).expect("remove artifact");
+        fs::rename(
+            missing.artifact("inventory/eec.json"),
+            missing.root.with_extension("retained-eec.json"),
+        )
+        .expect("retain missing artifact");
         assert_eq!(
             verify_release_bundle_for_owner(&missing.executable, missing.owner)
                 .expect_err("missing artifact")

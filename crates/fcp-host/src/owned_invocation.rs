@@ -66,7 +66,7 @@ impl OwnedInvocationConfig {
         }
     }
 
-    fn validate(self) -> Result<Self, OwnedInvocationError> {
+    const fn validate(self) -> Result<Self, OwnedInvocationError> {
         if self.max_frame_bytes == 0
             || self.rpc_timeout.is_zero()
             || self.termination_grace.is_zero()
@@ -135,13 +135,10 @@ impl std::fmt::Debug for OwnedInvocationHandle {
             .field("closed", &self.command_tx.is_none())
             .field(
                 "actor_finished",
-                &self
-                    .actor_join
-                    .as_ref()
-                    .map_or(true, |join| join.is_finished()),
+                &self.actor_join.as_ref().is_none_or(JoinHandle::is_finished),
             )
             .field("stderr", &self.stderr.metadata())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -150,6 +147,9 @@ impl OwnedInvocationHandle {
     ///
     /// Spawn, digest checks, and all stdio work happen on the dedicated actor
     /// thread. The child endpoint is consumed by the sandbox primitive.
+    ///
+    /// # Errors
+    /// Rejects invalid settings, launch failures, and actor startup failures.
     #[cfg(target_os = "linux")]
     pub async fn launch(
         spec: ProcessSpec,
@@ -168,14 +168,16 @@ impl OwnedInvocationHandle {
             .name("fcp-owned-invocation".to_owned())
             .spawn(move || {
                 actor_main(
-                    spec,
+                    &spec,
                     child_endpoint,
                     config,
-                    command_rx,
+                    &command_rx,
                     ready_tx,
-                    completion_tx,
-                    actor_cancel,
-                    actor_stderr,
+                    ActorEvidence {
+                        completion: &completion_tx,
+                        stderr: &actor_stderr,
+                    },
+                    &actor_cancel,
                 );
             })
             .map_err(|_| OwnedInvocationError::WorkerStopped)?;
@@ -211,6 +213,9 @@ impl OwnedInvocationHandle {
     }
 
     /// Send one JSON-RPC request. Calls are serialized by the actor.
+    ///
+    /// # Errors
+    /// Rejects closed or full channels and propagates bounded RPC failures.
     pub async fn request(
         &mut self,
         method: impl Into<String>,
@@ -237,21 +242,27 @@ impl OwnedInvocationHandle {
     }
 
     /// Ask the actor for a verified process-group memory sample.
-    pub async fn memory_sample(&self) -> Result<ProcessMemorySample, OwnedInvocationError> {
-        let (reply_tx, reply_rx) = fcp_async_core::channel::oneshot::channel();
-        let command_tx = self
-            .command_tx
-            .as_ref()
-            .ok_or(OwnedInvocationError::Closed)?;
-        command_tx
-            .try_send(ActorCommand::MemorySample { reply: reply_tx })
-            .map_err(|error| match error {
-                TrySendError::Full(_) => OwnedInvocationError::WorkerStopped,
-                TrySendError::Disconnected(_) => OwnedInvocationError::Closed,
-            })?;
-        reply_rx
-            .await
-            .map_err(|_| OwnedInvocationError::WorkerStopped)?
+    ///
+    /// # Errors
+    /// Rejects closed or full channels and propagates process identity or worker failures.
+    pub fn memory_sample(
+        &self,
+    ) -> impl std::future::Future<Output = Result<ProcessMemorySample, OwnedInvocationError>> + Send + '_
+    {
+        let command_tx = self.command_tx.as_ref();
+        async move {
+            let (reply_tx, reply_rx) = fcp_async_core::channel::oneshot::channel();
+            let command_tx = command_tx.ok_or(OwnedInvocationError::Closed)?;
+            command_tx
+                .try_send(ActorCommand::MemorySample { reply: reply_tx })
+                .map_err(|error| match error {
+                    TrySendError::Full(_) => OwnedInvocationError::WorkerStopped,
+                    TrySendError::Disconnected(_) => OwnedInvocationError::Closed,
+                })?;
+            reply_rx
+                .await
+                .map_err(|_| OwnedInvocationError::WorkerStopped)?
+        }
     }
 
     /// Return redaction-safe stderr metadata collected so far.
@@ -265,6 +276,9 @@ impl OwnedInvocationHandle {
     /// The caller must close the inherited host-egress endpoint before this
     /// method. A separate standard-library joiner keeps the final join off the
     /// async executor.
+    ///
+    /// # Errors
+    /// Returns an error unless process teardown and worker joins are proven.
     pub async fn terminate(mut self) -> Result<TerminationReport, OwnedInvocationError> {
         let command_tx = self.command_tx.take().ok_or(OwnedInvocationError::Closed)?;
         let completion_rx = self
@@ -369,17 +383,27 @@ enum FrameReadError {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+struct ActorEvidence<'a> {
+    completion: &'a SyncSender<Result<TerminationReport, OwnedInvocationError>>,
+    stderr: &'a Arc<StderrCounters>,
+}
+
+#[cfg(target_os = "linux")]
 fn actor_main(
-    spec: ProcessSpec,
+    spec: &ProcessSpec,
     child_endpoint: UnixStream,
     config: OwnedInvocationConfig,
-    command_rx: Receiver<ActorCommand>,
+    command_rx: &Receiver<ActorCommand>,
     ready_tx: fcp_async_core::channel::oneshot::Sender<Result<(), OwnedInvocationError>>,
-    completion_tx: SyncSender<Result<TerminationReport, OwnedInvocationError>>,
-    cancel: Arc<AtomicBool>,
-    stderr: Arc<StderrCounters>,
+    evidence: ActorEvidence<'_>,
+    cancel: &AtomicBool,
 ) {
-    let mut process = match OwnedProcess::spawn_with_host_egress_channel(&spec, child_endpoint) {
+    let ActorEvidence {
+        completion: completion_tx,
+        stderr,
+    } = evidence;
+    let mut process = match OwnedProcess::spawn_with_host_egress_channel(spec, child_endpoint) {
         Ok(process) => process,
         Err(error) => {
             let _ = ready_tx.send(Err(OwnedInvocationError::Launch(error)));
@@ -387,7 +411,7 @@ fn actor_main(
             return;
         }
     };
-    let workers = match take_and_spawn_workers(&mut process, config.max_frame_bytes, &stderr) {
+    let workers = match take_and_spawn_workers(&mut process, config.max_frame_bytes, stderr) {
         Ok(workers) => workers,
         Err(error) => {
             let termination = process.terminate(config.termination_grace);
@@ -426,8 +450,8 @@ fn actor_loop(
     process: &mut OwnedProcess,
     mut workers: WorkerSet,
     config: OwnedInvocationConfig,
-    command_rx: Receiver<ActorCommand>,
-    cancel: Arc<AtomicBool>,
+    command_rx: &Receiver<ActorCommand>,
+    cancel: &AtomicBool,
 ) -> Result<TerminationReport, OwnedInvocationError> {
     let mut next_request_seq = 0_u64;
 
@@ -444,11 +468,10 @@ fn actor_loop(
                 let result = rpc_exchange(
                     &workers.writer_tx,
                     &workers.frame_rx,
-                    config.max_frame_bytes,
-                    config.rpc_timeout,
-                    &cancel,
+                    config,
+                    cancel,
                     &method,
-                    params,
+                    &params,
                     &mut next_request_seq,
                 );
                 let fatal = result.is_err();
@@ -467,10 +490,9 @@ fn actor_loop(
                 };
                 let _ = reply.send(result);
             }
-            Ok(ActorCommand::Terminate) => break,
-            Ok(ActorCommand::Cancel) => break,
+            Ok(ActorCommand::Terminate | ActorCommand::Cancel)
+            | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
         }
     }
 
@@ -488,7 +510,11 @@ fn terminate_and_join(
     let process_result = process.terminate(config.termination_grace);
     let workers_joined = join_workers(workers, config.termination_grace);
     match process_result {
-        Ok(report) if report.group_absent && report.reaped && workers_joined => Ok(report),
+        Ok(report)
+            if report.completion.group_absent && report.completion.reaped && workers_joined =>
+        {
+            Ok(report)
+        }
         Ok(_) => Err(OwnedInvocationError::TerminationIncomplete),
         Err(error) => Err(OwnedInvocationError::Termination(error)),
     }
@@ -616,7 +642,7 @@ fn spawn_stderr(
             let mut line_bytes = 0_usize;
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => break,
                     Ok(bytes) => {
                         counters
                             .bytes
@@ -632,7 +658,6 @@ fn spawn_stderr(
                             }
                         }
                     }
-                    Err(_) => break,
                 }
             }
             let _ = done_tx.send(());
@@ -657,10 +682,10 @@ fn join_workers(workers: &mut [WorkerThread], grace: Duration) -> bool {
     }
     if all_done {
         for worker in workers.iter_mut() {
-            if let Some(join) = worker.join.take() {
-                if join.join().is_err() {
-                    all_done = false;
-                }
+            if let Some(join) = worker.join.take()
+                && join.join().is_err()
+            {
+                all_done = false;
             }
         }
     } else {
@@ -677,11 +702,10 @@ fn join_workers(workers: &mut [WorkerThread], grace: Duration) -> bool {
 fn rpc_exchange(
     writer_tx: &SyncSender<WriteCommand>,
     frame_rx: &Receiver<Result<Vec<u8>, FrameReadError>>,
-    max_frame_bytes: usize,
-    timeout: Duration,
+    config: OwnedInvocationConfig,
     cancel: &AtomicBool,
     method: &str,
-    params: Value,
+    params: &Value,
     next_request_seq: &mut u64,
 ) -> Result<Value, OwnedInvocationError> {
     let request_id = format!("0:{next_request_seq}");
@@ -692,7 +716,7 @@ fn rpc_exchange(
         "method": method,
         "params": params,
     });
-    let frame = serialize_frame(&request, max_frame_bytes)?;
+    let frame = serialize_frame(&request, config.max_frame_bytes)?;
     let (ack_tx, ack_rx) = mpsc::sync_channel(1);
     writer_tx
         .try_send(WriteCommand {
@@ -705,20 +729,18 @@ fn rpc_exchange(
             }
         })?;
 
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + config.rpc_timeout;
     recv_with_cancel(&ack_rx, deadline, cancel)?.map_err(|_| OwnedInvocationError::Io)?;
-    loop {
-        let frame = recv_with_cancel(frame_rx, deadline, cancel)?.map_err(|error| match error {
-            FrameReadError::Oversized => OwnedInvocationError::FrameTooLarge,
-            FrameReadError::Io | FrameReadError::InvalidUtf8 | FrameReadError::UnexpectedEof => {
-                OwnedInvocationError::MalformedFrame
-            }
-        })?;
-        let response = serde_json::from_slice::<Value>(&frame)
-            .map_err(|_| OwnedInvocationError::MalformedFrame)?;
-        validate_response_id(&request_id, &response)?;
-        return Ok(response);
-    }
+    let frame = recv_with_cancel(frame_rx, deadline, cancel)?.map_err(|error| match error {
+        FrameReadError::Oversized => OwnedInvocationError::FrameTooLarge,
+        FrameReadError::Io | FrameReadError::InvalidUtf8 | FrameReadError::UnexpectedEof => {
+            OwnedInvocationError::MalformedFrame
+        }
+    })?;
+    let response = serde_json::from_slice::<Value>(&frame)
+        .map_err(|_| OwnedInvocationError::MalformedFrame)?;
+    validate_response_id(&request_id, &response)?;
+    Ok(response)
 }
 
 fn recv_with_cancel<T>(
@@ -805,6 +827,102 @@ fn detach_actor(actor_join: JoinHandle<()>) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn memory_test_handle(command_tx: Option<SyncSender<ActorCommand>>) -> OwnedInvocationHandle {
+        OwnedInvocationHandle {
+            command_tx,
+            cancel: Arc::new(AtomicBool::new(false)),
+            stderr: Arc::new(StderrCounters::default()),
+            completion_rx: None,
+            actor_join: None,
+        }
+    }
+
+    #[test]
+    fn memory_sample_future_is_send_and_dispatches_only_when_polled() {
+        fn require_send<T: Send>(value: T) -> T {
+            value
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let handle = memory_test_handle(Some(sender));
+        let future = require_send(handle.memory_sample());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(future);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let responder = thread::spawn(move || {
+            let ActorCommand::MemorySample { reply } = receiver.recv().expect("sample command")
+            else {
+                panic!("unexpected command");
+            };
+            let _ = reply.send(Ok(ProcessMemorySample {
+                available: true,
+                process_count: 0,
+                rss_bytes: Some(0),
+                pss_bytes: Some(0),
+                private_bytes: Some(0),
+            }));
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        });
+        let sample = fcp_async_core::runtime::block_on_sync(handle.memory_sample())
+            .expect("test runtime")
+            .expect("sample");
+        assert!(sample.available);
+        responder.join().expect("responder");
+    }
+
+    #[test]
+    fn memory_sample_dropped_after_dispatch_closes_only_its_reply() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let handle = memory_test_handle(Some(sender));
+        let mut future = Box::pin(handle.memory_sample());
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(std::future::Future::poll(future.as_mut(), &mut context).is_pending());
+        let ActorCommand::MemorySample { reply } = receiver.try_recv().expect("one command") else {
+            panic!("unexpected command");
+        };
+        drop(future);
+        assert!(reply.send(Err(OwnedInvocationError::Cancelled)).is_err());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert!(!handle.cancel.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn memory_sample_closed_full_and_disconnected_channels_fail_without_retry() {
+        let closed = memory_test_handle(None);
+        assert!(matches!(
+            fcp_async_core::runtime::block_on_sync(closed.memory_sample()).expect("test runtime"),
+            Err(OwnedInvocationError::Closed)
+        ));
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send(ActorCommand::Cancel).expect("fill queue");
+        let handle = memory_test_handle(Some(sender));
+        assert!(matches!(
+            fcp_async_core::runtime::block_on_sync(handle.memory_sample()).expect("test runtime"),
+            Err(OwnedInvocationError::WorkerStopped)
+        ));
+        assert!(matches!(receiver.try_recv(), Ok(ActorCommand::Cancel)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(receiver);
+        assert!(matches!(
+            fcp_async_core::runtime::block_on_sync(handle.memory_sample()).expect("test runtime"),
+            Err(OwnedInvocationError::Closed)
+        ));
+    }
 
     #[test]
     fn configure_introspect_handshake_invoke_frames_are_jsonrpc() {
@@ -914,8 +1032,8 @@ done
             );
         }
         let report = run(handle.terminate()).expect("group teardown");
-        assert!(report.group_absent);
-        assert!(report.reaped);
+        assert!(report.completion.group_absent);
+        assert!(report.completion.reaped);
     }
 
     #[cfg(target_os = "linux")]
@@ -937,8 +1055,8 @@ done
         let result = run(handle.request("invoke", json!({})));
         assert!(matches!(result, Err(OwnedInvocationError::Timeout)));
         let report = run(handle.terminate()).expect("bounded timeout teardown");
-        assert!(report.group_absent);
-        assert!(report.reaped);
+        assert!(report.completion.group_absent);
+        assert!(report.completion.reaped);
     }
 
     #[cfg(target_os = "linux")]
@@ -960,7 +1078,7 @@ done
         let result = run(handle.request("invoke", json!({})));
         assert!(matches!(result, Err(OwnedInvocationError::WrongResponseId)));
         let report = run(handle.terminate()).expect("fatal RPC teardown");
-        assert!(report.group_absent);
-        assert!(report.reaped);
+        assert!(report.completion.group_absent);
+        assert!(report.completion.reaped);
     }
 }

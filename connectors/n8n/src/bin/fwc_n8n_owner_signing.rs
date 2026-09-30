@@ -14,7 +14,7 @@ use super::fwc_n8n_provision as provision;
 
 const MAX_SEED_INPUT_BYTES: usize = 45; // 44 Base64 bytes plus one LF.
 
-pub(crate) fn sign_staged_provision_receipt(
+pub fn sign_staged_provision_receipt(
     release_id: &str,
     git_revision: &str,
     bindings: Vec<provision::OfficialMcpBinding>,
@@ -87,7 +87,7 @@ pub(crate) fn sign_staged_provision_receipt(
     }
 }
 
-pub(crate) fn read_seed_from_stdin() -> Result<Zeroizing<[u8; SECRET_KEY_SIZE]>, ()> {
+pub fn read_seed_from_stdin() -> Result<Zeroizing<[u8; SECRET_KEY_SIZE]>, ()> {
     let mut encoded = Zeroizing::new(Vec::with_capacity(MAX_SEED_INPUT_BYTES));
     io::stdin()
         .take(u64::try_from(MAX_SEED_INPUT_BYTES + 1).map_err(|_| ())?)

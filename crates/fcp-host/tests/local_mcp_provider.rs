@@ -41,8 +41,8 @@ fn normal_request_runs_all_catalog_tools_and_tears_down() {
 
     assert_eq!(result.responses.len(), LOCAL_MCP_CATALOG_TOOLS.len());
     assert!(result.startup.network_disabled);
-    assert!(result.shutdown.reaped);
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.completion.reaped);
+    assert!(result.shutdown.completion.group_absent);
     assert_eq!(result.correlation_id, "normal-request");
     assert!(result.shutdown.memory_after.available);
     assert_eq!(result.shutdown.memory_after.process_count, 0);
@@ -73,7 +73,7 @@ fn compatible_catalog_and_reviewed_profile_run_in_real_process() {
             .unwrap();
         assert_eq!(result.status, LocalMcpResultStatus::Completed, "{mode}");
         assert_eq!(result.responses.len(), 1);
-        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        assert!(result.shutdown.completion.reaped && result.shutdown.completion.group_absent);
         assert!(!format!("{result:?}").contains("schema-secret-canary"));
     }
 }
@@ -118,7 +118,7 @@ fn raw_only_output_pins_and_legacy_absence_run_through_supervisor() {
             succeeds,
             "{mode} pin_present={pin_present}"
         );
-        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        assert!(result.shutdown.completion.reaped && result.shutdown.completion.group_absent);
         if !succeeds {
             assert!(result.responses.is_empty());
             assert_eq!(result.shutdown.stderr_bytes, 0);
@@ -156,7 +156,7 @@ fn sequence_catalog_preflight_rejects_later_conflict_before_any_call() {
         assert!(result.responses.is_empty());
         // Every fixture call emits a stderr marker: zero proves no first call.
         assert_eq!(result.shutdown.stderr_bytes, 0, "{mode}");
-        assert!(result.shutdown.reaped && result.shutdown.group_absent);
+        assert!(result.shutdown.completion.reaped && result.shutdown.completion.group_absent);
         assert_eq!(
             result.result_code,
             if mode == "catalog-oversized" {
@@ -176,7 +176,7 @@ fn seccomp_denies_socket_attempt_while_stdio_remains_functional() {
         .run_once(one_call())
         .expect("socket denial must not break stdio");
     assert_eq!(result.responses.len(), 1);
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.completion.group_absent);
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn seccomp_denies_session_escape_while_stdio_remains_functional() {
         .run_once(one_call())
         .expect("session escape denial must not break stdio");
     assert_eq!(result.responses.len(), 1);
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.completion.group_absent);
 }
 
 #[test]
@@ -278,11 +278,11 @@ fn teardown_identity_failure_returns_bounded_envelope_without_foreign_signal() {
         result.teardown_error_code.as_deref(),
         Some("process_identity")
     );
-    assert!(!result.shutdown.group_absent);
-    assert!(result.shutdown.reaped);
+    assert!(!result.shutdown.completion.group_absent);
+    assert!(result.shutdown.completion.reaped);
     assert!(!result.shutdown.memory_after.available);
-    assert!(!result.shutdown.term_sent);
-    assert!(!result.shutdown.kill_sent);
+    assert!(!result.shutdown.signals.term_sent);
+    assert!(!result.shutdown.signals.kill_sent);
     assert!(started.elapsed() < Duration::from_secs(2));
 
     thread::sleep(Duration::from_secs(2));
@@ -299,10 +299,10 @@ fn late_identity_failure_preserves_sent_signal_receipt() {
 
     assert_eq!(result.status, LocalMcpResultStatus::Failed);
     assert_eq!(result.result_code, "process_identity");
-    assert!(result.shutdown.term_sent);
-    assert!(!result.shutdown.kill_sent);
-    assert!(result.shutdown.reaped);
-    assert!(!result.shutdown.group_absent);
+    assert!(result.shutdown.signals.term_sent);
+    assert!(!result.shutdown.signals.kill_sent);
+    assert!(result.shutdown.completion.reaped);
+    assert!(!result.shutdown.completion.group_absent);
 
     thread::sleep(Duration::from_secs(2));
     assert!(process_group_absent(result.startup.pgid).expect("fixture cleanup probe"));
@@ -345,7 +345,7 @@ fn request_bounds_timeout_cancellation_and_orphan_are_fail_closed() {
     let cancelled = Arc::new(AtomicBool::new(false));
     let provider = cancel_fixture.provider_with_timeout(2_000);
     let cancel_flag = Arc::clone(&cancelled);
-    let handle = thread::spawn(move || provider.run_once_with_cancel(one_call(), cancel_flag));
+    let handle = thread::spawn(move || provider.run_once_with_cancel(one_call(), &cancel_flag));
     thread::sleep(Duration::from_millis(150));
     cancelled.store(true, Ordering::Release);
     let result = handle
@@ -360,8 +360,8 @@ fn request_bounds_timeout_cancellation_and_orphan_are_fail_closed() {
         .provider_with_timeout(100)
         .run_once(one_call())
         .expect("orphan fixture must be killed as a group");
-    assert!(result.shutdown.kill_sent);
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.signals.kill_sent);
+    assert!(result.shutdown.completion.group_absent);
     assert!(result.startup.pid > 0);
 
     let blocked = Fixture::new("blocked-write");
@@ -372,7 +372,7 @@ fn request_bounds_timeout_cancellation_and_orphan_are_fail_closed() {
         .expect("blocked write envelope");
     assert_eq!(result.status, LocalMcpResultStatus::Failed);
     assert_eq!(result.result_code, "request_timeout");
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.completion.group_absent);
     assert!(result.startup.pid > 0);
     assert!(started.elapsed() < Duration::from_secs(3));
 
@@ -381,7 +381,7 @@ fn request_bounds_timeout_cancellation_and_orphan_are_fail_closed() {
     let provider = blocked_cancel.provider_with_large_frames(1_000, 2_000);
     let cancel_flag = Arc::clone(&cancelled);
     let handle =
-        thread::spawn(move || provider.run_once_with_cancel(blocked_write_request(), cancel_flag));
+        thread::spawn(move || provider.run_once_with_cancel(blocked_write_request(), &cancel_flag));
     thread::sleep(Duration::from_millis(150));
     cancelled.store(true, Ordering::Release);
     let result = handle
@@ -390,7 +390,7 @@ fn request_bounds_timeout_cancellation_and_orphan_are_fail_closed() {
         .expect("blocked-write cancellation envelope");
     assert_eq!(result.status, LocalMcpResultStatus::Failed);
     assert_eq!(result.result_code, "cancelled");
-    assert!(result.shutdown.group_absent);
+    assert!(result.shutdown.completion.group_absent);
 }
 
 #[test]
@@ -512,7 +512,7 @@ fn installed_n8n_mcp_catalog_and_read_only_calls_run_through_supervisor() {
     let discovery_shutdown = discovery
         .terminate(Duration::from_secs(2))
         .expect("stop installed n8n-mcp discovery");
-    assert!(discovery_shutdown.group_absent);
+    assert!(discovery_shutdown.completion.group_absent);
 
     let policy = LocalMcpPolicy {
         package_id: "n8n-mcp".into(),
@@ -582,8 +582,8 @@ fn installed_n8n_mcp_catalog_and_read_only_calls_run_through_supervisor() {
     assert_eq!(result.result_code, "ok");
     assert_eq!(result.responses.len(), 4);
     assert!(result.startup.network_disabled);
-    assert!(result.shutdown.group_absent);
-    assert!(result.shutdown.reaped);
+    assert!(result.shutdown.completion.group_absent);
+    assert!(result.shutdown.completion.reaped);
     assert_eq!(result.shutdown.memory_after.process_count, 0);
     eprintln!(
         "installed n8n-mcp acceptance: startup_ms={} provider_ms={} total_ms={} peak_samples={:?}",
@@ -641,7 +641,8 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: &str) -> Self {
-        let dir = tempdir().expect("fixture directory");
+        let mut dir = tempdir().expect("fixture directory");
+        dir.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
         let script = dir.path().join("provider.sh");
         let package_json = dir.path().join("package.json");
         fs::write(&script, fixture_script()).expect("fixture script");

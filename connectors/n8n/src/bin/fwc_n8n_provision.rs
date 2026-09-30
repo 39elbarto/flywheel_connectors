@@ -23,20 +23,20 @@ use super::fwc_n8n_bundle;
 
 const RECEIPT_SCHEMA: &str = "fwc.n8n.bundle.v1";
 const PROVENANCE_SCHEMA: &str = "fwc.n8n.provenance.v1";
-pub(crate) const PROVISION_RECEIPT_SCHEMA: &str = "fwc.n8n.provision.v1";
-pub(crate) const RECEIPT_FILE: &str = "receipt.json";
-pub(crate) const PROVENANCE_FILE: &str = "provenance.json";
-pub(crate) const PROVISION_RECEIPT_FILE: &str = "provision-receipt.json";
-pub(crate) const MAX_RECEIPT_BYTES: usize = 128 * 1024;
-pub(crate) const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
-pub(crate) const MAX_PROVISION_RECEIPT_BYTES: usize = 256 * 1024;
-pub(crate) const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
-pub(crate) const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
-pub(crate) const MAX_POLICY_BYTES: usize = 256 * 1024;
-pub(crate) const DEFAULT_STAGING_ROOT: &str = "/var/lib/fwc-n8n/staging";
+pub const PROVISION_RECEIPT_SCHEMA: &str = "fwc.n8n.provision.v1";
+pub const RECEIPT_FILE: &str = "receipt.json";
+pub const PROVENANCE_FILE: &str = "provenance.json";
+pub const PROVISION_RECEIPT_FILE: &str = "provision-receipt.json";
+pub const MAX_RECEIPT_BYTES: usize = 128 * 1024;
+pub const MAX_PROVENANCE_BYTES: usize = 16 * 1024;
+pub const MAX_PROVISION_RECEIPT_BYTES: usize = 256 * 1024;
+pub const MAX_ARTIFACT_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_INVENTORY_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_POLICY_BYTES: usize = 256 * 1024;
+pub const DEFAULT_STAGING_ROOT: &str = "/var/lib/fwc-n8n/staging";
 const DEFAULT_INSTALL_ROOT: &str = "/usr/local/lib/fwc-n8n";
 
-pub(crate) const ARTIFACTS: [&str; 12] = [
+pub const ARTIFACTS: [&str; 12] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
@@ -51,7 +51,7 @@ pub(crate) const ARTIFACTS: [&str; 12] = [
     "policy/local-mcp.json",
 ];
 const RELEASE_DIRECTORIES: [&str; 4] = ["bin", "manifests", "inventory", "policy"];
-pub(crate) const EXECUTABLES: [&str; 4] = [
+pub const EXECUTABLES: [&str; 4] = [
     "bin/fwc-n8n",
     "bin/fcp-host",
     "bin/fcp-n8n",
@@ -162,7 +162,7 @@ const EEC_API_URL: &str = "https://n8n.europeaneyecenter.com/api/v1";
 const HETZNER_MCP_URL: &str = "https://n8nhet.levilaser.com:8443/mcp-server/http";
 const HETZNER_MCP_HOST: &str = "n8nhet.levilaser.com";
 const HETZNER_API_URL: &str = "https://n8nhet.levilaser.com/api/v1";
-pub(crate) const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
+pub const RELEASE_SIGNATURE_CONTEXT: &[u8] = b"fwc-n8n immutable release v1";
 const LEGACY_COMMON_ALLOWED_OPERATIONS: [&str; 15] = [
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
@@ -277,7 +277,7 @@ pub enum ServerId {
 }
 
 impl ServerId {
-    fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Eec => "eec",
             Self::Hetzner => "hetzner",
@@ -301,13 +301,13 @@ impl fmt::Debug for OfficialMcpBinding {
             .debug_struct("OfficialMcpBinding")
             .field("server", &self.server)
             .field("schema_digests", &"<redacted>")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReleaseSignature {
+pub struct ReleaseSignature {
     pub(crate) algorithm: String,
     pub(crate) key_id: String,
     pub(crate) signature: String,
@@ -440,7 +440,7 @@ impl fmt::Debug for ProvisionRequest {
             .field("release_id", &"<redacted>")
             .field("git_revision", &"<redacted>")
             .field("binding_count", &self.bindings.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -570,14 +570,14 @@ impl ProvisionRequest {
 
 /// Derive the only staging path accepted by the owner signer and runtime
 /// provisioner. Callers provide an identifier, never a filesystem path.
-pub(crate) fn fixed_staging_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
+pub fn fixed_staging_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
     if !is_safe_release_id(release_id) {
         return Err(ProvisionError::new(ProvisionErrorCode::Path));
     }
     Ok(Path::new(DEFAULT_STAGING_ROOT).join(release_id))
 }
 
-pub(crate) fn fixed_release_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
+pub fn fixed_release_path(release_id: &str) -> Result<PathBuf, ProvisionError> {
     if !is_safe_release_id(release_id) {
         return Err(ProvisionError::new(ProvisionErrorCode::Path));
     }
@@ -807,12 +807,12 @@ impl fmt::Debug for InstallPlan {
             .field("release_id", &"<redacted>")
             .field("promotion", &self.promotion)
             .field("previous_release_present", &self.previous_release.exists())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl InstallPlan {
-    pub fn promotion(&self) -> Promotion {
+    pub const fn promotion(&self) -> Promotion {
         self.promotion
     }
 
@@ -903,7 +903,7 @@ impl RevalidatedInstallPlan {
         Ok(self)
     }
 
-    pub fn promotion(&self) -> Promotion {
+    pub const fn promotion(&self) -> Promotion {
         self.plan.promotion
     }
 
@@ -1032,7 +1032,7 @@ impl RollbackPlan {
         Ok(())
     }
 
-    pub fn promotion(&self) -> Promotion {
+    pub const fn promotion(&self) -> Promotion {
         self.promotion
     }
 
@@ -1087,7 +1087,7 @@ impl RevalidatedRollbackPlan {
         Ok(self)
     }
 
-    pub fn promotion(&self) -> Promotion {
+    pub const fn promotion(&self) -> Promotion {
         self.plan.promotion
     }
 
@@ -1180,6 +1180,7 @@ std::thread_local! {
     static TEST_FAIL_CURRENT_PROMOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_FAIL_FINAL_ROLLBACK_FSYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_REPLACE_CURRENT_UNDER_LOCK: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static TEST_TAMPER_TARGET_BEFORE_FINAL_VALIDATION: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -1334,8 +1335,7 @@ fn current_matches_release(
 
 #[cfg(target_os = "linux")]
 fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
-    use rustix::fs::{Mode, OFlags, ResolveFlags, open};
-    use rustix::fs::{RenameFlags, fsync, openat2, renameat_with, symlinkat};
+    use rustix::fs::{RenameFlags, fsync, renameat_with, symlinkat};
     use std::os::unix::fs::MetadataExt;
 
     require_effective_root()?;
@@ -1354,65 +1354,15 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
     let lock = lock_owner_root(&install_root, expected_owner)?;
     let plan = plan.revalidate()?;
     let owner_verification = &plan.plan.owner_verification;
-    let stage_fd = open_owner_directory(plan.stage_root(), expected_owner)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let stage_identity = stage_fd
-        .metadata()
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    if !stage_identity.file_type().is_dir() {
-        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
-    }
-    verify_metadata(&stage_identity, expected_owner, false)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let (_stage_fd, stage_identity) = open_promotion_stage(plan.stage_root(), expected_owner)?;
     let stage_dev = stage_identity.dev();
     let stage_ino = stage_identity.ino();
 
-    let stage_parent = plan
-        .stage_root()
-        .parent()
-        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let stage_name = plan
-        .stage_root()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let release_name = plan
-        .release_path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let stage_parent_relative = stage_parent
-        .strip_prefix("/")
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let filesystem_root = open("/", OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let stage_parent_fd = File::from(
-        openat2(
-            &filesystem_root,
-            stage_parent_relative,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
-        )
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?,
-    );
-    let stage_parent_metadata = stage_parent_fd
-        .metadata()
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    verify_metadata(&stage_parent_metadata, expected_owner, false)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let (stage_parent, stage_name, release_name) = promotion_names(&plan)?;
+    let stage_parent_fd = open_promotion_stage_parent(stage_parent, expected_owner)?;
     let releases_fd = open_owner_directory(&plan.plan.releases_root, expected_owner)
         .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let stage_path_metadata = fs::symlink_metadata(plan.stage_root())
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    if !stage_path_metadata.file_type().is_dir()
-        || stage_path_metadata.dev() != stage_dev
-        || stage_path_metadata.ino() != stage_ino
-    {
-        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
-    }
-    verify_metadata(&stage_path_metadata, expected_owner, false)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    verify_promotion_stage_identity(plan.stage_root(), expected_owner, stage_dev, stage_ino)?;
 
     renameat_with(
         &stage_parent_fd,
@@ -1426,26 +1376,7 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
     fsync(&releases_fd).map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
     fsync(&lock.0).map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
 
-    let release_fd = open_owner_directory(plan.release_path(), expected_owner)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    let release_identity = release_fd
-        .metadata()
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
-    if !release_identity.file_type().is_dir()
-        || release_identity.dev() != stage_dev
-        || release_identity.ino() != stage_ino
-    {
-        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
-    }
-    validate_release_tree(
-        plan.release_path(),
-        &plan.plan.release_id,
-        &plan.plan.git_revision,
-        &plan.plan.bindings,
-        expected_owner,
-        plan.release_path(),
-        owner_verification,
-    )?;
+    let _promoted_fd = verify_promoted_release(&plan, stage_dev, stage_ino)?;
 
     if !current_matches_release(
         plan.current_path(),
@@ -1500,6 +1431,126 @@ fn promote_linux(plan: RevalidatedInstallPlan) -> Result<(), ProvisionError> {
     }
     fsync_owner_directory(&lock.0, ProvisionErrorCode::Promotion)?;
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn promotion_names(plan: &RevalidatedInstallPlan) -> Result<(&Path, &str, &str), ProvisionError> {
+    let stage_parent = plan
+        .stage_root()
+        .parent()
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_name = plan
+        .stage_root()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let release_name = plan
+        .release_path()
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    Ok((stage_parent, stage_name, release_name))
+}
+
+#[cfg(target_os = "linux")]
+fn open_promotion_stage(
+    stage_root: &Path,
+    expected_owner: u32,
+) -> Result<(File, Metadata), ProvisionError> {
+    let stage_fd = open_owner_directory(stage_root, expected_owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_identity = stage_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !stage_identity.file_type().is_dir() {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    verify_metadata(&stage_identity, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    Ok((stage_fd, stage_identity))
+}
+
+#[cfg(target_os = "linux")]
+fn open_promotion_stage_parent(
+    stage_parent: &Path,
+    expected_owner: u32,
+) -> Result<File, ProvisionError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, open, openat2};
+
+    let stage_parent_relative = stage_parent
+        .strip_prefix("/")
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let filesystem_root = open("/", OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let stage_parent_fd = File::from(
+        openat2(
+            &filesystem_root,
+            stage_parent_relative,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS,
+        )
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?,
+    );
+    let stage_parent_metadata = stage_parent_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    verify_metadata(&stage_parent_metadata, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    Ok(stage_parent_fd)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_promotion_stage_identity(
+    stage_root: &Path,
+    expected_owner: u32,
+    stage_dev: u64,
+    stage_ino: u64,
+) -> Result<(), ProvisionError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let stage_path_metadata = fs::symlink_metadata(stage_root)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !stage_path_metadata.file_type().is_dir()
+        || stage_path_metadata.dev() != stage_dev
+        || stage_path_metadata.ino() != stage_ino
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    verify_metadata(&stage_path_metadata, expected_owner, false)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))
+}
+
+#[cfg(target_os = "linux")]
+fn verify_promoted_release(
+    plan: &RevalidatedInstallPlan,
+    stage_dev: u64,
+    stage_ino: u64,
+) -> Result<File, ProvisionError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let expected_owner = plan.plan.expected_owner;
+    let promoted_fd = open_owner_directory(plan.release_path(), expected_owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    let release_identity = promoted_fd
+        .metadata()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Promotion))?;
+    if !release_identity.file_type().is_dir()
+        || release_identity.dev() != stage_dev
+        || release_identity.ino() != stage_ino
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Promotion));
+    }
+    validate_release_tree(
+        plan.release_path(),
+        &plan.plan.release_id,
+        &plan.plan.git_revision,
+        &plan.plan.bindings,
+        expected_owner,
+        plan.release_path(),
+        &plan.plan.owner_verification,
+    )?;
+    Ok(promoted_fd)
 }
 
 #[cfg(target_os = "linux")]
@@ -1563,6 +1614,13 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
     }
+    #[cfg(test)]
+    TEST_TAMPER_TARGET_BEFORE_FINAL_VALIDATION.with(|target| {
+        if let Some(path) = target.borrow_mut().take() {
+            std::fs::write(path, b"retained synthetic target tamper")
+                .expect("tamper retained target under owner lock");
+        }
+    });
     // Repeat full signed pair and receipt-pin validation under the same owner
     // lock immediately before the rename, not just pointer equality.
     if let Err(error) = plan.plan.validate_now() {
@@ -1702,7 +1760,7 @@ struct Receipt {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Artifact {
+pub struct Artifact {
     pub(crate) path: String,
     pub(crate) digest: String,
 }
@@ -1717,7 +1775,7 @@ struct Provenance {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProvisionReceipt {
+pub struct ProvisionReceipt {
     pub(crate) schema: String,
     pub(crate) release_id: String,
     pub(crate) git_revision: String,
@@ -1771,9 +1829,7 @@ fn validate_stage_root_binding(
     Ok(())
 }
 
-pub(crate) fn validate_binding_shape(
-    bindings: &[OfficialMcpBinding],
-) -> Result<(), ProvisionError> {
+pub fn validate_binding_shape(bindings: &[OfficialMcpBinding]) -> Result<(), ProvisionError> {
     validate_binding_shape_with_predecessor(bindings, false)
 }
 
@@ -1842,6 +1898,117 @@ fn validate_stage_tree(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+struct ReleaseSurface<'a> {
+    root: &'a Path,
+    release_id: &'a str,
+    git_revision: &'a str,
+    bindings: &'a [OfficialMcpBinding],
+}
+
+#[cfg(unix)]
+const SIGNED_CURRENT_SCHEMA_MODES: [CurrentValidationMode; 8] = [
+    CurrentValidationMode::SignedProvisionReceipt,
+    CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
+    CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
+    CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
+    CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
+    CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
+    CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory,
+    CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+];
+
+#[cfg(unix)]
+fn select_signed_current_schema(
+    surface: ReleaseSurface<'_>,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+) -> Result<CurrentValidationMode, ProvisionError> {
+    // Preserve reviewed predecessor ordering and fall through only on Policy.
+    // Integrity, signature and receipt failures never select another mode.
+    for mode in SIGNED_CURRENT_SCHEMA_MODES {
+        let allow_predecessor_execute = !matches!(
+            mode,
+            CurrentValidationMode::SignedProvisionReceipt
+                | CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+        );
+        let result = if !allow_predecessor_execute
+            && validate_binding_shape_with_predecessor(surface.bindings, true).is_ok()
+            && validate_binding_shape(surface.bindings).is_err()
+        {
+            Err(ProvisionError::new(ProvisionErrorCode::Policy))
+        } else {
+            validate_signed_tree_mode(
+                surface,
+                expected_owner,
+                owner_verification,
+                mode,
+                allow_predecessor_execute,
+            )
+        };
+        match result {
+            Ok(()) => return Ok(mode),
+            Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Err(ProvisionError::new(ProvisionErrorCode::Policy))
+}
+
+#[cfg(unix)]
+fn validate_signed_tree_mode(
+    surface: ReleaseSurface<'_>,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+    mode: CurrentValidationMode,
+    allow_predecessor_execute: bool,
+) -> Result<(), ProvisionError> {
+    let (lifecycle, common) = match mode {
+        CurrentValidationMode::SignedProvisionReceipt
+        | CurrentValidationMode::SignedProvisionReceiptPreviousExecute => (
+            LifecycleSchemaMode::CurrentPerServer,
+            CommonInventorySchemaMode::Current,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => (
+            LifecycleSchemaMode::CurrentPerServer,
+            CommonInventorySchemaMode::CurrentLegacyLimits,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => (
+            LifecycleSchemaMode::PreviousPerServer,
+            CommonInventorySchemaMode::Current,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory => (
+            LifecycleSchemaMode::CurrentPerServer,
+            CommonInventorySchemaMode::Previous,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => (
+            LifecycleSchemaMode::CurrentPerServer,
+            CommonInventorySchemaMode::Legacy,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory => (
+            LifecycleSchemaMode::CurrentPerServer,
+            CommonInventorySchemaMode::LegacyDisposable,
+        ),
+        CurrentValidationMode::SignedProvisionReceiptLegacySchema => (
+            LifecycleSchemaMode::LegacyCommon,
+            CommonInventorySchemaMode::Legacy,
+        ),
+        CurrentValidationMode::LegacyBootstrap => {
+            return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+        }
+    };
+    validate_release_tree_with_schema_mode_and_binding_mode(
+        surface,
+        expected_owner,
+        surface.root,
+        owner_verification,
+        lifecycle,
+        common,
+        allow_predecessor_execute,
+    )
+}
+
+#[cfg(unix)]
 fn validate_release_tree(
     root: &Path,
     release_id: &str,
@@ -1852,10 +2019,12 @@ fn validate_release_tree(
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
     validate_release_tree_with_schema_mode(
-        root,
-        release_id,
-        git_revision,
-        bindings,
+        ReleaseSurface {
+            root,
+            release_id,
+            git_revision,
+            bindings,
+        },
         expected_owner,
         inventory_release_root,
         owner_verification,
@@ -1866,10 +2035,7 @@ fn validate_release_tree(
 
 #[cfg(unix)]
 fn validate_release_tree_with_schema_mode(
-    root: &Path,
-    release_id: &str,
-    git_revision: &str,
-    bindings: &[OfficialMcpBinding],
+    surface: ReleaseSurface<'_>,
     expected_owner: u32,
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
@@ -1877,10 +2043,7 @@ fn validate_release_tree_with_schema_mode(
     common_inventory_schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
     validate_release_tree_with_schema_mode_and_binding_mode(
-        root,
-        release_id,
-        git_revision,
-        bindings,
+        surface,
         expected_owner,
         inventory_release_root,
         owner_verification,
@@ -1892,10 +2055,7 @@ fn validate_release_tree_with_schema_mode(
 
 #[cfg(unix)]
 fn validate_release_tree_with_schema_mode_and_binding_mode(
-    root: &Path,
-    release_id: &str,
-    git_revision: &str,
-    bindings: &[OfficialMcpBinding],
+    surface: ReleaseSurface<'_>,
     expected_owner: u32,
     inventory_release_root: &Path,
     owner_verification: &OwnerVerificationConfig,
@@ -1904,15 +2064,18 @@ fn validate_release_tree_with_schema_mode_and_binding_mode(
     allow_predecessor_execute: bool,
 ) -> Result<(), ProvisionError> {
     validate_unsigned_release_tree_with_schema_mode(
-        root,
-        release_id,
-        git_revision,
-        bindings,
+        surface,
         expected_owner,
         inventory_release_root,
         lifecycle_schema_mode,
         common_inventory_schema_mode,
     )?;
+    let ReleaseSurface {
+        root,
+        release_id,
+        git_revision,
+        bindings,
+    } = surface;
     let provision_receipt: ProvisionReceipt = read_json(
         &root.join(PROVISION_RECEIPT_FILE),
         expected_owner,
@@ -1952,7 +2115,7 @@ fn validate_release_tree_with_schema_mode_and_binding_mode(
 /// verifier and owner signer. The provision receipt is intentionally excluded:
 /// the signer creates its canonical signed form from this validated surface.
 #[cfg(unix)]
-pub(crate) fn validate_unsigned_release_tree(
+pub fn validate_unsigned_release_tree(
     root: &Path,
     release_id: &str,
     git_revision: &str,
@@ -1961,10 +2124,12 @@ pub(crate) fn validate_unsigned_release_tree(
     inventory_release_root: &Path,
 ) -> Result<(), ProvisionError> {
     validate_unsigned_release_tree_with_schema_mode(
-        root,
-        release_id,
-        git_revision,
-        bindings,
+        ReleaseSurface {
+            root,
+            release_id,
+            git_revision,
+            bindings,
+        },
         expected_owner,
         inventory_release_root,
         LifecycleSchemaMode::CurrentPerServer,
@@ -1974,15 +2139,18 @@ pub(crate) fn validate_unsigned_release_tree(
 
 #[cfg(unix)]
 fn validate_unsigned_release_tree_with_schema_mode(
-    root: &Path,
-    release_id: &str,
-    git_revision: &str,
-    bindings: &[OfficialMcpBinding],
+    surface: ReleaseSurface<'_>,
     expected_owner: u32,
     inventory_release_root: &Path,
     lifecycle_schema_mode: LifecycleSchemaMode,
     common_inventory_schema_mode: CommonInventorySchemaMode,
 ) -> Result<(), ProvisionError> {
+    let ReleaseSurface {
+        root,
+        release_id,
+        git_revision,
+        bindings,
+    } = surface;
     validate_release_directories(root, expected_owner)?;
     let provenance: Provenance = read_json(
         &root.join(PROVENANCE_FILE),
@@ -2144,7 +2312,7 @@ struct UnsignedProvisionReceipt {
     artifacts: Vec<Artifact>,
 }
 
-pub(crate) fn unsigned_provision_receipt_bytes(
+pub fn unsigned_provision_receipt_bytes(
     receipt: &ProvisionReceipt,
 ) -> Result<Vec<u8>, ProvisionError> {
     let mut bindings = receipt.bindings.clone();
@@ -2166,7 +2334,7 @@ fn append_signing_field(payload: &mut Vec<u8>, field: &[u8]) {
     payload.extend_from_slice(field);
 }
 
-pub(crate) fn release_signing_payload(
+pub fn release_signing_payload(
     receipt: &ProvisionReceipt,
     receipt_digest: &str,
     provision_digest: &str,
@@ -2221,7 +2389,7 @@ fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ProvisionError> {
     Ok(decoded)
 }
 
-pub(crate) fn verify_release_signature(
+pub fn verify_release_signature(
     receipt: &ProvisionReceipt,
     receipt_digest: &str,
     owner_verification: &OwnerVerificationConfig,
@@ -2289,7 +2457,7 @@ fn validate_receipt(receipt: &Receipt, release_id: &str) -> Result<(), Provision
 }
 
 #[cfg(unix)]
-pub(crate) fn validate_provision_receipt(
+pub fn validate_provision_receipt(
     receipt: &ProvisionReceipt,
     release_id: &str,
     git_revision: &str,
@@ -2392,15 +2560,7 @@ fn validate_common_inventory(
         ServerId::Eec => (EEC_MCP_HOST, 443_u64),
         ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
     };
-    let expected_operations = match schema_mode {
-        CommonInventorySchemaMode::Current => &COMMON_ALLOWED_OPERATIONS[..],
-        CommonInventorySchemaMode::CurrentLegacyLimits => &COMMON_ALLOWED_OPERATIONS[..],
-        CommonInventorySchemaMode::Previous => &PREVIOUS_COMMON_ALLOWED_OPERATIONS[..],
-        CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS[..],
-        CommonInventorySchemaMode::LegacyDisposable => {
-            &LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS[..]
-        }
-    };
+    let expected_operations = common_inventory_operations(schema_mode);
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
         .allowed_operations
@@ -2430,7 +2590,7 @@ fn validate_common_inventory(
     }
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
     let expected_bounded_network =
-        expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1048576);
+        expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1_048_576);
     if expected_operations.iter().any(|operation| {
         let expected = if matches!(
             schema_mode,
@@ -2455,8 +2615,21 @@ fn validate_common_inventory(
     Ok(())
 }
 
+const fn common_inventory_operations(
+    schema_mode: CommonInventorySchemaMode,
+) -> &'static [&'static str] {
+    match schema_mode {
+        CommonInventorySchemaMode::Current | CommonInventorySchemaMode::CurrentLegacyLimits => {
+            &COMMON_ALLOWED_OPERATIONS
+        }
+        CommonInventorySchemaMode::Previous => &PREVIOUS_COMMON_ALLOWED_OPERATIONS,
+        CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS,
+        CommonInventorySchemaMode::LegacyDisposable => &LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS,
+    }
+}
+
 fn expected_n8n_network_constraint(host: &str, port: u64) -> Value {
-    expected_n8n_network_constraint_with_limit(host, port, 10485760)
+    expected_n8n_network_constraint_with_limit(host, port, 10_485_760)
 }
 
 fn expected_n8n_network_constraint_with_limit(
@@ -2571,6 +2744,13 @@ fn validate_zone_policies(value: &Value) -> Result<(), ProvisionError> {
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    validate_zone_policy_header(policy)
+}
+
+#[cfg(unix)]
+fn validate_zone_policy_header(
+    policy: &serde_json::Map<String, Value>,
+) -> Result<(), ProvisionError> {
     let header = policy
         .get("header")
         .and_then(Value::as_object)
@@ -2723,6 +2903,17 @@ fn validate_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    validate_official_inventory_policy(config, server, binding, lifecycle_schema_mode)?;
+    validate_official_inventory_permissions(entry, expected_host, expected_port, &expected_binary)
+}
+
+#[cfg(unix)]
+fn validate_official_inventory_policy(
+    config: &serde_json::Map<String, Value>,
+    server: ServerId,
+    binding: &OfficialMcpBinding,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+) -> Result<(), ProvisionError> {
     let policy = config
         .get("capability_policy")
         .and_then(Value::as_object)
@@ -2748,6 +2939,17 @@ fn validate_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    validate_official_inventory_tools(policy, server, binding, lifecycle_schema_mode)?;
+    validate_official_inventory_schema_bindings(policy, binding)
+}
+
+#[cfg(unix)]
+fn validate_official_inventory_tools(
+    policy: &serde_json::Map<String, Value>,
+    server: ServerId,
+    binding: &OfficialMcpBinding,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+) -> Result<(), ProvisionError> {
     let tools = policy
         .get("approved_tools")
         .and_then(Value::as_array)
@@ -2790,36 +2992,8 @@ fn validate_inventory(
         if !is_sha256_digest(input) || !is_sha256_digest(output) {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
-        let lifecycle_matches = match (server, lifecycle_schema_mode, name) {
-            (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer, "publish_workflow")
-            | (ServerId::Eec, LifecycleSchemaMode::CurrentPerServer, "unpublish_workflow")
-            | (ServerId::Hetzner, LifecycleSchemaMode::CurrentPerServer, "publish_workflow")
-            | (ServerId::Hetzner, LifecycleSchemaMode::CurrentPerServer, "unpublish_workflow") => {
-                lifecycle_schema_digests(server, name)
-                    .is_some_and(|expected| expected == (input, output))
-            }
-            (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer, "publish_workflow")
-            | (ServerId::Eec, LifecycleSchemaMode::PreviousPerServer, "unpublish_workflow") => {
-                previous_eec_lifecycle_schema_digests(name)
-                    .is_some_and(|expected| expected == (input, output))
-            }
-            (ServerId::Hetzner, LifecycleSchemaMode::PreviousPerServer, "publish_workflow")
-            | (ServerId::Hetzner, LifecycleSchemaMode::PreviousPerServer, "unpublish_workflow") => {
-                [
-                    previous_hetzner_lifecycle_schema_digests(name),
-                    lifecycle_schema_digests(server, name),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|expected| expected == (input, output))
-            }
-            (_, LifecycleSchemaMode::LegacyCommon, "publish_workflow")
-            | (_, LifecycleSchemaMode::LegacyCommon, "unpublish_workflow") => {
-                fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
-                    .is_some_and(|expected| expected == (input, output))
-            }
-            _ => false,
-        };
+        let lifecycle_matches =
+            official_lifecycle_schema_matches(server, lifecycle_schema_mode, name, input, output);
         let binding_matches = match name {
             "archive_workflow" => {
                 (input, output)
@@ -2845,6 +3019,54 @@ fn validate_inventory(
     if seen.len() != APPROVED_TOOLS.len() {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn official_lifecycle_schema_matches(
+    server: ServerId,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+    name: &str,
+    input: &str,
+    output: &str,
+) -> bool {
+    match (server, lifecycle_schema_mode, name) {
+        (
+            ServerId::Eec | ServerId::Hetzner,
+            LifecycleSchemaMode::CurrentPerServer,
+            "publish_workflow" | "unpublish_workflow",
+        ) => lifecycle_schema_digests(server, name)
+            .is_some_and(|expected| expected == (input, output)),
+        (
+            ServerId::Eec,
+            LifecycleSchemaMode::PreviousPerServer,
+            "publish_workflow" | "unpublish_workflow",
+        ) => previous_eec_lifecycle_schema_digests(name)
+            .is_some_and(|expected| expected == (input, output)),
+        (
+            ServerId::Hetzner,
+            LifecycleSchemaMode::PreviousPerServer,
+            "publish_workflow" | "unpublish_workflow",
+        ) => [
+            previous_hetzner_lifecycle_schema_digests(name),
+            lifecycle_schema_digests(server, name),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|expected| expected == (input, output)),
+        (_, LifecycleSchemaMode::LegacyCommon, "publish_workflow" | "unpublish_workflow") => {
+            fwc_n8n_bundle::legacy_official_mcp_lifecycle_schema_digests(name)
+                .is_some_and(|expected| expected == (input, output))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn validate_official_inventory_schema_bindings(
+    policy: &serde_json::Map<String, Value>,
+    binding: &OfficialMcpBinding,
+) -> Result<(), ProvisionError> {
     let archive_schema = policy
         .get("archive_workflow_schema")
         .and_then(Value::as_object)
@@ -2881,6 +3103,16 @@ fn validate_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_official_inventory_permissions(
+    entry: &serde_json::Map<String, Value>,
+    expected_host: &str,
+    expected_port: u64,
+    expected_binary: &Path,
+) -> Result<(), ProvisionError> {
     let zones = entry
         .get("allowed_zones")
         .and_then(Value::as_array)
@@ -2992,6 +3224,130 @@ fn validate_current_pointer_with_verifier<F>(
 where
     F: FnOnce(&Path, u32) -> Result<(), ProvisionError>,
 {
+    let current = validate_current_pointer_layout(current_path, releases_root, expected_owner)?;
+    let release_id = current
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    validate_release_directories(&current, expected_owner)?;
+    let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
+    let mode = match fs::symlink_metadata(&provision_receipt_path) {
+        Ok(_) => match expected_mode {
+            None | Some(CurrentValidationMode::LegacyBootstrap) => {
+                CurrentValidationMode::SignedProvisionReceipt
+            }
+            Some(signed_mode) => signed_mode,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            CurrentValidationMode::LegacyBootstrap
+        }
+        Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Receipt)),
+    };
+    if expected_mode.is_some_and(|expected| expected != mode) {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+    }
+
+    let provenance = read_current_provenance(&current, release_id, expected_owner)?;
+
+    match mode {
+        CurrentValidationMode::SignedProvisionReceipt => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            let selected_mode = select_signed_current_schema(
+                ReleaseSurface {
+                    root: &current,
+                    release_id,
+                    git_revision: &provenance.git_revision,
+                    bindings: &provision_receipt.bindings,
+                },
+                expected_owner,
+                owner_verification,
+            )?;
+            return Ok((current, selected_mode));
+        }
+        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+        | CurrentValidationMode::SignedProvisionReceiptPreviousExecute
+        | CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
+        | CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory
+        | CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
+        | CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory
+        | CurrentValidationMode::SignedProvisionReceiptLegacySchema => {
+            let provenance = provenance
+                .as_ref()
+                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
+            let provision_receipt: ProvisionReceipt = read_json(
+                &provision_receipt_path,
+                expected_owner,
+                MAX_PROVISION_RECEIPT_BYTES,
+                ProvisionErrorCode::Receipt,
+            )?;
+            let allow_predecessor_execute =
+                mode != CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits;
+            validate_binding_shape_with_predecessor(
+                &provision_receipt.bindings,
+                allow_predecessor_execute,
+            )?;
+            validate_signed_tree_mode(
+                ReleaseSurface {
+                    root: &current,
+                    release_id,
+                    git_revision: &provenance.git_revision,
+                    bindings: &provision_receipt.bindings,
+                },
+                expected_owner,
+                owner_verification,
+                mode,
+                allow_predecessor_execute,
+            )?;
+            return Ok((current, mode));
+        }
+        CurrentValidationMode::LegacyBootstrap => {
+            legacy_verifier(&current, expected_owner)?;
+        }
+    }
+    Ok((current, mode))
+}
+
+#[cfg(unix)]
+fn read_current_provenance(
+    current: &Path,
+    release_id: &str,
+    expected_owner: u32,
+) -> Result<Option<Provenance>, ProvisionError> {
+    let provenance_path = current.join(PROVENANCE_FILE);
+    let provenance = match fs::symlink_metadata(&provenance_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(read_json::<Provenance>(
+            &provenance_path,
+            expected_owner,
+            MAX_PROVENANCE_BYTES,
+            ProvisionErrorCode::Provenance,
+        )?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Ok(_) | Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Provenance)),
+    };
+    if let Some(provenance) = &provenance
+        && (provenance.schema != PROVENANCE_SCHEMA
+            || provenance.release_id != release_id
+            || !is_git_revision(&provenance.git_revision))
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
+    }
+    Ok(provenance)
+}
+
+#[cfg(unix)]
+fn validate_current_pointer_layout(
+    current_path: &Path,
+    releases_root: &Path,
+    expected_owner: u32,
+) -> Result<PathBuf, ProvisionError> {
     use std::os::unix::fs::MetadataExt;
 
     let metadata = fs::symlink_metadata(current_path)
@@ -3016,409 +3372,7 @@ where
     {
         return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
     }
-    let release_id = current
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
-    validate_release_directories(&current, expected_owner)?;
-    let provision_receipt_path = current.join(PROVISION_RECEIPT_FILE);
-    let mode = match fs::symlink_metadata(&provision_receipt_path) {
-        Ok(_) => match expected_mode {
-            Some(CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits) => {
-                CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptPreviousExecute) => {
-                CurrentValidationMode::SignedProvisionReceiptPreviousExecute
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle) => {
-                CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory) => {
-                CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory) => {
-                CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory) => {
-                CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory
-            }
-            Some(CurrentValidationMode::SignedProvisionReceiptLegacySchema) => {
-                CurrentValidationMode::SignedProvisionReceiptLegacySchema
-            }
-            _ => CurrentValidationMode::SignedProvisionReceipt,
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            CurrentValidationMode::LegacyBootstrap
-        }
-        Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Receipt)),
-    };
-    if expected_mode.is_some_and(|expected| expected != mode) {
-        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
-    }
-
-    let provenance_path = current.join(PROVENANCE_FILE);
-    let provenance = match fs::symlink_metadata(&provenance_path) {
-        Ok(metadata) if metadata.file_type().is_file() => Some(read_json::<Provenance>(
-            &provenance_path,
-            expected_owner,
-            MAX_PROVENANCE_BYTES,
-            ProvisionErrorCode::Provenance,
-        )?),
-        Ok(_) => return Err(ProvisionError::new(ProvisionErrorCode::Provenance)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(ProvisionError::new(ProvisionErrorCode::Provenance)),
-    };
-    if let Some(provenance) = &provenance
-        && (provenance.schema != PROVENANCE_SCHEMA
-            || provenance.release_id != release_id
-            || !is_git_revision(&provenance.git_revision))
-    {
-        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
-    }
-
-    match mode {
-        CurrentValidationMode::SignedProvisionReceipt => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            let validate_signed_tree = |lifecycle_schema_mode, common_inventory_schema_mode| {
-                let allow_predecessor_execute = !matches!(
-                    (lifecycle_schema_mode, common_inventory_schema_mode),
-                    (
-                        LifecycleSchemaMode::CurrentPerServer,
-                        CommonInventorySchemaMode::Current
-                            | CommonInventorySchemaMode::CurrentLegacyLimits
-                    )
-                );
-                if !allow_predecessor_execute
-                    && validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)
-                        .is_ok()
-                    && validate_binding_shape(&provision_receipt.bindings).is_err()
-                {
-                    return Err(ProvisionError::new(ProvisionErrorCode::Policy));
-                }
-                validate_release_tree_with_schema_mode_and_binding_mode(
-                    &current,
-                    release_id,
-                    &provenance.git_revision,
-                    &provision_receipt.bindings,
-                    expected_owner,
-                    &current,
-                    owner_verification,
-                    lifecycle_schema_mode,
-                    common_inventory_schema_mode,
-                    allow_predecessor_execute,
-                )
-            };
-            match validate_signed_tree(
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Current,
-            ) {
-                Ok(()) => return Ok((current, CurrentValidationMode::SignedProvisionReceipt)),
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_signed_tree(
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::CurrentLegacyLimits,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Current,
-                true,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_signed_tree(
-                LifecycleSchemaMode::PreviousPerServer,
-                CommonInventorySchemaMode::Current,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_signed_tree(
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Previous,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_signed_tree(
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Legacy,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_signed_tree(
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::LegacyDisposable,
-            ) {
-                Ok(()) => {
-                    return Ok((
-                        current,
-                        CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory,
-                    ));
-                }
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            validate_signed_tree(
-                LifecycleSchemaMode::LegacyCommon,
-                CommonInventorySchemaMode::Legacy,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptLegacySchema,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape(&provision_receipt.bindings)?;
-            validate_release_tree_with_schema_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::CurrentLegacyLimits,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptPreviousExecute => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Current,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::PreviousPerServer,
-                CommonInventorySchemaMode::Current,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Previous,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Legacy,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::LegacyDisposable,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory,
-            ));
-        }
-        CurrentValidationMode::SignedProvisionReceiptLegacySchema => {
-            let provenance = provenance
-                .as_ref()
-                .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Provenance))?;
-            let provision_receipt: ProvisionReceipt = read_json(
-                &provision_receipt_path,
-                expected_owner,
-                MAX_PROVISION_RECEIPT_BYTES,
-                ProvisionErrorCode::Receipt,
-            )?;
-            validate_binding_shape_with_predecessor(&provision_receipt.bindings, true)?;
-            validate_release_tree_with_schema_mode_and_binding_mode(
-                &current,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                &current,
-                owner_verification,
-                LifecycleSchemaMode::LegacyCommon,
-                CommonInventorySchemaMode::Legacy,
-                true,
-            )?;
-            return Ok((
-                current,
-                CurrentValidationMode::SignedProvisionReceiptLegacySchema,
-            ));
-        }
-        CurrentValidationMode::LegacyBootstrap => {
-            legacy_verifier(&current, expected_owner)?;
-        }
-    }
-    Ok((current, mode))
+    Ok(current)
 }
 
 #[cfg(unix)]
@@ -3476,119 +3430,46 @@ fn validate_release_target(
             if error.code == ProvisionErrorCode::Policy
                 || (!current_binding_shape && error.code == ProvisionErrorCode::Receipt) =>
         {
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                target,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
+            validate_signed_target_predecessors(
+                ReleaseSurface {
+                    root: target,
+                    release_id,
+                    git_revision: &provenance.git_revision,
+                    bindings: &provision_receipt.bindings,
+                },
                 expected_owner,
-                target,
                 owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Current,
-                true,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                target,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                target,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::CurrentLegacyLimits,
-                true,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                target,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                target,
-                owner_verification,
-                LifecycleSchemaMode::PreviousPerServer,
-                CommonInventorySchemaMode::Current,
-                true,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                target,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                target,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Previous,
-                true,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
-                Err(_) => {}
-            }
-            match validate_release_tree_with_schema_mode_and_binding_mode(
-                target,
-                release_id,
-                &provenance.git_revision,
-                &provision_receipt.bindings,
-                expected_owner,
-                target,
-                owner_verification,
-                LifecycleSchemaMode::CurrentPerServer,
-                CommonInventorySchemaMode::Legacy,
-                true,
-            ) {
-                Ok(()) => Ok(()),
-                Err(error) if error.code == ProvisionErrorCode::Policy => {
-                    match validate_release_tree_with_schema_mode_and_binding_mode(
-                        target,
-                        release_id,
-                        &provenance.git_revision,
-                        &provision_receipt.bindings,
-                        expected_owner,
-                        target,
-                        owner_verification,
-                        LifecycleSchemaMode::CurrentPerServer,
-                        CommonInventorySchemaMode::LegacyDisposable,
-                        true,
-                    ) {
-                        Ok(()) => Ok(()),
-                        Err(error) if error.code == ProvisionErrorCode::Policy => {
-                            validate_release_tree_with_schema_mode_and_binding_mode(
-                                target,
-                                release_id,
-                                &provenance.git_revision,
-                                &provision_receipt.bindings,
-                                expected_owner,
-                                target,
-                                owner_verification,
-                                LifecycleSchemaMode::LegacyCommon,
-                                CommonInventorySchemaMode::Legacy,
-                                true,
-                            )
-                        }
-                        Err(error) => Err(error),
-                    }
-                }
-                Err(error) => Err(error),
-            }
+            )
         }
         Err(error) => Err(error),
     }
+}
+
+#[cfg(unix)]
+fn validate_signed_target_predecessors(
+    surface: ReleaseSurface<'_>,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+) -> Result<(), ProvisionError> {
+    const TARGET_MODES: [CurrentValidationMode; 7] = [
+        CurrentValidationMode::SignedProvisionReceipt,
+        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
+        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
+        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
+        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory,
+        CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory,
+        CurrentValidationMode::SignedProvisionReceiptLegacySchema,
+    ];
+    // Target predecessor validation has always admitted previous execute pins
+    // in every reviewed inventory mode. Only Policy permits another mode.
+    for mode in TARGET_MODES {
+        match validate_signed_tree_mode(surface, expected_owner, owner_verification, mode, true) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code != ProvisionErrorCode::Policy => return Err(error),
+            Err(_) => {}
+        }
+    }
+    Err(ProvisionError::new(ProvisionErrorCode::Policy))
 }
 
 #[cfg(unix)]
@@ -3726,7 +3607,7 @@ fn read_bounded(path: &Path, max_bytes: usize) -> Result<Vec<u8>, std::io::Error
 }
 
 #[cfg(unix)]
-pub(crate) fn hash_file(path: &Path) -> Result<String, ProvisionError> {
+pub fn hash_file(path: &Path) -> Result<String, ProvisionError> {
     let (mut file, _) = open_nofollow_regular_file(path)
         .map_err(|_| ProvisionError::new(ProvisionErrorCode::Digest))?;
     let mut hasher = blake3::Hasher::new();
@@ -3744,7 +3625,7 @@ pub(crate) fn hash_file(path: &Path) -> Result<String, ProvisionError> {
 }
 
 #[cfg(unix)]
-pub(crate) fn staged_provision_artifacts(root: &Path) -> Result<Vec<Artifact>, ProvisionError> {
+pub fn staged_provision_artifacts(root: &Path) -> Result<Vec<Artifact>, ProvisionError> {
     ARTIFACTS
         .into_iter()
         .chain([RECEIPT_FILE, PROVENANCE_FILE])
@@ -3794,7 +3675,7 @@ fn reject_symlink_ancestors(path: &Path, include_final: bool) -> Result<(), Prov
     Ok(())
 }
 
-pub(crate) fn is_safe_release_id(value: &str) -> bool {
+pub fn is_safe_release_id(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."
@@ -3804,7 +3685,7 @@ pub(crate) fn is_safe_release_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-pub(crate) fn is_git_revision(value: &str) -> bool {
+pub fn is_git_revision(value: &str) -> bool {
     (7..=64).contains(&value.len())
         && value
             .bytes()
@@ -4021,7 +3902,10 @@ mod tests {
         }
 
         fn new_with_previous_receipt(include_provision_receipt: bool) -> Self {
-            Self::new_with_retention(include_provision_receipt, false)
+            Self::new_with_retention(
+                include_provision_receipt,
+                std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some(),
+            )
         }
 
         fn new_with_retention(include_provision_receipt: bool, retain: bool) -> Self {
@@ -4994,6 +4878,35 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn retained_recovery_target_tamper_before_final_locked_validation() {
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        let before = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current identity");
+        let target_artifact = recovery.target_release.join("bin/fcp-n8n");
+        let proof = recovery.revalidate().expect("initial target proof");
+        TEST_TAMPER_TARGET_BEFORE_FINAL_VALIDATION.with(|target| {
+            *target.borrow_mut() = Some(target_artifact);
+        });
+        assert_eq!(
+            FilesystemOwnerAtomicInstaller::new()
+                .rollback(proof)
+                .expect_err("final locked target validation denies tamper")
+                .code(),
+            ProvisionErrorCode::Digest
+        );
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("working current preserved"),
+            before
+        );
+        TEST_TAMPER_TARGET_BEFORE_FINAL_VALIDATION.with(|target| {
+            assert!(target.borrow().is_none(), "single attempt consumed hook");
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn retained_recovery_post_rename_fsync_failure_is_uncertain_with_exact_readback() {
         let fixture = Fixture::retained();
         let recovery = fixture.promote_for_pinned_recovery();
@@ -5712,8 +5625,11 @@ mod tests {
     #[test]
     fn legacy_current_without_provenance_remains_bootstrap_eligible() {
         let fixture = Fixture::new_legacy();
-        fs::remove_file(fixture.releases.join("previous").join(PROVENANCE_FILE))
-            .expect("remove optional legacy provenance");
+        fs::rename(
+            fixture.releases.join("previous").join(PROVENANCE_FILE),
+            fixture.root.join("retained-legacy-provenance.json"),
+        )
+        .expect("retain optional legacy provenance");
         let plan = fixture
             .request()
             .validate_with_legacy_verifier(|_, _| Ok(()))
@@ -6106,7 +6022,8 @@ mod tests {
         let fixture = Fixture::new();
         let plan = fixture.request().validate().expect("valid plan");
         let before = fs::canonicalize(&fixture.current).expect("current target");
-        fs::remove_file(&fixture.current).expect("remove current");
+        fs::rename(&fixture.current, fixture.root.join("current.retained"))
+            .expect("retain current");
         symlink(&fixture.stage, &fixture.current).expect("stale current");
         assert_eq!(
             plan.revalidate().expect_err("stale current").code(),
@@ -6228,7 +6145,8 @@ mod tests {
         let fixture = Fixture::new();
         let plan = fixture.request().validate().expect("valid plan");
         let proof = plan.revalidate().expect("revalidated plan");
-        fs::remove_file(&fixture.current).expect("remove current");
+        fs::rename(&fixture.current, fixture.root.join("current.retained"))
+            .expect("retain current");
         fs::write(&fixture.current, b"not a symlink").expect("regular current");
         let error = FilesystemOwnerAtomicInstaller::new()
             .promote(proof)
@@ -6240,7 +6158,7 @@ mod tests {
         let fixture = Fixture::new();
         let plan = fixture.request().validate().expect("valid plan");
         let proof = plan.revalidate().expect("revalidated plan");
-        fs::remove_dir_all(&fixture.stage).expect("remove stage");
+        fs::rename(&fixture.stage, fixture.root.join("stage.retained")).expect("retain stage");
         fs::create_dir(fixture.root.join("outside")).expect("outside directory");
         symlink(fixture.root.join("outside"), &fixture.stage).expect("stage symlink");
         let error = FilesystemOwnerAtomicInstaller::new()
@@ -6307,7 +6225,8 @@ mod tests {
         FilesystemOwnerAtomicInstaller::new()
             .promote(plan.revalidate().expect("revalidated plan"))
             .expect("owner promotion");
-        fs::remove_file(&fixture.current).expect("remove current");
+        fs::rename(&fixture.current, fixture.root.join("current.retained"))
+            .expect("retain current");
         symlink(fixture.releases.join("previous"), &fixture.current).expect("stale current");
         let error = rollback.revalidate().expect_err("stale rollback current");
         assert_eq!(error.code(), ProvisionErrorCode::CurrentPointer);
@@ -6337,7 +6256,11 @@ mod tests {
             ProvisionErrorCode::Permissions | ProvisionErrorCode::Layout
         ));
         let fixture = Fixture::new();
-        fs::remove_file(fixture.stage.join("bin/fcp-host")).expect("remove");
+        fs::rename(
+            fixture.stage.join("bin/fcp-host"),
+            fixture.root.join("retained-fcp-host"),
+        )
+        .expect("retain artifact");
         symlink("fcp-n8n", fixture.stage.join("bin/fcp-host")).expect("symlink");
         assert_eq!(
             fixture.request().validate().expect_err("symlink").code(),
@@ -6440,7 +6363,8 @@ mod tests {
     #[test]
     fn current_pointer_and_rollback_target_fail_closed() {
         let fixture = Fixture::new();
-        fs::remove_file(&fixture.current).expect("remove current");
+        fs::rename(&fixture.current, fixture.root.join("current.retained"))
+            .expect("retain current");
         fs::write(&fixture.current, b"not a link").expect("regular current");
         assert_eq!(
             fixture
@@ -6451,7 +6375,8 @@ mod tests {
             ProvisionErrorCode::CurrentPointer
         );
         let fixture = Fixture::new();
-        fs::remove_file(&fixture.current).expect("remove current");
+        fs::rename(&fixture.current, fixture.root.join("current.retained"))
+            .expect("retain current");
         symlink(fixture.root.join("outside"), &fixture.current).expect("outside link");
         assert_eq!(
             fixture

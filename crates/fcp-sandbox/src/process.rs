@@ -89,13 +89,25 @@ pub struct ProcessMemorySample {
     pub private_bytes: Option<u64>,
 }
 
-/// Result of the best-effort TERM/KILL/reap sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminationReport {
+/// Independent evidence of signals sent to the verified process group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminationSignals {
     pub term_sent: bool,
     pub kill_sent: bool,
+}
+
+/// Independent evidence of child reaping and process-group absence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminationCompletion {
     pub reaped: bool,
     pub group_absent: bool,
+}
+
+/// Result of the best-effort TERM/KILL/reap sequence.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminationReport {
+    pub signals: TerminationSignals,
+    pub completion: TerminationCompletion,
 }
 
 /// Errors from exact process-group launch and teardown.
@@ -299,14 +311,14 @@ impl OwnedProcess {
         supervisor_control: Option<InheritedChannel>,
         supervisor_attach_fd: Option<OwnedFd>,
     ) -> Result<Self, ProcessGroupError> {
+        use std::os::unix::process::CommandExt;
+
         validate_supervised_spawn_pair(
             inherited_channel,
             supervisor_control,
             supervisor_attach_fd.is_some(),
         )?;
         validate_process_spec(spec)?;
-
-        use std::os::unix::process::CommandExt;
 
         let network_disabled = spec.network_disabled;
         let mut command = Command::new(&spec.launcher_path);
@@ -512,10 +524,14 @@ impl OwnedProcess {
     #[must_use]
     pub const fn termination_report(&self, group_absent: bool) -> TerminationReport {
         TerminationReport {
-            term_sent: self.term_sent,
-            kill_sent: self.kill_sent,
-            reaped: self.reaped,
-            group_absent,
+            signals: TerminationSignals {
+                term_sent: self.term_sent,
+                kill_sent: self.kill_sent,
+            },
+            completion: TerminationCompletion {
+                reaped: self.reaped,
+                group_absent,
+            },
         }
     }
 
@@ -570,18 +586,17 @@ impl OwnedProcess {
             for process in &processes {
                 let status = std::fs::read_to_string(format!("/proc/{}/status", process.pid))?;
                 rss = rss.saturating_add(parse_kib_field(&status, "VmRSS:")?);
-                match std::fs::read_to_string(format!("/proc/{}/smaps_rollup", process.pid)) {
-                    Ok(smaps) => {
-                        pss = pss.saturating_add(parse_kib_field(&smaps, "Pss:")?);
-                        private = private
-                            .saturating_add(parse_kib_field(&smaps, "Private_Clean:")?)
-                            .saturating_add(parse_kib_field(&smaps, "Private_Dirty:")?)
-                            .saturating_add(parse_kib_field(&smaps, "Private_Hugetlb:")?);
-                    }
-                    Err(_) => {
-                        pss_complete = false;
-                        private_complete = false;
-                    }
+                if let Ok(smaps) =
+                    std::fs::read_to_string(format!("/proc/{}/smaps_rollup", process.pid))
+                {
+                    pss = pss.saturating_add(parse_kib_field(&smaps, "Pss:")?);
+                    private = private
+                        .saturating_add(parse_kib_field(&smaps, "Private_Clean:")?)
+                        .saturating_add(parse_kib_field(&smaps, "Private_Dirty:")?)
+                        .saturating_add(parse_kib_field(&smaps, "Private_Hugetlb:")?);
+                } else {
+                    pss_complete = false;
+                    private_complete = false;
                 }
             }
             Ok(ProcessMemorySample {
@@ -963,7 +978,7 @@ fn read_proc_stat(pid: u32) -> Result<ProcSnapshot, ProcessGroupError> {
         .and_then(|value| value.as_bytes().first())
         .copied()
         .ok_or(ProcessGroupError::IdentityMismatch)?;
-    let pgid = fields
+    let process_group = fields
         .get(2)
         .ok_or(ProcessGroupError::IdentityMismatch)?
         .parse::<i32>()
@@ -981,7 +996,7 @@ fn read_proc_stat(pid: u32) -> Result<ProcSnapshot, ProcessGroupError> {
     Ok(ProcSnapshot {
         pid,
         state,
-        pgid,
+        pgid: process_group,
         session_id,
         start_time_ticks,
     })
@@ -992,14 +1007,14 @@ fn group_processes(pgid: i32) -> Result<Vec<ProcSnapshot>, ProcessGroupError> {
     let mut processes = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
-        let Some(pid) = entry
+        let Some(process_id) = entry
             .file_name()
             .to_str()
             .and_then(|name| name.parse().ok())
         else {
             continue;
         };
-        if let Ok(snapshot) = read_proc_stat(pid) {
+        if let Ok(snapshot) = read_proc_stat(process_id) {
             if snapshot.pgid == pgid {
                 processes.push(snapshot);
             }
@@ -1074,7 +1089,7 @@ pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, Proc
             fd,
             libc::SOL_SOCKET,
             libc::SO_DOMAIN,
-            (&mut domain as *mut libc::c_int).cast(),
+            std::ptr::from_mut(&mut domain).cast(),
             &mut domain_len,
         )
     };
@@ -1092,7 +1107,7 @@ pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, Proc
             fd,
             libc::SOL_SOCKET,
             libc::SO_TYPE,
-            (&mut socket_type as *mut libc::c_int).cast(),
+            std::ptr::from_mut(&mut socket_type).cast(),
             &mut socket_type_len,
         )
     };
@@ -1108,7 +1123,7 @@ pub fn claim_inherited_host_egress_channel(fd: RawFd) -> Result<UnixStream, Proc
     let peer_result = unsafe {
         libc::getpeername(
             fd,
-            (&mut peer_address as *mut libc::sockaddr_storage).cast(),
+            std::ptr::from_mut(&mut peer_address).cast(),
             &mut peer_address_len,
         )
     };
@@ -1177,7 +1192,7 @@ fn validate_host_egress_channel(stream: &UnixStream) -> Result<RawFd, ProcessGro
             fd,
             libc::SOL_SOCKET,
             libc::SO_TYPE,
-            (&mut socket_type as *mut libc::c_int).cast(),
+            std::ptr::from_mut(&mut socket_type).cast(),
             &mut socket_type_len,
         )
     };
@@ -1190,7 +1205,7 @@ fn validate_host_egress_channel(stream: &UnixStream) -> Result<RawFd, ProcessGro
     let address_result = unsafe {
         libc::getsockname(
             fd,
-            (&mut address as *mut libc::sockaddr_storage).cast(),
+            std::ptr::from_mut(&mut address).cast(),
             &mut address_len,
         )
     };
@@ -1421,7 +1436,7 @@ fn install_network_deny_filter(
         libc::prctl(
             libc::PR_SET_SECCOMP,
             libc::SECCOMP_MODE_FILTER,
-            &program as *const SeccompProgram,
+            std::ptr::from_ref(&program),
             0,
             0,
         )
@@ -1498,6 +1513,26 @@ fn digest_file(path: &Path) -> Result<String, ProcessGroupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn termination_evidence_preserves_all_independent_combinations() {
+        for bits in 0_u8..16 {
+            let report = TerminationReport {
+                signals: TerminationSignals {
+                    term_sent: bits & 1 != 0,
+                    kill_sent: bits & 2 != 0,
+                },
+                completion: TerminationCompletion {
+                    reaped: bits & 4 != 0,
+                    group_absent: bits & 8 != 0,
+                },
+            };
+            assert_eq!(report.signals.term_sent, bits & 1 != 0);
+            assert_eq!(report.signals.kill_sent, bits & 2 != 0);
+            assert_eq!(report.completion.reaped, bits & 4 != 0);
+            assert_eq!(report.completion.group_absent, bits & 8 != 0);
+        }
+    }
 
     #[cfg(target_os = "linux")]
     use std::io::{Read, Write};
@@ -1904,7 +1939,7 @@ mod tests {
         let report = process
             .terminate(Duration::from_secs(1))
             .expect("terminate channel child");
-        assert!(report.group_absent);
+        assert!(report.completion.group_absent);
     }
 
     #[cfg(target_os = "linux")]
@@ -1930,7 +1965,7 @@ mod tests {
         let report = process
             .terminate(Duration::from_secs(1))
             .expect("terminate credential channel child");
-        assert!(report.group_absent);
+        assert!(report.completion.group_absent);
     }
 
     #[cfg(target_os = "linux")]
@@ -2144,7 +2179,7 @@ mod tests {
         let report = process
             .terminate(Duration::from_secs(1))
             .expect("terminate supervised child");
-        assert!(report.group_absent);
+        assert!(report.completion.group_absent);
     }
 
     #[cfg(target_os = "linux")]
@@ -2177,7 +2212,7 @@ mod tests {
         let report = process
             .terminate(Duration::from_secs(1))
             .expect("terminate ambient-fd probe");
-        assert!(report.group_absent);
+        assert!(report.completion.group_absent);
     }
 
     #[test]
@@ -2364,8 +2399,8 @@ mod tests {
         let report = process
             .terminate_until(Deadline::after(Duration::from_secs(1)))
             .expect("deadline-bounded teardown");
-        assert!(report.reaped);
-        assert!(report.group_absent);
+        assert!(report.completion.reaped);
+        assert!(report.completion.group_absent);
     }
 
     #[cfg(target_os = "linux")]
@@ -2379,10 +2414,10 @@ mod tests {
         let report = process
             .terminate_until(Deadline::after(TERM_RESISTANT_REQUESTED_BUDGET))
             .expect("deadline-bounded TERM/KILL teardown");
-        assert!(report.term_sent);
-        assert!(report.kill_sent);
-        assert!(report.reaped);
-        assert!(report.group_absent);
+        assert!(report.signals.term_sent);
+        assert!(report.signals.kill_sent);
+        assert!(report.completion.reaped);
+        assert!(report.completion.group_absent);
         assert!(
             started.elapsed() < TERM_RESISTANT_REQUESTED_BUDGET + TERM_RESISTANT_SCHEDULER_SLACK
         );

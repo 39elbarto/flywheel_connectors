@@ -86,7 +86,7 @@ pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;
 pub use n8n_approval::{
-    N8nApprovalIssueRequest, N8nApprovalServer, N8nLifecycleOperation,
+    N8nApprovalInputBinding, N8nApprovalIssueRequest, N8nApprovalServer, N8nLifecycleOperation,
     build_unsigned_n8n_approval_token, canonical_approval_token_bytes,
     n8n_official_mcp_approval_constraints, n8n_runtime_approval_verifying_key,
     n8n_typed_approval_plan_digest,

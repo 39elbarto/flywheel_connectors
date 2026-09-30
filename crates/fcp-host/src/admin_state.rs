@@ -80,6 +80,9 @@ impl ConnectorLaunchBinding {
     /// Validate only the binding shape and its exact inventory-path join.
     ///
     /// No filesystem access or executable is performed here.
+    ///
+    /// # Errors
+    /// Returns a static reason for an invalid path, digest, or inventory join.
     pub fn validate_for_binary(&self, binary: &str) -> Result<(), &'static str> {
         if binary != self.launcher_path {
             return Err("launcher path must exactly equal connector binary");

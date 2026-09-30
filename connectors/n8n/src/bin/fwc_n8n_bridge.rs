@@ -278,7 +278,7 @@ impl fmt::Debug for BridgeError {
                 "correlation_id",
                 &self.correlation_id.as_ref().map(|_| "[REDACTED]"),
             )
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -679,8 +679,8 @@ impl fmt::Debug for ProcessOutput {
             .field("stdout_len", &self.stdout.len())
             .field("stderr_len", &self.stderr.len())
             .field("status_success", &self.status.success())
-            .field("reaped", &self.termination.reaped)
-            .field("group_absent", &self.termination.group_absent)
+            .field("reaped", &self.termination.completion.reaped)
+            .field("group_absent", &self.termination.completion.group_absent)
             .finish()
     }
 }
@@ -1182,7 +1182,7 @@ fn generic_child_diagnostic(diagnostic: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn child_failure_with_stderr(
+pub fn child_failure_with_stderr(
     stdout: &[u8],
     stderr: &[u8],
     prior_diagnostic: Option<&'static str>,
@@ -1903,13 +1903,13 @@ fn cleanup_with_diagnostic(
             *diagnostic,
         )
     })?;
-    if !termination.reaped {
+    if !termination.completion.reaped {
         return Err(with_diagnostic(
             BridgeError::new(BridgeErrorCode::TeardownFailed),
             *diagnostic,
         ));
     }
-    if !termination.group_absent {
+    if !termination.completion.group_absent {
         return Err(with_diagnostic(
             BridgeError::new(BridgeErrorCode::GroupPresent),
             *diagnostic,

@@ -15,9 +15,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use fcp_manifest::{LOCAL_MCP_PROTOCOL_VERSION, LocalMcpPolicy, local_mcp_schema_digest};
-use fcp_sandbox::{
-    OwnedProcess, ProcessGroupError, ProcessMemorySample, ProcessSpec, TerminationReport,
-};
+use fcp_sandbox::{OwnedProcess, ProcessGroupError, ProcessMemorySample, ProcessSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -56,12 +54,26 @@ pub struct LocalMcpStartupReceipt {
 
 /// Redacted shutdown evidence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct LocalMcpShutdownReceipt {
-    pub reason: LocalMcpShutdownReason,
+pub struct LocalMcpSignalEvidence {
     pub term_sent: bool,
     pub kill_sent: bool,
+}
+
+/// Independent completion facts; neither implies the other.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalMcpCompletionEvidence {
     pub reaped: bool,
     pub group_absent: bool,
+}
+
+/// Redacted shutdown evidence with the original flat wire fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LocalMcpShutdownReceipt {
+    pub reason: LocalMcpShutdownReason,
+    #[serde(flatten)]
+    pub signals: LocalMcpSignalEvidence,
+    #[serde(flatten)]
+    pub completion: LocalMcpCompletionEvidence,
     pub stderr_bytes: u64,
     pub memory_after: ProcessMemorySample,
 }
@@ -147,7 +159,7 @@ pub enum LocalMcpError {
 }
 
 impl LocalMcpError {
-    fn code(&self) -> &'static str {
+    const fn code(&self) -> &'static str {
         match self {
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::InvalidPolicy => "invalid_policy",
@@ -177,6 +189,9 @@ pub struct LocalMcpProvider {
 
 impl LocalMcpProvider {
     /// Construct a provider only from a validated signed-manifest policy.
+    ///
+    /// # Errors
+    /// Rejects an invalid fixed policy before any process is launched.
     pub fn new(policy: LocalMcpPolicy) -> Result<Self, LocalMcpError> {
         policy
             .validate()
@@ -191,18 +206,24 @@ impl LocalMcpProvider {
     }
 
     /// Run one bounded provider request and always execute the teardown path.
+    ///
+    /// # Errors
+    /// Rejects invalid requests, package identity mismatches, and process launch failures.
     pub fn run_once(&self, request: LocalMcpRequest) -> Result<LocalMcpResult, LocalMcpError> {
-        self.run_once_with_cancel(request, Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        self.run_once_with_cancel(request, &std::sync::atomic::AtomicBool::new(false))
     }
 
     /// Run one request while observing a host-owned cancellation flag.
     ///
     /// The flag is polled while waiting for provider frames. Cancellation
     /// never skips teardown and never causes a retry.
+    ///
+    /// # Errors
+    /// Rejects cancellation, invalid policy/request/package bindings, and launch failures.
     pub fn run_once_with_cancel(
         &self,
         request: LocalMcpRequest,
-        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<LocalMcpResult, LocalMcpError> {
         if !cfg!(target_os = "linux") {
             return Err(LocalMcpError::UnsupportedPlatform);
@@ -233,7 +254,7 @@ impl LocalMcpProvider {
 
         let total_started = Instant::now();
         let process = OwnedProcess::spawn(&spec)
-            .map_err(|error| map_process_error(error, ProcessPhase::Spawn))?;
+            .map_err(|error| map_process_error(&error, ProcessPhase::Spawn))?;
         let identity = process.identity().clone();
         let memory_before = zero_memory_sample();
         let memory_during = process
@@ -245,7 +266,7 @@ impl LocalMcpProvider {
             session_id: identity.session_id,
             start_time_ticks: identity.start_time_ticks,
             launcher_digest: self.policy.launcher_digest.clone(),
-            runtime_executable_digest: identity.runtime_executable_digest.clone(),
+            runtime_executable_digest: identity.runtime_executable_digest,
             network_disabled: self.policy.network_disabled,
             memory_before,
         };
@@ -253,7 +274,7 @@ impl LocalMcpProvider {
         let mut session = LocalMcpSession::new(process, self.policy.max_frame_bytes as usize);
         session.memory_during = memory_during;
         let provider_started = Instant::now();
-        let outcome = session.execute(&self.policy, &request, &cancelled);
+        let outcome = session.execute(&self.policy, &request, cancelled);
         let provider_latency_ms = elapsed_ms(provider_started.elapsed());
         let reason = match &outcome {
             Ok(_) => LocalMcpShutdownReason::Completed,
@@ -280,7 +301,7 @@ impl LocalMcpProvider {
             LocalMcpResultStatus::Failed
         };
         Ok(LocalMcpResult {
-            correlation_id: request.correlation_id.clone(),
+            correlation_id: request.correlation_id,
             responses: outcome.unwrap_or_default(),
             startup,
             shutdown,
@@ -382,14 +403,13 @@ impl LocalMcpSession {
                 let mut buffer = [0_u8; 4096];
                 loop {
                     match reader.read(&mut buffer) {
-                        Ok(0) => break,
+                        Ok(0) | Err(_) => break,
                         Ok(bytes) => {
                             stderr_counter.fetch_add(
                                 u64::try_from(bytes).unwrap_or(u64::MAX),
                                 Ordering::Relaxed,
                             );
                         }
-                        Err(_) => break,
                     }
                 }
             })
@@ -530,7 +550,7 @@ impl LocalMcpSession {
             let initialize = self.request(
                 policy,
                 "initialize",
-                json!({
+                &json!({
                     "protocolVersion": policy.protocol_version,
                     "capabilities": {},
                     "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION}
@@ -543,7 +563,7 @@ impl LocalMcpSession {
             self.notify(
                 policy,
                 "notifications/initialized",
-                json!({}),
+                &json!({}),
                 startup_deadline,
                 cancelled,
                 LocalMcpPhase::Startup,
@@ -551,7 +571,7 @@ impl LocalMcpSession {
             let catalog = self.request(
                 policy,
                 "tools/list",
-                json!({}),
+                &json!({}),
                 startup_deadline,
                 cancelled,
                 LocalMcpPhase::Startup,
@@ -566,7 +586,7 @@ impl LocalMcpSession {
             let result = self.request(
                 policy,
                 "tools/call",
-                json!({"name": call.tool, "arguments": call.arguments}),
+                &json!({"name": call.tool, "arguments": call.arguments}),
                 Instant::now() + millis(policy.request_timeout_ms),
                 cancelled,
                 LocalMcpPhase::Call,
@@ -587,7 +607,7 @@ impl LocalMcpSession {
         &mut self,
         policy: &LocalMcpPolicy,
         method: &str,
-        params: Value,
+        params: &Value,
         deadline: Instant,
         cancelled: &std::sync::atomic::AtomicBool,
         phase: LocalMcpPhase,
@@ -615,7 +635,7 @@ impl LocalMcpSession {
         &mut self,
         policy: &LocalMcpPolicy,
         method: &str,
-        params: Value,
+        params: &Value,
         deadline: Instant,
         cancelled: &std::sync::atomic::AtomicBool,
         phase: LocalMcpPhase,
@@ -681,7 +701,7 @@ impl LocalMcpSession {
     }
 
     fn recv_frame(
-        &mut self,
+        &self,
         deadline: Instant,
         cancelled: &std::sync::atomic::AtomicBool,
         phase: LocalMcpPhase,
@@ -734,7 +754,7 @@ impl LocalMcpSession {
             }
             match process.terminate(millis(policy.shutdown_timeout_ms)) {
                 Ok(report) => {
-                    if report.group_absent {
+                    if report.completion.group_absent {
                         if let Ok(sample) = process.memory_sample() {
                             memory_after = sample;
                             samples.push(sample);
@@ -749,25 +769,24 @@ impl LocalMcpSession {
                         let _ = process.reap_direct_child_until(millis(policy.shutdown_timeout_ms));
                     }
                     termination = Some(process.termination_report(false));
-                    teardown_error = Some(map_process_error(error, ProcessPhase::Stop));
+                    teardown_error = Some(map_process_error(&error, ProcessPhase::Stop));
                 }
             }
         } else {
             teardown_error = Some(LocalMcpError::ProcessStop);
         }
-        self.close_or_detach(termination.is_some_and(|report| report.group_absent));
-        let report = termination.unwrap_or(TerminationReport {
-            term_sent: false,
-            kill_sent: false,
-            reaped: false,
-            group_absent: false,
-        });
+        self.close_or_detach(termination.is_some_and(|report| report.completion.group_absent));
+        let report = termination.unwrap_or_default();
         let receipt = LocalMcpShutdownReceipt {
             reason,
-            term_sent: report.term_sent,
-            kill_sent: report.kill_sent,
-            reaped: report.reaped,
-            group_absent: report.group_absent,
+            signals: LocalMcpSignalEvidence {
+                term_sent: report.signals.term_sent,
+                kill_sent: report.signals.kill_sent,
+            },
+            completion: LocalMcpCompletionEvidence {
+                reaped: report.completion.reaped,
+                group_absent: report.completion.group_absent,
+            },
             stderr_bytes: self.stderr_bytes.load(Ordering::Relaxed),
             memory_after,
         };
@@ -822,7 +841,7 @@ impl Drop for LocalMcpSession {
             .process
             .as_mut()
             .and_then(|process| process.terminate(Duration::from_secs(1)).ok())
-            .is_some_and(|report| report.group_absent);
+            .is_some_and(|report| report.completion.group_absent);
         self.close_or_detach(group_absent);
     }
 }
@@ -1002,7 +1021,7 @@ enum ProcessPhase {
     Stop,
 }
 
-fn map_process_error(error: ProcessGroupError, phase: ProcessPhase) -> LocalMcpError {
+const fn map_process_error(error: &ProcessGroupError, phase: ProcessPhase) -> LocalMcpError {
     match error {
         ProcessGroupError::UnsupportedPlatform => LocalMcpError::UnsupportedPlatform,
         ProcessGroupError::LauncherDigestMismatch | ProcessGroupError::InvalidSpec => {
@@ -1019,7 +1038,7 @@ fn map_process_error(error: ProcessGroupError, phase: ProcessPhase) -> LocalMcpE
     }
 }
 
-fn millis(value: u64) -> Duration {
+const fn millis(value: u64) -> Duration {
     Duration::from_millis(value)
 }
 
@@ -1027,7 +1046,7 @@ fn elapsed_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-fn zero_memory_sample() -> ProcessMemorySample {
+const fn zero_memory_sample() -> ProcessMemorySample {
     ProcessMemorySample {
         available: true,
         process_count: 0,
@@ -1037,7 +1056,7 @@ fn zero_memory_sample() -> ProcessMemorySample {
     }
 }
 
-fn unavailable_memory_sample() -> ProcessMemorySample {
+const fn unavailable_memory_sample() -> ProcessMemorySample {
     ProcessMemorySample {
         available: false,
         process_count: 0,
@@ -1065,6 +1084,45 @@ fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shutdown_receipt_preserves_all_independent_flat_wire_facts() {
+        use super::*;
+        for bits in 0_u8..16 {
+            let receipt = LocalMcpShutdownReceipt {
+                reason: LocalMcpShutdownReason::Completed,
+                signals: LocalMcpSignalEvidence {
+                    term_sent: bits & 1 != 0,
+                    kill_sent: bits & 2 != 0,
+                },
+                completion: LocalMcpCompletionEvidence {
+                    reaped: bits & 4 != 0,
+                    group_absent: bits & 8 != 0,
+                },
+                stderr_bytes: 7,
+                memory_after: zero_memory_sample(),
+            };
+            let expected = serde_json::json!({
+                "reason": "Completed",
+                "term_sent": bits & 1 != 0,
+                "kill_sent": bits & 2 != 0,
+                "reaped": bits & 4 != 0,
+                "group_absent": bits & 8 != 0,
+                "stderr_bytes": 7,
+                "memory_after": zero_memory_sample(),
+            });
+            assert_eq!(serde_json::to_value(&receipt).expect("serialize"), expected);
+            assert_eq!(
+                serde_json::from_value::<LocalMcpShutdownReceipt>(expected.clone())
+                    .expect("deserialize"),
+                receipt
+            );
+            for key in ["term_sent", "kill_sent", "reaped", "group_absent"] {
+                let mut missing = expected.clone();
+                missing.as_object_mut().expect("object").remove(key);
+                assert!(serde_json::from_value::<LocalMcpShutdownReceipt>(missing).is_err());
+            }
+        }
+    }
     use super::*;
     use fcp_manifest::{LOCAL_MCP_CATALOG_TOOLS, LOCAL_MCP_METHODS};
 

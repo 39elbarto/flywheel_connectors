@@ -4357,10 +4357,10 @@ fn owned_operation_matches(trusted: &OperationInfo, observed: &OperationInfo) ->
 
 #[cfg(target_os = "linux")]
 fn normalize_owned_operation_approval_none(operation: &mut Value) {
-    if operation.get("requires_approval").and_then(Value::as_str) == Some("none") {
-        if let Some(operation) = operation.as_object_mut() {
-            operation.remove("requires_approval");
-        }
+    if operation.get("requires_approval").and_then(Value::as_str) == Some("none")
+        && let Some(operation) = operation.as_object_mut()
+    {
+        operation.remove("requires_approval");
     }
 }
 
@@ -4399,11 +4399,10 @@ async fn owned_perform_egress(
                 &request.context.resource_uri,
             )
             .await
-            .map_err(|error| {
+            .inspect_err(|_| {
                 emit_n8n_run_once_owned_egress_stage(
                     N8nRunOnceOwnedEgressStage::HostAuthorizationBinding,
                 );
-                error
             })?;
             if authorized.connector_id.to_string() != binding.connector_id
                 || authorized.operation.to_string() != binding.operation_id
@@ -4426,9 +4425,8 @@ async fn owned_perform_egress(
                 &authorized.credential_allow,
             )
             .await
-            .map_err(|error| {
+            .inspect_err(|_| {
                 emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::CredentialLease);
-                error
             })?;
             let result = authorize_and_perform_host_http_egress(
                 state,
@@ -4719,16 +4717,14 @@ async fn owned_finalize(
     };
     let termination_result = handle.terminate().await.map_err(owned_invocation_error);
     if let Ok(report) = termination_result.as_ref()
-        && (!report.group_absent || !report.reaped)
+        && (!report.completion.group_absent || !report.completion.reaped)
     {
         emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Teardown);
         return Err(HostError::Internal(
             "owned connector teardown did not prove group absence and reap".to_string(),
         ));
     }
-    if let Err(error) = termination_result {
-        return Err(error);
-    }
+    termination_result?;
     if operation_result.is_ok() {
         if shutdown_result.is_err() {
             emit_n8n_run_once_owned_diagnostic(N8nRunOnceOwnedDiagnostic::Teardown);
@@ -4736,9 +4732,7 @@ async fn owned_finalize(
                 "owned host-egress endpoint shutdown failed".to_string(),
             ));
         }
-        if let Err(error) = egress_result {
-            return Err(error);
-        }
+        egress_result?;
     }
     operation_result
 }
@@ -7631,11 +7625,21 @@ fn n8n_run_once_binding_hash(
     }))
 }
 
+#[derive(Clone, Copy)]
+struct N8nApprovalTarget<'a> {
+    connector: &'a str,
+    operation: &'a str,
+}
+
+const N8N_OFFICIAL_APPROVAL_TARGET: N8nApprovalTarget<'static> = N8nApprovalTarget {
+    connector: "fcp.mcp-bridge",
+    operation: N8N_APPROVAL_WRAPPER_OPERATION,
+};
+
 fn validate_external_n8n_approval(
     token: Option<&ApprovalToken>,
     approval_ref: &str,
-    expected_connector: &str,
-    expected_operation: &str,
+    target: N8nApprovalTarget<'_>,
     expected_zone: &ZoneId,
     expected_input_hash: [u8; 32],
     expected_constraints: &[InputConstraint],
@@ -7671,8 +7675,8 @@ fn validate_external_n8n_approval(
             "n8n external approval token scope is not execution".to_string(),
         ));
     };
-    if scope.connector_id != expected_connector
-        || scope.method_pattern != expected_operation
+    if scope.connector_id != target.connector
+        || scope.method_pattern != target.operation
         || scope.request_object_id.is_some()
         || scope.input_hash != Some(expected_input_hash)
         || scope.input_constraints.len() != expected_constraints.len()
@@ -9401,12 +9405,11 @@ fn n8n_official_mcp_policy_request(
     resource_uri: Option<&str>,
 ) -> HostResult<(InvokeRequest, [u8; 32])> {
     if request.connector_id.as_str() == "fcp.n8n"
-        && trusted_resource.is_some()
+        && let Some(binding) = trusted_resource
         && N8N_WRITE_OPERATIONS.contains(&request.operation.as_str())
         && !(request.operation.as_str() == "n8n.mcp_access.reconcile"
             && request.input.get("dryRun").and_then(Value::as_bool) == Some(true))
     {
-        let binding = trusted_resource.expect("checked above");
         let resource_uri = resource_uri.ok_or_else(|| {
             HostError::PreflightFailed("n8n approval requires a verified resource URI".to_string())
         })?;
@@ -10630,16 +10633,15 @@ fn validate_n8n_workflow_lifecycle_input(input: &Value) -> HostResult<()> {
             "n8n workflow lifecycle action is invalid".to_string(),
         ));
     }
-    if let Some(version_id) = object.get("versionId") {
-        if action == "unpublish"
+    if let Some(version_id) = object.get("versionId")
+        && (action == "unpublish"
             || version_id
                 .as_str()
-                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value)
-        {
-            return Err(HostError::InvalidFilter(
-                "n8n workflow lifecycle versionId is invalid".to_string(),
-            ));
-        }
+                .is_none_or(|value| value.is_empty() || value.len() > 256 || value.trim() != value))
+    {
+        return Err(HostError::InvalidFilter(
+            "n8n workflow lifecycle versionId is invalid".to_string(),
+        ));
     }
     let guard = object
         .get("guard")
@@ -12093,11 +12095,13 @@ fn build_n8n_typed_approval_binding(
         provider_plan.server_id.as_str(),
         workflow_id,
         lifecycle_operation,
-        official_mcp_tool,
-        &provider_payload_digest,
-        high_level_input,
-        precondition,
-        idempotency_key,
+        fcp_host::N8nApprovalInputBinding {
+            official_mcp_tool,
+            official_mcp_payload_digest: &provider_payload_digest,
+            input: high_level_input,
+            precondition,
+            idempotency_key,
+        },
         token.expires_at_ms,
         n8n_run_once_now_ms(),
     )
@@ -12788,23 +12792,23 @@ fn n8n_run_once_expected_receipt_binding(plan: &N8nReadOnlyRunOncePlan) -> Value
         "providerPayloadDigest": typed.map(|binding| binding.provider_payload_digest.clone()),
         "expiryMs": typed.map(|binding| binding.expires_at_ms),
     });
-    if plan.operation.as_str() == "n8n.workflows.delete_disposable" {
-        if let Some(object) = binding.as_object_mut() {
-            object.insert(
-                "workflowIdDigest".to_string(),
-                Value::String(n8n_run_once_digest(
-                    b"fwc-n8n.workflow-id.v1",
-                    plan.input.get("id").unwrap_or(&Value::Null),
-                )),
-            );
-            object.insert(
-                "creationReceiptDigest".to_string(),
-                Value::String(n8n_run_once_digest(
-                    b"fwc-n8n.creation-receipt.v1",
-                    plan.input.get("creationReceipt").unwrap_or(&Value::Null),
-                )),
-            );
-        }
+    if plan.operation.as_str() == "n8n.workflows.delete_disposable"
+        && let Some(object) = binding.as_object_mut()
+    {
+        object.insert(
+            "workflowIdDigest".to_string(),
+            Value::String(n8n_run_once_digest(
+                b"fwc-n8n.workflow-id.v1",
+                plan.input.get("id").unwrap_or(&Value::Null),
+            )),
+        );
+        object.insert(
+            "creationReceiptDigest".to_string(),
+            Value::String(n8n_run_once_digest(
+                b"fwc-n8n.creation-receipt.v1",
+                plan.input.get("creationReceipt").unwrap_or(&Value::Null),
+            )),
+        );
     }
     binding
 }
@@ -15168,8 +15172,10 @@ async fn async_n8n_read_only_run_once(
         validate_external_n8n_approval(
             approval_token.as_ref(),
             approval_ref,
-            "fcp.n8n",
-            plan.operation.as_str(),
+            N8nApprovalTarget {
+                connector: "fcp.n8n",
+                operation: plan.operation.as_str(),
+            },
             &plan.zone_id,
             binding_hash,
             &[],
@@ -15402,8 +15408,7 @@ async fn async_n8n_official_mcp_run_once(
         validate_external_n8n_approval(
             external_approval.as_ref(),
             approval_ref,
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &plan.zone_id,
             payload_digest,
             &constraints,
@@ -20769,11 +20774,10 @@ async fn perform_authorized_host_http_egress_once(
         &mut guard_request,
         injector,
     )
-    .map_err(|error| {
+    .inspect_err(|_| {
         if owned_diagnostics {
             emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
         }
-        error
     })?;
     let remaining_timeout =
         host_egress_remaining_timeout(authorized, started_at).ok_or_else(|| {
@@ -21146,11 +21150,10 @@ async fn perform_host_http_egress(
             url.scheme()
         )));
     }
-    verify_host_egress_tls_requirements(decision, url.host_str(), "HTTP").map_err(|error| {
+    verify_host_egress_tls_requirements(decision, url.host_str(), "HTTP").inspect_err(|_| {
         if owned_diagnostics {
             emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::TlsPolicyValidation);
         }
-        error
     })?;
     let is_https = url.scheme() == "https";
     if !is_https && !decision.spki_pins.is_empty() {
@@ -21170,13 +21173,11 @@ async fn perform_host_http_egress(
             "HTTP",
         )
         .await
-        .map_err(|error| {
+        .inspect_err(|_| {
             emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::DnsResolution);
-            error
         })?;
-        validate_host_egress_resolved_ips(decision, constraints, ips, "HTTP").map_err(|error| {
+        validate_host_egress_resolved_ips(decision, constraints, ips, "HTTP").inspect_err(|_| {
             emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
-            error
         })?
     } else {
         resolve_host_egress_decision(decision, constraints, "HTTP").await?
@@ -21190,13 +21191,12 @@ async fn perform_host_http_egress(
             constraints.total_timeout_ms,
         )))
         .redirect(
-            host_http_redirect_policy(&url, constraints).map_err(|error| {
+            host_http_redirect_policy(&url, constraints).inspect_err(|_| {
                 if owned_diagnostics {
                     emit_n8n_run_once_owned_egress_stage(
                         N8nRunOnceOwnedEgressStage::PolicyPreflight,
                     );
                 }
-                error
             })?,
         );
     if is_https {
@@ -21207,13 +21207,12 @@ async fn perform_host_http_egress(
                 &decision.spki_pins,
                 vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             )
-            .map_err(|error| {
+            .inspect_err(|_| {
                 if owned_diagnostics {
                     emit_n8n_run_once_owned_egress_stage(
                         N8nRunOnceOwnedEgressStage::TlsPolicyValidation,
                     );
                 }
-                error
             })?,
         );
     }
@@ -21241,11 +21240,10 @@ async fn perform_host_http_egress(
         if forbidden_egress_request_header(&header.name) {
             continue;
         }
-        validate_wire_header(&header.name, &header.value).map_err(|error| {
+        validate_wire_header(&header.name, &header.value).inspect_err(|_| {
             if owned_diagnostics {
                 emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::PolicyPreflight);
             }
-            error
         })?;
         let name =
             reqwest::header::HeaderName::from_bytes(header.name.as_bytes()).map_err(|err| {
@@ -35924,8 +35922,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "fixture-approved-execute",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &plan.zone_id,
             payload_digest,
             &constraints,
@@ -36135,8 +36132,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "chat-lifecycle-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &plan.zone_id,
             payload_hash,
             &constraints,
@@ -36325,8 +36321,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "chat-archive-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &plan.zone_id,
             payload_hash,
             &constraints,
@@ -36461,8 +36456,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "chat-lifecycle-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &ZoneId::work(),
             mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
             &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
@@ -36483,8 +36477,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&provider_scoped_approval),
                 "chat-lifecycle-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&plan.input).expect("canonical MCP payload hash"),
                 &official_mcp_approval_constraints(&plan).expect("MCP approval constraints"),
@@ -36503,8 +36496,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-lifecycle-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_idempotency_plan.input)
                     .expect("changed payload hash"),
@@ -36525,8 +36517,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-lifecycle-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_precondition_plan.input)
                     .expect("changed payload hash"),
@@ -36850,8 +36841,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "chat-execute-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &ZoneId::work(),
             mcp_tools_call_payload_digest(&plan.input).expect("execute MCP payload hash"),
             &official_mcp_approval_constraints(&plan).expect("execute approval constraints"),
@@ -36872,8 +36862,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&approval),
             "chat-execute-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &ZoneId::work(),
             mcp_tools_call_payload_digest(&different_version_plan.input)
                 .expect("same contract execute MCP payload hash"),
@@ -36896,8 +36885,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-execute-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_trigger_plan.input)
                     .expect("changed execute MCP payload hash"),
@@ -36925,8 +36913,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-execute-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_version_plan.input)
                     .expect("changed execute MCP payload hash"),
@@ -36978,8 +36965,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-execute-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_inputs_plan.input)
                     .expect("changed input execute MCP payload hash"),
@@ -37162,8 +37148,7 @@ done"#;
         validate_external_n8n_approval(
             Some(&token),
             "chat-execute-approval",
-            "fcp.mcp-bridge",
-            N8N_APPROVAL_WRAPPER_OPERATION,
+            N8N_OFFICIAL_APPROVAL_TARGET,
             &ZoneId::work(),
             payload_hash,
             &constraints,
@@ -37194,8 +37179,7 @@ done"#;
                 validate_external_n8n_approval(
                     Some(&token),
                     "chat-execute-approval",
-                    "fcp.mcp-bridge",
-                    N8N_APPROVAL_WRAPPER_OPERATION,
+                    N8N_OFFICIAL_APPROVAL_TARGET,
                     &ZoneId::work(),
                     mcp_tools_call_payload_digest(&changed_plan.input).expect("changed payload"),
                     &official_mcp_approval_constraints(&changed_plan).expect("changed constraints"),
@@ -37306,8 +37290,7 @@ done"#;
             validate_external_n8n_approval(
                 Some(&approval),
                 "chat-archive-approval",
-                "fcp.mcp-bridge",
-                N8N_APPROVAL_WRAPPER_OPERATION,
+                N8N_OFFICIAL_APPROVAL_TARGET,
                 &ZoneId::work(),
                 mcp_tools_call_payload_digest(&changed_plan.input).expect("changed archive hash"),
                 &official_mcp_approval_constraints(&changed_plan)
@@ -38041,8 +38024,10 @@ done"#;
         validate_external_n8n_approval(
             Some(&token),
             "chat-draft-approval",
-            "fcp.n8n",
-            plan.operation.as_str(),
+            N8nApprovalTarget {
+                connector: "fcp.n8n",
+                operation: plan.operation.as_str(),
+            },
             &ZoneId::work(),
             scope.input_hash.expect("input hash"),
             &[],
@@ -38084,8 +38069,10 @@ done"#;
             validate_external_n8n_approval(
                 None,
                 "chat-approval-2",
-                "fcp.n8n",
-                plan.operation.as_str(),
+                N8nApprovalTarget {
+                    connector: "fcp.n8n",
+                    operation: plan.operation.as_str()
+                },
                 &ZoneId::work(),
                 binding_hash,
                 &[],
@@ -38099,8 +38086,10 @@ done"#;
             validate_external_n8n_approval(
                 Some(&token),
                 "chat-approval-2",
-                "fcp.n8n",
-                plan.operation.as_str(),
+                N8nApprovalTarget {
+                    connector: "fcp.n8n",
+                    operation: plan.operation.as_str()
+                },
                 &ZoneId::work(),
                 binding_hash,
                 &[],
@@ -38120,8 +38109,10 @@ done"#;
             validate_external_n8n_approval(
                 Some(&token),
                 "chat-approval-2",
-                "fcp.n8n",
-                plan.operation.as_str(),
+                N8nApprovalTarget {
+                    connector: "fcp.n8n",
+                    operation: plan.operation.as_str()
+                },
                 &ZoneId::work(),
                 mismatched_hash,
                 &[],
@@ -38530,7 +38521,8 @@ done"#;
     fn n8n_typed_run_once_orders_claim_and_provider_start_and_recovers_unknown() {
         let (plan, request) = typed_official_mcp_test_fixture();
         assert_eq!(request.operation.as_str(), N8N_OFFICIAL_MCP_CALL_OPERATION);
-        let pending_root = tempfile::tempdir().expect("pending claim state root");
+        let mut pending_root = tempfile::tempdir().expect("pending claim state root");
+        pending_root.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
         for name in ["locks", "consumed", "receipts"] {
             std::fs::create_dir(pending_root.path().join(name)).expect("claim subdirectory");
         }
@@ -38543,7 +38535,8 @@ done"#;
             .expect("pending restart is terminal unknown");
         assert!(pending_restart.to_string().contains("outcome is unknown"));
 
-        let root = tempfile::tempdir().expect("typed claim state root");
+        let mut root = tempfile::tempdir().expect("typed claim state root");
+        root.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
         for name in ["locks", "consumed", "receipts"] {
             std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
         }
@@ -38591,7 +38584,8 @@ done"#;
     #[test]
     fn n8n_typed_terminal_replay_never_calls_provider_and_receipt_is_request_bound() {
         let (plan, request) = typed_official_mcp_test_fixture();
-        let root = tempfile::tempdir().expect("typed receipt state root");
+        let mut root = tempfile::tempdir().expect("typed receipt state root");
+        root.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
         for name in ["locks", "consumed", "receipts"] {
             std::fs::create_dir(root.path().join(name)).expect("claim subdirectory");
         }

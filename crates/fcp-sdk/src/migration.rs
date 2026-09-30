@@ -835,7 +835,7 @@ impl InheritedFdChannel {
             let response = serde_json::from_slice::<HostEgressWireResponse>(&response)
                 .map_err(|_| InheritedChannelStage::Json)?;
             validate_inherited_wire_response(response, request_id, route)
-                .map_err(|_| InheritedChannelStage::Validation)
+                .map_err(|()| InheritedChannelStage::Validation)
         };
 
         match fcp_async_core::time::timeout(self.request_timeout, operation).await {
@@ -843,7 +843,9 @@ impl InheritedFdChannel {
                 exchange_guard.validated_response = true;
                 Ok(response)
             }
-            Ok(Err(stage)) => Err(HostEgressProxyError::InheritedChannelStage(stage)),
+            Ok(Err(failure_stage)) => {
+                Err(HostEgressProxyError::InheritedChannelStage(failure_stage))
+            }
             Err(_) => Err(HostEgressProxyError::InheritedChannelStage(
                 InheritedChannelStage::Timeout,
             )),

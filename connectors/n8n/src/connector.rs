@@ -868,7 +868,7 @@ impl N8nConnector {
                     id: typed.id.clone(),
                     action: WorkflowLifecycleAction::Unpublish,
                     version_id: None,
-                    guard: typed.guard.clone(),
+                    guard: typed.guard,
                 },
                 &input,
                 canonical_resource,
@@ -1599,8 +1599,10 @@ impl N8nConnector {
                     }
                     Ok(_) => None,
                     Err(error @ N8nError::InvalidInput(_)) => return Err(error),
-                    Err(error @ N8nError::PreconditionFailed(_))
-                    | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+                    Err(
+                        error @ (N8nError::PreconditionFailed(_)
+                        | N8nError::CapabilityUnavailable(_)),
+                    ) => return Err(error),
                     Err(_) => None,
                 }
             }
@@ -1611,8 +1613,10 @@ impl N8nConnector {
                     }
                     Ok(_) => None,
                     Err(error @ N8nError::InvalidInput(_)) => return Err(error),
-                    Err(error @ N8nError::PreconditionFailed(_))
-                    | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+                    Err(
+                        error @ (N8nError::PreconditionFailed(_)
+                        | N8nError::CapabilityUnavailable(_)),
+                    ) => return Err(error),
                     Err(_) => None,
                 }
             }
@@ -1685,8 +1689,9 @@ impl N8nConnector {
                 // remain deterministic zero-write failures.
                 return Err(error);
             }
-            Err(error @ N8nError::PreconditionFailed(_))
-            | Err(error @ N8nError::CapabilityUnavailable(_)) => return Err(error),
+            Err(error @ (N8nError::PreconditionFailed(_) | N8nError::CapabilityUnavailable(_))) => {
+                return Err(error);
+            }
             Err(_) => None,
         };
 
@@ -2049,8 +2054,10 @@ impl N8nConnector {
                     &typed.guard.approval_ref,
                     self.zone_id.as_ref(),
                     input,
-                    &server_id,
-                    canonical_resource,
+                    DraftApprovalResource {
+                        server_id: &server_id,
+                        resource_uri: canonical_resource,
+                    },
                     current_time_ms(),
                 )
             })
@@ -2117,8 +2124,10 @@ impl N8nConnector {
                     approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
-                    &server_id,
-                    canonical_resource,
+                    DraftApprovalResource {
+                        server_id: &server_id,
+                        resource_uri: canonical_resource,
+                    },
                     current_time_ms(),
                 )
             })
@@ -2174,8 +2183,10 @@ impl N8nConnector {
                     &guard.approval_ref,
                     self.zone_id.as_ref(),
                     raw_input,
-                    &server_id,
-                    canonical_resource,
+                    DraftApprovalResource {
+                        server_id: &server_id,
+                        resource_uri: canonical_resource,
+                    },
                     current_time_ms(),
                 )
             })
@@ -2671,14 +2682,19 @@ fn execution_resource_uri(
     ))
 }
 
+#[derive(Clone, Copy)]
+struct DraftApprovalResource<'a> {
+    server_id: &'a str,
+    resource_uri: &'a str,
+}
+
 fn is_matching_draft_approval(
     approval: &ApprovalToken,
     operation: &str,
     approval_ref: &str,
     zone_id: Option<&ZoneId>,
     request_input: &Value,
-    server_id: &str,
-    resource_uri: &str,
+    resource: DraftApprovalResource<'_>,
     now_ms: u64,
 ) -> bool {
     if approval.token_id != approval_ref
@@ -2701,8 +2717,13 @@ fn is_matching_draft_approval(
         return false;
     };
     scope.input_constraints.is_empty()
-        && approval_binding_hash(server_id, resource_uri, operation, request_input)
-            .is_some_and(|actual| actual == expected_hash)
+        && approval_binding_hash(
+            resource.server_id,
+            resource.resource_uri,
+            operation,
+            request_input,
+        )
+        .is_some_and(|actual| actual == expected_hash)
 }
 
 fn approval_input_hash(input: &Value) -> Option<[u8; 32]> {
@@ -3330,7 +3351,7 @@ fn parse_workflow_delete_disposable_input(
         ));
     }
     parse_workflow_archive_input(&json!({
-        "id": typed.id.clone(),
+        "id": typed.id,
         "guard": input
             .get("guard")
             .cloned()
@@ -7835,8 +7856,10 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
-            "eec",
-            resource_uri,
+            DraftApprovalResource {
+                server_id: "eec",
+                resource_uri
+            },
             now,
         ));
 
@@ -7848,8 +7871,10 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &mismatched,
-            "eec",
-            resource_uri,
+            DraftApprovalResource {
+                server_id: "eec",
+                resource_uri
+            },
             now,
         ));
         let constrained = ApprovalToken::approved(
@@ -7881,8 +7906,10 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
-            "eec",
-            resource_uri,
+            DraftApprovalResource {
+                server_id: "eec",
+                resource_uri
+            },
             now,
         ));
         let expired = ApprovalToken::approved(
@@ -7900,8 +7927,10 @@ mod tests {
             "approval-1",
             Some(&ZoneId::work()),
             &request_input,
-            "eec",
-            resource_uri,
+            DraftApprovalResource {
+                server_id: "eec",
+                resource_uri
+            },
             now,
         ));
     }

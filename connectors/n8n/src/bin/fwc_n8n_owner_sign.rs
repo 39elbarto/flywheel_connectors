@@ -65,20 +65,20 @@ fn main() -> ExitCode {
 fn run() -> Result<Vec<u8>, &'static str> {
     let cli = Cli::parse();
     let request_bytes = read_bounded_regular_file(&cli.request_file, MAX_REQUEST_BYTES)
-        .map_err(|_| "invalid_request")?;
+        .map_err(|()| "invalid_request")?;
     let request: SigningRequest =
         serde_json::from_slice(&request_bytes).map_err(|_| "invalid_request")?;
     if request.schema != PROVISION_INPUT_SCHEMA || request.release_id != cli.release_id {
         return Err("invalid_request");
     }
-    let seed = fwc_n8n_owner_signing::read_seed_from_stdin().map_err(|_| "invalid_seed")?;
+    let seed = fwc_n8n_owner_signing::read_seed_from_stdin().map_err(|()| "invalid_seed")?;
     fwc_n8n_owner_signing::sign_staged_provision_receipt(
         &cli.release_id,
         &request.git_revision,
         request.bindings,
         &seed,
     )
-    .map_err(|error| error.redacted_code())
+    .map_err(fwc_n8n_provision::ProvisionError::redacted_code)
 }
 
 fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ()> {

@@ -72,7 +72,7 @@ impl fmt::Debug for InheritedEgressCodec {
             )
             .field("next_request_id", &self.next_request_id)
             .field("pending_response", &self.pending_response)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -82,6 +82,9 @@ impl InheritedEgressCodec {
     /// The token is copied into private memory and never appears in Debug or
     /// error values. The stream must already have been claimed and validated by
     /// the narrow sandbox inherited-FD primitive.
+    ///
+    /// # Errors
+    /// Rejects an empty or non-ASCII authentication token.
     pub fn new(stream: UnixStream, auth_token: &str) -> Result<Self, InheritedEgressCodecError> {
         if auth_token.is_empty() || !auth_token.is_ascii() {
             return Err(InheritedEgressCodecError::InvalidAuthToken);
@@ -100,6 +103,9 @@ impl InheritedEgressCodec {
     /// If the underlying read returns multiple newline-delimited frames, only
     /// the first is returned and the remainder is retained for the next call.
     /// The caller should handle and respond before reading the next request.
+    ///
+    /// # Errors
+    /// Rejects outstanding responses, invalid authentication or frames, and I/O failures.
     pub async fn read_request(
         &mut self,
     ) -> Result<HostEgressWireRequest, InheritedEgressCodecError> {
@@ -115,6 +121,9 @@ impl InheritedEgressCodec {
     }
 
     /// Validate and write exactly one response for the last request.
+    ///
+    /// # Errors
+    /// Rejects missing requests, invalid response bindings, and write failures.
     pub async fn write_response(
         &mut self,
         response: &HostEgressWireResponse,
@@ -135,6 +144,9 @@ impl InheritedEgressCodec {
     }
 
     /// Build a typed success response for the current request.
+    ///
+    /// # Errors
+    /// Returns `MissingRequest` if no request is awaiting a response.
     pub fn success_response(
         &self,
         body: HostEgressWireResponseBody,
@@ -153,6 +165,9 @@ impl InheritedEgressCodec {
     }
 
     /// Build a typed failure response for the current request.
+    ///
+    /// # Errors
+    /// Returns `MissingRequest` if no request is awaiting a response.
     pub fn error_response(
         &self,
         status: u16,
@@ -256,7 +271,7 @@ fn validate_request(
     Ok(())
 }
 
-fn route_matches_payload(
+const fn route_matches_payload(
     route: HostEgressWireRoute,
     payload: &HostEgressWireRequestPayload,
 ) -> bool {

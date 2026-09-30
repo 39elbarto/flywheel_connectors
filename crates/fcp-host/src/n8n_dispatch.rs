@@ -861,9 +861,13 @@ impl LocalN8nDispatcher {
         let provider_request = request.into_provider_request()?;
         let result = self
             .provider
-            .run_once_with_cancel(provider_request, cancelled)
+            .run_once_with_cancel(provider_request, &cancelled)
             .map_err(|error| map_provider_error(&error))?;
-        Ok(LocalN8nDispatchResponse { operation, result })
+        let response = LocalN8nDispatchResponse { operation, result };
+        // Retain the dispatch-owned cancellation flag through response construction,
+        // matching its original end-of-dispatch lifetime.
+        drop(cancelled);
+        Ok(response)
     }
 }
 

@@ -312,8 +312,9 @@ pub struct WorkflowUnarchiveInput {
     pub guard: WorkflowLifecycleGuard,
 }
 
-/// Typed deletion input for a workflow that was created through the bounded
-/// disposable-draft host path.  The receipt is an opaque host-issued digest;
+/// Typed deletion input for a workflow from the bounded disposable-draft host path.
+///
+/// The receipt is an opaque host-issued digest;
 /// it is not a caller assertion and is checked by the host before dispatch.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -343,7 +344,9 @@ impl WorkflowExecuteMode {
     }
 }
 
-/// Approval binding for a workflow execution.  `inputClass` and
+/// Approval binding for a workflow execution.
+///
+/// `inputClass` and
 /// `sideEffectSummary` are explicit so production approval cannot be reused
 /// for a materially different invocation; manual execution is not assumed to
 /// be side-effect free either.

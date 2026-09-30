@@ -556,16 +556,20 @@ impl AppError {
         code: Option<i32>,
     ) -> Self {
         let provenance = match (diagnostic, phase) {
-            (Some("external.mcp.discovery_jsonrpc_error"), Some("discovery")) => Some("discovery"),
-            (Some("external.mcp.discovery_tool_result_error"), Some("discovery")) => {
-                Some("discovery")
-            }
-            (Some("external.mcp.execute_call_jsonrpc_error"), Some("execute_call")) => {
-                Some("execute_call")
-            }
-            (Some("external.mcp.execute_call_tool_result_error"), Some("execute_call")) => {
-                Some("execute_call")
-            }
+            (
+                Some(
+                    "external.mcp.discovery_jsonrpc_error"
+                    | "external.mcp.discovery_tool_result_error",
+                ),
+                Some("discovery"),
+            ) => Some("discovery"),
+            (
+                Some(
+                    "external.mcp.execute_call_jsonrpc_error"
+                    | "external.mcp.execute_call_tool_result_error",
+                ),
+                Some("execute_call"),
+            ) => Some("execute_call"),
             _ => None,
         };
         self.rpc_phase = provenance;
@@ -929,7 +933,7 @@ fn effective_uid_is_root() -> bool {
     }
 }
 
-fn map_provision_error(_error: fwc_n8n_provision::ProvisionError) -> AppError {
+const fn map_provision_error(_error: fwc_n8n_provision::ProvisionError) -> AppError {
     AppError::new("provision_denied")
 }
 
@@ -1236,13 +1240,8 @@ fn verify_execute_wrapper_receipt_directory(
 }
 
 #[cfg(unix)]
-fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
-    Ok(rustix::process::geteuid().as_raw())
-}
-
-#[cfg(not(unix))]
-fn current_execute_wrapper_receipt_owner() -> Result<u32, AppError> {
-    Err(AppError::new("execute_receipt_unavailable"))
+fn current_execute_wrapper_receipt_owner() -> u32 {
+    rustix::process::geteuid().as_raw()
 }
 
 fn open_execute_wrapper_receipt_directory_for_request(
@@ -1265,11 +1264,19 @@ fn open_execute_wrapper_receipt_directory_for_request(
     let Some(filesystem_root) = filesystem_root else {
         return Ok(None);
     };
-    let owner_uid = current_execute_wrapper_receipt_owner()
-        .map_err(|error| error.with_correlation_id(Some(request_correlation_id.to_owned())))?;
-    open_execute_wrapper_receipt_directory_at(filesystem_root, owner_uid)
-        .map(Some)
-        .map_err(|error| error.with_correlation_id(Some(request_correlation_id.to_owned())))
+    #[cfg(not(unix))]
+    {
+        let _ = filesystem_root;
+        Err(AppError::new("execute_receipt_unavailable")
+            .with_correlation_id(Some(request_correlation_id.to_owned())))
+    }
+    #[cfg(unix)]
+    {
+        let owner_uid = current_execute_wrapper_receipt_owner();
+        open_execute_wrapper_receipt_directory_at(filesystem_root, owner_uid)
+            .map(Some)
+            .map_err(|error| error.with_correlation_id(Some(request_correlation_id.to_owned())))
+    }
 }
 
 fn persist_execute_wrapper_input_error<P>(
@@ -1283,9 +1290,8 @@ where
 {
     let error_code = error.code;
     let observed_correlation_id = Uuid::new_v4().to_string();
-    let receipt_file_name = match execute_wrapper_receipt_file_name(request_correlation_id) {
-        Ok(file_name) => file_name,
-        Err(_) => return error,
+    let Ok(receipt_file_name) = execute_wrapper_receipt_file_name(request_correlation_id) else {
+        return error;
     };
     let directory = match open_execute_wrapper_receipt_directory_for_request(
         filesystem_root_override,
@@ -1467,7 +1473,7 @@ where
         envelope.correlation_id.clone()
     };
     if is_execute {
-        envelope.correlation_id = request_correlation_id.clone();
+        envelope.correlation_id.clone_from(&request_correlation_id);
     }
     let deadline_ms = envelope
         .deadline_ms
@@ -2122,7 +2128,7 @@ fn normalize_error_envelope(response: &Value, fallback_code: &'static str) -> Op
     )
 }
 
-fn response_result(response: Value, unknown_code: &'static str) -> Result<Value, AppError> {
+fn response_result(mut response: Value, unknown_code: &'static str) -> Result<Value, AppError> {
     if let Some(error) = normalize_error_envelope(&response, unknown_code) {
         return Err(error);
     }
@@ -2132,8 +2138,8 @@ fn response_result(response: Value, unknown_code: &'static str) -> Result<Value,
         return Err(AppError::new(unknown_code));
     }
     response
-        .get("result")
-        .cloned()
+        .get_mut("result")
+        .map(Value::take)
         .filter(Value::is_object)
         .ok_or_else(|| AppError::new(unknown_code))
 }
@@ -2184,7 +2190,7 @@ fn lifecycle_response_result(response: Value) -> Result<Value, AppError> {
 }
 
 fn decode_official_mcp_lifecycle_result(
-    response: Value,
+    mut response: Value,
     _action: &str,
     _workflow_id: &str,
 ) -> Result<Value, AppError> {
@@ -2199,15 +2205,15 @@ fn decode_official_mcp_lifecycle_result(
     {
         // Report only which fixed envelope slot rejected; provider text and keys stay private.
         let diagnostic = lifecycle_provider_error_diagnostic(&response).unwrap_or_else(|| {
-            if response.get("status").and_then(Value::as_str) != Some("ok") {
-                "lifecycle_provider_status_rejected"
-            } else {
+            if response.get("status").and_then(Value::as_str) == Some("ok") {
                 "lifecycle_provider_error_field"
+            } else {
+                "lifecycle_provider_status_rejected"
             }
         });
         return Err(rejection_error(Some(diagnostic)));
     }
-    let Some(result) = response.get("result") else {
+    let Some(result) = response.get_mut("result").map(Value::take) else {
         return Err(shape_error());
     };
 
@@ -2216,7 +2222,7 @@ fn decode_official_mcp_lifecycle_result(
     // empty acknowledgements are all valid provider-level envelopes).  It is
     // an advisory signal only; the independent REST readback below is the
     // sole authority for lifecycle state.
-    if let Some(diagnostic) = lifecycle_provider_result_rejection_diagnostic(result) {
+    if let Some(diagnostic) = lifecycle_provider_result_rejection_diagnostic(&result) {
         return Err(rejection_error(Some(diagnostic)));
     }
     Ok(json!({"delivered": true}))
@@ -2307,34 +2313,32 @@ fn lifecycle_provider_error_diagnostic(value: &Value) -> Option<&'static str> {
     visit(value, 0)
 }
 
-fn lifecycle_provider_text_diagnostic(text: &str) -> Option<&'static str> {
-    let has = |needles: &[&str]| {
-        needles.iter().any(|needle| {
-            text.as_bytes()
-                .get(..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES))
-                .is_some_and(|bounded| {
-                    bounded
-                        .windows(needle.len())
-                        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-                })
+fn lifecycle_provider_text_has(text: &str, needles: &[&str]) -> bool {
+    let bounded = &text.as_bytes()[..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES)];
+    needles.iter().any(|needle| {
+        bounded
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    })
+}
+
+fn lifecycle_provider_text_has_status(text: &str, code: &str) -> bool {
+    let bounded = &text.as_bytes()[..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES)];
+    bounded
+        .windows(code.len())
+        .enumerate()
+        .any(|(index, window)| {
+            let before_is_digit = index > 0 && bounded[index - 1].is_ascii_digit();
+            let after_index = index + code.len();
+            let after_is_digit =
+                after_index < bounded.len() && bounded[after_index].is_ascii_digit();
+            window == code.as_bytes() && !before_is_digit && !after_is_digit
         })
-    };
-    let has_status = |code: &str| {
-        text.as_bytes()
-            .get(..text.len().min(MAX_LIFECYCLE_PROVIDER_ERROR_TEXT_BYTES))
-            .is_some_and(|bounded| {
-                bounded
-                    .windows(code.len())
-                    .enumerate()
-                    .any(|(index, window)| {
-                        let before_is_digit = index > 0 && bounded[index - 1].is_ascii_digit();
-                        let after_index = index + code.len();
-                        let after_is_digit =
-                            after_index < bounded.len() && bounded[after_index].is_ascii_digit();
-                        window == code.as_bytes() && !before_is_digit && !after_is_digit
-                    })
-            })
-    };
+}
+
+fn lifecycle_provider_text_diagnostic(text: &str) -> Option<&'static str> {
+    let has = |needles: &[&str]| lifecycle_provider_text_has(text, needles);
+    let has_status = |code: &str| lifecycle_provider_text_has_status(text, code);
 
     if has(&[
         "unauthorized",
@@ -2616,14 +2620,14 @@ fn lifecycle_write_deadline_at(request_deadline_at: Instant) -> Result<Instant, 
 }
 
 fn execute_workflow_lifecycle_with_bridge<F>(
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
     mut bridge: F,
 ) -> Result<Value, AppError>
 where
     F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
 {
-    let get = lifecycle_get_envelope(&envelope)?;
+    let get = lifecycle_get_envelope(envelope)?;
     let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = lifecycle_response_result(baseline_response)?;
     verify_lifecycle_baseline(&envelope.input, &baseline).map_err(lifecycle_state_error)?;
@@ -2641,7 +2645,7 @@ where
     let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)?;
     ensure_request_deadline(write_deadline_at)?;
     let provider_advisory = match bridge(
-        &envelope,
+        envelope,
         BrokerCredentialPurpose::OfficialMcp,
         write_deadline_at,
     ) {
@@ -2695,7 +2699,7 @@ where
 
 fn execute_workflow_lifecycle_official_mcp(
     bundle: &fwc_n8n_bundle::VerifiedBundle,
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
 ) -> Result<Value, AppError> {
     execute_workflow_lifecycle_with_bridge(
@@ -2707,7 +2711,7 @@ fn execute_workflow_lifecycle_official_mcp(
 
 fn execute_workflow_archive_official_mcp(
     bundle: &fwc_n8n_bundle::VerifiedBundle,
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
 ) -> Result<Value, AppError> {
     execute_workflow_archive_with_bridge(
@@ -2718,29 +2722,27 @@ fn execute_workflow_archive_official_mcp(
 }
 
 fn archive_error_after_provider_advisory(
-    provider_advisory: Option<AppError>,
+    provider_advisory: Option<&AppError>,
     readback_error: AppError,
 ) -> AppError {
     let diagnostic = provider_advisory
-        .as_ref()
         .and_then(|error| error.diagnostic)
         .or(readback_error.diagnostic);
     let correlation_id = provider_advisory
-        .as_ref()
         .and_then(|error| error.correlation_id.clone())
         .or(readback_error.correlation_id);
     AppError::with_diagnostic("unknown_outcome", diagnostic).with_correlation_id(correlation_id)
 }
 
 fn execute_workflow_archive_with_bridge<F>(
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
     mut bridge: F,
 ) -> Result<Value, AppError>
 where
     F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
 {
-    let get = lifecycle_get_envelope(&envelope)?;
+    let get = lifecycle_get_envelope(envelope)?;
     let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = response_result(baseline_response, "unknown_outcome")?;
     verify_lifecycle_baseline(&envelope.input, &baseline)?;
@@ -2753,7 +2755,7 @@ where
     let write_deadline_at = lifecycle_write_deadline_at(request_deadline_at)?;
     ensure_request_deadline(write_deadline_at)?;
     let (provider, provider_advisory) = match bridge(
-        &envelope,
+        envelope,
         BrokerCredentialPurpose::OfficialMcp,
         write_deadline_at,
     ) {
@@ -2773,7 +2775,7 @@ where
             Ok(response) => response,
             Err(error) => {
                 return Err(archive_error_after_provider_advisory(
-                    provider_advisory,
+                    provider_advisory.as_ref(),
                     error,
                 ));
             }
@@ -2782,14 +2784,14 @@ where
         Ok(readback) => readback,
         Err(error) => {
             return Err(archive_error_after_provider_advisory(
-                provider_advisory,
+                provider_advisory.as_ref(),
                 error,
             ));
         }
     };
     if let Err(error) = validate_lifecycle_state_summary(&readback) {
         return Err(archive_error_after_provider_advisory(
-            provider_advisory,
+            provider_advisory.as_ref(),
             error,
         ));
     }
@@ -2802,7 +2804,7 @@ where
         || readback.get("isArchived") != Some(&Value::Bool(true))
     {
         return Err(archive_error_after_provider_advisory(
-            provider_advisory,
+            provider_advisory.as_ref(),
             AppError::new("readback_mismatch"),
         ));
     }
@@ -2828,7 +2830,7 @@ where
 }
 
 fn decode_official_mcp_execute_result(
-    response: Value,
+    mut response: Value,
     workflow_id: &str,
 ) -> Result<Value, AppError> {
     let protocol_error = || AppError::with_diagnostic("unknown_outcome", Some("response_protocol"));
@@ -2840,8 +2842,8 @@ fn decode_official_mcp_execute_result(
         return Err(protocol_error());
     }
     let result = response
-        .get("result")
-        .cloned()
+        .get_mut("result")
+        .map(Value::take)
         .filter(Value::is_object)
         .ok_or_else(shape_error)?;
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
@@ -2852,23 +2854,22 @@ fn decode_official_mcp_execute_result(
         Some(_) => return Err(shape_error()),
         None => None,
     };
-    let result = match structured {
-        Some(structured) => structured,
-        None => {
-            let content = result
-                .get("content")
-                .and_then(Value::as_array)
-                .ok_or_else(shape_error)?;
-            let text = content
-                .iter()
-                .find_map(|item| {
-                    (item.get("type").and_then(Value::as_str) == Some("text"))
-                        .then(|| item.get("text").and_then(Value::as_str))
-                        .flatten()
-                })
-                .ok_or_else(shape_error)?;
-            serde_json::from_str::<Value>(text).map_err(|_| shape_error())?
-        }
+    let result = if let Some(structured) = structured {
+        structured
+    } else {
+        let content = result
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(shape_error)?;
+        let text = content
+            .iter()
+            .find_map(|item| {
+                (item.get("type").and_then(Value::as_str) == Some("text"))
+                    .then(|| item.get("text").and_then(Value::as_str))
+                    .flatten()
+            })
+            .ok_or_else(shape_error)?;
+        serde_json::from_str::<Value>(text).map_err(|_| shape_error())?
     };
     let object = result.as_object().ok_or_else(shape_error)?;
     let execution_id = object
@@ -2964,7 +2965,7 @@ fn terminal_execute_readback<T>(result: Result<T, AppError>) -> Result<T, AppErr
 
 fn execute_workflow_execute_official_mcp(
     bundle: &fwc_n8n_bundle::VerifiedBundle,
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
 ) -> Result<Value, AppError> {
     execute_workflow_execute_with_bridge(
@@ -2975,19 +2976,19 @@ fn execute_workflow_execute_official_mcp(
 }
 
 fn execute_workflow_execute_with_bridge<F>(
-    envelope: HostRunOnceEnvelope,
+    envelope: &HostRunOnceEnvelope,
     request_deadline_at: Instant,
     mut bridge: F,
 ) -> Result<Value, AppError>
 where
     F: FnMut(&HostRunOnceEnvelope, BrokerCredentialPurpose, Instant) -> Result<Value, AppError>,
 {
-    let get = lifecycle_get_envelope(&envelope)?;
+    let get = lifecycle_get_envelope(envelope)?;
     let baseline_response = bridge(&get, BrokerCredentialPurpose::RestApi, request_deadline_at)?;
     let baseline = response_result(baseline_response, "unknown_outcome")?;
     verify_lifecycle_baseline(&envelope.input, &baseline)?;
     let provider_response = terminal_execute_readback(bridge(
-        &envelope,
+        envelope,
         BrokerCredentialPurpose::OfficialMcp,
         request_deadline_at,
     ))?;
@@ -3007,7 +3008,7 @@ where
             break;
         }
         let execution_get = terminal_execute_readback(executions_get_envelope(
-            &envelope,
+            envelope,
             workflow_id,
             execution_id,
         ))?;
@@ -3090,13 +3091,13 @@ fn execute_host_run_once(
         return normalize_workflow_activation_response(response);
     }
     if operation == HostRunOnceOperation::WorkflowsLifecycle {
-        return execute_workflow_lifecycle_official_mcp(&bundle, envelope, request_deadline_at);
+        return execute_workflow_lifecycle_official_mcp(&bundle, &envelope, request_deadline_at);
     }
     if operation == HostRunOnceOperation::WorkflowsArchive {
-        return execute_workflow_archive_official_mcp(&bundle, envelope, request_deadline_at);
+        return execute_workflow_archive_official_mcp(&bundle, &envelope, request_deadline_at);
     }
     if operation == HostRunOnceOperation::WorkflowsExecute {
-        return execute_workflow_execute_official_mcp(&bundle, envelope, request_deadline_at);
+        return execute_workflow_execute_official_mcp(&bundle, &envelope, request_deadline_at);
     }
     let mcp_access_reconcile = operation == HostRunOnceOperation::McpAccessReconcile;
     let mcp_access_dry_run =
@@ -3187,11 +3188,7 @@ impl McpAccessLedgerPort for fwc_n8n_update_host::McpAccessReconciliationLedger 
         expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
     ) -> Result<fwc_n8n_update_host::McpAccessLedgerBegin, fwc_n8n_update_host::McpAccessLedgerError>
     {
-        fwc_n8n_update_host::McpAccessReconciliationLedger::begin_for_request(
-            self,
-            binding,
-            Some(expectation),
-        )
+        Self::begin_for_request(self, binding, Some(expectation))
     }
 
     fn commit_for_request(
@@ -3200,12 +3197,7 @@ impl McpAccessLedgerPort for fwc_n8n_update_host::McpAccessReconciliationLedger 
         receipt: &Value,
         expectation: &fwc_n8n_update_host::McpAccessReceiptExpectation,
     ) -> Result<(), fwc_n8n_update_host::McpAccessLedgerError> {
-        fwc_n8n_update_host::McpAccessReconciliationLedger::commit_for_request(
-            self,
-            binding,
-            receipt,
-            Some(expectation),
-        )
+        Self::commit_for_request(self, binding, receipt, Some(expectation))
     }
 }
 
@@ -3246,7 +3238,7 @@ where
     {
         fwc_n8n_update_host::McpAccessLedgerBegin::Claimed => {}
         fwc_n8n_update_host::McpAccessLedgerBegin::Replayed(receipt) => {
-            return Ok(replay_mcp_access_response(receipt));
+            return Ok(replay_mcp_access_response(&receipt));
         }
     }
     let response = provider_attempt()?;
@@ -3262,7 +3254,7 @@ where
     Ok(response)
 }
 
-fn replay_mcp_access_response(receipt: Value) -> Value {
+fn replay_mcp_access_response(receipt: &Value) -> Value {
     let readback_digest = receipt
         .get("readbackDigest")
         .cloned()
@@ -3478,14 +3470,10 @@ fn build_host_run_once_envelope(
     })
 }
 
-fn validate_host_run_once_input(
+const fn host_run_once_input_fields(
     operation: HostRunOnceOperation,
-    input: &Value,
-) -> Result<(), AppError> {
-    let object = input
-        .as_object()
-        .ok_or_else(|| AppError::new("input_object_required"))?;
-    let (allowed, required): (&[&str], &[&str]) = match operation {
+) -> (&'static [&'static str], &'static [&'static str]) {
+    match operation {
         HostRunOnceOperation::CapabilitiesInspect => (&[], &[]),
         HostRunOnceOperation::CredentialsList
         | HostRunOnceOperation::ExecutionsList
@@ -3526,8 +3514,9 @@ fn validate_host_run_once_input(
             &["id", "action", "versionId", "guard"],
             &["id", "action", "guard"],
         ),
-        HostRunOnceOperation::WorkflowsArchive => (&["id", "guard"], &["id", "guard"]),
-        HostRunOnceOperation::WorkflowsUnarchive => (&["id", "guard"], &["id", "guard"]),
+        HostRunOnceOperation::WorkflowsArchive | HostRunOnceOperation::WorkflowsUnarchive => {
+            (&["id", "guard"], &["id", "guard"])
+        }
         HostRunOnceOperation::WorkflowsExecute => (
             &[
                 "id",
@@ -3555,7 +3544,17 @@ fn validate_host_run_once_input(
             ],
             &["scope", "desired", "dryRun"],
         ),
-    };
+    }
+}
+
+fn validate_host_run_once_input(
+    operation: HostRunOnceOperation,
+    input: &Value,
+) -> Result<(), AppError> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| AppError::new("input_object_required"))?;
+    let (allowed, required) = host_run_once_input_fields(operation);
     if object.keys().any(|key| !allowed.contains(&key.as_str()))
         || required.iter().any(|key| !object.contains_key(*key))
     {
@@ -3605,6 +3604,14 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::McpAccessReconcile => validate_mcp_access_input(input, object),
     }
 }
+
+const WORKFLOW_PRECONDITION_FIELDS: [&str; 5] = [
+    "versionId",
+    "activeVersionId",
+    "active",
+    "isArchived",
+    "stateDigest",
+];
 
 fn validate_workflow_activation_input(
     object: &serde_json::Map<String, Value>,
@@ -3666,17 +3673,12 @@ fn validate_workflow_activation_input(
         .get("precondition")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    const REQUIRED: [&str; 5] = [
-        "versionId",
-        "activeVersionId",
-        "active",
-        "isArchived",
-        "stateDigest",
-    ];
     if precondition
         .keys()
-        .any(|key| !REQUIRED.contains(&key.as_str()))
-        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        .any(|key| !WORKFLOW_PRECONDITION_FIELDS.contains(&key.as_str()))
+        || WORKFLOW_PRECONDITION_FIELDS
+            .iter()
+            .any(|key| !precondition.contains_key(*key))
         || precondition
             .get("versionId")
             .and_then(Value::as_str)
@@ -3764,17 +3766,12 @@ fn validate_workflow_lifecycle_input(
         .get("precondition")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    const REQUIRED: [&str; 5] = [
-        "versionId",
-        "activeVersionId",
-        "active",
-        "isArchived",
-        "stateDigest",
-    ];
     if precondition
         .keys()
-        .any(|key| !REQUIRED.contains(&key.as_str()))
-        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        .any(|key| !WORKFLOW_PRECONDITION_FIELDS.contains(&key.as_str()))
+        || WORKFLOW_PRECONDITION_FIELDS
+            .iter()
+            .any(|key| !precondition.contains_key(*key))
         || precondition
             .get("versionId")
             .and_then(Value::as_str)
@@ -3852,17 +3849,12 @@ fn validate_workflow_archive_input(
         .get("precondition")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    const REQUIRED: [&str; 5] = [
-        "versionId",
-        "activeVersionId",
-        "active",
-        "isArchived",
-        "stateDigest",
-    ];
     if precondition
         .keys()
-        .any(|key| !REQUIRED.contains(&key.as_str()))
-        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        .any(|key| !WORKFLOW_PRECONDITION_FIELDS.contains(&key.as_str()))
+        || WORKFLOW_PRECONDITION_FIELDS
+            .iter()
+            .any(|key| !precondition.contains_key(*key))
         || precondition
             .get("versionId")
             .and_then(Value::as_str)
@@ -3926,17 +3918,12 @@ fn validate_workflow_unarchive_input(
         .get("precondition")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    const REQUIRED: [&str; 5] = [
-        "versionId",
-        "activeVersionId",
-        "active",
-        "isArchived",
-        "stateDigest",
-    ];
     if precondition
         .keys()
-        .any(|key| !REQUIRED.contains(&key.as_str()))
-        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        .any(|key| !WORKFLOW_PRECONDITION_FIELDS.contains(&key.as_str()))
+        || WORKFLOW_PRECONDITION_FIELDS
+            .iter()
+            .any(|key| !precondition.contains_key(*key))
         || precondition
             .get("versionId")
             .and_then(Value::as_str)
@@ -4090,17 +4077,21 @@ fn validate_workflow_execute_input(
         .get("precondition")
         .and_then(Value::as_object)
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
-    const REQUIRED: [&str; 5] = [
-        "versionId",
-        "activeVersionId",
-        "active",
-        "isArchived",
-        "stateDigest",
-    ];
+    validate_execute_precondition(precondition, version_id)?;
+    let _ = side_effect_summary;
+    Ok(())
+}
+
+fn validate_execute_precondition(
+    precondition: &serde_json::Map<String, Value>,
+    version_id: &str,
+) -> Result<(), AppError> {
     if precondition
         .keys()
-        .any(|key| !REQUIRED.contains(&key.as_str()))
-        || REQUIRED.iter().any(|key| !precondition.contains_key(*key))
+        .any(|key| !WORKFLOW_PRECONDITION_FIELDS.contains(&key.as_str()))
+        || WORKFLOW_PRECONDITION_FIELDS
+            .iter()
+            .any(|key| !precondition.contains_key(*key))
         || precondition.get("versionId") != Some(&Value::String(version_id.to_owned()))
         || precondition
             .get("active")
@@ -4123,7 +4114,6 @@ fn validate_workflow_execute_input(
     {
         return Err(AppError::new("invalid_operation_input"));
     }
-    let _ = side_effect_summary;
     Ok(())
 }
 
@@ -4590,6 +4580,12 @@ mod tests {
     use super::*;
     use fcp_n8n::router::{Provider, ProviderCapability, ServerId};
 
+    fn retained_test_directory(label: &str) -> tempfile::TempDir {
+        let mut directory = tempfile::tempdir().expect(label);
+        directory.disable_cleanup(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
+        directory
+    }
+
     fn execute_input_fixture() -> Value {
         json!({
             "id": "workflow-1",
@@ -4805,7 +4801,7 @@ mod tests {
             Some(&filesystem_root),
             |envelope, deadline| {
                 assert_eq!(envelope.server_id, HostRunOnceServerId::Eec);
-                execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                execute_workflow_execute_with_bridge(&envelope, deadline, |request, purpose, _| {
                     if purpose == BrokerCredentialPurpose::OfficialMcp {
                         assert_eq!(request.operation, HostRunOnceOperation::WorkflowsExecute);
                         assert_eq!(request.input["id"], "kXVmpnLGECl1aHLy");
@@ -5037,7 +5033,7 @@ mod tests {
                 .collect(),
             };
             let error = execute_workflow_execute_with_bridge(
-                execute_host_envelope_fixture(),
+                &execute_host_envelope_fixture(),
                 Instant::now() + Duration::from_secs(5),
                 |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
             )
@@ -5078,7 +5074,7 @@ mod tests {
             .collect(),
         };
         let error = execute_workflow_execute_with_bridge(
-            execute_host_envelope_fixture(),
+            &execute_host_envelope_fixture(),
             Instant::now() + Duration::from_secs(5),
             |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
         )
@@ -5142,7 +5138,7 @@ mod tests {
             &bytes,
             Instant::now(),
             |envelope, deadline| {
-                execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                execute_workflow_execute_with_bridge(&envelope, deadline, |request, purpose, _| {
                     probe.dispatch(request, purpose, deadline)
                 })
             },
@@ -5200,7 +5196,7 @@ mod tests {
                 .collect(),
             };
             let result = execute_workflow_execute_with_bridge(
-                execute_host_envelope_fixture(),
+                &execute_host_envelope_fixture(),
                 Instant::now() + Duration::from_secs(5),
                 |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
             )
@@ -5565,7 +5561,7 @@ mod tests {
     fn execute_wrapper_receipt_is_safe_once_only_and_fails_closed() {
         use std::{cell::Cell, fs, os::unix::fs::MetadataExt};
 
-        let receipt_root = tempfile::tempdir().expect("receipt test directory");
+        let receipt_root = retained_test_directory("receipt test directory");
         let receipt_path = prepare_execute_receipt_tree(receipt_root.path(), 0o700, false);
         let receipts_directory_path = receipt_path.clone();
         let filesystem_root =
@@ -5699,7 +5695,7 @@ mod tests {
             persisted
         );
 
-        let failed_root = tempfile::tempdir().expect("persistence failure directory");
+        let failed_root = retained_test_directory("persistence failure directory");
         prepare_execute_receipt_tree(failed_root.path(), 0o700, false);
         let failed_filesystem_root =
             File::open(failed_root.path()).expect("open failure filesystem root");
@@ -5839,7 +5835,7 @@ mod tests {
                 |envelope, deadline| {
                     outer_dispatch_count.set(outer_dispatch_count.get() + 1);
                     execute_workflow_execute_with_bridge(
-                        envelope,
+                        &envelope,
                         deadline,
                         |request, purpose, _| {
                             let purpose_label = match purpose {
@@ -6013,7 +6009,7 @@ mod tests {
             assert_eq!(dispatch_count.load(Ordering::SeqCst), 0);
         }
 
-        let wrong_mode_root = tempfile::tempdir().expect("wrong-mode receipt root");
+        let wrong_mode_root = retained_test_directory("wrong-mode receipt root");
         prepare_execute_receipt_tree(wrong_mode_root.path(), 0o750, false);
         assert_rejected_before_dispatch(
             wrong_mode_root.path().to_path_buf(),
@@ -6021,7 +6017,7 @@ mod tests {
             "execute_receipt_unavailable",
         );
 
-        let symlink_root = tempfile::tempdir().expect("symlink receipt root");
+        let symlink_root = retained_test_directory("symlink receipt root");
         prepare_execute_receipt_tree(symlink_root.path(), 0o700, true);
         assert_rejected_before_dispatch(
             symlink_root.path().to_path_buf(),
@@ -6029,7 +6025,7 @@ mod tests {
             "execute_receipt_unavailable",
         );
 
-        let fifo_root = tempfile::tempdir().expect("FIFO receipt root");
+        let fifo_root = retained_test_directory("FIFO receipt root");
         let fifo_receipts_path = prepare_execute_receipt_tree(fifo_root.path(), 0o700, false);
         let fifo_filesystem_root =
             File::open(fifo_root.path()).expect("open FIFO fixture filesystem root");
@@ -6079,7 +6075,7 @@ mod tests {
         };
 
         let error = execute_workflow_execute_with_bridge(
-            execute_host_envelope_fixture(),
+            &execute_host_envelope_fixture(),
             Instant::now() + Duration::from_secs(5),
             |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
         )
@@ -6124,7 +6120,7 @@ mod tests {
         };
 
         let result = execute_workflow_execute_with_bridge(
-            execute_host_envelope_fixture(),
+            &execute_host_envelope_fixture(),
             Instant::now() + Duration::from_secs(5),
             |request, purpose, deadline| probe.dispatch(request, purpose, deadline),
         )
@@ -6255,7 +6251,7 @@ mod tests {
             Instant::now(),
             Some(&filesystem_root),
             |envelope, deadline| {
-                execute_workflow_execute_with_bridge(envelope, deadline, |request, purpose, _| {
+                execute_workflow_execute_with_bridge(&envelope, deadline, |request, purpose, _| {
                     probe.dispatch(request, purpose, deadline)
                 })
             },
@@ -7270,7 +7266,7 @@ mod tests {
                 ))),
             ]);
             let result = execute_workflow_lifecycle_with_bridge(
-                envelope,
+                &envelope,
                 lifecycle_test_deadline(),
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
@@ -7308,7 +7304,7 @@ mod tests {
         ]);
         let mut deadlines = Vec::new();
         let result = execute_workflow_lifecycle_with_bridge(
-            envelope,
+            &envelope,
             request_deadline_at,
             |request, purpose, deadline| {
                 deadlines.push((purpose, deadline));
@@ -7355,7 +7351,7 @@ mod tests {
             false,
         )))]);
         let error = execute_workflow_lifecycle_with_bridge(
-            envelope,
+            &envelope,
             request_deadline_at,
             |request, purpose, deadline| {
                 assert_eq!(purpose, BrokerCredentialPurpose::RestApi);
@@ -7393,7 +7389,7 @@ mod tests {
         ]);
         let mut deadlines = Vec::new();
         let result = execute_workflow_archive_with_bridge(
-            envelope,
+            &envelope,
             request_deadline_at,
             |request, purpose, deadline| {
                 deadlines.push((purpose, deadline));
@@ -7454,7 +7450,7 @@ mod tests {
                 ))),
             ]);
             let result = execute_workflow_archive_with_bridge(
-                archive_envelope(),
+                &archive_envelope(),
                 lifecycle_test_deadline(),
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
@@ -7525,7 +7521,7 @@ mod tests {
                 readback,
             ]);
             let error = execute_workflow_archive_with_bridge(
-                archive_envelope(),
+                &archive_envelope(),
                 lifecycle_test_deadline(),
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
@@ -7565,7 +7561,7 @@ mod tests {
             .with_correlation_id(Some(readback_correlation.to_owned()))),
         ]);
         let error = execute_workflow_archive_with_bridge(
-            archive_envelope(),
+            &archive_envelope(),
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -7604,7 +7600,7 @@ mod tests {
             .with_correlation_id(Some(readback_correlation.to_owned()))),
         ]);
         let error = execute_workflow_archive_with_bridge(
-            archive_envelope(),
+            &archive_envelope(),
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -7642,7 +7638,7 @@ mod tests {
                 Ok(readback),
             ]);
             let error = execute_workflow_archive_with_bridge(
-                archive_envelope(),
+                &archive_envelope(),
                 lifecycle_test_deadline(),
                 |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
             )
@@ -7677,7 +7673,7 @@ mod tests {
             Ok(json!({"status": "ok", "result": []})),
         ]);
         let error = execute_workflow_archive_with_bridge(
-            archive_envelope(),
+            &archive_envelope(),
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -7706,7 +7702,7 @@ mod tests {
             Err(AppError::new("official_mcp_plan_failed")),
         ]);
         let error = execute_workflow_archive_with_bridge(
-            archive_envelope(),
+            &archive_envelope(),
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -7738,7 +7734,7 @@ mod tests {
             ))),
         ]);
         let result = execute_workflow_lifecycle_with_bridge(
-            envelope.clone(),
+            &envelope,
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -7768,7 +7764,7 @@ mod tests {
             ))),
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
-            envelope.clone(),
+            &envelope,
             lifecycle_test_deadline(),
             |request, purpose, deadline| unchanged.dispatch(request, purpose, deadline),
         )
@@ -7793,7 +7789,7 @@ mod tests {
             Err(AppError::new("official_mcp_plan_failed")),
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
-            envelope,
+            &envelope,
             lifecycle_test_deadline(),
             |request, purpose, deadline| preflight.dispatch(request, purpose, deadline),
         )
@@ -7815,7 +7811,7 @@ mod tests {
             Ok(lifecycle_response(json!({}))),
         ]);
         let error = execute_workflow_lifecycle_with_bridge(
-            envelope,
+            &envelope,
             lifecycle_test_deadline(),
             |request, purpose, deadline| bridge.dispatch(request, purpose, deadline),
         )
@@ -8902,8 +8898,8 @@ mod tests {
         assert!(observation.stdout_bytes > 0);
         assert_eq!(observation.stderr_bytes, 0);
         assert!(observation.child_status.success());
-        assert!(observation.termination.group_absent);
-        assert!(observation.termination.reaped);
+        assert!(observation.termination.completion.group_absent);
+        assert!(observation.termination.completion.reaped);
     }
 
     #[cfg(target_os = "linux")]

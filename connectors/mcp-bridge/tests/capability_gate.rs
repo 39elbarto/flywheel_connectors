@@ -355,11 +355,13 @@ fn typed_n8n_approval_for(
         server_id,
         workflow_id,
         action,
-        tool_name,
-        &provider_payload_digest_text,
-        &high_level_input,
-        precondition,
-        idempotency_key,
+        fcp_host::N8nApprovalInputBinding {
+            official_mcp_tool: tool_name,
+            official_mcp_payload_digest: &provider_payload_digest_text,
+            input: &high_level_input,
+            precondition,
+            idempotency_key,
+        },
         expires_at_ms,
         now_ms,
     )

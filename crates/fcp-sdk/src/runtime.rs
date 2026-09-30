@@ -443,6 +443,9 @@ impl ConnectorRuntimeConfig {
     }
 
     /// Omission-compatible name for the production host-launch loader.
+    ///
+    /// # Errors
+    /// Rejects missing, conflicting, or invalid host-egress transport configuration.
     #[cfg(feature = "connector-http")]
     pub fn with_host_egress_uds_from_env(self) -> Result<Self, HostEgressProxyConfigError> {
         self.with_host_egress_from_env()

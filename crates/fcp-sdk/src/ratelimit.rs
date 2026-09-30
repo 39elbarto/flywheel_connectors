@@ -590,8 +590,8 @@ impl RateLimitTracker {
             None => PoolState::new(pool),
         };
         pools.insert(pool_id, pool_state);
-        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
-        self.persist_checkpoint_file(checkpoint_file);
+        self.persist_locked_pools(&pools);
+        drop(pools);
     }
 
     /// Try to consume requests for an operation.
@@ -666,8 +666,7 @@ impl RateLimitTracker {
         // Keep the pool write lock until the corresponding snapshot has been
         // persisted. Otherwise an older snapshot can acquire the I/O lock
         // after a newer snapshot and regress the on-disk checkpoint state.
-        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
-        self.persist_checkpoint_file(checkpoint_file);
+        self.persist_locked_pools(&pools);
 
         None
     }
@@ -746,7 +745,13 @@ impl RateLimitTracker {
             state.curr_count = 0;
             state.window_start = Instant::now();
         }
-        let checkpoint_file = self.checkpoint_file_for_locked(&pools);
+        self.persist_locked_pools(&pools);
+        drop(pools);
+    }
+
+    // The caller retains its pool lock throughout both snapshot and persistence.
+    fn persist_locked_pools(&self, pools: &HashMap<String, PoolState>) {
+        let checkpoint_file = self.checkpoint_file_for_locked(pools);
         self.persist_checkpoint_file(checkpoint_file);
     }
 
@@ -2658,6 +2663,46 @@ mod tests {
         state.maybe_advance_window();
         assert_eq!(state.prev_count, 7);
         assert_eq!(state.curr_count, 0);
+    }
+
+    #[test]
+    fn add_and_reset_retain_pool_lock_until_checkpoint_persistence_finishes() {
+        let state_dir = unique_state_dir("pool-lock-persist");
+        let declarations = RateLimitDeclarations {
+            limits: vec![test_pool("api", 100, 60)],
+            tool_pool_map: HashMap::from([("send".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = Arc::new(RateLimitTracker::from_declarations_with_state_dir(
+            &declarations,
+            &state_dir,
+        ));
+        for reset in [false, true] {
+            let store = tracker.checkpoint_store.as_ref().expect("checkpoint store");
+            let io_guard = store.io_lock.lock().expect("hold persistence lock");
+            let worker_tracker = Arc::clone(&tracker);
+            let worker = std::thread::spawn(move || {
+                if reset {
+                    worker_tracker.reset_all();
+                } else {
+                    worker_tracker.add_pool(test_pool("extra", 100, 60));
+                }
+            });
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while tracker.pools.try_read().is_ok() {
+                assert!(
+                    Instant::now() < deadline,
+                    "worker must retain the pool lock while persistence is blocked"
+                );
+                std::thread::yield_now();
+            }
+            assert!(!worker.is_finished());
+            drop(io_guard);
+            worker.join().expect("persist worker");
+            assert!(tracker.pools.try_read().is_ok());
+            let restarted =
+                RateLimitTracker::from_declarations_with_state_dir(&declarations, &state_dir);
+            assert!(restarted.pool_status("api").is_some());
+        }
     }
 
     #[test]

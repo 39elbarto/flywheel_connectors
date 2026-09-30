@@ -1,5 +1,38 @@
 # n8n Connector Security Contract
 
+## Current status and remaining scope — 2026-09-30
+
+The installed checkpoint is `release-20260929-42a574a62-started-result-rc40`.
+`.25` accepted manual execution on EEC (`414677`) and Hetzner (`379754`),
+with separate execution GET receipts proving terminal success, manual mode and
+the approved workflow versions. See the
+[manual acceptance procedure](../../docs/runbooks/n8n_agent_workflow.md#bounded-manual-acceptance-for-the-two-disposable-25-workflows).
+Production execution `.26` remains incomplete. Selected-version publish/unpublish
+passed under `.24`/RC33 and REST unarchive under `.23`/RC26; neither establishes
+blanket RC40 parity. MCP archive remains unaccepted under `.33`. Historical
+UNKNOWN attempts and the Hetzner create investigation `.32` remain preserved.
+
+Complete v1 still requires read/knowledge/validation/status parity (`.35`),
+workflow versions/rollback (`.36`), data tables (`.37`), evaluations (`.38`),
+approved credential-backed resource exploration (`.39`), opt-in execution detail
+(`.40`), test preparation/execution (`.41`) and full draft/template/autofix parity
+(`.42`). Routing or refusal alone does not complete these features. Ordinary
+execution GET remains metadata-only; credential mutation and general permanent
+deletion remain future-only. Final core acceptance is `.15`; update-service `.43`
+and ClickUp/Telegram `.12` separately gate integrated rollout, with `.16`–`.18`
+remaining owner-gated future work.
+
+`.34` implements compatible-update checks in source with offline regressions;
+installed/live upgrade acceptance remains unverified. Numeric upstream versions
+are diagnostic, while exact signed artifacts, package approvals and workflow
+approvals remain binding. See the
+[compatibility policy](../../docs/architecture/fwc-n8n-operation-contract.md#112-compatible-upstream-updates-owner-requirement-2026-09-30).
+
+## Historical status and acceptance packets
+
+The dated packets below preserve their original evidence boundaries. “Current”
+and “live-unaccepted” refer to each packet's date, not later `.24`/`.25` results.
+
 > **Status**: Source implements bounded per-invocation provider paths behind the same verified wrapper boundary: typed REST reads, guarded REST draft create/update, guarded typed REST publish/unpublish activation with independent GET readback, typed official-MCP publish/unpublish and archive paths, a separately guarded typed REST `n8n.workflows.unarchive` path, a typed REST `n8n.workflows.delete_disposable` cleanup path, a typed REST `n8n.mcp_access.reconcile` dry-run/apply path, local `n8n-mcp` knowledge/validation, and the closed `n8n.capabilities.inspect` official-MCP discovery operation. The typed `n8n.workflows.execute` input/approval seam is source-only and owner-gated; immutable EEC/Hetzner policy fixtures now carry exact owner-provisioned `execute_workflow` input/output schema digests, but no live execution acceptance is claimed. The bounded `flywheel_connectors-nqm81.10` live acceptance covers one disposable publish/unpublish cycle per server on EEC and Hetzner, with exact preconditions, one official-MCP write per transition, independent REST readback, and no retry. Separately, `flywheel_connectors-nqm81.23` REST unarchive live acceptance passed on EEC and Hetzner on 2026-09-21. The typed REST activation source path is implemented for EEC and Hetzner but remains live-unaccepted in this packet; no installed release, provider call, or promotion is claimed. This result does not repair or accept MCP archive; `restore_workflow_version` remains a separate version-restore operation. Execution, credential mutation, permanent deletion, and future release switches remain outside these acceptances. n8n requires the full required workflow transport payload (`name`, `nodes`, `connections`, and `settings`) for `PUT`; the logical mutation remains allow-listed to `settings.availableInMCP`, with independent readback preserving lifecycle and graph invariants. Disposable cleanup requires a host-issued creation receipt and is not a general workflow-delete path. Discovery exposes only names and schema digests with `unknown`/`unreviewed` policy markers; it does not authorize generic `tools/call`. Existing opt-in MCP profiles remain a separate opt-in path, and prior immutable releases remain available for rollback.
 > **Current `flywheel_connectors-nqm81.23` live acceptance (2026-09-21; PASS)**: Main fix `4ef0578dc`; installed candidate `release-20260920-02d215cfd-unarchive-introspection-rc26` (rc26). EEC workflow `2Zdk8MWoC70eyqeb` passed with evidence in `/srv/dev-ssd/fcp/nqm81.23/acceptance-eec-20260921-9c42e6a1`; Hetzner workflow `uQXXNMWE2lzlCgag` passed with evidence in `/srv/dev-ssd/fcp/nqm81.23/acceptance-hetzner-NZAx85`. Each used exactly one fresh archived baseline GET, one approval, one REST unarchive, and one independent GET proving `isArchived: true -> false`, inactive/unpublished state (`active=false`, `published=null`, `activeVersionId=null`), and the preserved draft graph digest. No retry occurred; raw provider/request bodies, tokens, seeds, and secrets were not persisted in evidence. Earlier NO-GO comments and acceptance history describe earlier candidates/attempts only. See the [unarchive acceptance runbook](../../docs/runbooks/n8n_unarchive_acceptance.md) for closeout; typed REST activation is now implemented in source but has no live acceptance or release claim here.
 > **Current `flywheel_connectors-nqm81.10` live acceptance (2026-09-18; PASS)**: The Bead is closed for the bounded EEC-first scope. EEC workflow `2k83Mtem1wCvsqpJ` / version `64fa87fb-8dcf-4a8b-9bc8-4aa4d86677ea` passed exact inactive/unpublished/unarchived preconditions, one owner-approved publish followed by an independent GET proving the matching active/published version and graph, one owner-approved unpublish, and a final independent GET proving inactive/unpublished/unarchived state with the draft version/graph preserved. The existing Hetzner disposable cycle passed the same publish/readback/unpublish/readback invariants. Redaction-safe evidence is retained under `/srv/dev-ssd/fcp/nqm81.30/live-mcp-access-20260918-corrected-7e96070b-df6e-49ff-8435-4865fb1e1008/`, `/srv/dev-ssd/fcp/nqm81.30/live-eec-publish-20260918-23de91b7-0969-447f-9a65-4e078a08014b/`, `/srv/dev-ssd/fcp/nqm81.30/live-eec-unpublish-20260918-bb7c1500-d210-434e-adb6-a7ea77d19dac/`, and `/srv/dev-ssd/fcp/nqm81.30/live-hetzner-publish-20260917/`. Raw provider bodies, credentials, seeds, and tokens were not persisted.
@@ -1200,7 +1233,7 @@ bash scripts/fcp_ssd.sh -- cargo fmt --all -- --check
 - Configure an n8n public API root, commonly shaped like `https://n8n.example.com/api/v1`.
 - A host credential reference is accepted and every advertised read uses a bounded proxy envelope carrying its canonical logical resource independently of its HTTPS target. Current-host read-only acceptance has passed for EEC and Hetzner; repeat the focused test for every new release, credential rotation, or server migration.
 - Direct API-key mode is for loopback fixtures only in this packet; production egress requires host mediation.
-- Treat workflow activation as source-implemented but live-unaccepted until the bounded acceptance procedure passes on EEC and then Hetzner. The procedure uses a newly created credential-free Webhook draft, fresh approval and UUID for each transition, one baseline GET plus exactly one POST and one independent GET per transition, never invokes the webhook, stops on uncertainty, and performs no automatic cleanup.
+- Selected-version publish/unpublish passed under `.24`/RC33 on EEC and Hetzner. Later releases require applicable regression evidence preserving exact version/state/readback. Each new cycle needs an approved harmless fixture, fresh approval/UUID per transition, one provider attempt and independent GET; it never authorizes webhook execution or automatic cleanup.
 - Use `self_check()` as a safe readiness/probe report. Production and credential-reference modes report failure before provider traffic.
 - Expect list operations to return one bounded provider page. Pass a returned
   `nextCursor` back unchanged to continue; provider-specific filtering remains unsupported.

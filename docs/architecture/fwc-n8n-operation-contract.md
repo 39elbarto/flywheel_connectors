@@ -14,6 +14,45 @@ for implementation details.
 No provider call, live workflow change, credential change, process stop, or MCP
 profile change is authorized by this contract.
 
+## Current delivery plan and evidence boundary (2026-09-30)
+
+Sections 5, 5.1 and 14 remain the complete v1 feature baseline. Unimplemented
+routes remain delivery obligations; Beads owns status and dependencies.
+
+- Installed checkpoint: `release-20260929-42a574a62-started-result-rc40`.
+  `.25` manual execution passed on EEC (`414677`) and Hetzner (`379754`), with
+  independent GET proving manual mode, terminal success and exact approved
+  workflow versions. Retained evidence is under
+  `/srv/dev-ssd/fcp/nqm81.25/manual-acceptance-rc38-webhookdata-20260929/attempt-05`
+  and `/srv/dev-ssd/fcp/nqm81.25/manual-acceptance-rc37-20260929/hetzner/attempt-06`;
+  directory names describe the test series, not the installed RC.
+- `.24` selected-version publish/unpublish passed under RC33; `.23` REST
+  unarchive passed under RC26. These are operation-specific historical results.
+  MCP archive was not accepted by `.10`; `.33` owns reversible archive/unarchive.
+  `.26` production execution and `.41` test preparation/execution remain separate.
+- `.34` owns compatible updates under section 11.2. Source/offline verification
+  does not establish installed/live acceptance.
+- `.35` owns read/knowledge/validation/status/audit parity; `.36` versions and
+  rollback; `.37` data tables; `.38` evaluations; `.39` credential-backed resource
+  exploration; `.40` explicit execution detail; `.42` draft/template/autofix parity.
+  Each includes every applicable section 5.1 sub-action, public dispatch,
+  unit/host/CLI tests and separately authorized provider acceptance. Routing or
+  refusal-only behavior is not completion; section 13 destructive scope stays future-only.
+- `.15` owns the final operation/server/release/evidence matrix, same-chat UX,
+  risk-based regressions, failure drills, zero-idle, fallback and proven recovery
+  on one identified candidate. Missing capability remains a gap unless the owner
+  changes scope. `.32` UNKNOWN requires reconciliation or explicit owner disposition;
+  preserve UNKNOWN history. Fixture availability restoration is separately approved.
+- `.11` accepted a trusted update executor, not the whole update service. `.43`
+  owns detection/staging/verification/recovery integration; `.12` owns ClickUp/Telegram.
+  Both gate integrated rollout separately from `.15`; `.16`–`.18` retain credential
+  mutation, legacy key retirement and general permanent deletion as future decisions.
+
+Maintain the final matrix here during `.15`, rather than adding a backlog. Each
+feature needs a bounded tracked script with offline self-test, actual CLI tests,
+redacted stage/attempt/readback/teardown evidence and distinct source, installed
+and live results. No plan authorizes provider writes, installation or cleanup.
+
 **Compatible-update source contract (`flywheel_connectors-nqm81.34`):**
 Numeric upstream versions are diagnostic; exact approved staged versions and
 artifact/trust hashes remain binding. Local catalog validation covers the whole
@@ -46,6 +85,11 @@ Offline CLI, bundle,
 provision, update, supervisor and loopback/process runs validate separate
 boundaries. The bounded preflight script's `--compatibility-self-test` reports
 `acceptance:false`; installed-provider/live upgrade acceptance is unverified.
+
+## Historical implementation and acceptance packets
+
+The dated packets retain their evidence and limitations. “Current” refers to
+the packet date and cannot establish acceptance on a later release.
 
 **Current installed release/read-only smoke boundary (2026-09-18):**
 `/usr/local/lib/fwc-n8n/current` resolves to
@@ -1036,7 +1080,8 @@ separate:
   `workflows.delete_disposable`, `workflows.execute`, and
   `mcp_access.reconcile`. A manifest declaration does
   not override an operation's fail-closed provider gate; the typed REST
-  activation implementation is present in source but remains live-unaccepted.
+  selected-version activation was accepted by `.24` on RC33; later releases
+  still need applicable `.15` regression evidence.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is absent from
   the connector manifest. The wrapper/host path accepts an empty operation
   input, derives a fixed EEC/Hetzner server from its bounded envelope, and
@@ -1047,13 +1092,12 @@ separate:
   `n8n.data_tables.search`, `n8n.data_tables.mutate`, `n8n.audit.inspect`,
   and `n8n.workflows.versions`. A routing decision is not a provider
   execution path and does not imply that the selected operation is available.
-- **Future/unimplemented execution paths:** `n8n.runtime.status`,
+- **Unimplemented v1 execution paths:** `n8n.runtime.status`,
   `n8n.node_resources.explore`, `n8n.evaluations.manage`, and any router intent
-  without a corresponding host/connector dispatch remain future or
-  unimplemented execution paths. `restore_workflow_version`, `versions`, credential
-  mutation, and permanent/general deletion remain fail-closed/non-goals. Typed
-  REST activation is implemented but remains outside live acceptance until the
-  bounded EEC-then-Hetzner procedure passes.
+  without a corresponding host/connector dispatch remain unimplemented under
+  `.35`–`.42`. Version restoration is distinct from unarchive, remains
+  fail-closed pending `.36`, and is accepted v1 scope. Credential mutation and
+  permanent/general deletion remain future-only. Catalog entries grant no authority.
 
 Historical live acceptance boundary (2026-08-21; release ID and evidence receipt
 not recorded here): the then-installed owner-gated bundle
@@ -1616,16 +1660,17 @@ trigger, webhook, or polling node on the target n8n deployment. A
 not be used for publish/unpublish acceptance because n8n intentionally excludes
 it from activation eligibility.
 
-`workflows.execute.mode` is exactly `manual` or `production` in the bounded
-input contract. Both modes are Risky/High/BestEffort and require a current-chat
-guard with exact workflow/version preconditions, UUID idempotency, bounded
-input class, and side-effect summary. The provider call is only the immutable
-owner-policy-bound official MCP `execute_workflow` tool with `wait=false`; the
-EEC and Hetzner input/output schema digests are fixed in the owner-signed
-per-server binding. A legacy unavailable sentinel may remain in an older bundle
-but never admits execution. The path must return only a bounded handle and
-verify the execution through an independent typed `n8n.executions.get`; `test`
-and `prepare_test` remain future-only. `inputs.headers`
+The provider path currently accepts `manual` only; `.25` accepted bounded runs
+on both servers. Production `.26` is rejected before dispatch and test/preparation
+`.41` remains planned v1 scope. Both modes require exact current-chat workflow,
+version, input and side-effect approval plus a one-use UUID. The fixed provider
+is owner-policy-bound official MCP `execute_workflow`; preserve version binding
+locally and through independent readback without inventing provider `versionId`
+or `wait` arguments. Per-server input/output schema bindings remain mandatory;
+numeric package versions cannot replace them. Return a bounded execution handle
+and verify it with a separate typed `n8n.executions.get`; started is not terminal
+success. Planned opt-in detail `.40` cannot change metadata-only GET or diagnostics
+defaults. `inputs.headers`
 rejects authorization, cookie, proxy authorization, API-key, and other
 credential-bearing headers; secrets must come from the workflow's existing
 credential references, not model input.
@@ -1759,7 +1804,7 @@ caller-configurable frame expansion.
 | Draft/published comparison | Official MCP | REST plus local validation | Official server semantics expose both graphs |
 | Workflow SDK create/update | Official MCP | Typed REST only after parity | Server-side SDK and node schema validation |
 | Publish/unpublish/archive/restore | Typed REST after parity | Official MCP | Typed preconditions and compact readback |
-| Manual/production execution | Owner-gated official MCP `execute_workflow` | No REST fallback | Input parity and exact EEC/Hetzner schema binding are implemented; live execution acceptance and test/prepare-test remain deferred |
+| Manual/production execution | Owner-gated official MCP `execute_workflow` | No REST fallback | Manual accepted by `.25`; production `.26` and test/preparation `.41` remain incomplete, with separate provider-semantic and approval gates |
 | Credential metadata | Official MCP | Typed REST | Official MCP strips secret data |
 | Data tables | Official MCP | Typed REST after parity | Current official typed surface is broader |
 | Audit/evaluations/version history | Typed REST or local MCP by capability | No silent fallback | Feature/version dependent |
@@ -2035,11 +2080,34 @@ Catalog policy:
 
 - unchanged approved read tools may continue within snapshot TTL;
 - a removed tool returns `capability_unavailable`;
-- a new or changed write/execution/credential/destructive tool is `blocked`;
+- a new unreviewed write/execution/credential/destructive tool or semantic/security change is `blocked`; section 11.2 requires deterministic reviewed proof for harmless changes;
 - a read tool whose schema changes in security-relevant fields is also blocked;
 - no catalog description or annotation can downgrade risk;
 - provider cache TTL is honored only within local maximums; deterministic tool
   order and schema digests are used for comparison and prompt-cache efficiency.
+
+### 11.2 Compatible upstream updates (owner requirement, 2026-09-30)
+
+Numeric upstream version changes alone must not disable supported operations
+with compatible routes, wire protocols, inputs/outputs, permissions and readback.
+Assess EEC, Hetzner, local MCP and bridge separately. Evidence versions identify
+tested artifacts, rather than a permanent numeric support allowlist.
+
+`.34` uses deterministic reviewed comparisons, never model interpretation.
+Descriptive/order/additive changes cannot grant new authority. Required fields,
+permissions, output/readback, unknown schema semantics and risky tools remain
+fail-closed. Unaffected operations continue unless shared authentication,
+transport or artifact trust is compromised. Preserve safe diagnostics without
+retrying writes or adding fallback.
+
+Exact immutable signatures, hashes, ownership, executable selection, candidate
+approval and recovery remain mandatory. Ambient package changes require the
+existing reviewed update path; never edit signed inventory in place. Remote n8n
+is observed, not automatically upgraded or downgraded. Section 11.1 still binds
+immutable evidence. Reviewed source/offline tests cover version/protocol sets,
+harmless metadata, missing/changed tools, semantic/output drift, trust/expiry and
+operation isolation. Installed-provider and real before/after upgrade acceptance
+remain unverified; offline checks cannot claim live PASS.
 
 ## 12. Process lifecycle and telemetry
 

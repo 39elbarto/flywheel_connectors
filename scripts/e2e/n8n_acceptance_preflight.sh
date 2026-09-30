@@ -3,8 +3,9 @@ set -euo pipefail
 
 # Redaction-safe, read-only policy gate for the nqm81.10 supervised worker.
 #
-# This file intentionally contains no provider, issuer, credential, secret, or
-# write path.  It validates a closed metadata projection and, when requested,
+# Provider reads require the explicit --read-only-check mode; the default and
+# self-tests never contact a provider. There is no issuer, secret or write path.
+# The default validates a closed metadata projection and, when requested,
 # only stats the fixed approval-request path.  It never reads request/response
 # bodies, creates/removes files, or echoes input values.
 
@@ -943,12 +944,258 @@ run_self_test() {
   emit_self_test_success
 }
 
+read_only_projection() {
+  local target="$1" version="${2:-}" execution="${3:-}"
+  if [[ "$target" == local ]]; then
+    jq -e 'type == "object" and .schema == "fwc.n8n.local-run-once.v1" and
+      .provider == "local_mcp" and .response.operation == "knowledge_query" and
+      .response.result.status == "Completed" and .response.result.shutdown.reaped == true and
+      .response.result.shutdown.group_absent == true and
+      .response.result.startup.network_disabled == true and
+      (.response.result | has("teardown_error_code")) and
+      .response.result.teardown_error_code == null and
+      (.response.result.responses | type == "array" and length == 1 and
+        (.[0] | type == "object" and
+        ((has("isError") | not) or .isError == false) and
+        (.content | type == "array" and length > 0 and length <= 64 and
+          all(.[]; type == "object" and .type == "text" and
+            (.text | type == "string" and length > 0 and length <= 262144 and test("\\S"))))))' >/dev/null 2>&1
+  else
+    jq -e --arg version "$version" --arg execution "$execution" '
+      type == "object" and .status == "ok" and
+      .result.id == $execution and .result.workflowVersionId == $version' >/dev/null 2>&1
+  fi
+}
+
+run_read_only_self_test() {
+  local local_ok='{"schema":"fwc.n8n.local-run-once.v1","provider":"local_mcp","response":{"operation":"knowledge_query","result":{"status":"Completed","startup":{"network_disabled":true},"shutdown":{"reaped":true,"group_absent":true},"teardown_error_code":null,"responses":[{"content":[{"type":"text","text":"HOSTILE-CANARY"}]}]}}}'
+  read_only_projection local <<<"$local_ok" || return 1
+  if read_only_projection local <<<"$(jq '.response.result.shutdown.reaped=false' <<<"$local_ok")"; then return 1; fi
+  if read_only_projection local <<<"$(jq '.response.result.status="Failed"' <<<"$local_ok")"; then return 1; fi
+  read_only_projection eec version-1 execution-1 <<<'{"status":"ok","result":{"id":"execution-1","workflowVersionId":"version-1","data":"HOSTILE-CANARY"}}' || return 1
+  if read_only_projection hetzner version-2 execution-1 <<<'{"status":"ok","result":{"id":"execution-1","workflowVersionId":"version-1"}}'; then return 1; fi
+  if read_only_projection eec version-1 execution-1 <<<'{"status":"ok","result":{"id":"execution-1","versionId":"version-1"}}'; then return 1; fi
+  if read_only_projection eec version-1 execution-2 <<<'{"status":"ok","result":{"id":"execution-1","workflowVersionId":"version-1"}}'; then return 1; fi
+  local catalog='{"status":"ok","result":{"capabilities":{"schema":"fwc.n8n.capabilities.v1","serverId":"eec","tools":[]}}}'
+  read_only_catalog_projection eec <<<"$catalog" || return 1
+  if read_only_catalog_projection hetzner <<<"$catalog"; then return 1; fi
+  if read_only_catalog_projection eec <<<"$(jq '.result.capabilities.tools=[{name:"HOSTILE-CANARY",class:"unknown",status:"unreviewed",inputSchemaDigest:"invalid",outputSchemaDigest:"invalid"}]' <<<"$catalog")"; then return 1; fi
+  local projected
+  projected="$(safe_read_only_failure local "$PARENT_BINDING" <<<'{"schema":"fwc.n8n.error.v1","status":"error","code":"HOSTILE-CANARY","correlationId":"HOSTILE-CANARY","diagnostic":"HOSTILE-CANARY"}')"
+  [[ "$projected" != *HOSTILE-CANARY* ]] || return 1
+  if read_only_projection local <<<"$(jq '.provider="HOSTILE-CANARY"' <<<"$local_ok")"; then return 1; fi
+  if read_only_projection local <<<"$(jq '.response.operation="validation_run"' <<<"$local_ok")"; then return 1; fi
+  projected="$(safe_read_only_failure eec "$PARENT_BINDING" <<<'{"schema":"fwc.n8n.error.v1","status":"error","code":"official_mcp_plan_failed","diagnostic":"external.mcp.discovery_jsonrpc_error","rpcPhase":"discovery","rpcCode":-32602,"correlationId":"12345678-1234-4234-8234-123456789abc"}')"
+  jq -e '.code=="official_mcp_plan_failed" and .diagnostic=="external.mcp.discovery_jsonrpc_error" and .rpc_phase=="discovery" and .rpc_code == -32602 and .observed_correlation_id != null' <<<"$projected" >/dev/null || return 1
+  projected="$(safe_read_only_failure eec "$PARENT_BINDING" <<<'{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","diagnostic":"owned.egress_stage.response_body_read","rpcPhase":"HOSTILE-CANARY","rpcCode":"HOSTILE-CANARY"}')"
+  jq -e '.diagnostic=="owned.egress_stage.response_body_read" and .rpc_phase==null and .rpc_code==null' <<<"$projected" >/dev/null || return 1
+  projected="$(emit_read_only_failure local "$PARENT_BINDING" HOSTILE-CANARY 124)"
+  jq -e '.abort_code=="outer_guard_timeout" and .exit_code==124 and .teardown=="unverified" and .verdict=="fail"' <<<"$projected" >/dev/null || return 1
+  [[ "$projected" != *HOSTILE-CANARY* ]] || return 1
+  local fixture code
+  for code in host_n8n_invoke_failed teardown_failed process_group_present io_worker_failed; do
+    fixture="$(jq -nc --arg code "$code" '{schema:"fwc.n8n.error.v1",status:"error",code:$code,diagnostic:"invoke_unknown"}')"
+    projected="$(safe_read_only_failure local "$PARENT_BINDING" <<<"$fixture")"
+    jq -e --arg code "$code" '.code==$code and .diagnostic=="invoke_unknown"' <<<"$projected" >/dev/null || return 1
+  done
+  for fixture in \
+    '.response.result.responses[0].isError=true' \
+    '.response.result.responses=["HOSTILE-CANARY"]' \
+    '.response.result.responses[0].isError=null' \
+    '.response.result.responses[0].content=[]' \
+    '.response.result.responses[0].content[0].text="   "'; do
+    if read_only_projection local <<<"$(jq "$fixture" <<<"$local_ok")"; then return 1; fi
+  done
+  read_only_projection local <<<"$(jq '.response.result.responses[0].isError=false' <<<"$local_ok")" || return 1
+  printf '%s\n' '{"schema":"fwc.n8n.compatibility-read.v1","mode":"self-test","verdict":"pass","cases":26,"boundaries":["bridge-code-invoke_unknown-pairs","hostile-denial","meaningful-tool-result"],"acceptance":false}'
+}
+
+safe_read_only_failure() {
+  # Whitelist actual wrapper error codes; never reflect arbitrary upstream text.
+  jq -c --arg target "$1" --arg requested "$2" --argjson exit_code "${3:-1}" '
+    . as $r |
+    {schema:"fwc.n8n.compatibility-read.v1",mode:"read-only",target:$target,
+      verdict:"fail",abort_code:"read_only_probe_failed",provider_attempts:"unknown",exit_code:$exit_code,
+      requested_correlation_id:$requested,
+      code:(if $r.schema == "fwc.n8n.error.v1" and $r.status == "error" and
+        (["bundle_unavailable","local_provider_policy_invalid","local_provider_failed",
+          "invalid_input","invalid_operation_input","input_read_timeout",
+          "cancelled","credential_broker_unavailable","credential_oversized",
+          "credential_backend_failed","credential_invalid","official_mcp_response_invalid",
+          "official_mcp_plan_failed","unknown_outcome","host_n8n_invoke_failed",
+          "teardown_failed","process_group_present","io_worker_failed",
+          "bridge_failed","output_encoding_failed"] | index($r.code)) != null
+        then $r.code elif $r.schema == "fwc.n8n.local-run-once.v1" and
+          $r.provider == "local_mcp" and $r.response.operation == "knowledge_query" and
+          (["unsupported_platform","invalid_policy","invalid_request","process_start",
+            "package_identity","process_identity","process_stop","startup_timeout",
+            "request_timeout","cancelled","invalid_frame","catalog_mismatch","unknown_tool",
+            "too_many_calls","frame_too_large","provider_error"] | index($r.response.result.result_code)) != null
+        then $r.response.result.result_code else "unclassified_wrapper_failure" end),
+      diagnostic:(if (["provider_unauthorized","provider_forbidden","provider_not_found",
+        "provider_conflict","provider_rate_limited","provider_unavailable","validation_failed","invoke_unknown",
+        "response_protocol","response_auth","response_rate_limited","response_capability",
+        "response_zone","response_connector","response_resource","response_upstream_timeout",
+        "response_dependency_unavailable","response_internal",
+        "external.mcp.discovery_jsonrpc_error","external.mcp.discovery_tool_result_error",
+        "external.mcp.execute_call_jsonrpc_error","external.mcp.execute_call_tool_result_error",
+        "owned.egress_stage.host_authorization_binding","owned.egress_stage.credential_lease",
+        "owned.egress_stage.policy_preflight","owned.egress_stage.dns_resolution",
+        "owned.egress_stage.tls_policy_validation","owned.egress_stage.outbound_transport",
+        "owned.egress_stage.response_body_read",
+        "response_external_4xx","response_external_5xx","response_external_other",
+        "response_external_unknown","child.protocol","child.auth","child.capability",
+        "child.zone","child.connector","child.resource","child.external","child.internal",
+        "child.unknown"] | index($r.diagnostic)) != null
+        then $r.diagnostic else null end),
+      rpc_phase:(if (["discovery","execute_call"] | index($r.rpcPhase)) != null then $r.rpcPhase else null end),
+      rpc_code:(if ($r.rpcCode|type) == "number" and ($r.rpcCode|floor) == $r.rpcCode and
+        $r.rpcCode >= -2147483648 and $r.rpcCode <= 2147483647 then $r.rpcCode else null end),
+      teardown:(if $r.schema == "fwc.n8n.local-run-once.v1" then
+        {reaped:(if ($r.response.result.shutdown.reaped|type)=="boolean" then $r.response.result.shutdown.reaped else null end),
+         group_absent:(if ($r.response.result.shutdown.group_absent|type)=="boolean" then $r.response.result.shutdown.group_absent else null end)} else null end),
+      observed_correlation_id:(if ($r.correlationId | type) == "string" and
+        ($r.correlationId | test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"))
+        then $r.correlationId elif $r.schema == "fwc.n8n.local-run-once.v1" and
+          ($r.response.result.correlation_id|type)=="string" and
+          ($r.response.result.correlation_id|test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"))
+        then $r.response.result.correlation_id else null end)}' 2>/dev/null
+}
+
+emit_read_only_failure() {
+  local target="$1" requested="$2" response="$3" exit_code="${4:-1}" projected=""
+  if [[ "$exit_code" == 124 || "$exit_code" == 137 ]]; then
+    printf '{"schema":"fwc.n8n.compatibility-read.v1","verdict":"fail","abort_code":"outer_guard_timeout","exit_code":%s,"requested_correlation_id":"%s","teardown":"unverified","provider_attempts":"unknown"}\n' "$exit_code" "$requested"
+    return 0
+  fi
+  projected="$(safe_read_only_failure "$target" "$requested" "$exit_code" <<<"$response")" || {
+    emit_failure read_only_probe_failed; return 0;
+  }
+  [[ -n "$projected" ]] || { emit_failure read_only_probe_failed; return 0; }
+  printf '%s\n' "$projected"
+}
+
+run_actual_read_only_error_test() {
+  local binary="$1" response="" projected="" actual_exit=0 correlation="12345678-1234-4234-8234-123456789abc"
+  # A source wrapper outside an installed release fails bundle verification
+  # before any provider or credential dispatch. Never accept the installed CLI.
+  [[ -x "$binary" && "$(readlink -e "$binary")" == /srv/dev-ssd/fcp/targets/*/debug/fwc-n8n ]] || return 1
+  if response="$(jq -nc --arg correlation "$correlation" \
+      '{input:{action:{tool_documentation:{topic:null,depth:"essentials"}}},correlation_id:$correlation}' |
+      /usr/bin/timeout 10s "$binary" run-once n8n.knowledge.query 2>/dev/null)"; then return 1; else actual_exit="$?"; fi
+  [[ "$actual_exit" == 1 ]] || return 1
+  projected="$(safe_read_only_failure local "$correlation" "$actual_exit" <<<"$response")" || return 1
+  jq -e --arg correlation "$correlation" '.code == "bundle_unavailable" and
+      .exit_code == 1 and .observed_correlation_id == $correlation' <<<"$projected" >/dev/null || return 1
+  printf '%s\n' "$projected"
+  printf '%s\n' '{"schema":"fwc.n8n.compatibility-read.v1","mode":"actual-source-cli-error","verdict":"pass","acceptance":false}'
+}
+
+run_read_only_check() {
+  local target="${1:-}" workflow="${2:-}" execution="${3:-}" version="${4:-}" response="" operation="" correlation budget guard
+  correlation="$(cat /proc/sys/kernel/random/uuid)"
+  [[ -x "$WRAPPER" && -x /usr/bin/timeout ]] || { emit_failure checker_dependency_missing; return 1; }
+  if [[ "$target" == local && "$#" == 1 ]]; then
+    operation=n8n.knowledge.query
+    # Read only fixed public policy budgets. Allow startup + one call + both
+    # TERM/KILL teardown windows, five-second framing and fifteen-second margin.
+    budget="$(jq -er '[.startup_timeout_ms,.request_timeout_ms,.shutdown_timeout_ms] |
+      if all(.[]; type=="number" and floor==. and .>0 and .<=600000)
+      then .[0]+.[1]+2*.[2] else error("invalid") end' \
+      /usr/local/lib/fwc-n8n/current/policy/local-mcp.json 2>/dev/null)" || {
+      emit_failure local_budget_invalid; return 1;
+    }
+    guard="$(( (budget + 999) / 1000 + 20 ))"
+    # Fixed credential-free knowledge request, never workflow validation/execution.
+    response="$(jq -nc --arg correlation "$correlation" '{input:{action:{tool_documentation:{topic:null,depth:"essentials"}}},correlation_id:$correlation}' |
+      /usr/bin/timeout "${guard}s" "$WRAPPER" run-once "$operation" 2>/dev/null)" || {
+      emit_read_only_failure "$target" "$correlation" "$response" "$?"; return 1;
+    }
+    read_only_projection local <<<"$response" || {
+      emit_read_only_failure "$target" "$correlation" "$response" 0; return 1;
+    }
+  elif [[ ( "$target" == eec || "$target" == hetzner ) && "$#" == 4 &&
+          "$workflow" =~ ^[A-Za-z0-9_-]{1,128}$ &&
+          "$execution" =~ ^[A-Za-z0-9_-]{1,128}$ &&
+          "$version" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+    operation=n8n.executions.get
+    response="$(jq -nc --arg server "$target" --arg workflow "$workflow" --arg id "$execution" --arg correlation "$correlation" \
+      '{server_id:$server,input:{workflow_id:$workflow,id:$id},deadline_ms:20000,correlation_id:$correlation}' |
+      /usr/bin/timeout 25s "$WRAPPER" run-once "$operation" 2>/dev/null)" || {
+      emit_read_only_failure "$target" "$correlation" "$response" "$?"; return 1;
+    }
+    # Consume the full result in memory but persist no graph, credentials or items.
+    read_only_projection "$target" "$version" "$execution" <<<"$response" || {
+      emit_failure readback_version_mismatch; return 1;
+    }
+    jq -e --arg workflow "$workflow" '.result.workflowId == $workflow' <<<"$response" >/dev/null 2>&1 || {
+      emit_failure readback_identity_mismatch; return 1;
+    }
+  else
+    emit_failure input_arguments_invalid
+    return 1
+  fi
+  printf '{"schema":"fwc.n8n.compatibility-read.v1","mode":"read-only","target":"%s","operation":"%s","verdict":"pass","wrapper_invocations":1,"requested_correlation_id":"%s","upgrade_acceptance":false}\n' "$target" "$operation" "$correlation"
+}
+
+read_only_catalog_projection() {
+  # Only the wrapper's compact, unreviewed hash projection may reach evidence.
+  jq -e --arg target "$1" '
+    .status == "ok" and .result.capabilities.schema == "fwc.n8n.capabilities.v1" and
+    .result.capabilities.serverId == $target and
+    (.result.capabilities.tools | type == "array" and length <= 256 and
+      all(.[]; .class == "unknown" and .status == "unreviewed" and
+        (.name | type == "string" and test("^[A-Za-z0-9_.:-]{1,256}$")) and
+        (.inputSchemaDigest | type == "string" and test("^sha256:[0-9a-f]{64}$")) and
+        (.outputSchemaDigest | type == "string" and test("^sha256:[0-9a-f]{64}$"))))' >/dev/null 2>&1
+}
+
+run_read_only_catalog() {
+  local target="${1:-}" response="" correlation
+  correlation="$(cat /proc/sys/kernel/random/uuid)"
+  [[ "$#" == 1 && ( "$target" == eec || "$target" == hetzner ) ]] || {
+    emit_failure input_arguments_invalid; return 1;
+  }
+  [[ -x "$WRAPPER" && -x /usr/bin/timeout ]] || { emit_failure checker_dependency_missing; return 1; }
+  response="$(jq -nc --arg server "$target" --arg correlation "$correlation" '{server_id:$server,input:{},deadline_ms:20000,correlation_id:$correlation}' |
+    /usr/bin/timeout 25s "$WRAPPER" run-once n8n.capabilities.inspect 2>/dev/null)" || {
+    emit_read_only_failure "$target" "$correlation" "$response" "$?"; return 1;
+  }
+  read_only_catalog_projection "$target" <<<"$response" || {
+    emit_failure read_only_projection_invalid; return 1;
+  }
+  jq -c --arg target "$target" '{schema:"fwc.n8n.compatibility-catalog.v1",target:$target,
+    mode:"read-only",reviewed:false,upgrade_acceptance:false,
+    tools:[.result.capabilities.tools[] | {name,inputSchemaDigest,outputSchemaDigest}]}' <<<"$response"
+}
+
 usage() {
   printf '%s\n' "usage: n8n_acceptance_preflight.sh [--self-test] [PLAN.json] | --compatibility-self-test SOURCE_BINARY"
+  printf '%s\n' "explicit future provider reads: --read-only-check local | --read-only-check eec|hetzner WORKFLOW_ID EXECUTION_ID EXPECTED_WORKFLOW_VERSION_ID"
+  printf '%s\n' "official catalog only: --read-only-catalog eec|hetzner; offline projections: --read-only-self-test"
+  printf '%s\n' "actual offline error emitter: --actual-read-only-error-self-test SOURCE_DEBUG_BINARY"
 }
 
 main() {
   require_dependencies || return 1
+  if [[ "${1:-}" == "--actual-read-only-error-self-test" && "$#" == 2 ]]; then
+    run_actual_read_only_error_test "$2"
+    return $?
+  fi
+  if [[ "${1:-}" == "--read-only-catalog" ]]; then
+    shift
+    run_read_only_catalog "$@"
+    return $?
+  fi
+  if [[ "${1:-}" == "--read-only-self-test" && "$#" == 1 ]]; then
+    run_read_only_self_test
+    return $?
+  fi
+  if [[ "${1:-}" == "--read-only-check" ]]; then
+    shift
+    run_read_only_check "$@"
+    return $?
+  fi
   if [[ "${1:-}" == "--help" ]]; then
     usage
     emit_failure "input_arguments_invalid"

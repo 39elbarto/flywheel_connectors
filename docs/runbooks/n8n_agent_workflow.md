@@ -35,6 +35,36 @@ runner fix: `4ef0578dc`, with retained evidence at:
 At that handoff, the planned sequence was `.24` source/capability triage before
 any bounded, authorized implementation, then `.25`, then `.26`.
 
+## Plan refinement — 2026-09-30
+
+The dated sequence above is historical: `.24` selected-version lifecycle and
+`.25` manual execution are accepted, while production `.26` and complete v1
+remain unfinished. The [operation contract](../architecture/fwc-n8n-operation-contract.md#current-delivery-plan-and-evidence-boundary-2026-09-30)
+maps remaining original scope to `.33`–`.43`. `.34` now has reviewed source and
+offline compatibility tests; installed/live upgrade checks remain unverified.
+Compatible numeric-version changes must retain usable supported routes without
+relaxing signed artifacts, exact approvals, schema/protocol/permission or readback
+semantics. Isolate actual conflicts to affected operations where trust permits.
+
+The current preparation stage produces an unsigned binary/public-input set for
+subsequent assembly. It grants no package update, signing, installation, release
+switch, provider mutation, secret change, cleanup or profile removal. Retain the
+role defaults below and reuse the established coordinator/reviewer sessions.
+
+Extend existing unit/contract/host/CLI coverage and bounded scripts for every
+feature. Offline self-tests are separate from acceptance. Evidence retains run
+and requested/observed correlation IDs, source/release/schema hashes, timing,
+attempts, dispatch certainty, safe error/status classes, independent readback and
+teardown. Never retain raw bodies, workflow/Code/execution items, tokens, headers
+or customer/patient content. Synthetic redaction canaries cover success/failure;
+nonzero exits must preserve safe diagnostics.
+
+`.15` owns final complete-v1 acceptance and proven recovery. Preserve PASS and
+UNKNOWN separately; `.32` requires reconciliation or explicit owner disposition.
+`.25` fixture restoration is separately approved. `.12`/`.43` gate external update
+integration; `.16`–`.18` remain future owner decisions. Add process machinery only
+for a concrete delivery risk.
+
 ## Default owner and authority
 
 These role and model assignments are defaults for this workflow effective
@@ -321,3 +351,114 @@ bodies in the repository, Agent Mail, or evidence.
 Apply this runbook to every n8n task. Re-review it whenever an n8n provider
 operation, approval contract, release-key binding, role assignment, or
 coordination transport changes.
+
+## `.34` preparation, future read-only acceptance and recovery
+
+The preparation artifact is an **unsigned binary/public-input set**, not an
+installable RC. Build only the four runtime binaries from a clean reviewed
+commit, using the existing assembler `build_one` arguments, SSD launcher and
+dedicated release target. For this unsigned diagnostic compilation, the actual
+mapped owner **public** metadata and its decoded SHA-256 identify the build input;
+they do not prove trust. The decoded SHA-256 at this checkpoint is
+`745a9236846ab0c9523a1f9ac884b740d1886725602af28ac59f94f0d12be12d`.
+Never substitute the approval key or read a signing seed. `fwc-n8n status` checks
+root-owned bundle hashes, not owner signatures. Current RC40 signature/key binding
+is **unverified**, and is a mandatory signing/install/release gate. No standalone
+trusted verifier invocation is known; do not add crypto or run a deliberately
+failing provision preflight. This gap does not prevent unsigned compilation.
+
+Normal assembly retains fixed `/var/lib/fwc-n8n/staging`, fresh official schema
+bindings, reviewed originals for semantic profiles, isolated local discovery,
+owner signing and provision preflight/promotion. Copied RC40 inventory/policy
+is historical input, never fresh approval or proof of current provider semantics.
+No signer/issuer, production receipt or provision request belongs in the unsigned
+preparation set. Non-green Clippy/UBS evidence permits preparation, not release GO.
+
+Offline commands, run from the task checkout (no provider access):
+
+```bash
+bash scripts/e2e/n8n_acceptance_preflight.sh --self-test
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-self-test
+bash scripts/e2e/n8n_acceptance_preflight.sh --actual-read-only-error-self-test /srv/dev-ssd/fcp/targets/n8n/debug/fwc-n8n
+bash scripts/e2e/n8n_acceptance_preflight.sh --compatibility-self-test /srv/dev-ssd/fcp/targets/n8n/debug/fwc-n8n
+```
+
+Expected: pass JSON with `acceptance:false` (18 preflight, 26 projection cases,
+one actual source-CLI error boundary and 7 compatibility cases).
+The actual CLI test uses a source binary outside the installed release and must
+fail bundle verification before provider/credential dispatch. It checks the real
+serialized wrapper error and exact requested correlation, rather than a mock
+error envelope. Happy projection fixtures are synthetic and prove no live success.
+The compatibility producer test uses synthetic pins; it grants no approval.
+Only after separate explicit authorization for installed/provider reads, use
+the following commands before and after an independently approved installation.
+Set execution/version variables to the exact owner-approved existing harmless
+fixtures; do not create, execute or replay workflows to obtain them.
+
+```bash
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-check local
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-catalog eec
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-catalog hetzner
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-check eec "$EEC_WORKFLOW_ID" "$EEC_EXECUTION_ID" "$EEC_WORKFLOW_VERSION_ID"
+bash scripts/e2e/n8n_acceptance_preflight.sh --read-only-check hetzner "$HETZNER_WORKFLOW_ID" "$HETZNER_EXECUTION_ID" "$HETZNER_WORKFLOW_VERSION_ID"
+```
+
+Each command makes one wrapper invocation, with bounded framing/deadline and
+no retry/fallback. Local knowledge requires successful owned-child teardown;
+official discovery only lists tools and emits compact unreviewed schema hashes;
+REST execution GET independently compares workflow/execution identity and
+`workflowVersionId`, preserving
+metadata-only semantics. Evidence contains static verdicts or validated names/
+digests, never raw results, graphs, descriptions, headers or credentials.
+Nonzero exit emits `read_only_probe_failed`, `read_only_projection_invalid` or
+`readback_version_mismatch`; stop without repeating the call. This safe failure
+does not prove dispatch certainty or successful teardown after a wrapper failure.
+Wrapper failure evidence preserves only closed known codes and a syntactically
+validated UUID correlation; arbitrary codes/descriptions are replaced, and raw
+stderr is discarded. Malformed output falls back to a static safe failure.
+It retains the actual wrapper/guard exit, approved diagnostic/RPC fields and
+local result-code/teardown booleans. Local success binds both `local_mcp` provider
+and `knowledge_query` operation. The local outer guard reads the fixed public
+policy and adds startup + one request + twice shutdown + 20 seconds for framing
+and margin (84 seconds for current 30s/30s/2s policy). Guard timeout has its own
+static code and **unverified teardown**; it never produces PASS or retry.
+Local success additionally requires exactly one object MCP tool result, absent
+or boolean-false `isError`, and bounded nonempty text documentation content.
+Completed process/teardown alone cannot accept a tool error or malformed result.
+Retain command exits plus release/source/package/protocol hashes separately.
+Two same-release runs are not an upgrade test; these reads cannot accept risky
+write operations. Fresh reviewed schemas and operation-specific acceptance still
+remain mandatory.
+
+Retained recovery target:
+`/usr/local/lib/fwc-n8n/releases/release-20260929-42a574a62-started-result-rc40`.
+Keep its complete four binaries, two manifests, four inventories, two policies,
+`receipt.json`, `provenance.json` and signed `provision-receipt.json` together.
+The compatible external issuer is `/usr/local/sbin/fcp-n8n-approval-issue`, SHA-256
+`48b8167603ffb98d10f9d8f53d981ec3e5031862bb3fc801901ce7866a340c4b`;
+retain the associated public approval pin separately from owner trust. Read-only
+recovery checks (not a restore or signature proof):
+
+```bash
+readlink -e /usr/local/lib/fwc-n8n/current
+sha256sum /usr/local/lib/fwc-n8n/releases/release-20260929-42a574a62-started-result-rc40/receipt.json
+sha256sum /usr/local/lib/fwc-n8n/releases/release-20260929-42a574a62-started-result-rc40/provision-receipt.json
+sha256sum /usr/local/sbin/fcp-n8n-approval-issue /etc/fwc-n8n/approval-public-key
+```
+
+The current CLI exposes provision preflight/apply, but **no rollback command**.
+The typed owner rollback seam requires revalidated proofs and the owner lock;
+do not replace it with an unverified `ln`/`mv` switch or re-promote an installed
+release as staging. A literal supported restore invocation must be supplied and
+reviewed before release acceptance; currently this is a recovery gate gap.
+Unknown provider outcomes are reconciled independently, never replayed as rollback.
+
+Integration composition is remote FCP `ee30a7e87424952b8e65645b8432bb821e567155`,
+then `b53067c03a444d4dea4f309cd8998ec9bf2f385b` (model defaults),
+`938a6511471b84374286b646b383da53a1a7a01d` (reviewed implementation),
+`e1071b36d20b90c05e413644bd271b666082ea75` (coordinator Beads snapshot), then the
+separately reviewed preparation documentation/script commit. Do not cherry-pick
+the old plan JSONL or replace model defaults. VM integration independently uses
+existing `5071855711bcdf4013a006a4ccfd4cca017214a4`, whose parent is verified remote
+`c6e652ddee29b52fec11e9e5cd09e97203c96b61`; no VM edits are needed. Merge/push and
+all installation/recovery actions require their separate authorization.

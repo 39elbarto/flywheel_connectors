@@ -842,6 +842,141 @@ expect_success() {
   validate_plan >/dev/null
 }
 
+run_recovery_parser_self_test() {
+  local binary="$1"
+  [[ -f "$binary" && -x "$binary" ]] || return 1
+  python3 - "$binary" <<'PY'
+import copy
+import json
+import os
+import subprocess
+import sys
+
+assert os.geteuid() != 0, "owner-denial test requires unprivileged execution"
+binary = sys.argv[1]
+base = {"expected_current_release_id": "synthetic-current", "expected_current_receipt_blake3": "00" * 32,
+    "target_release_id": "synthetic-target", "target_receipt_blake3": "00" * 32}
+cases = []
+for name, field, value, code in [
+    ("arbitrary-field", "hostileField", "HOSTILE_RECOVERY_CANARY", "invalid_input"),
+    ("runtime-key", "owner_public_key", "HOSTILE_RECOVERY_CANARY", "invalid_input"),
+    ("arbitrary-current-path", "expected_current_release_id", "/tmp/HOSTILE_RECOVERY_CANARY", "recovery_denied"),
+    ("arbitrary-target-path", "target_release_id", "../HOSTILE_RECOVERY_CANARY", "recovery_denied"),
+    ("bad-pin", "target_receipt_blake3", "HOSTILE_RECOVERY_CANARY", "recovery_denied"),
+    ("equal-ids", "target_release_id", "synthetic-current", "recovery_denied"),
+]:
+    value_input = copy.deepcopy(base)
+    value_input[field] = value
+    cases.append((name, "preflight", value_input, code))
+cases.append(("root-apply-denial", "apply", base, "recovery_owner_required"))
+cases.append(("missing-field", "preflight", {"target_release_id": "synthetic"}, "invalid_input"))
+cases.append(("concatenated-json", "preflight", (json.dumps(base) + " {}").encode(), "invalid_input"))
+cases.append(("oversize-input", "preflight", b" " * (262144 + 1), "input_too_large"))
+for name, mode, value, code in cases:
+    argv = [binary, "recovery", "--mode", mode]
+    payload = value if isinstance(value, bytes) else json.dumps(value).encode()
+    result = subprocess.run(argv, input=payload, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=10, check=False)
+    assert result.returncode == 1 and len(result.stdout) <= 262144 and len(result.stderr) <= 65536
+    response = json.loads(result.stdout)
+    assert response["schema"] == "fwc.n8n.error.v1" and response["code"] == code
+    assert b"HOSTILE_RECOVERY_CANARY" not in result.stdout + result.stderr
+    if code == "recovery_denied":
+        assert response["diagnostic"] == "invalid_request"
+    print(json.dumps({"scenario": name, "argv": argv, "exit": result.returncode, "safe_code": code}))
+print(json.dumps({"mode": "recovery-parser-self-test", "cases": 10, "verdict": "pass", "real_apply": False}))
+PY
+}
+
+run_producer_replay_self_test() {
+  local binary="$1" evidence="$2" assembler
+  assembler="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/n8n_release_assembler.sh"
+  [[ -f "$binary" && -x "$binary" && -d "$evidence" && ! -L "$evidence" ]] || return 1
+  [[ "$(readlink -f -- "$evidence")" == /srv/dev-ssd/fcp/nqm81-34/* ]] || return 1
+  python3 - "$binary" "$assembler" "$evidence" <<'PY'
+import copy
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+
+binary, assembler, evidence = sys.argv[1:]
+root = pathlib.Path(evidence)
+names = ["tools_documentation", "search_nodes", "get_node", "validate_node", "get_template", "search_templates", "validate_workflow"]
+input_schema = {"type": "object", "description": "synthetic reviewed input"}
+output_schema = {"type": "object", "description": "synthetic reviewed output"}
+
+def invoke(argv, value):
+    result = subprocess.run(argv, input=json.dumps(value).encode(), stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=20, check=False)
+    assert len(result.stdout) <= 262144 and len(result.stderr) <= 65536
+    return result
+
+def projection(output):
+    result = invoke([binary, "schema-projection"], {"input_schema": input_schema, "output_schema": output})
+    assert result.returncode == 0
+    return json.loads(result.stdout)
+
+pins = projection(output_schema)
+baseline = {"integrity": "blake3", "input_schema": input_schema, "output_schema": output_schema,
+    "input_schema_digest": pins["input_schema_digest"], "output_schema_digest": pins["output_schema_digest"]}
+request = {"expected_catalog": dict.fromkeys(names, pins["input_schema_digest"]),
+    "reviewed_baselines": {name: copy.deepcopy(baseline) for name in names},
+    "catalog": {"tools": [{"name": name, "inputSchema": copy.deepcopy(input_schema),
+        "outputSchema": copy.deepcopy(output_schema)} for name in names]}}
+cases = [("reviewed-input-output-profile-produced", copy.deepcopy(request), 0)]
+metadata = copy.deepcopy(request)
+for tool in metadata["catalog"]["tools"]:
+    tool["inputSchema"]["description"] = "synthetic metadata change"
+    tool["outputSchema"]["description"] = "synthetic metadata change"
+cases.append(("metadata-input-output-compatible", metadata, 0))
+unrelated = copy.deepcopy(metadata)
+unrelated["catalog"]["tools"].append({"name": "unreviewed_new_tool", "inputSchema": {"type": "object"}})
+cases.append(("unrelated-new-tool-no-authority", unrelated, 0))
+incorrect = copy.deepcopy(request)
+incorrect["reviewed_baselines"][names[0]]["output_schema_digest"] = "00" * 32
+cases.append(("incorrect-output-pin-denied", incorrect, 1))
+semantic = copy.deepcopy(request)
+semantic["catalog"]["tools"][0]["outputSchema"]["required"] = ["security"]
+cases.append(("semantic-output-drift-denied", semantic, 1))
+unknown = copy.deepcopy(request)
+unknown["catalog"]["tools"][0]["outputSchema"]["unknownSecurityKeyword"] = True
+cases.append(("unknown-output-keyword-denied", unknown, 1))
+absent = copy.deepcopy(request)
+del absent["catalog"]["tools"][0]["outputSchema"]
+cases.append(("present-absent-swap-denied", absent, 1))
+raw = copy.deepcopy(request)
+del raw["reviewed_baselines"]
+for tool in raw["catalog"]["tools"]:
+    del tool["outputSchema"]
+cases.append(("raw-default-absent-output-admitted", raw, 0))
+added = copy.deepcopy(raw)
+added["catalog"]["tools"][0]["outputSchema"] = copy.deepcopy(output_schema)
+cases.append(("raw-default-added-output-denied", added, 1))
+for name, value, expected in cases:
+    argv = ["bash", assembler, "--offline-catalog-bindings", binary]
+    # Exclusive creation retains reproducible synthetic inputs without ever
+    # overwriting a prior evidence packet or archived candidate.
+    with (root / (name + ".input.json")).open("x") as stream:
+        json.dump(value, stream, sort_keys=True)
+    result = invoke(argv, value)
+    assert result.returncode == expected, name
+    if expected == 0:
+        policy = json.loads(result.stdout)
+        assert policy["callable_tools"] == names
+        assert set(policy["expected_output_catalog"]) == set(names)
+        assert set(policy["reviewed_schemas"]) == (set(names) if "reviewed_baselines" in value else set())
+    receipt = {"scenario": name, "argv": argv, "exit": result.returncode,
+        "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(), "synthetic": True}
+    with (root / (name + ".receipt.json")).open("x") as stream:
+        json.dump(receipt, stream, sort_keys=True)
+    print(json.dumps(receipt, sort_keys=True))
+print(json.dumps({"mode": "producer-replay-self-test", "cases": 9, "acceptance": False, "verdict": "pass"}))
+PY
+}
+
 run_compatibility_self_test() {
   local binary="$1" input output baseline profile metadata changed invalid
   [[ -f "$binary" && -x "$binary" ]] || { emit_self_test_failure; return 1; }
@@ -1204,6 +1339,16 @@ main() {
   if [[ "${1:-}" == "--compatibility-self-test" ]]; then
     [[ "$#" == 2 ]] || { emit_failure "input_arguments_invalid"; return 1; }
     run_compatibility_self_test "$2"
+    return $?
+  fi
+  if [[ "${1:-}" == "--producer-replay-self-test" ]]; then
+    [[ "$#" == 3 ]] || { emit_failure "input_arguments_invalid"; return 1; }
+    run_producer_replay_self_test "$2" "$3"
+    return $?
+  fi
+  if [[ "${1:-}" == "--recovery-parser-self-test" ]]; then
+    [[ "$#" == 2 ]] || { emit_failure "input_arguments_invalid"; return 1; }
+    run_recovery_parser_self_test "$2"
     return $?
   fi
   if [[ "${1:-}" == "--self-test" ]]; then

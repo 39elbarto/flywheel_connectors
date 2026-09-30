@@ -362,10 +362,16 @@ mapped owner **public** metadata and its decoded SHA-256 identify the build inpu
 they do not prove trust. The decoded SHA-256 at this checkpoint is
 `745a9236846ab0c9523a1f9ac884b740d1886725602af28ac59f94f0d12be12d`.
 Never substitute the approval key or read a signing seed. `fwc-n8n status` checks
-root-owned bundle hashes, not owner signatures. Current RC40 signature/key binding
-is **unverified**, and is a mandatory signing/install/release gate. No standalone
-trusted verifier invocation is known; do not add crypto or run a deliberately
-failing provision preflight. This gap does not prevent unsigned compilation.
+root-owned bundle hashes, not owner signatures. The follow-up `verify-current`
+command verifies the signed full tree using the build-embedded owner public
+configuration, with no runtime key/path override. Run it from the explicitly
+reviewed build; RC40 does not itself expose this new command. Public mapping
+identity does not independently establish the authority of that mapping.
+The 2026-09-30 read-only follow-up verified RC40 with the mapped active key and
+`signed_current` mode; provider/live acceptance and mandatory non-green static
+analysis gates remain separate. Verification covers the signed artifact set,
+receipt/provenance/bindings and safe expected directories, not an enumeration
+of every unreferenced regular file beneath the release.
 
 Normal assembly retains fixed `/var/lib/fwc-n8n/staging`, fresh official schema
 bindings, reviewed originals for semantic profiles, isolated local discovery,
@@ -446,11 +452,67 @@ sha256sum /usr/local/lib/fwc-n8n/releases/release-20260929-42a574a62-started-res
 sha256sum /usr/local/sbin/fcp-n8n-approval-issue /etc/fwc-n8n/approval-public-key
 ```
 
-The current CLI exposes provision preflight/apply, but **no rollback command**.
-The typed owner rollback seam requires revalidated proofs and the owner lock;
-do not replace it with an unverified `ln`/`mv` switch or re-promote an installed
-release as staging. A literal supported restore invocation must be supplied and
-reviewed before release acceptance; currently this is a recovery gate gap.
+The reviewed follow-up CLI exposes `verify-current` and `recovery --mode
+preflight|apply`. Recovery stdin is a closed four-field request. Obtain both
+signed receipt BLAKE3 pins from verified retained trees; never choose a target
+automatically or use an old receipt as a new installation approval. Example
+command shapes below are future operator commands, not instructions to execute
+real recovery during preparation:
+
+```bash
+/srv/dev-ssd/fcp/nqm81-34/followup-verifier-fwc-n8n verify-current
+/srv/dev-ssd/fcp/nqm81-34/followup-verifier-fwc-n8n recovery --mode preflight < exact-owner-recovery.json
+# Only AFTER reviewed artifact admission/install and separate exact-pair
+# owner authorization; current RC40 does not expose this new command:
+readlink -e /usr/local/lib/fwc-n8n/current/bin/fwc-n8n
+sha256sum /usr/local/lib/fwc-n8n/current/bin/fwc-n8n
+stat -c '%u:%g:%a:%F' /usr/local/lib/fwc-n8n/current
+stat -Lc '%u:%g:%a:%F' /usr/local/lib/fwc-n8n/current/bin/fwc-n8n
+# Stop unless these match the exact admitted artifact and safe root ownership/modes.
+sudo -- /usr/local/lib/fwc-n8n/current/bin/fwc-n8n recovery --mode apply < exact-owner-recovery.json
+```
+
+The user-writable SSD diagnostic binary is permitted only for read-only checks
+and isolated fixtures; never execute it as root for real recovery. Future apply
+must use the exact reviewed/admitted root-owned wrapper from the existing
+artifact/trust/install workflow. Immediately before execution, independently
+match the installed wrapper's exact digest to that approved artifact and verify
+the resolved file and pointer ownership/modes (owner/group 0, non-writable by
+others, expected executable mode), including fixed current/release binding.
+Do not substitute the diagnostic binary's digest or current RC40 admission for
+approval of the new command. No new wrapper is installed during preparation.
+
+`exact-owner-recovery.json` contains only `expected_current_release_id`,
+`expected_current_receipt_blake3`, `target_release_id`, and
+`target_receipt_blake3`. IDs are safe basenames under the fixed releases root;
+pins are 64 lowercase hex BLAKE3 digests of the complete signed
+`provision-receipt.json` bytes. Equal IDs, paths, unknown fields and key/policy/
+owner overrides are rejected. Both signed trees and pins are verified before
+planning and again under the same owner lock immediately before atomic rename.
+Apply requires explicit owner/root intent for this exact pair; future real
+apply requires separate owner authorization. The existing promotion plan's
+rollback target restriction remains intact. No claims ledger is rewound; no
+global numeric antirollback or replay protection is claimed. An error after
+rename/fsync leaves the outcome unverified: re-read exact current pins, never
+retry or claim restoration from the error alone.
+
+Reproduce the nine synthetic CLI/assembler producer cases with the tracked
+script, a reviewed source binary, and a fresh retained SSD evidence directory:
+
+```bash
+mkdir /srv/dev-ssd/fcp/nqm81-34/producer-replay-NEW
+bash scripts/fcp_ssd.sh -- bash scripts/e2e/n8n_acceptance_preflight.sh \
+  --producer-replay-self-test /path/to/reviewed/fwc-n8n \
+  /srv/dev-ssd/fcp/nqm81-34/producer-replay-NEW
+```
+
+The script preserves synthetic serialized inputs and exact argv/exit/hash
+receipts using exclusive creation. It invokes only schema projection/profile
+and assembler offline catalog bindings, never discovery, signing or providers.
+The separate `--recovery-parser-self-test /path/to/reviewed/fwc-n8n` mode runs
+10 actual CLI refusals as an unprivileged user, including unknown fields,
+paths, malformed pins, equal IDs, oversized/concatenated input and root-only
+apply denial. It does not admit a real recovery request.
 Unknown provider outcomes are reconciled independently, never replayed as rollback.
 
 Integration composition is remote FCP `ee30a7e87424952b8e65645b8432bb821e567155`,

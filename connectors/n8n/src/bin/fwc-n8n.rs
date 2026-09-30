@@ -174,6 +174,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Verify the fixed installed current signed tree without mutation.
+    #[command(name = "verify-current")]
+    VerifyCurrent,
+    /// Explicit owner recovery of one exact pinned signed release pair.
+    Recovery {
+        #[arg(long, value_enum, default_value_t = ProvisionMode::Preflight)]
+        mode: ProvisionMode,
+    },
     /// Produce a compatibility profile from an explicitly reviewed, raw-pinned baseline.
     #[command(name = "reviewed-schema-profile")]
     ReviewedSchemaProfile,
@@ -636,6 +644,18 @@ fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
 
 fn execute(cli: Cli) -> Result<Value, AppError> {
     match cli.command {
+        Command::VerifyCurrent => {
+            let proof = fwc_n8n_provision::verify_current().map_err(|error| {
+                AppError::with_diagnostic(
+                    "current_verification_denied",
+                    Some(error.redacted_code()),
+                )
+            })?;
+            Ok(
+                json!({"schema": "fwc.n8n.current-verification.v1", "status": "verified", "proof": proof}),
+            )
+        }
+        Command::Recovery { mode } => run_recovery(mode),
         Command::SchemaProjection => {
             let observation: McpSchemaObservation = read_stdin_json()?;
             Ok(json!({
@@ -733,6 +753,79 @@ fn detect_update_input(input: UpdateDetectInput) -> Result<Value, AppError> {
     let outcome = detect_update(input.current, input.candidate)
         .map_err(|_| AppError::new("update_review_invalid"))?;
     serde_json::to_value(outcome).map_err(|_| AppError::new("output_encoding_failed"))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryInput {
+    expected_current_release_id: String,
+    expected_current_receipt_blake3: String,
+    target_release_id: String,
+    target_receipt_blake3: String,
+}
+
+fn run_recovery(mode: ProvisionMode) -> Result<Value, AppError> {
+    if mode == ProvisionMode::Apply && !effective_uid_is_root() {
+        return Err(AppError::new("recovery_owner_required"));
+    }
+    let input: RecoveryInput = read_stdin_json()?;
+    let plan = fwc_n8n_provision::RollbackPlan::fixed_recovery(
+        input.expected_current_release_id.clone(),
+        input.expected_current_receipt_blake3.clone(),
+        input.target_release_id.clone(),
+        input.target_receipt_blake3.clone(),
+    )
+    .map_err(|error| AppError::with_diagnostic("recovery_denied", Some(error.redacted_code())))?;
+    if mode == ProvisionMode::Apply {
+        let proof = plan.revalidate().map_err(|error| {
+            AppError::with_diagnostic("recovery_denied", Some(error.redacted_code()))
+        })?;
+        let installer = fwc_n8n_provision::FilesystemOwnerAtomicInstaller::new();
+        if fwc_n8n_provision::OwnerAtomicRollback::rollback(&installer, proof).is_err() {
+            let diagnostic = match fwc_n8n_provision::verify_current() {
+                Ok(observed)
+                    if observed.matches(&input.target_release_id, &input.target_receipt_blake3) =>
+                {
+                    "current_matches_target_durability_unverified"
+                }
+                Ok(observed)
+                    if observed.matches(
+                        &input.expected_current_release_id,
+                        &input.expected_current_receipt_blake3,
+                    ) =>
+                {
+                    "current_matches_expected_durability_unverified"
+                }
+                _ => "current_identity_unverified",
+            };
+            return Err(AppError::with_diagnostic(
+                "recovery_outcome_unverified",
+                Some(diagnostic),
+            ));
+        }
+        let observed = fwc_n8n_provision::verify_current().map_err(|_| {
+            AppError::with_diagnostic(
+                "recovery_outcome_unverified",
+                Some("current_identity_unverified"),
+            )
+        })?;
+        if !observed.matches(&input.target_release_id, &input.target_receipt_blake3) {
+            return Err(AppError::with_diagnostic(
+                "recovery_outcome_unverified",
+                Some("current_identity_unverified"),
+            ));
+        }
+    }
+    Ok(json!({
+        "schema": "fwc.n8n.recovery.v1",
+        "status": if mode == ProvisionMode::Apply { "restored" } else { "preflight_ok" },
+        "expectedCurrentReleaseId": input.expected_current_release_id,
+        "expectedCurrentReceiptBlake3": input.expected_current_receipt_blake3,
+        "targetReleaseId": input.target_release_id,
+        "targetReceiptBlake3": input.target_receipt_blake3,
+        "currentChanged": mode == ProvisionMode::Apply,
+        "claimsLedgerRewound": false,
+    }))
 }
 
 fn run_provision(mode: ProvisionMode) -> Result<Value, AppError> {

@@ -604,6 +604,168 @@ enum CurrentValidationMode {
     LegacyBootstrap,
 }
 
+/// A read-only signed-current proof. No caller-controlled roots or keys enter
+/// the production entry point; the receipt pin identifies signed bytes, not
+/// a new authorization to install or downgrade.
+#[derive(Debug, Serialize)]
+pub struct CurrentVerification {
+    release_id: String,
+    provision_receipt_blake3: String,
+    validation_mode: &'static str,
+    key_role: &'static str,
+    owner_key_id: String,
+}
+
+impl CurrentVerification {
+    pub fn matches(&self, release_id: &str, receipt_pin: &str) -> bool {
+        self.release_id == release_id && self.provision_receipt_blake3 == receipt_pin
+    }
+}
+
+pub fn verify_current() -> Result<CurrentVerification, ProvisionError> {
+    let trust = OwnerVerificationConfig::from_immutable_production_config()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::KeyConfiguration))?;
+    verify_signed_current(
+        &Path::new(DEFAULT_INSTALL_ROOT).join("current"),
+        &Path::new(DEFAULT_INSTALL_ROOT).join("releases"),
+        0,
+        &trust,
+    )
+}
+
+#[cfg(unix)]
+fn signed_current_sample(
+    current: &Path,
+    releases: &Path,
+    owner: u32,
+) -> Result<(PathBuf, String), ProvisionError> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(current)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    if !metadata.file_type().is_symlink() || metadata.uid() != owner || metadata.nlink() != 1 {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+    }
+    let target = fs::canonicalize(current)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    let root = fs::canonicalize(releases)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?;
+    if target.parent() != Some(root.as_path())
+        || !target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_safe_release_id)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentPointer));
+    }
+    let receipt = target.join(PROVISION_RECEIPT_FILE);
+    if !receipt
+        .try_exists()
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))?
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::MissingSignedProof));
+    }
+    validate_file(&receipt, owner, false, MAX_PROVISION_RECEIPT_BYTES as u64)?;
+    let bytes = read_bounded(&receipt, MAX_PROVISION_RECEIPT_BYTES)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))?;
+    Ok((target, blake3::hash(&bytes).to_hex().to_string()))
+}
+
+#[cfg(unix)]
+fn verify_signed_current(
+    current: &Path,
+    releases: &Path,
+    owner: u32,
+    trust: &OwnerVerificationConfig,
+) -> Result<CurrentVerification, ProvisionError> {
+    let before = signed_current_sample(current, releases, owner)?;
+    let observed_receipt: ProvisionReceipt = read_json(
+        &before.0.join(PROVISION_RECEIPT_FILE),
+        owner,
+        MAX_PROVISION_RECEIPT_BYTES,
+        ProvisionErrorCode::Receipt,
+    )?;
+    if observed_receipt.signature.key_id != trust.active.key_id
+        && trust
+            .previous
+            .as_ref()
+            .is_none_or(|key| key.key_id != observed_receipt.signature.key_id)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::UnadmittedKey));
+    }
+    let verification = validate_current_pointer(current, releases, owner, trust, None);
+    let after_validation = signed_current_sample(current, releases, owner)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::CurrentDrift))?;
+    if before != after_validation {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentDrift));
+    }
+    let (verified, mode) = verification?;
+    let validation_mode = match mode {
+        CurrentValidationMode::SignedProvisionReceipt => "signed_current",
+        CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => {
+            "signed_current_legacy_limits"
+        }
+        CurrentValidationMode::SignedProvisionReceiptPreviousExecute => "signed_previous_execute",
+        CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => {
+            "signed_previous_lifecycle"
+        }
+        CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory => {
+            "signed_previous_common_inventory"
+        }
+        CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => {
+            "signed_legacy_common_inventory"
+        }
+        CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory => {
+            "signed_legacy_disposable_inventory"
+        }
+        CurrentValidationMode::SignedProvisionReceiptLegacySchema => "signed_legacy_schema",
+        CurrentValidationMode::LegacyBootstrap => {
+            return Err(ProvisionError::new(ProvisionErrorCode::MissingSignedProof));
+        }
+    };
+    let receipt: ProvisionReceipt = read_json(
+        &verified.join(PROVISION_RECEIPT_FILE),
+        owner,
+        MAX_PROVISION_RECEIPT_BYTES,
+        ProvisionErrorCode::Receipt,
+    )?;
+    let key_role = if receipt.signature.key_id == trust.active.key_id {
+        "active"
+    } else if trust
+        .previous
+        .as_ref()
+        .is_some_and(|key| key.key_id == receipt.signature.key_id)
+    {
+        "previous"
+    } else {
+        return Err(ProvisionError::new(ProvisionErrorCode::UnadmittedKey));
+    };
+    let after = signed_current_sample(current, releases, owner)?;
+    if before != after || verified != before.0 {
+        return Err(ProvisionError::new(ProvisionErrorCode::CurrentDrift));
+    }
+    Ok(CurrentVerification {
+        release_id: verified
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::CurrentPointer))?
+            .to_owned(),
+        provision_receipt_blake3: before.1,
+        validation_mode,
+        key_role,
+        owner_key_id: receipt.signature.key_id,
+    })
+}
+
+#[cfg(not(unix))]
+fn verify_signed_current(
+    _: &Path,
+    _: &Path,
+    _: u32,
+    _: &OwnerVerificationConfig,
+) -> Result<CurrentVerification, ProvisionError> {
+    Err(ProvisionError::new(ProvisionErrorCode::UnsupportedPlatform))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecycleSchemaMode {
     CurrentPerServer,
@@ -664,6 +826,7 @@ impl InstallPlan {
             owner_verification: self.owner_verification.clone(),
             expected_owner: self.expected_owner,
             promotion: self.promotion,
+            receipt_pins: None,
         }
     }
 
@@ -794,6 +957,7 @@ pub struct RollbackPlan {
     owner_verification: OwnerVerificationConfig,
     expected_owner: u32,
     promotion: Promotion,
+    receipt_pins: Option<(String, String)>,
 }
 
 impl fmt::Debug for RollbackPlan {
@@ -802,11 +966,72 @@ impl fmt::Debug for RollbackPlan {
             .debug_struct("RollbackPlan")
             .field("promotion", &self.promotion)
             .field("target_release_present", &self.target_release.exists())
-            .finish()
+            .field("receipt_pins_present", &self.receipt_pins.is_some())
+            .finish_non_exhaustive()
     }
 }
 
 impl RollbackPlan {
+    /// Explicit owner recovery intent for one exact signed pair. This does not
+    /// infer downgrade approval from a historical signature; production apply
+    /// still requires the owner/root boundary and repeats checks under its lock.
+    pub(super) fn fixed_recovery(
+        expected_current_release_id: String,
+        expected_current_receipt_blake3: String,
+        target_release_id: String,
+        target_receipt_blake3: String,
+    ) -> Result<Self, ProvisionError> {
+        if !is_safe_release_id(&expected_current_release_id)
+            || !is_safe_release_id(&target_release_id)
+            || expected_current_release_id == target_release_id
+            || !is_blake3_digest(&expected_current_receipt_blake3)
+            || !is_blake3_digest(&target_receipt_blake3)
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::InvalidRequest));
+        }
+        let root = Path::new(DEFAULT_INSTALL_ROOT);
+        let plan = Self {
+            current_path: root.join("current"),
+            target_release: root.join("releases").join(target_release_id),
+            expected_current_release: root.join("releases").join(expected_current_release_id),
+            releases_root: root.join("releases"),
+            owner_verification: OwnerVerificationConfig::from_immutable_production_config()
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::KeyConfiguration))?,
+            expected_owner: 0,
+            promotion: Promotion::TemporarySymlinkRename,
+            receipt_pins: Some((expected_current_receipt_blake3, target_receipt_blake3)),
+        };
+        plan.validate_now()?;
+        Ok(plan)
+    }
+
+    #[cfg(unix)]
+    fn validate_receipt_pins(&self) -> Result<(), ProvisionError> {
+        if let Some((current_pin, target_pin)) = &self.receipt_pins {
+            let (current, digest) = signed_current_sample(
+                &self.current_path,
+                &self.releases_root,
+                self.expected_owner,
+            )?;
+            if current != self.expected_current_release || digest != *current_pin {
+                return Err(ProvisionError::new(ProvisionErrorCode::CurrentDrift));
+            }
+            let path = self.target_release.join(PROVISION_RECEIPT_FILE);
+            validate_file(
+                &path,
+                self.expected_owner,
+                false,
+                MAX_PROVISION_RECEIPT_BYTES as u64,
+            )?;
+            let bytes = read_bounded(&path, MAX_PROVISION_RECEIPT_BYTES)
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))?;
+            if blake3::hash(&bytes).to_hex().as_str() != target_pin {
+                return Err(ProvisionError::new(ProvisionErrorCode::Digest));
+            }
+        }
+        Ok(())
+    }
+
     pub fn promotion(&self) -> Promotion {
         self.promotion
     }
@@ -826,6 +1051,7 @@ impl RollbackPlan {
         }
         #[cfg(unix)]
         {
+            self.validate_receipt_pins()?;
             let (current, _) = validate_current_pointer(
                 &self.current_path,
                 &self.releases_root,
@@ -841,7 +1067,8 @@ impl RollbackPlan {
                 &self.releases_root,
                 self.expected_owner,
                 &self.owner_verification,
-            )
+            )?;
+            self.validate_receipt_pins()
         }
     }
 }
@@ -951,6 +1178,8 @@ fn owner_boundary_effective_uid() -> u32 {
 std::thread_local! {
     static TEST_OWNER_BOUNDARY_EFFECTIVE_UID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static TEST_FAIL_CURRENT_PROMOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_FAIL_FINAL_ROLLBACK_FSYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_REPLACE_CURRENT_UNDER_LOCK: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(all(target_os = "linux", test))]
@@ -1286,6 +1515,18 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
     )?;
     let expected_owner = plan.plan.expected_owner;
     let lock = lock_owner_root(&install_root, expected_owner)?;
+    #[cfg(test)]
+    TEST_REPLACE_CURRENT_UNDER_LOCK.with(|replacement| {
+        if let Some(target) = replacement.borrow_mut().take() {
+            fs::rename(
+                plan.current_path(),
+                install_root.join("current.retained-under-lock"),
+            )
+            .expect("retain fixture current before replacement");
+            std::os::unix::fs::symlink(target, plan.current_path())
+                .expect("replace fixture current under owner lock");
+        }
+    });
     let plan = plan.revalidate()?;
     let owner_verification = &plan.plan.owner_verification;
     if !current_matches_release(
@@ -1322,6 +1563,12 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
     }
+    // Repeat full signed pair and receipt-pin validation under the same owner
+    // lock immediately before the rename, not just pointer equality.
+    if let Err(error) = plan.plan.validate_now() {
+        cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
+        return Err(error);
+    }
     if renameat_with(
         &lock.0,
         &temporary,
@@ -1334,12 +1581,20 @@ fn rollback_linux(plan: RevalidatedRollbackPlan) -> Result<(), ProvisionError> {
         cleanup_owner_symlink(&lock.0, &temporary, ProvisionErrorCode::Rollback)?;
         return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
     }
+    #[cfg(test)]
+    if TEST_FAIL_FINAL_ROLLBACK_FSYNC.with(|failure| failure.replace(false)) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Rollback));
+    }
     fsync_owner_directory(&lock.0, ProvisionErrorCode::Rollback)?;
     Ok(())
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum ProvisionErrorCode {
+    MissingSignedProof,
+    KeyConfiguration,
+    UnadmittedKey,
+    CurrentDrift,
     UnsupportedPlatform,
     InvalidRequest,
     Path,
@@ -1363,6 +1618,10 @@ pub enum ProvisionErrorCode {
 impl ProvisionErrorCode {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::MissingSignedProof => "signed_proof_missing",
+            Self::KeyConfiguration => "owner_key_configuration_invalid",
+            Self::UnadmittedKey => "owner_key_unadmitted",
+            Self::CurrentDrift => "current_drift",
             Self::UnsupportedPlatform => "unsupported_platform",
             Self::InvalidRequest => "invalid_request",
             Self::Path => "invalid_path",
@@ -3727,9 +3986,32 @@ mod tests {
         current: PathBuf,
         owner: u32,
         release_id: String,
+        retain: bool,
     }
 
     impl Fixture {
+        #[cfg(target_os = "linux")]
+        fn promote_for_pinned_recovery(&self) -> RollbackPlan {
+            let plan = self.request().validate().expect("fixture plan");
+            let mut recovery = plan.rollback_plan();
+            FilesystemOwnerAtomicInstaller::new()
+                .promote(plan.revalidate().expect("fixture proof"))
+                .expect("isolated fixture promotion");
+            let current_pin = signed_current_sample(&self.current, &self.releases, self.owner)
+                .expect("current receipt pin")
+                .1;
+            let target_bytes = fs::read(recovery.target_release.join(PROVISION_RECEIPT_FILE))
+                .expect("target receipt");
+            recovery.receipt_pins = Some((
+                current_pin,
+                blake3::hash(&target_bytes).to_hex().to_string(),
+            ));
+            recovery
+        }
+
+        fn retained() -> Self {
+            Self::new_with_retention(true, true)
+        }
         fn new() -> Self {
             Self::new_with_previous_receipt(true)
         }
@@ -3739,6 +4021,10 @@ mod tests {
         }
 
         fn new_with_previous_receipt(include_provision_receipt: bool) -> Self {
+            Self::new_with_retention(include_provision_receipt, false)
+        }
+
+        fn new_with_retention(include_provision_receipt: bool, retain: bool) -> Self {
             let base = fs::canonicalize(std::env::temp_dir()).expect("temp root");
             let id = format!(
                 "fwc-provision-{}-{}",
@@ -3788,6 +4074,7 @@ mod tests {
                 current,
                 owner,
                 release_id,
+                retain,
             };
             fixture.populate();
             fixture.populate_previous_with_receipt(include_provision_receipt);
@@ -4506,8 +4793,394 @@ mod tests {
 
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.root);
+            if !self.retain {
+                let _ = fs::remove_dir_all(&self.root);
+            }
         }
+    }
+
+    #[test]
+    fn retained_signed_current_verification_and_missing_proof() {
+        let fixture = Fixture::retained();
+        let proof = verify_signed_current(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("signed retained current");
+        assert_eq!(proof.release_id, "previous");
+        assert_eq!(proof.key_role, "active");
+        let path = fixture
+            .releases
+            .join("previous")
+            .join(PROVISION_RECEIPT_FILE);
+        fs::rename(&path, path.with_extension("retained-missing-proof"))
+            .expect("retain absent-proof receipt");
+        assert_eq!(
+            verify_signed_current(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification()
+            )
+            .expect_err("no legacy signature pass")
+            .code(),
+            ProvisionErrorCode::MissingSignedProof
+        );
+    }
+
+    #[test]
+    fn retained_recovery_rejects_equal_ids_paths_and_malformed_pins() {
+        for (current, target, pin) in [
+            ("same", "same", "00".repeat(32)),
+            ("../current", "target", "00".repeat(32)),
+            ("current", "/target", "00".repeat(32)),
+            ("current", "target", "bad-pin".to_owned()),
+        ] {
+            assert_eq!(
+                RollbackPlan::fixed_recovery(
+                    current.to_owned(),
+                    pin,
+                    target.to_owned(),
+                    "00".repeat(32)
+                )
+                .expect_err("invalid exact pair")
+                .code(),
+                ProvisionErrorCode::InvalidRequest
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_interrupted_promotion_preserves_current_and_candidate() {
+        let fixture = Fixture::retained();
+        let plan = fixture.request().validate().expect("fixture plan");
+        let before = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current identity");
+        let result = with_test_current_promotion_failure(|| {
+            FilesystemOwnerAtomicInstaller::new().promote(plan.revalidate().expect("fixture proof"))
+        });
+        assert_eq!(
+            result.expect_err("interrupted promotion").code(),
+            ProvisionErrorCode::Promotion
+        );
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("current preserved"),
+            before
+        );
+        assert!(fixture.releases.join(&fixture.release_id).exists());
+        assert!(!fixture.stage.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_recovery_target_signature_digest_owner_and_tree_denials() {
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        let before = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current identity");
+        validate_release_target(
+            &recovery.target_release,
+            &fixture.releases,
+            fixture.owner + 1,
+            &test_owner_verification(),
+        )
+        .expect_err("target owner mismatch");
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("current preserved"),
+            before
+        );
+        fs::write(
+            recovery.target_release.join("bin/fcp-n8n"),
+            b"target digest tamper",
+        )
+        .expect("retained target tamper");
+        assert_eq!(
+            recovery
+                .validate_now()
+                .expect_err("target digest denied")
+                .code(),
+            ProvisionErrorCode::Digest
+        );
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("current preserved"),
+            before
+        );
+
+        let fixture = Fixture::retained();
+        let mut recovery = fixture.promote_for_pinned_recovery();
+        let before = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current identity");
+        let path = recovery.target_release.join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&path).expect("receipt")).expect("receipt JSON");
+        receipt["signature"]["signature"] = json!("00".repeat(SIGNATURE_SIZE));
+        let bytes = serde_json::to_vec(&receipt).expect("receipt bytes");
+        fs::write(&path, &bytes).expect("retained target signature tamper");
+        recovery.receipt_pins.as_mut().expect("pins").1 = blake3::hash(&bytes).to_hex().to_string();
+        assert_eq!(
+            recovery
+                .validate_now()
+                .expect_err("target signature denied despite exact pin")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("current preserved"),
+            before
+        );
+
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        let before = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current identity");
+        let bin = recovery.target_release.join("bin");
+        let retained_bin = recovery.target_release.join("bin.retained-unsafe-tree");
+        fs::rename(&bin, &retained_bin).expect("retain target directory");
+        symlink(&retained_bin, &bin).expect("unsafe target directory symlink");
+        recovery
+            .validate_now()
+            .expect_err("unsafe target directory symlink denied");
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("current preserved"),
+            before
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_recovery_current_replacement_before_and_under_lock() {
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        fs::rename(
+            &fixture.current,
+            fixture.root.join("current.retained-before-validation"),
+        )
+        .expect("retain current pointer");
+        symlink(fixture.releases.join("previous"), &fixture.current).expect("replace current");
+        assert_eq!(
+            recovery
+                .revalidate()
+                .expect_err("stale current pair denied")
+                .code(),
+            ProvisionErrorCode::CurrentDrift
+        );
+
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        let proof = recovery.revalidate().expect("pre-lock proof");
+        TEST_REPLACE_CURRENT_UNDER_LOCK.with(|replacement| {
+            *replacement.borrow_mut() = Some(fixture.releases.join("previous"));
+        });
+        assert_eq!(
+            FilesystemOwnerAtomicInstaller::new()
+                .rollback(proof)
+                .expect_err("under-lock current replacement denied")
+                .code(),
+            ProvisionErrorCode::CurrentDrift
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("replacement preserved"),
+            fixture.releases.join("previous")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_recovery_post_rename_fsync_failure_is_uncertain_with_exact_readback() {
+        let fixture = Fixture::retained();
+        let recovery = fixture.promote_for_pinned_recovery();
+        let target_pin = recovery.receipt_pins.as_ref().expect("pins").1.clone();
+        TEST_FAIL_FINAL_ROLLBACK_FSYNC.with(|failure| failure.set(true));
+        assert_eq!(
+            FilesystemOwnerAtomicInstaller::new()
+                .rollback(recovery.revalidate().expect("proof"))
+                .expect_err("post-rename durability unknown")
+                .code(),
+            ProvisionErrorCode::Rollback
+        );
+        // Error alone is not restoration proof: independently read signed
+        // current identity, without retrying the mutation or rewinding claims.
+        let observed = verify_signed_current(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("independent signed readback");
+        assert!(observed.matches("previous", &target_pin));
+        assert!(fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[test]
+    fn retained_signed_current_rejects_tamper_key_and_owner() {
+        let fixture = Fixture::retained();
+        let path = fixture.releases.join("previous/bin/fcp-n8n");
+        fs::write(path, b"tampered-artifact").expect("retained digest tamper");
+        assert_eq!(
+            verify_signed_current(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification()
+            )
+            .expect_err("digest denial")
+            .code(),
+            ProvisionErrorCode::Digest
+        );
+
+        let fixture = Fixture::retained();
+        let path = fixture
+            .releases
+            .join("previous")
+            .join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value =
+            serde_json::from_slice(&fs::read(&path).expect("receipt")).expect("receipt JSON");
+        receipt["signature"]["signature"] = json!("00".repeat(SIGNATURE_SIZE));
+        fs::write(&path, serde_json::to_vec(&receipt).expect("receipt bytes"))
+            .expect("retained bad signature");
+        assert_eq!(
+            verify_signed_current(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification()
+            )
+            .expect_err("signature denial")
+            .code(),
+            ProvisionErrorCode::Signature
+        );
+
+        receipt["signature"]["key_id"] = json!("0000000000000000");
+        fs::write(&path, serde_json::to_vec(&receipt).expect("receipt bytes"))
+            .expect("retained unadmitted key");
+        assert_eq!(
+            verify_signed_current(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification()
+            )
+            .expect_err("key denial")
+            .code(),
+            ProvisionErrorCode::UnadmittedKey
+        );
+        assert_eq!(
+            verify_signed_current(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner + 1,
+                &test_owner_verification()
+            )
+            .expect_err("owner denial")
+            .code(),
+            ProvisionErrorCode::CurrentPointer
+        );
+    }
+
+    #[test]
+    fn retained_signed_current_admitted_previous_key_and_predecessor_mode() {
+        let fixture = Fixture::retained();
+        fixture.set_previous_legacy_lifecycle_schemas();
+        let active = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[9_u8; 32])
+            .expect("synthetic active key");
+        let trust = OwnerVerificationConfig::for_test_with_previous(
+            hex::encode(active.verifying_key().to_bytes()),
+            hex::encode(test_signing_key().verifying_key().to_bytes()),
+        );
+        let proof =
+            verify_signed_current(&fixture.current, &fixture.releases, fixture.owner, &trust)
+                .expect("admitted previous signed schema mode");
+        assert_eq!(proof.key_role, "previous");
+        assert_eq!(proof.validation_mode, "signed_legacy_schema");
+        assert_eq!(
+            proof.owner_key_id,
+            test_signing_key().verifying_key().key_id().to_string()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_pinned_recovery_preserves_current_on_refusal_and_restores_exact_pair() {
+        let fixture = Fixture::retained();
+        let plan = fixture
+            .request()
+            .validate()
+            .expect("fixture promotion plan");
+        let mut recovery = plan.rollback_plan();
+        FilesystemOwnerAtomicInstaller::new()
+            .promote(plan.revalidate().expect("fixture promotion proof"))
+            .expect("isolated fixture promotion");
+        let current = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("current pin");
+        let target_bytes =
+            fs::read(recovery.target_release.join(PROVISION_RECEIPT_FILE)).expect("target receipt");
+        let target_pin = blake3::hash(&target_bytes).to_hex().to_string();
+        recovery.receipt_pins = Some(("00".repeat(32), target_pin.clone()));
+        assert_eq!(
+            recovery
+                .validate_now()
+                .expect_err("stale current pin")
+                .code(),
+            ProvisionErrorCode::CurrentDrift
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("preserved current"),
+            current.0
+        );
+        recovery.receipt_pins = Some((current.1.clone(), "00".repeat(32)));
+        assert_eq!(
+            recovery
+                .validate_now()
+                .expect_err("wrong target pin")
+                .code(),
+            ProvisionErrorCode::Digest
+        );
+        recovery.receipt_pins = Some((current.1, target_pin));
+        let proof = recovery.revalidate().expect("exact signed pair proof");
+        let refusal = with_test_owner_boundary_effective_uid(1000, || {
+            FilesystemOwnerAtomicInstaller::new().rollback(proof)
+        });
+        assert_eq!(
+            refusal.expect_err("owner-only recovery").code(),
+            ProvisionErrorCode::OwnerRequired
+        );
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("preserved current"),
+            current.0
+        );
+        // The staged tree has moved. Reconstruct only the test's same pinned
+        // pair, using private fixture roots; production exposes no root seam.
+        let recovery = RollbackPlan {
+            current_path: fixture.current.clone(),
+            target_release: fixture.releases.join("previous"),
+            expected_current_release: current.0,
+            releases_root: fixture.releases.clone(),
+            owner_verification: test_owner_verification(),
+            expected_owner: fixture.owner,
+            promotion: Promotion::TemporarySymlinkRename,
+            receipt_pins: Some((
+                signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                    .expect("current pin")
+                    .1,
+                blake3::hash(&target_bytes).to_hex().to_string(),
+            )),
+        };
+        FilesystemOwnerAtomicInstaller::new()
+            .rollback(recovery.revalidate().expect("fixture recovery proof"))
+            .expect("isolated exact-pair recovery");
+        assert_eq!(
+            fs::canonicalize(&fixture.current).expect("restored current"),
+            fixture.releases.join("previous")
+        );
+        assert!(fixture.releases.join(&fixture.release_id).exists());
     }
 
     #[test]

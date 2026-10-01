@@ -1018,6 +1018,8 @@ fn parse_proc_stat(pid: u32, contents: &str) -> Result<ProcSnapshot, ProcessGrou
 
 #[cfg(target_os = "linux")]
 fn group_processes(pgid: i32) -> Result<Vec<ProcSnapshot>, ProcessGroupError> {
+    #[cfg(test)]
+    let scan_started = Instant::now();
     let mut processes = Vec::new();
     for entry in std::fs::read_dir("/proc")? {
         let entry = entry?;
@@ -1034,6 +1036,8 @@ fn group_processes(pgid: i32) -> Result<Vec<ProcSnapshot>, ProcessGroupError> {
             }
         }
     }
+    #[cfg(test)]
+    tests::record_group_scan(scan_started.elapsed());
     Ok(processes)
 }
 
@@ -1528,6 +1532,20 @@ fn digest_file(path: &Path) -> Result<String, ProcessGroupError> {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    std::thread_local! {
+        static GROUP_SCAN_TIMES: std::cell::Cell<(usize, Duration, Duration)> =
+            const { std::cell::Cell::new((0, Duration::ZERO, Duration::ZERO)) };
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn record_group_scan(elapsed: Duration) {
+        GROUP_SCAN_TIMES.with(|times| {
+            let (count, total, longest) = times.get();
+            times.set((count + 1, total + elapsed, longest.max(elapsed)));
+        });
+    }
+
     #[test]
     fn termination_evidence_preserves_all_independent_combinations() {
         for bits in 0_u8..16 {
@@ -1855,11 +1873,7 @@ mod tests {
             Err(ProcessGroupError::Io(error)) if error.raw_os_error() == Some(libc::EBADF)
         ));
         drop(claimed);
-        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EBADF)
-        );
+        assert_channel_peer_eof(&mut peer);
     }
 
     #[cfg(target_os = "linux")]
@@ -1887,7 +1901,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn inherited_channel_claim_is_concurrently_one_shot() {
-        let (client, _peer) = UnixStream::pair().expect("socketpair");
+        let (client, mut peer) = UnixStream::pair().expect("socketpair");
         let raw_fd = client.into_raw_fd();
         clear_cloexec_for_inherited_test(raw_fd);
         let start = std::sync::Arc::new(std::sync::Barrier::new(3));
@@ -1915,11 +1929,72 @@ mod tests {
             .filter(|succeeded| *succeeded)
             .count();
         assert_eq!(successes, 1);
-        assert_eq!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::EBADF)
+        assert_channel_peer_eof(&mut peer);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_channel_peer_eof(peer: &mut UnixStream) {
+        peer.set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bound channel close observation");
+        // Descriptor numbers can be reused by another test immediately after
+        // close. EOF observes this socket's ownership, independent of reuse.
+        assert_eq!(peer.read(&mut [0_u8; 1]).expect("channel peer EOF"), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_channel_closed_fd_reuse_child_probe() {
+        if std::env::var_os("FCP_CHANNEL_FD_REUSE_CHILD").is_none() {
+            return;
+        }
+        let (client, mut peer) = UnixStream::pair().expect("socketpair");
+        let raw_fd = client.into_raw_fd();
+        clear_cloexec_for_inherited_test(raw_fd);
+        let claimed = claim_inherited_host_egress_channel(raw_fd).expect("claim channel");
+        drop(claimed);
+        // This exact probe runs alone in its child process. F_DUPFD_CLOEXEC
+        // allocates rather than overwriting any descriptor another thread owns.
+        let reused_fd = unsafe { libc::fcntl(peer.as_raw_fd(), libc::F_DUPFD_CLOEXEC, raw_fd) };
+        assert_eq!(reused_fd, raw_fd, "controlled descriptor-number reuse");
+        let reused = unsafe { OwnedFd::from_raw_fd(reused_fd) };
+        assert!(unsafe { libc::fcntl(raw_fd, libc::F_GETFD) } >= 0);
+        assert_channel_peer_eof(&mut peer);
+        drop(reused);
+        println!("closed-channel-peer-eof-despite-fd-reuse");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_channel_close_observation_survives_controlled_fd_reuse() {
+        let mut spec = test_process_spec(
+            "process::tests::inherited_channel_closed_fd_reuse_child_probe",
+            "FCP_CHANNEL_FD_REUSE_CHILD",
         );
+        // The probe creates a local socketpair; the inherited-channel seccomp
+        // profile intentionally forbids new sockets. It makes no network calls.
+        spec.network_disabled = false;
+        spec.fixed_args
+            .extend(["--exact".into(), "--test-threads=1".into()]);
+        let mut process = OwnedProcess::spawn(&spec).expect("spawn isolated reuse probe");
+        let mut stdout = process.take_stdout().expect("reuse probe stdout");
+        set_nonblocking(&stdout).expect("nonblocking reuse probe output");
+        let deadline = Deadline::after(Duration::from_secs(2));
+        let mut output = String::new();
+        loop {
+            match stdout.read_to_string(&mut output) {
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(!deadline.is_expired(), "reuse probe output deadline");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("reuse probe output failed: {error}"),
+            }
+        }
+        assert!(output.contains("closed-channel-peer-eof-despite-fd-reuse"));
+        let report = process
+            .terminate(Duration::from_secs(1))
+            .expect("reuse probe teardown");
+        assert!(report.completion.reaped && report.completion.group_absent);
     }
 
     #[cfg(target_os = "linux")]
@@ -2466,10 +2541,18 @@ mod tests {
         let mut stdout = process.take_stdout().expect("term-resistant stdout");
         read_ready_marker(&mut stdout);
         drop(stdout);
+        GROUP_SCAN_TIMES.with(|times| times.set((0, Duration::ZERO, Duration::ZERO)));
         let started = Instant::now();
-        let report = process
-            .terminate_until(Deadline::after(TERM_RESISTANT_REQUESTED_BUDGET))
-            .expect("deadline-bounded TERM/KILL teardown");
+        let result = process.terminate_until(Deadline::after(TERM_RESISTANT_REQUESTED_BUDGET));
+        let (scan_count, scan_total, scan_longest) = GROUP_SCAN_TIMES.with(std::cell::Cell::get);
+        eprintln!(
+            "teardown observation: elapsed={:?} scans={scan_count} scan_total={scan_total:?} scan_longest={scan_longest:?} term_sent={} kill_sent={} reaped={} result={result:?}",
+            started.elapsed(),
+            process.term_sent,
+            process.kill_sent,
+            process.reaped
+        );
+        let report = result.expect("deadline-bounded TERM/KILL teardown");
         assert!(report.signals.term_sent);
         assert!(report.signals.kill_sent);
         assert!(report.completion.reaped);

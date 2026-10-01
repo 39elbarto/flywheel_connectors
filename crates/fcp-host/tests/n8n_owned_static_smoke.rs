@@ -75,6 +75,6 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
 
     drop(host_endpoint);
     let report = run(handle.terminate()).expect("owned fcp-n8n teardown");
-    assert!(report.group_absent);
-    assert!(report.reaped);
+    assert!(report.completion.group_absent);
+    assert!(report.completion.reaped);
 }

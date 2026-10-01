@@ -260,16 +260,19 @@ PY
 write_local_mcp_policy() {
   local stage_root="$1"
   local hash_helper="$2"
+  local export_binary="${3:-}"
   require_fixed_local_mcp_file "$LOCAL_MCP_NODE_PATH" 1
   require_fixed_local_mcp_file "$LOCAL_MCP_PACKAGE_METADATA_PATH"
   require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
   python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
     "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
-    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" \
+    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" "$export_binary" \
     -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
 import json
 import pathlib
 import selectors
+import hashlib
+import uuid
 import subprocess
 import sys
 import time
@@ -287,12 +290,21 @@ second_separator = args.index("--", first_separator + 1)
     package_id,
     protocol_version,
     assembler_path,
+    export_binary,
 ) = args[:first_separator]
 catalog_tools = args[first_separator + 1 : second_separator]
 catalog_digests = args[second_separator + 1 :]
 
 if len(catalog_tools) != 7 or len(catalog_digests) != len(catalog_tools):
     raise SystemExit("local n8n-mcp catalog pins are malformed")
+
+if export_binary:
+    # Check signed fixed current and exact public Node/package pins BEFORE spawn.
+    preflight = subprocess.run([export_binary, "export-schemas", "local", "--check-only"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=20)
+    if preflight.returncode != 0:
+        raise SystemExit("local schema export preflight denied")
 
 def blake3_bytes(value):
     return subprocess.check_output([hash_helper, "-"], input=value).decode().strip()
@@ -418,6 +430,56 @@ if (
     raise SystemExit("local n8n-mcp catalog discovery returned an invalid handshake")
 
 baseline_path = os.environ.get("FWC_N8N_REVIEWED_SCHEMA_BASELINES", "")
+if export_binary:
+    if (len(messages) != 2 or any(message.get("jsonrpc") != "2.0" for message in messages)
+        or {message.get("id") for message in messages} != {1, 2}
+        or any("error" in message for message in messages)):
+        raise SystemExit("local schema export frame invalid")
+    tools = catalog["result"]["tools"]
+    names = set()
+    if len(tools) > 256 or catalog["result"].get("nextCursor") is not None:
+        raise SystemExit("local schema export catalog invalid")
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+            raise SystemExit("local schema export catalog invalid")
+        name = tool["name"]
+        if name in names:
+            raise SystemExit("local schema export catalog invalid")
+        names.add(name)
+    result = subprocess.run([export_binary, "export-schemas", "local"],
+        input=json.dumps({"status":"ok", "result":catalog["result"]}).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+    if result.returncode != 0:
+        try:
+            code = json.loads(result.stdout).get("code")
+        except (ValueError, AttributeError):
+            code = None
+        safe_codes = {"schema_export_invalid", "schema_export_too_large", "schema_export_schema_invalid",
+            "schema_export_sensitive_content", "schema_export_injection_content", "schema_export_tool_missing", "input_too_large",
+            "schema_export_signature_denied", "schema_export_local_pin_denied"}
+        raise SystemExit(code if code in safe_codes else "local schema export validation denied")
+    original_receipt = json.loads(result.stdout)
+    original_path = pathlib.Path(original_receipt["path"])
+    if hashlib.sha256(original_path.read_bytes()).hexdigest() != original_receipt["file_sha256"]:
+        raise SystemExit("local schema export receipt invalid")
+    receipt_path = pathlib.Path("/srv/dev-ssd/fcp/nqm81-34") / ("local-schema-capture-" + str(uuid.uuid4()) + ".json")
+    capture = {"schema":"fwc.n8n.local-schema-capture.v1", "route":"fixed_node/bwrap_unshare_net",
+        "network":"disabled", "uid":65534, "gid":65534, "exit":return_code,
+        "argv":process.args, "environment":environment,
+        "request_sha256":hashlib.sha256(request).hexdigest(),
+        "exporter_sha256":hashlib.sha256(pathlib.Path(export_binary).read_bytes()).hexdigest(),
+        "catalog_stdout_sha256":hashlib.sha256(stdout).hexdigest(),
+        "catalog_sha256":hashlib.sha256(json.dumps(catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+        "originals":original_receipt, "assembler_sha256":hashlib.sha256(pathlib.Path(assembler_path).read_bytes()).hexdigest()}
+    with os.fdopen(os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as receipt_file:
+        json.dump(capture, receipt_file, sort_keys=True)
+        receipt_file.flush()
+        os.fsync(receipt_file.fileno())
+    # Only a compact file/hash receipt reaches stdout, never original schemas.
+    original_receipt["capture_receipt_path"] = str(receipt_path)
+    original_receipt["capture_receipt_sha256"] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    print(json.dumps(original_receipt, sort_keys=True))
+    raise SystemExit(0)
 baselines = json.loads(pathlib.Path(baseline_path).read_text()).get("local", {}) if baseline_path else {}
 bindings = json.loads(subprocess.check_output(
     ["bash", assembler_path, "--offline-catalog-bindings", str(pathlib.Path(stage) / "bin/fwc-n8n")],
@@ -453,6 +515,9 @@ policy = {
 }
 stage_policy.write_text(json.dumps(policy, indent=2) + "\n")
 PY
+  if [[ -n "$export_binary" ]]; then
+    return 0
+  fi
   chown root:root "$stage_root/policy/local-mcp.json"
   chmod 0644 "$stage_root/policy/local-mcp.json"
 }
@@ -770,6 +835,14 @@ PY
 }
 
 main() {
+  if [[ "${1:-}" == "--export-local-schemas" ]]; then
+    [[ "$#" == 2 && "$2" == /* && -f "$2" && -x "$2" ]] || die "local schema export requires an explicit diagnostic binary"
+    if [[ "${FCP_SSD_ACTIVE:-}" != 1 ]]; then
+      exec bash "$(dirname "${BASH_SOURCE[0]}")/fcp_ssd.sh" -- bash "${BASH_SOURCE[0]}" "$@"
+    fi
+    write_local_mcp_policy "" "" "$2"
+    return $?
+  fi
   if [[ "${1:-}" == "--offline-catalog-bindings" ]]; then
     [[ "$#" == 2 && -f "$2" && -x "$2" ]] || die "offline catalog bindings require an explicit source binary"
     assemble_local_catalog_bindings "$2"

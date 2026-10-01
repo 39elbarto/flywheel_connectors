@@ -1038,6 +1038,51 @@ done
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn term_resistant_actor_joins_io_workers_after_owned_group_teardown() {
+        // The response is a readiness barrier after TERM has been ignored.
+        // Closing stdin does not terminate this fixture: its foreground sleep
+        // keeps stdout/stderr open until the owned group receives KILL.
+        let script = r#"
+trap '' TERM
+while IFS= read -r _line; do
+  printf 'fixture-ready\n' >&2
+  printf '{"jsonrpc":"2.0","id":"0:0","result":{"pid":%s}}\n' "$$"
+done
+sleep 30
+"#;
+        let (host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");
+        drop(host_endpoint);
+        let mut handle = run(OwnedInvocationHandle::launch(
+            shell_spec(script),
+            child_endpoint,
+            OwnedInvocationConfig::default(),
+        ))
+        .expect("actor launch");
+        let response = run(handle.request("introspect", json!({}))).expect("ready response");
+        let pid = response["result"]["pid"].as_u64().expect("fixture PID");
+        let stat =
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("own ready child stat");
+        eprintln!("owned TERM-resistant fixture before teardown: {stat}");
+        let stderr = Arc::clone(&handle.stderr);
+        let started = Instant::now();
+        let result = run(handle.terminate());
+        eprintln!(
+            "owned actor teardown: pid={pid} elapsed={:?} result={result:?}",
+            started.elapsed()
+        );
+        // terminate succeeds only after all three IO workers and the actor
+        // have joined, in addition to the process completion evidence.
+        let report = result.expect("TERM-resistant group and IO worker teardown");
+        assert!(report.signals.term_sent);
+        assert!(report.signals.kill_sent);
+        assert!(report.completion.reaped);
+        assert!(report.completion.group_absent);
+        assert_eq!(stderr.metadata().bytes, 14);
+        assert!(!stderr.metadata().truncated);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn actor_timeout_cancels_and_descendant_group_is_reaped() {
         let script = "sleep 30 & wait";
         let (host_endpoint, child_endpoint) = UnixStream::pair().expect("socketpair");

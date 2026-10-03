@@ -897,6 +897,7 @@ run_producer_replay_self_test() {
 import copy
 import hashlib
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -973,7 +974,67 @@ for name, value, expected in cases:
     with (root / (name + ".receipt.json")).open("x") as stream:
         json.dump(receipt, stream, sort_keys=True)
     print(json.dumps(receipt, sort_keys=True))
-print(json.dumps({"mode": "producer-replay-self-test", "cases": 9, "acceptance": False, "verdict": "pass"}))
+# Exercise the same official validation function invoked before normal builds.
+official_tools = ("publish_workflow", "unpublish_workflow", "archive_workflow", "execute_workflow")
+official_input = {"type": "object"}
+official_output = {"type": "object", "properties": {"reason": {"enum": ["blocked", "insufficient_api_key_scope", "insufficient_permissions"]}}}
+def native_sha(value):
+    return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+official_baseline = {"integrity": "sha256", "input_schema": official_input,
+    "output_schema": official_output, "input_schema_digest": native_sha(official_input),
+    "output_schema_digest": native_sha(official_output)}
+official = {server: {tool: copy.deepcopy(official_baseline) for tool in official_tools} for server in ("eec", "hetzner")}
+official["local"] = {}
+effective = {f"FWC_N8N_{server.upper()}_{tool.removesuffix('_workflow').upper()}_{direction.upper()}_SCHEMA_DIGEST":
+    baseline[f"{direction}_schema_digest"]
+    for server in ("eec", "hetzner") for tool, baseline in official[server].items()
+    for direction in ("input", "output")}
+official_cases = [("official-new-admitted-output-accepted", copy.deepcopy(official), dict(effective), 0)]
+old_pins = dict(effective)
+old_pins["FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST"] = "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
+official_cases.append(("official-old-output-refused-before-build", copy.deepcopy(official), old_pins, 1))
+for direction in ("input", "output"):
+    bad = copy.deepcopy(official)
+    bad["eec"]["publish_workflow"][f"{direction}_schema_digest"] = "sha256:" + "0" * 64
+    official_cases.append((f"official-wrong-{direction}-pin-denied", bad, dict(effective), 1))
+absent = copy.deepcopy(official); absent["eec"]["publish_workflow"]["output_schema"] = None
+official_cases.append(("official-output-presence-change-denied", absent, dict(effective), 1))
+unknown = copy.deepcopy(official)
+unknown["eec"]["publish_workflow"]["output_schema"]["unknownSecurityKeyword"] = True
+unknown["eec"]["publish_workflow"]["output_schema_digest"] = native_sha(unknown["eec"]["publish_workflow"]["output_schema"])
+unknown_pins = dict(effective); unknown_pins["FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST"] = unknown["eec"]["publish_workflow"]["output_schema_digest"]
+official_cases.append(("official-unknown-schema-denied", unknown, unknown_pins, 1))
+extra = copy.deepcopy(official); extra["eec"]["unreviewed_tool"] = copy.deepcopy(official_baseline)
+official_cases.append(("official-extra-tool-denied", extra, dict(effective), 1))
+official_cases.append(("official-override-without-admission-denied", None, dict(effective), 1))
+official_cases.append(("official-no-admission-legacy-defaults", None, {}, 0))
+local_only_path = pathlib.Path("/srv/dev-ssd/fcp/nqm81-34/schema-export-local-baselines-UNAPPROVED.json")
+local_only_raw = local_only_path.read_bytes()
+assert hashlib.sha256(local_only_raw).hexdigest() == "0cf5648c1d96c017fa8ada9c4c7f9a5446a301a802eb746ea06d1f98a93d7d54"
+local_only = json.loads(local_only_raw)
+assert set(local_only) == {"_authority", "local"}
+official_cases.append(("official-local-only-admitted-defaults-accepted", local_only, {}, 0))
+official_cases.append(("official-local-only-changed-override-denied", local_only,
+    {"FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST": effective["FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST"]}, 1))
+for name, value, pins, expected in official_cases:
+    input_path = root / (name + ".input.json")
+    if name.startswith("official-local-only-"):
+        with input_path.open("xb") as stream: stream.write(local_only_raw)
+    else:
+        with input_path.open("x") as stream: json.dump(value, stream, sort_keys=True)
+    environment = {"PATH": "/usr/bin:/bin", "HOME": str(root), "LANG": "C", "LC_ALL": "C", **pins}
+    if value is not None: environment["FWC_N8N_REVIEWED_SCHEMA_BASELINES"] = str(input_path)
+    argv = ["bash", assembler, "--check-official-baselines", binary]
+    result = subprocess.run(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=100)
+    assert result.returncode == expected and len(result.stdout) <= 262144 and len(result.stderr) <= 65536, name
+    assert b"unknownSecurityKeyword" not in result.stdout + result.stderr
+    receipt = {"scenario": name, "argv": argv, "environment": environment, "exit": result.returncode,
+        "input_sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+        "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(), "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
+        "before_build_only": True, "synthetic": True}
+    with (root / (name + ".receipt.json")).open("x") as stream: json.dump(receipt, stream, sort_keys=True)
+    print(json.dumps(receipt, sort_keys=True))
+print(json.dumps({"mode": "producer-replay-self-test", "cases": 9 + len(official_cases), "acceptance": False, "verdict": "pass"}))
 PY
 }
 

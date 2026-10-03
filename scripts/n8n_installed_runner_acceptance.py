@@ -676,7 +676,7 @@ def publish_check(server):
         require(current['status'] == 'verified' and
                 current['proof']['validation_mode'] == 'signed_current' and
                 current['proof']['owner_key_id'] == '8e7a0ab7f8435586' and
-                current['proof']['release_id'] == 'release-20261003-37936e82d-publish-reasons-rc43' and
+                current['proof']['release_id'] == 'release-20261003-37936e82d-publish-reasons-rc43b' and
                 re.fullmatch('[a-f0-9]{64}', current['proof']['provision_receipt_blake3']),
                 'publish_requires_signed_current_rc43')
         save(folder / 'current-verification.json', {'status': 'verified', 'proof': {
@@ -800,7 +800,7 @@ def publish_self_test():
     canary = 'HOSTILE_PARAMETER_MUST_NOT_BE_RETAINED_53c77'
     scenarios = ('success', 'prestate_drift', 'publish_unknown', 'publish_timeout',
                  'publish_malformed', 'publish_readback_drift', 'unpublish_failed',
-                 'issuer_abort', 'wrong_current', 'hostile_prestate_and_stop',
+                 'issuer_abort', 'wrong_current', 'old_rc43_correct_key', 'hostile_prestate_and_stop',
                  'create_unknown', 'create_timeout', 'create_malformed',
                  'mcp_unknown', 'mcp_after_get_drift', 'mcp_already_available')
     total_parent = 0
@@ -829,7 +829,8 @@ def publish_self_test():
                         'validation_mode': 'signed_current', 'owner_key_id': '8e7a0ab7f8435586',
                         'provision_receipt_blake3': 'a' * 64,
                         'release_id': 'wrong' if scenario == 'wrong_current' else
-                        'release-20261003-37936e82d-publish-reasons-rc43'}}
+                        'release-20261003-37936e82d-publish-reasons-rc43' if scenario == 'old_rc43_correct_key' else
+                        'release-20261003-37936e82d-publish-reasons-rc43b'}}
                     return subprocess.CompletedProcess(argv, 0, encode(current), b'')
                 if argv[:3] == ['sudo', '-n', '/usr/bin/python3']:
                     request = json.loads(kwargs['input'])
@@ -959,7 +960,7 @@ def publish_self_test():
                               'n8n.workflows.create_draft', 'n8n.mcp_access.reconcile')
                         for op, value in actions), 'test_execute_create_forbidden')
             require(sum(op == 'n8n.workflows.create_draft' for op, value in actions) ==
-                    (0 if scenario in ('wrong_current', 'issuer_abort') else 1),
+                    (0 if scenario in ('wrong_current', 'old_rc43_correct_key', 'issuer_abort') else 1),
                     'test_create_replayed')
             lifecycle_requests = [r for r in requests if r['operation'] in ('publish', 'unpublish')]
             if len(lifecycle_requests) == 2:
@@ -983,7 +984,7 @@ def publish_self_test():
                 pass
             else:
                 raise RuntimeError('test_unsafe_graph_not_denied')
-    print(json.dumps({'publish_self_test': True, 'serialized_full_paths': 32,
+    print(json.dumps({'publish_self_test': True, 'serialized_full_paths': 34,
                       'unsafe_graph_denials': 10,
                       'native_parent_calls': total_parent, 'live_or_signer_calls': 0,
                       'retained': str(sandbox)}))

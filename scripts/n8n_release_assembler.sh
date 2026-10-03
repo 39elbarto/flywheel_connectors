@@ -26,10 +26,10 @@ readonly ARTIFACTS=(
   "policy/zone-policies.json"
   "policy/local-mcp.json"
 )
-readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
-readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
-readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
-readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983"
+readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_PUBLISH_INPUT_SCHEMA_DIGEST:-sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6}"
+readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13}"
+readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST:-sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a}"
+readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983}"
 # Lifecycle schemas are owner-provisioned from a fresh official-MCP tools/list
 # snapshot.  They are deliberately not guessed or copied from the current
 # release: a provider/database restore can change the live schema while the
@@ -40,10 +40,10 @@ readonly EEC_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_INPUT_SCHEMA_DIG
 readonly EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
-readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6"
-readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13"
-readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a"
-readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983"
+readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST:-sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6}"
+readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13}"
+readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST:-sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a}"
+readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983}"
 readonly HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
@@ -254,6 +254,97 @@ encoded = json.dumps(policy, sort_keys=True, separators=(",", ":"))
 if len(encoded.encode()) > MAX_BYTES:
     fail()
 print(encoded)
+PY
+}
+
+validate_official_schema_baselines() {
+  local source_binary="$1"
+  python3 - "$source_binary" "$REVIEWED_SCHEMA_BASELINES" \
+    "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_ARCHIVE_INPUT_SCHEMA_DIGEST" "$EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_EXECUTE_INPUT_SCHEMA_DIGEST" "$EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST" "$HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST" "$HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST" <<'PY'
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+
+binary, baseline_path, *pins = sys.argv[1:]
+servers = ("eec", "hetzner")
+tools = ("publish_workflow", "unpublish_workflow", "archive_workflow", "execute_workflow")
+directions = ("input", "output")
+
+def fail():
+    raise SystemExit("reviewed official schema baseline prebuild validation denied")
+
+def unique_object(pairs):
+    value = {}
+    for key, child in pairs:
+        if key in value:
+            fail()
+        value[key] = child
+    return value
+
+legacy = (
+    "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6",
+    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13",
+    "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a",
+    "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983",
+)
+if len(pins) != 16:
+    fail()
+changed = {(server, tool) for server_index, server in enumerate(servers)
+    for tool_index, tool in enumerate(tools[:2])
+    if pins[server_index * 8 + tool_index * 2:server_index * 8 + tool_index * 2 + 2]
+        != list(legacy[tool_index * 2:tool_index * 2 + 2])}
+if not baseline_path:
+    if changed:
+        fail()
+    print('{"status":"legacy_raw_defaults","reviewed_baselines":false}')
+    raise SystemExit(0)
+try:
+    raw = pathlib.Path(baseline_path).read_bytes()
+    if len(raw) > 1048576:
+        fail()
+    baselines = json.loads(raw, object_pairs_hook=unique_object)
+    if (not isinstance(baselines, dict) or not set(baselines).issubset({"eec", "hetzner", "local", "_authority"})):
+        fail()
+    supplied = set()
+    # Admission and original schema capture pins are established by the protected
+    # caller. This boundary validates those explicit inputs; it never discovers
+    # or enrolls ambient provider schemas.
+    for server_index, server in enumerate(servers):
+        values = baselines.get(server, {})
+        if not isinstance(values, dict) or not set(values).issubset(tools):
+            fail()
+        for tool_index, tool in enumerate(tools):
+            if tool not in values:
+                continue
+            baseline = values[tool]
+            offset = server_index * 8 + tool_index * 2
+            if (not isinstance(baseline, dict) or baseline.get("integrity") != "sha256"
+                or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", p) for p in pins[offset:offset + 2])
+                or baseline.get("input_schema_digest") != pins[offset]
+                or baseline.get("output_schema_digest") != pins[offset + 1]):
+                fail()
+            result = subprocess.run([binary, "reviewed-schema-profile"],
+                input=json.dumps(baseline).encode(), stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, timeout=10, check=False)
+            if result.returncode != 0 or len(result.stdout) > 262144:
+                fail()
+            json.loads(result.stdout)
+            supplied.add((server, tool))
+    if not changed.issubset(supplied):
+        fail()
+except (OSError, ValueError, subprocess.SubprocessError):
+    fail()
+print(json.dumps({"status": "reviewed_official_baselines_verified", "tools": len(supplied), "native_pins": 2 * len(supplied)}))
 PY
 }
 
@@ -797,16 +888,18 @@ write_metadata() {
   local stage_root="$1"
   local git_revision="$2"
   local hash_helper="$3"
-  python3 - "$stage_root" "$RELEASE_ID" "$git_revision" <<'PY'
+  python3 - "$stage_root" "$RELEASE_ID" "$git_revision" "${BASH_SOURCE[0]}" <<'PY'
+import hashlib
 import json
 import pathlib
 import sys
-stage, release_id, git_revision = sys.argv[1:]
+stage, release_id, git_revision, assembler = sys.argv[1:]
 stage = pathlib.Path(stage)
 (stage / "provenance.json").write_text(json.dumps({
     "schema": "fwc.n8n.provenance.v1",
     "release_id": release_id,
     "git_revision": git_revision,
+    "assembler_sha256": hashlib.sha256(pathlib.Path(assembler).read_bytes()).hexdigest(),
 }, indent=2) + "\n")
 PY
   python3 - "$stage_root" "$RELEASE_ID" "$hash_helper" "${ARTIFACTS[@]}" <<'PY'
@@ -835,6 +928,11 @@ PY
 }
 
 main() {
+  if [[ "${1:-}" == "--check-official-baselines" ]]; then
+    [[ "$#" == 2 && "$2" == /* && -f "$2" && -x "$2" ]] || die "official baseline check requires an explicit source binary"
+    validate_official_schema_baselines "$2"
+    return $?
+  fi
   if [[ "${1:-}" == "--export-local-schemas" ]]; then
     [[ "$#" == 2 && "$2" == /* && -f "$2" && -x "$2" ]] || die "local schema export requires an explicit diagnostic binary"
     if [[ "${FCP_SSD_ACTIVE:-}" != 1 ]]; then
@@ -848,12 +946,13 @@ main() {
     assemble_local_catalog_bindings "$2"
     return $?
   fi
-  local release_id=""
+  local release_id="" explicit_repo_root=""
   TARGET_DIR="${SSD_ROOT}/targets/n8n-release"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release-id) [[ $# -ge 2 ]] || die "--release-id requires a value"; release_id="$2"; shift 2 ;;
       --target-dir) [[ $# -ge 2 ]] || die "--target-dir requires a value"; TARGET_DIR="$2"; shift 2 ;;
+      --repo-root) [[ $# -ge 2 && "$2" == /* ]] || die "--repo-root requires an absolute path"; explicit_repo_root="$2"; shift 2 ;;
       --help|-h) usage; return 0 ;;
       *) usage; die "unknown argument: $1" ;;
     esac
@@ -863,7 +962,12 @@ main() {
   export PATH
   need_cmd cargo; need_cmd git; need_cmd install; need_cmd python3; need_cmd rustc
   need_cmd stat; need_cmd readlink
-  REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
+  if [[ -n "$explicit_repo_root" ]]; then
+    REPO_ROOT="$(git -C "$explicit_repo_root" rev-parse --show-toplevel)"
+    [[ "$REPO_ROOT" == "$explicit_repo_root" && "$(readlink -f "$explicit_repo_root")" == "$explicit_repo_root" ]] || die "explicit repository root is not canonical"
+  else
+    REPO_ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse --show-toplevel)"
+  fi
   cd "$REPO_ROOT"
   SSD_LAUNCHER="${REPO_ROOT}/scripts/fcp_ssd.sh"
   [[ -f "$SSD_LAUNCHER" && ! -L "$SSD_LAUNCHER" ]] \
@@ -910,6 +1014,8 @@ main() {
   source_release="$(readlink -f "$CURRENT_PATH")"
   [[ "$source_release" == "${INSTALL_ROOT}/releases/"* && -d "$source_release" ]] || die "current is outside fixed releases root"
   require_immutable_template_release "$source_release"
+  # Refuse inconsistent admitted inputs before any Cargo/build or stage writes.
+  validate_official_schema_baselines "$source_release/bin/fwc-n8n"
   RELEASE_ID="$release_id"
   stage_root="${STAGING_ROOT}/${release_id}"
   [[ ! -e "$stage_root" ]] || die "staging target already exists; refusing to overwrite"

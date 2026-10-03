@@ -630,6 +630,365 @@ def run(server):
     print(json.dumps({'proof': str(folder / 'public-proof.json'), 'execution_attempts': 1}))
 
 
+def publication_graph(server):
+    require(server in ('eec', 'hetzner'), 'publication_server')
+    webhook = {'eec': '8c186456-980d-4937-a352-34aa7700ab45',
+               'hetzner': '35c75bf4-eacc-4d70-846b-2767b72e644e'}[server]
+    return {'nodes': [{'id': 'harmless-webhook', 'name': 'Disconnected publication trigger',
+             'type': 'n8n-nodes-base.webhook', 'typeVersion': 2,
+             'position': [0, 0], 'webhookId': webhook, 'parameters': {
+                 'httpMethod': 'POST', 'path': 'fcp-rc43-publish-' + server + '-' + webhook,
+                 'authentication': 'none', 'responseMode': 'onReceived', 'options': {}}}],
+            'connections': {}, 'settings': {'executionOrder': 'v1', 'availableInMCP': False}}
+
+
+def publication_eligibility(graph, server):
+    # Exact reviewed literal graph; deny extra nodes/connections/credentials,
+    # schedules, URLs, commands, Code, receivers or any changed parameter.
+    require(graph == publication_graph(server), 'publication_graph_not_exact')
+    return {'types': ['n8n-nodes-base.webhook'], 'method': 'POST',
+            'disconnected': True, 'credentials_or_external_actions': False,
+            'schedule_or_execute_or_direct_webhook_call': False,
+            'graph_sha256': hashlib.sha256(encode(graph)).hexdigest(),
+            'activation_trigger_type': 'webhook', 'provider_publishability': 'UNVERIFIED'}
+
+
+def publish_check(server):
+    """One approved new disconnected Webhook draft, publish/unpublish pair.
+
+    No execute, direct webhook call, mutation retry or cleanup.
+    Requires admitted RC43 to be actually signed and current first.
+    """
+    graph = publication_graph(server)
+    eligibility = publication_eligibility(graph, server)
+    folder = ROOT / ('controlled-webhook-publish-unpublish-rc43-once-' + server)
+    folder.mkdir(mode=0o700)
+    once = Once(server, folder)
+    workflow = version = baseline = None
+    fields = ('id', 'versionId', 'activeVersionId', 'active', 'isArchived',
+              'stateDigest', 'draft', 'published')
+    try:
+        state = installed_state(server)
+        save(folder / 'installed-state.json', state)
+        p = subprocess.run([BIN, 'verify-current'], capture_output=True, timeout=10)
+        require(p.returncode == 0, 'installed_bundle_unverified')
+        current = json.loads(p.stdout)
+        require(current['status'] == 'verified' and
+                current['proof']['validation_mode'] == 'signed_current' and
+                current['proof']['owner_key_id'] == '8e7a0ab7f8435586' and
+                current['proof']['release_id'] == 'release-20261003-37936e82d-publish-reasons-rc43' and
+                re.fullmatch('[a-f0-9]{64}', current['proof']['provision_receipt_blake3']),
+                'publish_requires_signed_current_rc43')
+        save(folder / 'current-verification.json', {'status': 'verified', 'proof': {
+            k: current['proof'][k] for k in ('validation_mode', 'owner_key_id',
+                                            'release_id', 'provision_receipt_blake3')}})
+        save(folder / 'eligibility.json', eligibility)
+        create = {'name': 'FWC harmless disconnected publication RC43 ' + server,
+                  'graph': graph, 'guard': {
+                      'approvalRef': 'synthetic-publication-create-' + str(uuid.uuid4()),
+                      'idempotencyKey': str(uuid.uuid4()), 'precondition': {}}}
+        created = once.write('create', 'n8n.workflows.create_draft', create, '')
+        candidate = created.get('id')
+        if isinstance(candidate, str) and re.fullmatch('[A-Za-z0-9_-]{1,256}', candidate):
+            workflow = once.workflow = candidate
+        require(created.get('status') == 'verified' and workflow is not None and
+                isinstance(created.get('versionId'), str) and
+                re.fullmatch('[A-Za-z0-9_-]{1,256}', created['versionId']) and
+                isinstance(created.get('graphDigest'), str) and
+                re.fullmatch(r'blake3-256:[a-f0-9]{64}', created['graphDigest']),
+                'publication_create_not_verified')
+        version = created['versionId']
+        save(folder / 'created-handle.json', {'id': workflow, 'versionId': version,
+                                             'graphDigest': created['graphDigest']})
+        once.phase = 'publish_prestate'
+        fresh = once.call('n8n.workflows.get', {'id': workflow})
+        require(fresh['id'] == workflow and fresh['versionId'] == version and
+                fresh['draft'] == {'versionId': version, 'graphDigest': created['graphDigest']} and
+                fresh['active'] is False and
+                fresh['activeVersionId'] is None and fresh['published'] is None and
+                fresh['isArchived'] is False and isinstance(fresh.get('stateDigest'), str) and
+                re.fullmatch(r'blake3-256:[a-f0-9]{64}', fresh['stateDigest']),
+                'publish_fixture_changed')
+        save(folder / 'prestate.json', {k: fresh[k] for k in fields})
+        baseline = fresh
+        reconcile = {'scope': 'workflow_ids', 'workflowIds': [workflow],
+                     'desired': True, 'dryRun': True}
+        once.phase = 'publication_mcp_dryrun'
+        plan = once.call('n8n.mcp_access.reconcile', reconcile)
+        save(folder / 'mcp-plan.json', plan)
+        if not checked_plan(plan, workflow, server):
+            apply = dict(reconcile, dryRun=False, guard={
+                'approvalRef': 'synthetic-publication-mcp-' + str(uuid.uuid4()),
+                'dryRunDigest': plan['readbackDigest'], 'idempotencyKey': str(uuid.uuid4())})
+            applied = once.write('mcp', 'n8n.mcp_access.reconcile', apply, workflow)
+            require(applied['receipt']['status'] == 'applied', 'publication_mcp_apply_unknown')
+        once.phase = 'publication_mcp_readback'
+        readback = once.call('n8n.mcp_access.reconcile', reconcile)
+        require(checked_plan(readback, workflow, server), 'publication_mcp_unavailable')
+        fresh = once.call('n8n.workflows.get', {'id': workflow})
+        require(fresh['id'] == workflow and fresh['versionId'] == version and
+                fresh['draft'] == baseline['draft'] and fresh['active'] is False and
+                fresh['isArchived'] is False and fresh['activeVersionId'] is None and
+                fresh['published'] is None and isinstance(fresh.get('stateDigest'), str) and
+                re.fullmatch(r'blake3-256:[a-f0-9]{64}', fresh['stateDigest']),
+                'publication_after_mcp_changed')
+        save(folder / 'post-mcp-prestate.json', {k: fresh[k] for k in fields})
+        for action in ('publish', 'unpublish'):
+            value = {'id': workflow, 'action': action, 'guard': {
+                'approvalRef': 'synthetic-lifecycle-' + action + '-' + str(uuid.uuid4()),
+                'idempotencyKey': str(uuid.uuid4()),
+                'precondition': {k: fresh[k] for k in
+                    ('versionId', 'activeVersionId', 'active', 'isArchived', 'stateDigest')}}}
+            if action == 'publish':
+                value['versionId'] = version
+            # Existing issuer and native parent producer handle exact per-write approval.
+            result = once.write(action, 'n8n.workflows.lifecycle', value, workflow)
+            result = flat_lifecycle_result(result, value)
+            once.phase = action + '_independent_get'
+            observed = once.call('n8n.workflows.get', {'id': workflow})
+            require(all(observed.get(k) == result['after'][k] for k in fields),
+                    'lifecycle_independent_readback_mismatch')
+            require(observed['id'] == workflow and observed['versionId'] == version and
+                    observed['draft'] == baseline['draft'], 'lifecycle_fixture_binding')
+            save(folder / (action + '-independent-get.json'), {k: observed[k] for k in fields})
+            fresh = observed
+        save(folder / 'public-proof.json', {
+            'status': 'controlled_publish_unpublish_verified', 'server': server,
+            'workflow': workflow, 'versionId': version, 'graph_sha256': eligibility['graph_sha256'],
+            'publish_attempts': 1, 'unpublish_attempts': 1,
+            'create_attempts': 1, 'execute_calls': 0, 'direct_webhook_calls': 0,
+            'business_or_external_actions': False,
+            'final_state': {k: fresh[k] for k in fields}, 'fixture_retained': True})
+    except Exception as error:
+        try:
+            require(workflow is not None, 'publication_no_known_workflow')
+            observed = once.call('n8n.workflows.get', {'id': workflow})
+            # A drifted/malformed read must not persist arbitrary provider fields.
+            save(folder / 'stop-state-observation.json', {
+                'workflow_binding_equal': observed.get('id') == workflow,
+                'version_binding_equal': observed.get('versionId') == version,
+                'draft_binding_equal': baseline is not None and
+                    observed.get('draft') == baseline['draft'],
+                'active': observed.get('active') if type(observed.get('active')) is bool else None,
+                'isArchived': observed.get('isArchived') if
+                    type(observed.get('isArchived')) is bool else None,
+                'active_version_equal': observed.get('activeVersionId') == version,
+                'active_version_absent': observed.get('activeVersionId') is None,
+                'published_absent': observed.get('published') is None,
+                'raw_bodies_retained': False})
+        except Exception as observation_error:
+            save(folder / 'stop-state-observation-failed.json', {
+                'status': 'UNKNOWN', 'exception_class': type(observation_error).__name__,
+                'raw_error_body_retained': False})
+        save(folder / 'public-proof.json', {
+            'status': 'STOP', 'phase': once.phase, 'workflow': workflow, 'versionId': version,
+            'exception_class': type(error).__name__, 'automatic_retry': False,
+            'raw_error_body_retained': False})
+        raise RuntimeError('controlled_publish_stopped') from None
+    print(json.dumps({'proof': str(folder / 'public-proof.json'), 'new_execution_calls': 0}))
+
+
+def publish_self_test():
+    """Serialized complete publish path with native parent, no signer/provider.
+
+    Retains fixtures. Mock only subprocess boundaries, not Once.write/call.
+    """
+    from unittest.mock import patch
+    sandbox = ROOT / ('publish-offline-retained-' + str(uuid.uuid4()))
+    sandbox.mkdir(mode=0o700)
+    native_run = subprocess.run
+    canary = 'HOSTILE_PARAMETER_MUST_NOT_BE_RETAINED_53c77'
+    scenarios = ('success', 'prestate_drift', 'publish_unknown', 'publish_timeout',
+                 'publish_malformed', 'publish_readback_drift', 'unpublish_failed',
+                 'issuer_abort', 'wrong_current', 'hostile_prestate_and_stop',
+                 'create_unknown', 'create_timeout', 'create_malformed',
+                 'mcp_unknown', 'mcp_after_get_drift', 'mcp_already_available')
+    total_parent = 0
+    for server in ('hetzner', 'eec'):
+        base = {'id': 'synthetic_webhook_' + server, 'versionId': 'synthetic-version',
+                'activeVersionId': None, 'active': False, 'isArchived': False,
+                'stateDigest': 'blake3-256:' + '0' * 64,
+                'draft': {'versionId': 'synthetic-version',
+                          'graphDigest': 'blake3-256:' + '4' * 64}, 'published': None}
+        published = dict(base, active=True, activeVersionId=base['versionId'],
+                         published=base['draft'], stateDigest='blake3-256:' + '1' * 64)
+        final = dict(base, stateDigest='blake3-256:' + '2' * 64)
+        for scenario in scenarios:
+            case = sandbox / (server + '-' + scenario)
+            case.mkdir(mode=0o700)
+            saved = case / ('controlled-webhook-publish-unpublish-rc43-once-' + server)
+            actions, requests, parent_calls = [], [], []
+            state = [base]
+            available = [scenario == 'mcp_already_available']
+            def boundary(argv, **kwargs):
+                if argv[0] == PARENT:
+                    parent_calls.append(argv)
+                    return native_run(argv, **kwargs)
+                if argv == [BIN, 'verify-current']:
+                    current = {'status': 'verified', 'proof': {
+                        'validation_mode': 'signed_current', 'owner_key_id': '8e7a0ab7f8435586',
+                        'provision_receipt_blake3': 'a' * 64,
+                        'release_id': 'wrong' if scenario == 'wrong_current' else
+                        'release-20261003-37936e82d-publish-reasons-rc43'}}
+                    return subprocess.CompletedProcess(argv, 0, encode(current), b'')
+                if argv[:3] == ['sudo', '-n', '/usr/bin/python3']:
+                    request = json.loads(kwargs['input'])
+                    if request['operation'] == 'create_draft':
+                        require(request['workflow_id'] == '' and
+                                request['input']['graph'] == publication_graph(server) and
+                                request['input']['graph']['settings']['availableInMCP'] is False and
+                                request['input']['guard']['precondition'] == {} and
+                                (request['official_mcp_tool'], request['official_mcp_resource_uri'],
+                                 request['official_mcp_payload_digest']) == ('', '', ''),
+                                'test_create_approval_binding')
+                    elif request['operation'] == 'mcp_access_reconcile':
+                        require(request['workflow_id'] == '' and
+                                request['input']['workflowIds'] == [base['id']] and
+                                request['input']['desired'] is True and
+                                request['input']['dryRun'] is False and
+                                (request['official_mcp_tool'], request['official_mcp_resource_uri'],
+                                 request['official_mcp_payload_digest']) == ('', '', ''),
+                                'test_mcp_approval_scope')
+                    else:
+                        require(request['operation'] in ('publish', 'unpublish') and
+                                request['workflow_id'] == base['id'], 'test_issuer_request_binding')
+                        tool, resource, digest = lifecycle_provider_binding(server, request['input'])
+                        require((request['official_mcp_tool'], request['official_mcp_resource_uri'],
+                                 request['official_mcp_payload_digest']) == (tool, resource, digest),
+                                'test_native_payload_binding')
+                    requests.append(request)
+                    return subprocess.CompletedProcess(argv, 0, b'', b'')
+                if argv[:3] == ['sudo', '-n', '/usr/bin/env']:
+                    if scenario == 'issuer_abort':
+                        error = {'schema': 'fwc.n8n.approval-once.v1', 'abort_code': canary}
+                        return subprocess.CompletedProcess(argv, 1, b'', encode(error))
+                    # Synthetic token only, no issuer invocation or signature claim.
+                    return subprocess.CompletedProcess(argv, 0, b'{"synthetic_offline":true}', b'')
+                require(argv[:2] == [BIN, 'run-once'], 'test_unexpected_subprocess')
+                envelope = json.loads(kwargs['input'])
+                operation, value = argv[2], envelope['input']
+                actions.append((operation, value))
+                if operation == 'n8n.mcp_access.reconcile':
+                    require(value['workflowIds'] == [base['id']] and
+                            value['scope'] == 'workflow_ids' and value['desired'] is True,
+                            'test_mcp_only_new_fixture')
+                    if value['dryRun'] is False:
+                        require(envelope.get('approval_token') == {'synthetic_offline': True},
+                                'test_mcp_approval_missing')
+                        if scenario == 'mcp_unknown':
+                            return subprocess.CompletedProcess(argv, 1, encode({
+                                'code': 'unknown_outcome', 'diagnostic': canary}), b'')
+                        available[0] = True
+                        result = {'receipt': {'status': 'applied'}}
+                    else:
+                        item = {'id': base['id'], 'desired': True,
+                                'availableInMCP': available[0],
+                                'reason': 'already_desired' if available[0] else 'requires_change'}
+                        result = {'exceptions': [], 'changed': [],
+                                  'planned': [] if available[0] else [item],
+                                  'skipped': [item] if available[0] else [],
+                                  'readbackDigest': 'blake3-256:' + '5' * 64,
+                                  'receipt': {'schema': 'fwc.n8n.mcp-access-receipt.v1',
+                                  'operation': operation, 'serverId': server, 'scope': 'workflow_ids',
+                                  'desired': True, 'dryRun': True, 'status': 'planned',
+                                  'readbackDigest': 'blake3-256:' + '5' * 64,
+                                  'items': [{'desired': True, 'availableInMCP': available[0]}]}}
+                    return subprocess.CompletedProcess(argv, 0, encode({
+                        'type': 'response', 'status': 'ok', 'result': result}), b'')
+                if operation == 'n8n.workflows.create_draft':
+                    require(value['graph'] == publication_graph(server) and
+                            envelope.get('approval_token') == {'synthetic_offline': True},
+                            'test_create_scope')
+                    if scenario == 'create_timeout':
+                        raise subprocess.TimeoutExpired(argv, 30, output=canary.encode())
+                    if scenario == 'create_malformed':
+                        return subprocess.CompletedProcess(argv, 0, canary.encode(), b'')
+                    result = {'status': 'unknown' if scenario == 'create_unknown' else 'verified',
+                              'id': base['id'], 'versionId': base['versionId'],
+                              'graphDigest': base['draft']['graphDigest']}
+                    return subprocess.CompletedProcess(argv, 0, encode({
+                        'type': 'response', 'status': 'ok', 'result': result}), b'')
+                if operation == 'n8n.workflows.get':
+                    require(value == {'id': base['id']}, 'test_get_scope')
+                    observed = state[0]
+                    if scenario == 'prestate_drift' and len(actions) == 2:
+                        observed = dict(base, versionId='drift')
+                    if scenario == 'hostile_prestate_and_stop':
+                        observed = dict(base, stateDigest=canary, published={'raw': canary})
+                    if scenario == 'mcp_after_get_drift' and available[0] and len(actions) > 2:
+                        observed = dict(base, versionId='mcp-drift')
+                    if scenario == 'publish_readback_drift' and any(
+                            op == 'n8n.workflows.lifecycle' for op, v in actions):
+                        observed = dict(published, stateDigest='blake3-256:' + '3' * 64)
+                    return subprocess.CompletedProcess(argv, 0, encode({
+                        'type': 'response', 'status': 'ok', 'result': observed}), b'')
+                require(operation == 'n8n.workflows.lifecycle' and
+                        envelope.get('approval_token') == {'synthetic_offline': True},
+                        'test_unapproved_or_extra_mutation')
+                action = value['action']
+                if action == 'publish' and scenario == 'publish_timeout':
+                    raise subprocess.TimeoutExpired(argv, 30, output=canary.encode())
+                if action == 'publish' and scenario == 'publish_malformed':
+                    return subprocess.CompletedProcess(argv, 0, canary.encode(), canary.encode())
+                before, after = state[0], published if action == 'publish' else final
+                result = {'status': 'verified', 'operation': operation, 'action': action,
+                          'provider': 'official_mcp', 'retry': 'never_automatic',
+                          'readback': 'independent_get', 'before': before, 'after': after}
+                if (action == 'publish' and scenario == 'publish_unknown') or (
+                        action == 'unpublish' and scenario == 'unpublish_failed'):
+                    return subprocess.CompletedProcess(argv, 1, encode({
+                        'status': 'unknown', 'code': 'unknown_outcome', 'diagnostic': canary}), b'')
+                state[0] = after
+                return subprocess.CompletedProcess(argv, 0, encode(result), b'')
+            with patch.dict(globals(), ROOT=case, installed_state=lambda s: {'synthetic': True}), \
+                    patch('subprocess.run', side_effect=boundary):
+                try:
+                    publish_check(server)
+                except RuntimeError:
+                    require(scenario not in ('success', 'mcp_already_available'),
+                            'test_publish_success_failed')
+                else:
+                    require(scenario in ('success', 'mcp_already_available'),
+                            'test_publish_negative_not_denied')
+            mutations = [v['action'] for op, v in actions if op == 'n8n.workflows.lifecycle']
+            require(mutations == (['publish', 'unpublish'] if scenario in
+                    ('success', 'unpublish_failed', 'mcp_already_available') else ['publish'] if scenario in
+                    ('publish_unknown', 'publish_timeout', 'publish_malformed',
+                     'publish_readback_drift') else []), 'test_mutation_retry_or_scope')
+            require(all(op in ('n8n.workflows.get', 'n8n.workflows.lifecycle',
+                              'n8n.workflows.create_draft', 'n8n.mcp_access.reconcile')
+                        for op, value in actions), 'test_execute_create_forbidden')
+            require(sum(op == 'n8n.workflows.create_draft' for op, value in actions) ==
+                    (0 if scenario in ('wrong_current', 'issuer_abort') else 1),
+                    'test_create_replayed')
+            lifecycle_requests = [r for r in requests if r['operation'] in ('publish', 'unpublish')]
+            if len(lifecycle_requests) == 2:
+                require(len({r['input']['guard']['idempotencyKey'] for r in requests}) == len(requests) and
+                        lifecycle_requests[1]['input']['guard']['precondition']['active'] is True,
+                        'test_distinct_fresh_unpublish_approval')
+            for path in saved.rglob('*.json'):
+                require(canary.encode() not in path.read_bytes(), 'test_publish_canary_leak')
+            total_parent += len(parent_calls)
+    for server in ('eec', 'hetzner'):
+        graph = publication_graph(server)
+        for changed in (dict(graph, connections={'unexpected': {}}),
+                        dict(graph, settings=dict(graph['settings'], availableInMCP=True)),
+                        dict(graph, nodes=graph['nodes'] + graph['nodes']),
+                        dict(graph, nodes=[dict(graph['nodes'][0], credentials={'canary': canary})]),
+                        dict(graph, nodes=[dict(graph['nodes'][0], parameters={
+                            'url': canary, 'httpMethod': 'POST'})])):
+            try:
+                publication_eligibility(changed, server)
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError('test_unsafe_graph_not_denied')
+    print(json.dumps({'publish_self_test': True, 'serialized_full_paths': 32,
+                      'unsafe_graph_denials': 10,
+                      'native_parent_calls': total_parent, 'live_or_signer_calls': 0,
+                      'retained': str(sandbox)}))
+
+
 def reconcile(server):
     # Read-only observation of the two already executed fixtures. Never call
     # run/write/create/execute from this mode, including after a refusal.
@@ -1117,12 +1476,21 @@ if __name__ == '__main__':
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--run', choices=['eec', 'hetzner'])
     parser.add_argument('--reconcile', choices=['eec', 'hetzner'])
+    parser.add_argument('--publish-check', choices=['eec', 'hetzner'])
+    parser.add_argument('--publish-self-test', action='store_true')
     args = parser.parse_args()
-    if args.self_test and not args.run and not args.reconcile:
+    if sum(bool(v) for v in (args.self_test, args.run, args.reconcile,
+                            args.publish_check, args.publish_self_test)) != 1:
+        parser.error('exactly one mode required')
+    if args.publish_self_test:
+        publish_self_test()
+    elif args.self_test and not args.run and not args.reconcile and not args.publish_check:
         self_test()
-    elif args.run and not args.self_test and not args.reconcile:
+    elif args.run and not args.self_test and not args.reconcile and not args.publish_check:
         run(args.run)
-    elif args.reconcile and not args.self_test and not args.run:
+    elif args.reconcile and not args.self_test and not args.run and not args.publish_check:
         reconcile(args.reconcile)
+    elif args.publish_check and not args.self_test and not args.run and not args.reconcile:
+        publish_check(args.publish_check)
     else:
         parser.error('exactly one mode required')

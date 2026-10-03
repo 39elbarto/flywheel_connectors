@@ -27,7 +27,7 @@ readonly ARTIFACTS=(
   "policy/local-mcp.json"
 )
 readonly EEC_PUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_PUBLISH_INPUT_SCHEMA_DIGEST:-sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6}"
-readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13}"
+readonly EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9}"
 readonly EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST:-sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a}"
 readonly EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983}"
 # Lifecycle schemas are owner-provisioned from a fresh official-MCP tools/list
@@ -41,7 +41,7 @@ readonly EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_ARCHIVE_OUTPUT_SCHEMA_D
 readonly EEC_EXECUTE_INPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_INPUT_SCHEMA_DIGEST:-}"
 readonly EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST:-}"
 readonly HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST:-sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6}"
-readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13}"
+readonly HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9}"
 readonly HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST:-sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a}"
 readonly HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST:-sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983}"
 readonly HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST="${FWC_N8N_HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST:-}"
@@ -291,9 +291,9 @@ def unique_object(pairs):
         value[key] = child
     return value
 
-legacy = (
+current = (
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6",
-    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13",
+    "sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9",
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a",
     "sha256:78d3bfad1d60d713564c6e04028acdfcd76aa03483606d17a047ea6aab8bb983",
 )
@@ -302,11 +302,11 @@ if len(pins) != 16:
 changed = {(server, tool) for server_index, server in enumerate(servers)
     for tool_index, tool in enumerate(tools[:2])
     if pins[server_index * 8 + tool_index * 2:server_index * 8 + tool_index * 2 + 2]
-        != list(legacy[tool_index * 2:tool_index * 2 + 2])}
+        != list(current[tool_index * 2:tool_index * 2 + 2])}
 if not baseline_path:
     if changed:
         fail()
-    print('{"status":"legacy_raw_defaults","reviewed_baselines":false}')
+    print('{"status":"current_raw_defaults","reviewed_baselines":false}')
     raise SystemExit(0)
 try:
     raw = pathlib.Path(baseline_path).read_bytes()
@@ -884,24 +884,53 @@ PY
   chown root:root "$request_path"
 }
 
+release_provenance() {
+  # Native runtime37936 has serde deny_unknown_fields: assembler admission is separate.
+  python3 - "$@" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+mode, release_id, git_revision, *output = sys.argv[1:]
+expected = {"schema": "fwc.n8n.provenance.v1", "release_id": release_id, "git_revision": git_revision}
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        assert key not in result
+        result[key] = value
+    return result
+try:
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release_id)
+    assert re.fullmatch(r"[0-9a-f]{40}", git_revision)
+    if mode == "check":
+        with os.fdopen(3, "rb") as source:
+            raw = source.read(65537)
+        assert len(raw) <= 65536
+        observed = json.loads(raw, object_pairs_hook=closed_object)
+        assert type(observed) is dict and observed == expected and set(observed) == set(expected)
+    elif mode in ("emit", "write"):
+        raw = json.dumps(expected, indent=2) + "\n"
+        assert json.loads(raw) == expected
+        if mode == "write":
+            assert len(output) == 1
+            with pathlib.Path(output[0]).open("x") as f:
+                f.write(raw)
+        else:
+            assert not output
+            print(raw, end="")
+    else:
+        raise ValueError()
+except (AssertionError, ValueError, TypeError, OSError):
+    raise SystemExit("release_metadata_invalid")
+PY
+}
+
 write_metadata() {
   local stage_root="$1"
   local git_revision="$2"
   local hash_helper="$3"
-  python3 - "$stage_root" "$RELEASE_ID" "$git_revision" "${BASH_SOURCE[0]}" <<'PY'
-import hashlib
-import json
-import pathlib
-import sys
-stage, release_id, git_revision, assembler = sys.argv[1:]
-stage = pathlib.Path(stage)
-(stage / "provenance.json").write_text(json.dumps({
-    "schema": "fwc.n8n.provenance.v1",
-    "release_id": release_id,
-    "git_revision": git_revision,
-    "assembler_sha256": hashlib.sha256(pathlib.Path(assembler).read_bytes()).hexdigest(),
-}, indent=2) + "\n")
-PY
+  release_provenance write "$RELEASE_ID" "$git_revision" "$stage_root/provenance.json"
   python3 - "$stage_root" "$RELEASE_ID" "$hash_helper" "${ARTIFACTS[@]}" <<'PY'
 import json
 import pathlib
@@ -928,6 +957,15 @@ PY
 }
 
 main() {
+  if [[ "${1:-}" == "--check-release-metadata" || "${1:-}" == "--emit-release-provenance" ]]; then
+    [[ "$#" == 3 ]] || die "release metadata check requires exact release id and git revision"
+    if [[ "$1" == "--check-release-metadata" ]]; then
+      release_provenance check "$2" "$3" 3<&0
+    else
+      release_provenance emit "$2" "$3"
+    fi
+    return $?
+  fi
   if [[ "${1:-}" == "--check-official-baselines" ]]; then
     [[ "$#" == 2 && "$2" == /* && -f "$2" && -x "$2" ]] || die "official baseline check requires an explicit source binary"
     validate_official_schema_baselines "$2"
@@ -1009,6 +1047,8 @@ main() {
   require_clean_tracked_head
   local git_revision source_release stage_root request_path hash_helper
   git_revision="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  # Exercise the exact metadata producer before Cargo, stage creation or any seed.
+  release_provenance emit "$release_id" "$git_revision" >/dev/null
   require_safe_directory "$INSTALL_ROOT"
   require_safe_directory "$INSTALL_ROOT/releases"
   source_release="$(readlink -f "$CURRENT_PATH")"

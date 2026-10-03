@@ -66,7 +66,7 @@ const APPROVED_TOOLS: [&str; 4] = [
 const EEC_PUBLISH_INPUT: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const EEC_PUBLISH_OUTPUT: &str =
-    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
+    "sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9";
 const EEC_UNPUBLISH_INPUT: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const EEC_UNPUBLISH_OUTPUT: &str =
@@ -74,6 +74,10 @@ const EEC_UNPUBLISH_OUTPUT: &str =
 const HETZNER_PUBLISH_INPUT: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const HETZNER_PUBLISH_OUTPUT: &str =
+    "sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9";
+// RC42 and its reviewed inventory predecessors use this exact publish output.
+// It is never accepted for a new unsigned or signed staged candidate.
+const RC42_PUBLISH_OUTPUT: &str =
     "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
 const HETZNER_UNPUBLISH_INPUT: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
@@ -118,6 +122,23 @@ fn previous_eec_lifecycle_schema_digests(tool_name: &str) -> Option<(&'static st
     match tool_name {
         "publish_workflow" => Some((PREVIOUS_EEC_PUBLISH_INPUT, PREVIOUS_EEC_PUBLISH_OUTPUT)),
         "unpublish_workflow" => Some((PREVIOUS_EEC_UNPUBLISH_INPUT, PREVIOUS_EEC_UNPUBLISH_OUTPUT)),
+        _ => None,
+    }
+}
+
+fn rc42_lifecycle_schema_digests(
+    server: ServerId,
+    tool_name: &str,
+) -> Option<(&'static str, &'static str)> {
+    match (server, tool_name) {
+        (ServerId::Eec, "publish_workflow") => Some((EEC_PUBLISH_INPUT, RC42_PUBLISH_OUTPUT)),
+        (ServerId::Hetzner, "publish_workflow") => {
+            Some((HETZNER_PUBLISH_INPUT, RC42_PUBLISH_OUTPUT))
+        }
+        (ServerId::Eec, "unpublish_workflow") => Some((EEC_UNPUBLISH_INPUT, EEC_UNPUBLISH_OUTPUT)),
+        (ServerId::Hetzner, "unpublish_workflow") => {
+            Some((HETZNER_UNPUBLISH_INPUT, HETZNER_UNPUBLISH_OUTPUT))
+        }
         _ => None,
     }
 }
@@ -594,6 +615,7 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptRc42Lifecycle,
     SignedProvisionReceiptCurrentLegacyLimits,
     SignedProvisionReceiptPreviousExecute,
     SignedProvisionReceiptPreviousLifecycle,
@@ -701,6 +723,7 @@ fn verify_signed_current(
     let (verified, mode) = verification?;
     let validation_mode = match mode {
         CurrentValidationMode::SignedProvisionReceipt => "signed_current",
+        CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle => "signed_rc42_lifecycle",
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => {
             "signed_current_legacy_limits"
         }
@@ -769,6 +792,7 @@ fn verify_signed_current(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LifecycleSchemaMode {
     CurrentPerServer,
+    Rc42PerServer,
     PreviousPerServer,
     LegacyCommon,
 }
@@ -1907,8 +1931,9 @@ struct ReleaseSurface<'a> {
 }
 
 #[cfg(unix)]
-const SIGNED_CURRENT_SCHEMA_MODES: [CurrentValidationMode; 8] = [
+const SIGNED_CURRENT_SCHEMA_MODES: [CurrentValidationMode; 9] = [
     CurrentValidationMode::SignedProvisionReceipt,
+    CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle,
     CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
     CurrentValidationMode::SignedProvisionReceiptPreviousExecute,
     CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
@@ -1930,6 +1955,7 @@ fn select_signed_current_schema(
         let allow_predecessor_execute = !matches!(
             mode,
             CurrentValidationMode::SignedProvisionReceipt
+                | CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
                 | CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
         );
         let result = if !allow_predecessor_execute
@@ -1964,13 +1990,17 @@ fn validate_signed_tree_mode(
     allow_predecessor_execute: bool,
 ) -> Result<(), ProvisionError> {
     let (lifecycle, common) = match mode {
-        CurrentValidationMode::SignedProvisionReceipt
-        | CurrentValidationMode::SignedProvisionReceiptPreviousExecute => (
+        CurrentValidationMode::SignedProvisionReceipt => (
             LifecycleSchemaMode::CurrentPerServer,
             CommonInventorySchemaMode::Current,
         ),
+        CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
+        | CurrentValidationMode::SignedProvisionReceiptPreviousExecute => (
+            LifecycleSchemaMode::Rc42PerServer,
+            CommonInventorySchemaMode::Current,
+        ),
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => (
-            LifecycleSchemaMode::CurrentPerServer,
+            LifecycleSchemaMode::Rc42PerServer,
             CommonInventorySchemaMode::CurrentLegacyLimits,
         ),
         CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle => (
@@ -1978,15 +2008,15 @@ fn validate_signed_tree_mode(
             CommonInventorySchemaMode::Current,
         ),
         CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory => (
-            LifecycleSchemaMode::CurrentPerServer,
+            LifecycleSchemaMode::Rc42PerServer,
             CommonInventorySchemaMode::Previous,
         ),
         CurrentValidationMode::SignedProvisionReceiptLegacyCommonInventory => (
-            LifecycleSchemaMode::CurrentPerServer,
+            LifecycleSchemaMode::Rc42PerServer,
             CommonInventorySchemaMode::Legacy,
         ),
         CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory => (
-            LifecycleSchemaMode::CurrentPerServer,
+            LifecycleSchemaMode::Rc42PerServer,
             CommonInventorySchemaMode::LegacyDisposable,
         ),
         CurrentValidationMode::SignedProvisionReceiptLegacySchema => (
@@ -3038,6 +3068,12 @@ fn official_lifecycle_schema_matches(
         ) => lifecycle_schema_digests(server, name)
             .is_some_and(|expected| expected == (input, output)),
         (
+            ServerId::Eec | ServerId::Hetzner,
+            LifecycleSchemaMode::Rc42PerServer,
+            "publish_workflow" | "unpublish_workflow",
+        ) => rc42_lifecycle_schema_digests(server, name)
+            .is_some_and(|expected| expected == (input, output)),
+        (
             ServerId::Eec,
             LifecycleSchemaMode::PreviousPerServer,
             "publish_workflow" | "unpublish_workflow",
@@ -3049,7 +3085,7 @@ fn official_lifecycle_schema_matches(
             "publish_workflow" | "unpublish_workflow",
         ) => [
             previous_hetzner_lifecycle_schema_digests(name),
-            lifecycle_schema_digests(server, name),
+            rc42_lifecycle_schema_digests(server, name),
         ]
         .into_iter()
         .flatten()
@@ -3273,6 +3309,7 @@ where
             return Ok((current, selected_mode));
         }
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+        | CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
         | CurrentValidationMode::SignedProvisionReceiptPreviousExecute
         | CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
         | CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory
@@ -3288,8 +3325,11 @@ where
                 MAX_PROVISION_RECEIPT_BYTES,
                 ProvisionErrorCode::Receipt,
             )?;
-            let allow_predecessor_execute =
-                mode != CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits;
+            let allow_predecessor_execute = !matches!(
+                mode,
+                CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+                    | CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
+            );
             validate_binding_shape_with_predecessor(
                 &provision_receipt.bindings,
                 allow_predecessor_execute,
@@ -3451,8 +3491,9 @@ fn validate_signed_target_predecessors(
     expected_owner: u32,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<(), ProvisionError> {
-    const TARGET_MODES: [CurrentValidationMode; 7] = [
+    const TARGET_MODES: [CurrentValidationMode; 8] = [
         CurrentValidationMode::SignedProvisionReceipt,
+        CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle,
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits,
         CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle,
         CurrentValidationMode::SignedProvisionReceiptPreviousCommonInventory,
@@ -4446,6 +4487,7 @@ mod tests {
                 )
                 .expect("previous artifact mode");
             }
+            self.set_rc42_publish_policy(&previous);
             self.set_predecessor_execute_policy(&previous);
             fs::write(
                 previous.join(PROVENANCE_FILE),
@@ -4477,6 +4519,55 @@ mod tests {
                 fs::set_permissions(previous.join(name), fs::Permissions::from_mode(0o644))
                     .expect("previous metadata mode");
             }
+        }
+
+        fn set_rc42_publish_policy(&self, root: &Path) {
+            for server in ["eec", "hetzner"] {
+                let path = root.join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                    .expect("inventory JSON");
+                let publish = value[0]["config"]["capability_policy"]["approved_tools"]
+                    .as_array_mut()
+                    .expect("approved tools")
+                    .iter_mut()
+                    .find(|tool| tool["name"] == "publish_workflow")
+                    .expect("publish tool");
+                publish["output_schema_digest"] = json!(RC42_PUBLISH_OUTPUT);
+                fs::write(path, serde_json::to_vec(&value).expect("inventory JSON"))
+                    .expect("RC42 publish policy");
+            }
+        }
+
+        fn set_signed_rc42(&self, root: &Path, release_id: &str) {
+            self.set_rc42_publish_policy(root);
+            for (server, input, output) in [
+                ("eec", EEC_EXECUTE_INPUT, EEC_EXECUTE_OUTPUT),
+                ("hetzner", HETZNER_EXECUTE_INPUT, HETZNER_EXECUTE_OUTPUT),
+            ] {
+                let path = root.join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                    .expect("inventory JSON");
+                let policy = &mut value[0]["config"]["capability_policy"];
+                let execute = policy["approved_tools"]
+                    .as_array_mut()
+                    .expect("approved tools")
+                    .iter_mut()
+                    .find(|tool| tool["name"] == "execute_workflow")
+                    .expect("execute tool");
+                execute["input_schema_digest"] = json!(input);
+                execute["output_schema_digest"] = json!(output);
+                policy["execute_workflow_schema"]["input_schema_digest"] = json!(input);
+                policy["execute_workflow_schema"]["output_schema_digest"] = json!(output);
+                fs::write(path, serde_json::to_vec(&value).expect("inventory JSON"))
+                    .expect("RC42 execute policy");
+            }
+            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+                .expect("RC42 receipt");
+            fs::write(
+                root.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt_for(root, release_id),
+            )
+            .expect("RC42 signed receipt");
         }
 
         fn set_predecessor_execute_policy(&self, root: &Path) {
@@ -5113,6 +5204,235 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn native_provenance_rejects_extra_and_duplicate_metadata_fields() {
+        let valid = json!({"schema": PROVENANCE_SCHEMA, "release_id": "release-test",
+            "git_revision": "0123456789abcdef0123456789abcdef01234567"});
+        assert!(serde_json::from_value::<Provenance>(valid.clone()).is_ok());
+        let mut extra = valid;
+        extra["assembler_sha256"] = json!("00".repeat(32));
+        assert!(serde_json::from_value::<Provenance>(extra).is_err());
+        let duplicate = br#"{"schema":"fwc.n8n.provenance.v1","schema":"fwc.n8n.provenance.v1","release_id":"release-test","git_revision":"0123456789abcdef0123456789abcdef01234567"}"#;
+        assert!(serde_json::from_slice::<Provenance>(duplicate).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_rc42_lifecycle_preflight_and_exact_pinned_recovery() {
+        let fixture = Fixture::retained();
+        let previous = fixture.releases.join("previous");
+        fixture.set_signed_rc42(&previous, "previous");
+        let old_pin = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+            .expect("RC42 signed receipt pin")
+            .1;
+        let plan = fixture.request().validate().expect("RC42 to new preflight");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
+        );
+        plan.revalidate().expect("same exact RC42 tree under lock");
+        assert_eq!(
+            signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
+                .expect("read-only preflight current")
+                .1,
+            old_pin
+        );
+        let recovery = fixture.promote_for_pinned_recovery();
+        let installed = verify_signed_current(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("new signed current");
+        assert_eq!(installed.validation_mode, "signed_current");
+        recovery
+            .validate_now()
+            .expect("read-only exact recovery pair");
+        FilesystemOwnerAtomicInstaller::new()
+            .rollback(recovery.revalidate().expect("locked exact recovery pair"))
+            .expect("isolated retained RC42 recovery");
+        let restored = verify_signed_current(
+            &fixture.current,
+            &fixture.releases,
+            fixture.owner,
+            &test_owner_verification(),
+        )
+        .expect("restored signed RC42");
+        assert!(restored.matches("previous", &old_pin));
+        assert_eq!(restored.validation_mode, "signed_rc42_lifecycle");
+        assert!(fixture.releases.join(&fixture.release_id).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_rc42_revalidation_never_widens_to_previous_execute() {
+        let fixture = Fixture::retained();
+        let previous = fixture.releases.join("previous");
+        fixture.set_signed_rc42(&previous, "previous");
+        let plan = fixture.request().validate().expect("RC42 preflight");
+        assert_eq!(
+            plan.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
+        );
+        fixture.set_predecessor_execute_policy(&previous);
+        fs::write(
+            previous.join(RECEIPT_FILE),
+            fixture.receipt_for(&previous, "previous"),
+        )
+        .expect("predecessor receipt");
+        fs::write(
+            previous.join(PROVISION_RECEIPT_FILE),
+            fixture.predecessor_provision_receipt_for(&previous, "previous"),
+        )
+        .expect("predecessor signed receipt");
+        assert!(
+            validate_current_pointer_with_verifier(
+                &fixture.current,
+                &fixture.releases,
+                fixture.owner,
+                &test_owner_verification(),
+                Some(CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle),
+                |_, _| panic!("no legacy fallback"),
+            )
+            .is_err()
+        );
+        assert!(plan.revalidate().is_err());
+        let distinct = fixture
+            .request()
+            .validate()
+            .expect("distinct predecessor mode");
+        assert_eq!(
+            distinct.current_validation,
+            CurrentValidationMode::SignedProvisionReceiptPreviousExecute
+        );
+        distinct
+            .revalidate()
+            .expect("distinct predecessor remains valid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_rc42_pins_are_never_staged_or_mixed_with_current() {
+        for changed_server in [None, Some("eec"), Some("hetzner")] {
+            let fixture = Fixture::retained();
+            for server in ["eec", "hetzner"] {
+                if changed_server.is_some_and(|selected| selected != server) {
+                    continue;
+                }
+                let path = fixture
+                    .stage
+                    .join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                    .expect("inventory JSON");
+                let publish = value[0]["config"]["capability_policy"]["approved_tools"]
+                    .as_array_mut()
+                    .expect("approved tools")
+                    .iter_mut()
+                    .find(|tool| tool["name"] == "publish_workflow")
+                    .expect("publish tool");
+                publish["output_schema_digest"] = json!(RC42_PUBLISH_OUTPUT);
+                fs::write(path, serde_json::to_vec(&value).expect("inventory JSON"))
+                    .expect("old or mixed stage inventory");
+            }
+            fs::write(fixture.stage.join(RECEIPT_FILE), fixture.receipt()).expect("stage receipt");
+            fs::write(
+                fixture.stage.join(PROVISION_RECEIPT_FILE),
+                fixture.provision_receipt(),
+            )
+            .expect("signed stage receipt");
+            assert_eq!(
+                fixture
+                    .request()
+                    .validate()
+                    .expect_err("old or mixed staged pins")
+                    .code(),
+                ProvisionErrorCode::Policy
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_rc42_predecessor_never_falls_back_after_bad_signature() {
+        let fixture = Fixture::retained();
+        let previous = fixture.releases.join("previous");
+        fixture.set_signed_rc42(&previous, "previous");
+        let path = previous.join(PROVISION_RECEIPT_FILE);
+        let mut receipt: Value = serde_json::from_slice(&fs::read(&path).expect("signed receipt"))
+            .expect("signed receipt JSON");
+        receipt["signature"]["signature"] = json!("00".repeat(SIGNATURE_SIZE));
+        fs::write(
+            path,
+            serde_json::to_vec(&receipt).expect("damaged signed receipt"),
+        )
+        .expect("retain damaged signature");
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("RC42 invalid signature")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_current_lifecycle_unknown_profile_and_signature_fail_closed() {
+        for server in ["eec", "hetzner"] {
+            for denial in ["unknown_output", "malformed_profile", "damaged_signature"] {
+                let fixture = Fixture::retained();
+                let path = fixture
+                    .stage
+                    .join(format!("inventory/{server}-official-mcp.json"));
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
+                    .expect("inventory JSON");
+                let publish = value[0]["config"]["capability_policy"]["approved_tools"]
+                    .as_array_mut()
+                    .expect("approved tools")
+                    .iter_mut()
+                    .find(|tool| tool["name"] == "publish_workflow")
+                    .expect("publish tool");
+                match denial {
+                    "unknown_output" => {
+                        publish["output_schema_digest"] =
+                            json!(format!("sha256:{}", "00".repeat(32)))
+                    }
+                    "malformed_profile" => {
+                        publish["reviewed_schemas"] = json!({"unexpected": true})
+                    }
+                    "damaged_signature" => {}
+                    _ => unreachable!(),
+                }
+                fs::write(path, serde_json::to_vec(&value).expect("inventory JSON"))
+                    .expect("retained denial inventory");
+                fs::write(fixture.stage.join(RECEIPT_FILE), fixture.receipt())
+                    .expect("denial receipt");
+                let mut receipt: Value = serde_json::from_slice(&fixture.provision_receipt())
+                    .expect("signed receipt JSON");
+                if denial == "damaged_signature" {
+                    receipt["signature"]["signature"] = json!("00".repeat(SIGNATURE_SIZE));
+                }
+                fs::write(
+                    fixture.stage.join(PROVISION_RECEIPT_FILE),
+                    serde_json::to_vec(&receipt).expect("signed denial receipt"),
+                )
+                .expect("retained denial receipt");
+                let expected = if denial == "damaged_signature" {
+                    ProvisionErrorCode::Signature
+                } else {
+                    ProvisionErrorCode::Policy
+                };
+                assert_eq!(
+                    fixture.request().validate().expect_err(denial).code(),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn signed_previous_lifecycle_is_accepted_only_as_predecessor() {
         let fixture = Fixture::new();
         let previous = fixture.releases.join("previous");
@@ -5544,13 +5864,17 @@ mod tests {
                 execute_output_schema_digest: PREVIOUS_HETZNER_EXECUTE_OUTPUT.to_owned(),
             },
         ];
-        validate_unsigned_release_tree(
-            current,
-            release_id,
-            &provenance.git_revision,
-            &bindings,
+        validate_unsigned_release_tree_with_schema_mode(
+            ReleaseSurface {
+                root: current,
+                release_id,
+                git_revision: &provenance.git_revision,
+                bindings: &bindings,
+            },
             owner,
             current,
+            LifecycleSchemaMode::Rc42PerServer,
+            CommonInventorySchemaMode::Current,
         )
     }
 

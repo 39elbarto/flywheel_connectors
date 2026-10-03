@@ -381,7 +381,7 @@ const N8N_OFFICIAL_MCP_EXECUTE_TOOL: &str = "execute_workflow";
 const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
-    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
+    "sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9";
 const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
@@ -389,7 +389,7 @@ const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC: &str =
 const N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:93c8bb4e57cea4ae0d368b58dad24560774905ccaa3872f85eb5511bb6162bf6";
 const N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
-    "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13";
+    "sha256:377ede5c5c793ad7c1f123dfac17238cd69f29fd764333519c0ac170a4639ca9";
 const N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_HETZNER: &str =
     "sha256:0042470662fcc1488e5d5438ddb3d713675bce04315121b801a3faa7fbea415a";
 const N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_HETZNER: &str =
@@ -36650,6 +36650,92 @@ done"#;
             &different_version,
             N8N_OFFICIAL_MCP_PUBLISH_TOOL
         ));
+    }
+
+    #[test]
+    fn n8n_official_mcp_admitted_publish_output_is_exact_for_both_servers() {
+        for (server, execute_input, execute_output) in [
+            (
+                "eec",
+                N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_EEC,
+                N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_EEC,
+            ),
+            (
+                "hetzner",
+                N8N_OFFICIAL_MCP_EXECUTE_INPUT_SCHEMA_DIGEST_HETZNER,
+                N8N_OFFICIAL_MCP_EXECUTE_OUTPUT_SCHEMA_DIGEST_HETZNER,
+            ),
+        ] {
+            let mut config = ManagedConnectorConfig {
+                id: "fcp.mcp-bridge".to_string(),
+                binary: "/bin/true".to_string(),
+                manifest_path: None,
+                name: None,
+                description: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                config: Some(json!({"capability_policy": {
+                    "approved_tools": [
+                        {"name": "publish_workflow", "class": "write",
+                         "input_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                         "output_schema_digest": N8N_OFFICIAL_MCP_PUBLISH_OUTPUT_SCHEMA_DIGEST_EEC},
+                        {"name": "unpublish_workflow", "class": "write",
+                         "input_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_INPUT_SCHEMA_DIGEST_EEC,
+                         "output_schema_digest": N8N_OFFICIAL_MCP_UNPUBLISH_OUTPUT_SCHEMA_DIGEST_EEC},
+                        {"name": "archive_workflow", "class": "write",
+                         "input_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                         "output_schema_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                        {"name": "execute_workflow", "class": "write"}
+                    ],
+                    "archive_workflow_schema": {
+                        "input_schema_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "output_schema_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                    "execute_workflow_schema": {"status": N8N_OFFICIAL_MCP_EXECUTE_POLICY_STATUS}
+                }})),
+                categories: Vec::new(),
+                version: None,
+                allowed_zones: Vec::new(),
+                allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
+                enforce_empty_allow_lists: false,
+                runtime_network_enforcement: RuntimeNetworkEnforcement::LegacyUnspecified,
+                prewarm: Default::default(),
+                lifecycle_mode: ConnectorLifecycleMode::PerInvocation,
+                launch_binding: None,
+                operation_network_constraints: BTreeMap::new(),
+            };
+            let body = config.config.as_mut().expect("config");
+            body["server_id"] = json!(server);
+            let policy = &mut body["capability_policy"];
+            policy["approved_tools"][3]["input_schema_digest"] = json!(execute_input);
+            policy["approved_tools"][3]["output_schema_digest"] = json!(execute_output);
+            policy["execute_workflow_schema"]["input_schema_digest"] = json!(execute_input);
+            policy["execute_workflow_schema"]["output_schema_digest"] = json!(execute_output);
+            assert!(official_mcp_policy_allows_tool(
+                &config,
+                N8N_OFFICIAL_MCP_PUBLISH_TOOL
+            ));
+            assert!(official_mcp_policy_allows_tool(
+                &config,
+                N8N_OFFICIAL_MCP_EXECUTE_TOOL
+            ));
+            for rejected in [
+                "sha256:103216d1ba8bb8e017ec6c068c2764c2ef3fd7950f34f413b32204d541ccfe13",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ] {
+                let mut wrong = config.clone();
+                wrong.config.as_mut().expect("config")["capability_policy"]["approved_tools"][0]
+                    ["output_schema_digest"] = json!(rejected);
+                assert!(!official_mcp_policy_allows_tool(
+                    &wrong,
+                    N8N_OFFICIAL_MCP_PUBLISH_TOOL
+                ));
+                assert!(!official_mcp_policy_allows_tool(
+                    &wrong,
+                    N8N_OFFICIAL_MCP_EXECUTE_TOOL
+                ));
+            }
+        }
     }
 
     #[test]

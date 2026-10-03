@@ -842,6 +842,68 @@ expect_success() {
   validate_plan >/dev/null
 }
 
+run_release_metadata_self_test() {
+  local assembler="$1" consumer="$2"
+  python3 - "$assembler" "$consumer" <<'PY'
+import copy
+import json
+import pathlib
+import subprocess
+import sys
+import uuid
+assembler, consumer = sys.argv[1:]
+source = pathlib.Path(consumer).read_text()
+contract = '#[serde(deny_unknown_fields)]\nstruct Provenance {\n    schema: String,\n    release_id: String,\n    git_revision: String,\n}'
+assert contract in source
+rid = 'release-20261003-37936e82d-publish-reasons-rc43c'
+revision = '37936e82d0d8da485ae4ce505728d8149fcdbae7'
+emit = ['bash', assembler, '--emit-release-provenance', rid, revision]
+check = ['bash', assembler, '--check-release-metadata', rid, revision]
+produced = subprocess.run(emit, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+assert produced.returncode == 0
+expected = json.loads(produced.stdout)
+assert set(expected) == {'schema', 'release_id', 'git_revision'}
+cases = [('exact_native_provenance', produced.stdout, True)]
+for label, key, value in (
+    ('assembler_field_denied', 'assembler_sha256', 'ab' * 32),
+    ('unknown_field_denied', 'unknown', 'HOSTILE_METADATA_CANARY'),
+    ('wrong_schema_denied', 'schema', 'HOSTILE_METADATA_CANARY'),
+    ('wrong_release_denied', 'release_id', 'HOSTILE_METADATA_CANARY'),
+    ('wrong_revision_denied', 'git_revision', 'HOSTILE_METADATA_CANARY'),
+):
+    altered = copy.deepcopy(expected); altered[key] = value
+    cases.append((label, json.dumps(altered).encode(), False))
+altered = copy.deepcopy(expected); del altered['git_revision']
+cases.extend([('missing_field_denied', json.dumps(altered).encode(), False),
+    ('malformed_denied', b'HOSTILE_METADATA_CANARY', False),
+    ('oversize_denied', b' ' * 65537, False),
+    ('duplicate_field_denied', produced.stdout.rstrip()[:-1] + b',"schema":"fwc.n8n.provenance.v1"}', False)])
+for label, raw, allowed in cases:
+    result = subprocess.run(check, input=raw, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+    assert (result.returncode == 0) == allowed
+    assert b'HOSTILE_METADATA_CANARY' not in result.stdout + result.stderr
+# Execute the actual shared producer write branch in a retained SSD fixture.
+text = pathlib.Path(assembler).read_text()
+start = text.index('release_provenance() {')
+body = text[text.index("<<'PY'\n", start) + 7:text.index('\nPY\n}', start)]
+fixture = pathlib.Path('/srv/dev-ssd/fcp/nqm81-34') / ('rc43c-metadata-producer-' + str(uuid.uuid4()))
+fixture.mkdir(mode=0o700)
+written = fixture / 'provenance.json'
+write = subprocess.run([sys.executable, '-c', body, 'write', rid, revision, str(written)],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+assert write.returncode == 0 and written.read_bytes() == produced.stdout
+checked = subprocess.run(check, input=written.read_bytes(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+assert checked.returncode == 0
+again = subprocess.run([sys.executable, '-c', body, 'write', rid, revision, str(written)],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+assert again.returncode != 0 and written.read_bytes() == produced.stdout
+assert b'HOSTILE_METADATA_CANARY' not in again.stdout + again.stderr
+print(json.dumps({'cases': len(cases), 'metadata_producer_native_contract': True,
+    'retained_write_fixture': str(fixture), 'write_and_no_overwrite': True,
+    'no_build': True, 'no_seed': True, 'labels': [c[0] for c in cases]}))
+PY
+}
+
 run_recovery_parser_self_test() {
   local binary="$1"
   [[ -f "$binary" && -x "$binary" ]] || return 1
@@ -1007,7 +1069,7 @@ official_cases.append(("official-unknown-schema-denied", unknown, unknown_pins, 
 extra = copy.deepcopy(official); extra["eec"]["unreviewed_tool"] = copy.deepcopy(official_baseline)
 official_cases.append(("official-extra-tool-denied", extra, dict(effective), 1))
 official_cases.append(("official-override-without-admission-denied", None, dict(effective), 1))
-official_cases.append(("official-no-admission-legacy-defaults", None, {}, 0))
+official_cases.append(("official-no-admission-current-defaults", None, {}, 0))
 local_only_path = pathlib.Path("/srv/dev-ssd/fcp/nqm81-34/schema-export-local-baselines-UNAPPROVED.json")
 local_only_raw = local_only_path.read_bytes()
 assert hashlib.sha256(local_only_raw).hexdigest() == "0cf5648c1d96c017fa8ada9c4c7f9a5446a301a802eb746ea06d1f98a93d7d54"
@@ -1374,6 +1436,10 @@ usage() {
 
 main() {
   require_dependencies || return 1
+  if [[ "${1:-}" == "--release-metadata-self-test" && "$#" == 3 ]]; then
+    run_release_metadata_self_test "$2" "$3"
+    return $?
+  fi
   if [[ "${1:-}" == "--actual-read-only-error-self-test" && "$#" == 2 ]]; then
     run_actual_read_only_error_test "$2"
     return $?

@@ -341,13 +341,10 @@ fn process_spec(
     use std::path::Path;
 
     let (host_path, host_digest) = bundle.fcp_host();
-    let official_mcp = matches!(
-        envelope.operation,
-        super::HostRunOnceOperation::CapabilitiesInspect
-            | super::HostRunOnceOperation::WorkflowsLifecycle
-            | super::HostRunOnceOperation::WorkflowsArchive
-            | super::HostRunOnceOperation::WorkflowsExecute
-    );
+    let official_mcp = envelope
+        .operation
+        .effective_credential_purpose(&envelope.input)
+        == super::BrokerCredentialPurpose::OfficialMcp;
     let mcp_access_dry_run = matches!(
         envelope.operation,
         super::HostRunOnceOperation::McpAccessReconcile
@@ -444,6 +441,11 @@ const fn max_output_bytes(operation: super::HostRunOnceOperation) -> usize {
     if matches!(
         operation,
         super::HostRunOnceOperation::CapabilitiesInspect
+            | super::HostRunOnceOperation::CredentialsList
+            | super::HostRunOnceOperation::OfficialKnowledge
+            | super::HostRunOnceOperation::OfficialSdkValidation
+            | super::HostRunOnceOperation::StructureSearch
+            | super::HostRunOnceOperation::WorkflowsSearch
             | super::HostRunOnceOperation::WorkflowsLifecycle
             | super::HostRunOnceOperation::WorkflowsArchive
             | super::HostRunOnceOperation::WorkflowsExecute

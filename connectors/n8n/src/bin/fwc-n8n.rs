@@ -238,6 +238,8 @@ enum SchemaExportSource {
     Eec,
     Hetzner,
     Local,
+    EecReadParity,
+    HetznerReadParity,
 }
 
 impl SchemaExportSource {
@@ -246,6 +248,8 @@ impl SchemaExportSource {
             "eec" => Ok(Self::Eec),
             "hetzner" => Ok(Self::Hetzner),
             "local" => Ok(Self::Local),
+            "eec-read-parity" => Ok(Self::EecReadParity),
+            "hetzner-read-parity" => Ok(Self::HetznerReadParity),
             _ => Err(AppError::new("schema_export_source_denied")),
         }
     }
@@ -254,6 +258,8 @@ impl SchemaExportSource {
             Self::Eec => "eec",
             Self::Hetzner => "hetzner",
             Self::Local => "local",
+            Self::EecReadParity => "eec-read-parity",
+            Self::HetznerReadParity => "hetzner-read-parity",
         }
     }
 
@@ -273,6 +279,18 @@ impl SchemaExportSource {
                 "get_template",
                 "search_templates",
                 "validate_workflow",
+            ],
+            Self::EecReadParity | Self::HetznerReadParity => &[
+                "get_workflow_sdk_reference",
+                "get_workflow_best_practices",
+                "validate_workflow",
+                "validate_node_config",
+                "search_projects",
+                "search_folders",
+                "list_workflow_tags",
+                "search_workflows",
+                "list_credentials",
+                "get_workflow_versions_diff",
             ],
         }
     }
@@ -319,10 +337,22 @@ impl HostRunOnceServerId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum HostRunOnceOperation {
+    #[serde(rename = "n8n.workflows.search")]
+    WorkflowsSearch,
+    #[serde(rename = "n8n.executions.search")]
+    ExecutionsSearch,
+    #[serde(rename = "n8n.structure.search")]
+    StructureSearch,
+    #[serde(rename = "n8n.audit.inspect")]
+    AuditInspect,
     #[serde(rename = "n8n.capabilities.inspect")]
     CapabilitiesInspect,
     #[serde(rename = "n8n.credentials.list")]
     CredentialsList,
+    #[serde(rename = "n8n.knowledge.query")]
+    OfficialKnowledge,
+    #[serde(rename = "n8n.validation.run")]
+    OfficialSdkValidation,
     #[serde(rename = "n8n.executions.get")]
     ExecutionsGet,
     #[serde(rename = "n8n.executions.diagnostics")]
@@ -339,6 +369,8 @@ enum HostRunOnceOperation {
     TagsList,
     #[serde(rename = "n8n.workflows.get")]
     WorkflowsGet,
+    #[serde(rename = "n8n.workflows.compare")]
+    WorkflowsCompare,
     #[serde(rename = "n8n.workflows.list")]
     WorkflowsList,
     #[serde(rename = "n8n.workflows.create_draft")]
@@ -364,8 +396,14 @@ enum HostRunOnceOperation {
 impl HostRunOnceOperation {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::WorkflowsSearch => "n8n.workflows.search",
+            Self::ExecutionsSearch => "n8n.executions.search",
+            Self::StructureSearch => "n8n.structure.search",
+            Self::AuditInspect => "n8n.audit.inspect",
             Self::CapabilitiesInspect => "n8n.capabilities.inspect",
             Self::CredentialsList => "n8n.credentials.list",
+            Self::OfficialKnowledge => "n8n.knowledge.query",
+            Self::OfficialSdkValidation => "n8n.validation.run",
             Self::ExecutionsGet => "n8n.executions.get",
             Self::ExecutionsDiagnostics => "n8n.executions.diagnostics",
             Self::ExecutionsList => "n8n.executions.list",
@@ -374,6 +412,7 @@ impl HostRunOnceOperation {
             Self::ProjectsList => "n8n.projects.list",
             Self::TagsList => "n8n.tags.list",
             Self::WorkflowsGet => "n8n.workflows.get",
+            Self::WorkflowsCompare => "n8n.workflows.compare",
             Self::WorkflowsList => "n8n.workflows.list",
             Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
             Self::WorkflowsUpdateDraft => "n8n.workflows.update_draft",
@@ -389,8 +428,14 @@ impl HostRunOnceOperation {
 
     fn parse(value: &str) -> Result<Self, AppError> {
         match value {
+            "n8n.workflows.search" => Ok(Self::WorkflowsSearch),
+            "n8n.executions.search" => Ok(Self::ExecutionsSearch),
+            "n8n.structure.search" => Ok(Self::StructureSearch),
+            "n8n.audit.inspect" => Ok(Self::AuditInspect),
             "n8n.capabilities.inspect" => Ok(Self::CapabilitiesInspect),
             "n8n.credentials.list" => Ok(Self::CredentialsList),
+            "n8n.knowledge.query" => Ok(Self::OfficialKnowledge),
+            "n8n.validation.run" => Ok(Self::OfficialSdkValidation),
             "n8n.executions.get" => Ok(Self::ExecutionsGet),
             "n8n.executions.diagnostics" => Ok(Self::ExecutionsDiagnostics),
             "n8n.executions.list" => Ok(Self::ExecutionsList),
@@ -399,6 +444,7 @@ impl HostRunOnceOperation {
             "n8n.projects.list" => Ok(Self::ProjectsList),
             "n8n.tags.list" => Ok(Self::TagsList),
             "n8n.workflows.get" => Ok(Self::WorkflowsGet),
+            "n8n.workflows.compare" => Ok(Self::WorkflowsCompare),
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
             "n8n.workflows.update_draft" => Ok(Self::WorkflowsUpdateDraft),
@@ -415,8 +461,14 @@ impl HostRunOnceOperation {
 
     const fn credential_purpose(self) -> BrokerCredentialPurpose {
         match self {
-            Self::CapabilitiesInspect => BrokerCredentialPurpose::OfficialMcp,
-            Self::CredentialsList
+            Self::CapabilitiesInspect
+            | Self::CredentialsList
+            | Self::OfficialKnowledge
+            | Self::OfficialSdkValidation
+            | Self::StructureSearch
+            | Self::WorkflowsSearch => BrokerCredentialPurpose::OfficialMcp,
+            Self::ExecutionsSearch
+            | Self::AuditInspect
             | Self::ExecutionsGet
             | Self::ExecutionsDiagnostics
             | Self::ExecutionsList
@@ -425,6 +477,7 @@ impl HostRunOnceOperation {
             | Self::ProjectsList
             | Self::TagsList
             | Self::WorkflowsGet
+            | Self::WorkflowsCompare
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
             | Self::WorkflowsUpdateDraft
@@ -436,6 +489,14 @@ impl HostRunOnceOperation {
             Self::WorkflowsUnarchive | Self::WorkflowsDeleteDisposable => {
                 BrokerCredentialPurpose::RestApi
             }
+        }
+    }
+
+    fn effective_credential_purpose(self, input: &Value) -> BrokerCredentialPurpose {
+        if self == Self::OfficialSdkValidation && input["subject"] == "remote_workflow" {
+            BrokerCredentialPurpose::RestApi
+        } else {
+            self.credential_purpose()
         }
     }
 }
@@ -999,10 +1060,426 @@ fn run_once(operation: &str) -> Result<Value, AppError> {
         .checked_add(STDIN_READ_TIMEOUT)
         .ok_or_else(|| AppError::new("input_read_timeout"))?;
     let bytes = read_input_until(io::stdin(), input_deadline)?;
+    if operation == "n8n.runtime.status" {
+        return runtime_status_from_bytes(&bytes);
+    }
+    if operation == "n8n.targets.resolve" {
+        return public_targets_resolve(&bytes);
+    }
     if matches!(operation, "n8n.knowledge.query" | "n8n.validation.run") {
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| AppError::new("invalid_input"))?;
+        if operation == "n8n.validation.run" && value["input"]["subject"] == "remote_workflow" {
+            let normalized = normalize_remote_validation_target(&bytes)?;
+            return run_once_from_bytes_at(
+                operation,
+                &normalized,
+                request_started_at,
+                execute_host_run_once,
+            );
+        }
+        if is_official_sdk_input(operation, &value["input"]) {
+            let normalized = normalize_official_sdk_target(&bytes)?;
+            return run_once_from_bytes_at(
+                operation,
+                &normalized,
+                request_started_at,
+                execute_host_run_once,
+            );
+        }
         return run_local_once_from_bytes(operation, &bytes, execute_local_run_once);
     }
     run_once_from_bytes_at(operation, &bytes, request_started_at, execute_host_run_once)
+}
+
+fn is_official_sdk_input(operation: &str, input: &Value) -> bool {
+    (operation == "n8n.knowledge.query"
+        && matches!(
+            input["action"].as_str(),
+            Some("sdk_reference" | "workflow_best_practices")
+        ))
+        || (operation == "n8n.validation.run"
+            && matches!(input["subject"].as_str(), Some("workflow_code" | "nodes")))
+}
+
+fn normalize_remote_validation_target(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
+    let mut value: Value =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let input = value["input"]
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let target = input
+        .remove("target")
+        .ok_or_else(|| AppError::new("exact_workflow_target_required"))?;
+    let target = target
+        .as_object()
+        .filter(|target| target.len() == 1)
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let uri = target
+        .get("resourceUri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::new("exact_workflow_target_required"))?;
+    let parsed = fcp_n8n::router::CanonicalResourceUri::parse(uri)
+        .map_err(|_| AppError::new("invalid_operation_input"))?;
+    if parsed.kind() != fcp_n8n::router::ResourceKind::Workflow {
+        return Err(AppError::new("exact_workflow_target_required"));
+    }
+    let server = parsed.server().to_string();
+    let encoded = parsed
+        .as_str()
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let id = percent_encoding::percent_decode_str(encoded)
+        .decode_utf8()
+        .map_err(|_| AppError::new("invalid_operation_input"))?
+        .into_owned();
+    if input.contains_key("id") {
+        return Err(AppError::new("conflicting_evidence"));
+    }
+    input.insert("id".into(), json!(id));
+    fcp_n8n::types::RemoteWorkflowValidationInput::parse(&Value::Object(input.clone()))
+        .map_err(AppError::new)?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_input"))?;
+    if object
+        .get("server_id")
+        .is_some_and(|existing| existing != &json!(server))
+    {
+        return Err(AppError::new("conflicting_evidence"));
+    }
+    object.insert("server_id".into(), json!(server));
+    serde_json::to_vec(&value).map_err(|_| AppError::new("invalid_input"))
+}
+
+fn normalize_public_read_target(
+    operation: HostRunOnceOperation,
+    bytes: &[u8],
+) -> Result<Vec<u8>, AppError> {
+    use fcp_n8n::router::{CanonicalResourceUri, ResourceKind, ServerId};
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    if !matches!(
+        operation,
+        HostRunOnceOperation::WorkflowsGet
+            | HostRunOnceOperation::WorkflowsCompare
+            | HostRunOnceOperation::WorkflowsSearch
+            | HostRunOnceOperation::ExecutionsGet
+            | HostRunOnceOperation::ExecutionsSearch
+            | HostRunOnceOperation::StructureSearch
+            | HostRunOnceOperation::CredentialsList
+            | HostRunOnceOperation::AuditInspect
+    ) {
+        return Ok(bytes.to_vec());
+    }
+    let refused = || AppError::new("invalid_operation_input");
+    let mut value: Value =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let input = value["input"].as_object_mut().ok_or_else(refused)?;
+    let Some(target) = input.remove("target") else {
+        return Ok(bytes.to_vec());
+    };
+    let target = target
+        .as_object()
+        .filter(|target| target.len() == 1)
+        .ok_or_else(refused)?;
+    let known_workflow = matches!(
+        operation,
+        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsCompare
+    );
+    let known_execution = operation == HostRunOnceOperation::ExecutionsGet;
+    let server = if known_workflow || known_execution {
+        let uri = target
+            .get("resourceUri")
+            .and_then(Value::as_str)
+            .ok_or_else(refused)?;
+        let parsed = CanonicalResourceUri::parse(uri).map_err(|_| refused())?;
+        if parsed.kind()
+            != if known_workflow {
+                ResourceKind::Workflow
+            } else {
+                ResourceKind::Execution
+            }
+        {
+            return Err(refused());
+        }
+        let segments = parsed
+            .as_str()
+            .split('/')
+            .skip(3)
+            .map(|segment| {
+                percent_encoding::percent_decode_str(segment)
+                    .decode_utf8()
+                    .map(std::borrow::Cow::into_owned)
+                    .map_err(|_| refused())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bindings = if known_workflow {
+            vec![("id", segments[1].clone())]
+        } else {
+            vec![
+                ("workflow_id", segments[1].clone()),
+                ("id", segments[3].clone()),
+            ]
+        };
+        for (key, id) in bindings {
+            if input.contains_key(key) {
+                return Err(AppError::new("conflicting_evidence"));
+            }
+            input.insert(key.into(), json!(id));
+        }
+        parsed.server()
+    } else {
+        ServerId::parse(
+            target
+                .get("server")
+                .and_then(Value::as_str)
+                .ok_or_else(refused)?,
+        )
+        .map_err(|_| refused())?
+    };
+    if server.is_local() || server.is_legacy() {
+        return Err(refused());
+    }
+    let object = value.as_object_mut().ok_or_else(refused)?;
+    if object
+        .get("server_id")
+        .is_some_and(|existing| existing != &json!(server.to_string()))
+    {
+        return Err(AppError::new("conflicting_evidence"));
+    }
+    object.insert("server_id".into(), json!(server.to_string()));
+    serde_json::to_vec(&value).map_err(|_| refused())
+}
+
+fn normalize_official_sdk_target(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
+    #[derive(Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublicSdkEnvelope {
+        #[serde(default)]
+        server_id: Option<HostRunOnceServerId>,
+        input: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        correlation_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Target {
+        server: HostRunOnceServerId,
+    }
+    let mut envelope: PublicSdkEnvelope =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let object = envelope
+        .input
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let target = object
+        .remove("target")
+        .map(serde_json::from_value::<Target>)
+        .transpose()
+        .map_err(|_| AppError::new("invalid_operation_input"))?;
+    let server = match (envelope.server_id, target) {
+        (Some(server), Some(target)) if server != target.server => {
+            return Err(AppError::new("conflicting_evidence"));
+        }
+        (_, Some(target)) => target.server,
+        (Some(server), None) => server,
+        (None, None) => return Err(AppError::new("server_required")),
+    };
+    envelope.server_id = Some(server);
+    serde_json::to_vec(&envelope).map_err(|_| AppError::new("invalid_input"))
+}
+
+fn runtime_status_from_bytes(bytes: &[u8]) -> Result<Value, AppError> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    let input: LocalRunOnceInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let fields = input
+        .input
+        .as_object()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if !fields.is_empty()
+        || input
+            .correlation_id
+            .as_ref()
+            .is_some_and(|id| Uuid::parse_str(id).is_err())
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    // A per-invocation wrapper cannot observe other supervisor sessions. Its
+    // existence, or a readable signed bundle, is not proof of global idleness.
+    Ok(json!({"idle":null,"activeRuns":null,"providers":[],
+        "observation":{"owner":"host","scope":"this_invocation","sessions":"not_collected","memory":"not_collected",
+            "reason":"shared_supervisor_observation_unavailable"}}))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PublicTarget {
+    server: Option<String>,
+    resource_uri: Option<String>,
+    project_id: Option<String>,
+    workflow_id: Option<String>,
+    execution_id: Option<String>,
+    #[serde(default)]
+    candidate_servers: Vec<String>,
+    #[serde(default)]
+    legacy_opt_in: bool,
+}
+
+fn public_targets_resolve(bytes: &[u8]) -> Result<Value, AppError> {
+    use fcp_n8n::router::ServerId;
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    let envelope: LocalRunOnceInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let input: PublicTarget = serde_json::from_value(envelope.input)
+        .map_err(|_| AppError::new("invalid_operation_input"))?;
+    if envelope
+        .correlation_id
+        .as_ref()
+        .is_some_and(|id| Uuid::parse_str(id).is_err())
+    {
+        return Err(AppError::new("invalid_correlation_id"));
+    }
+    if !input.candidate_servers.is_empty() {
+        if input.candidate_servers.len() > 3
+            || input.server.is_some()
+            || input.resource_uri.is_some()
+            || input
+                .candidate_servers
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != input.candidate_servers.len()
+        {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+        let mut candidates = Vec::with_capacity(input.candidate_servers.len());
+        for server in &input.candidate_servers {
+            let server = ServerId::parse(server)
+                .map_err(|error| AppError::new(target_error_code(error.code())))?;
+            if server.is_local() || (server.is_legacy() && !input.legacy_opt_in) {
+                return Err(AppError::new("invalid_operation_input"));
+            }
+            let mut exact = json!({"server":server.to_string(),"legacyOptIn":input.legacy_opt_in});
+            for (key, value) in [
+                ("projectId", &input.project_id),
+                ("workflowId", &input.workflow_id),
+                ("executionId", &input.execution_id),
+            ] {
+                if let Some(value) = value {
+                    exact[key] = json!(value);
+                }
+            }
+            let result = public_targets_resolve(
+                &serde_json::to_vec(&json!({"input":exact}))
+                    .map_err(|_| AppError::new("invalid_input"))?,
+            )?;
+            candidates.push(result["target"].clone());
+        }
+        // Candidate identities are not claims that the resource exists. No
+        // unrelated provider discovery is performed to resolve ambiguity.
+        if candidates.len() == 1 {
+            return Ok(json!({"resolution":"resolved","target":candidates.remove(0)}));
+        }
+        return Ok(json!({"resolution":"ambiguous","candidates":candidates}));
+    }
+    resolve_exact_public_target(input)
+}
+
+fn resolve_exact_public_target(input: PublicTarget) -> Result<Value, AppError> {
+    use fcp_n8n::router::{CanonicalResourceUri, ServerId};
+    let server = input
+        .server
+        .as_deref()
+        .map(ServerId::parse)
+        .transpose()
+        .map_err(|error| AppError::new(target_error_code(error.code())))?;
+    let mut resource = input
+        .resource_uri
+        .as_deref()
+        .map(CanonicalResourceUri::parse)
+        .transpose()
+        .map_err(|error| AppError::new(target_error_code(error.code())))?;
+    let ids = [&input.project_id, &input.workflow_id, &input.execution_id];
+    if ids
+        .into_iter()
+        .flatten()
+        .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if input.project_id.is_some() && (input.workflow_id.is_some() || input.execution_id.is_some())
+        || input.execution_id.is_some() && input.workflow_id.is_none()
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    if input.project_id.is_some() || input.workflow_id.is_some() {
+        let server = server.ok_or_else(|| AppError::new("identifier_provenance_required"))?;
+        let root = format!("fwc-n8n://{server}");
+        let derived = if let Some(project) = &input.project_id {
+            format!(
+                "{root}/projects/{}",
+                percent_encoding::utf8_percent_encode(project, percent_encoding::NON_ALPHANUMERIC)
+            )
+        } else {
+            let workflow = input
+                .workflow_id
+                .as_ref()
+                .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+            let workflow =
+                percent_encoding::utf8_percent_encode(workflow, percent_encoding::NON_ALPHANUMERIC);
+            input.execution_id.as_ref().map_or_else(
+                || format!("{root}/workflows/{workflow}"),
+                |execution| {
+                    format!(
+                        "{root}/workflows/{workflow}/executions/{}",
+                        percent_encoding::utf8_percent_encode(
+                            execution,
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    )
+                },
+            )
+        };
+        let derived = CanonicalResourceUri::parse(&derived)
+            .map_err(|error| AppError::new(target_error_code(error.code())))?;
+        if resource
+            .as_ref()
+            .is_some_and(|existing| existing != &derived)
+        {
+            return Err(AppError::new("conflicting_evidence"));
+        }
+        resource = Some(derived);
+    }
+    let query = TargetQuery {
+        server,
+        resource_uri: resource,
+        legacy_opt_in: input.legacy_opt_in,
+        ..TargetQuery::default()
+    };
+    let resolution = TargetResolver::resolve(&query)
+        .map_err(|error| AppError::new(target_error_code(error.code())))?;
+    let target = exact_target(&resolution)?;
+    let mut projected = json!({"server":target.server,"resourceUri":target.resource_uri});
+    for (key, value) in [
+        ("projectId", input.project_id),
+        ("workflowId", input.workflow_id),
+        ("executionId", input.execution_id),
+    ] {
+        if let Some(value) = value {
+            projected[key] = json!(value);
+        }
+    }
+    Ok(json!({"resolution":"resolved","target":projected}))
 }
 
 fn run_local_once_from_bytes<F>(
@@ -1034,6 +1511,17 @@ where
     if operation_input.contains_key("correlation_id") {
         return Err(AppError::new("invalid_operation_input"));
     }
+    let public_validation = operation == "n8n.validation.run"
+        && operation_input.get("subject").is_some_and(Value::is_string);
+    let public_local_knowledge = operation == "n8n.knowledge.query"
+        && operation_input.get("action").is_some_and(Value::is_string);
+    let public_knowledge_binding = Value::Object(operation_input.clone());
+    if public_local_knowledge {
+        operation_input = public_local_knowledge_input(&public_knowledge_binding)?;
+    }
+    if public_validation {
+        operation_input = public_local_validation_input(Value::Object(operation_input))?;
+    }
     let correlation_id = input
         .correlation_id
         .unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -1050,13 +1538,890 @@ where
         "input": Value::Object(operation_input),
     }))
     .map_err(|_| AppError::new("invalid_operation_input"))?;
-    dispatch(request).map_err(|error| error.with_correlation_id(request_correlation_id))
+    let response = dispatch(request)
+        .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?;
+    if public_validation {
+        project_local_validation_result(&response)
+            .map_err(|error| error.with_correlation_id(request_correlation_id))
+    } else if public_local_knowledge {
+        project_local_knowledge_result(&public_knowledge_binding, &response)
+            .map_err(|error| error.with_correlation_id(request_correlation_id))
+    } else {
+        Ok(response)
+    }
+}
+
+fn public_local_knowledge_input(input: &Value) -> Result<serde_json::Map<String, Value>, AppError> {
+    let malformed = || AppError::new("invalid_operation_input");
+    let object = input.as_object().ok_or_else(malformed)?;
+    if object.values().any(Value::is_null) {
+        return Err(malformed());
+    }
+    let action = input["action"].as_str().ok_or_else(malformed)?;
+    if action == "get_node" {
+        return public_local_get_node_input(input);
+    }
+    let allowed: &[&str] = match action {
+        "tool_documentation" => &["action", "toolName", "detail"],
+        "search_nodes" => &["action", "queries", "source", "includeExamples", "limit"],
+        "search_templates" => &["action", "query", "nodeTypes", "task", "metadata", "page"],
+        "get_template" => &["action", "templateId", "mode"],
+        _ => return Err(malformed()),
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(malformed());
+    }
+    let tagged = match action {
+        "tool_documentation" => public_tool_documentation_input(input)?,
+        "search_nodes" => {
+            let queries = input["queries"]
+                .as_array()
+                .filter(|queries| (1..=20).contains(&queries.len()))
+                .ok_or_else(malformed)?;
+            let mut seen = BTreeSet::new();
+            let mut calls = Vec::with_capacity(queries.len());
+            if input
+                .get("source")
+                .is_some_and(|source| !matches!(source.as_str(), Some("community" | "verified")))
+                || input
+                    .get("includeExamples")
+                    .is_some_and(|value| !value.is_boolean())
+            {
+                return Err(malformed());
+            }
+            let limit = input
+                .get("limit")
+                .map(|value| value.as_u64().ok_or_else(malformed))
+                .transpose()?
+                .unwrap_or(20);
+            if !(1..=20).contains(&limit) {
+                return Err(malformed());
+            }
+            for query in queries {
+                let query = query
+                    .as_str()
+                    .filter(|query| {
+                        !query.is_empty()
+                            && query.len() <= 1024
+                            && !query.chars().any(char::is_control)
+                    })
+                    .ok_or_else(malformed)?;
+                if !seen.insert(query) {
+                    return Err(malformed());
+                }
+                let mut call = json!({"query":query,"limit":limit,"includeExamples":input.get("includeExamples").cloned().unwrap_or(json!(false))});
+                if let Some(source) = input.get("source") {
+                    call["source"] = source.clone();
+                }
+                calls.push(call);
+            }
+            json!({"search_nodes_batch":calls})
+        }
+        "get_template" => {
+            let id = input["templateId"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .ok_or_else(malformed)?;
+            let mode = input["mode"]
+                .as_str()
+                .filter(|mode| matches!(*mode, "nodes_only" | "structure" | "full"))
+                .ok_or_else(malformed)?;
+            json!({"get_template":{"templateId":id,"mode":mode}})
+        }
+        "search_templates" => {
+            return public_template_search_input(input);
+        }
+        _ => return Err(malformed()),
+    };
+    json!({"action":tagged})
+        .as_object()
+        .cloned()
+        .ok_or_else(malformed)
+}
+
+fn public_tool_documentation_input(input: &Value) -> Result<Value, AppError> {
+    let malformed = || AppError::new("invalid_operation_input");
+    let tool = input["toolName"]
+        .as_str()
+        .filter(|tool| {
+            matches!(
+                *tool,
+                "overview"
+                    | "tools_documentation"
+                    | "search_nodes"
+                    | "get_node"
+                    | "search_templates"
+                    | "get_template"
+                    | "validate_node"
+                    | "validate_workflow"
+            )
+        })
+        .ok_or_else(malformed)?;
+    let depth = match input
+        .get("detail")
+        .map(|value| value.as_str().ok_or_else(malformed))
+        .transpose()?
+        .unwrap_or("standard")
+    {
+        "minimal" | "standard" => "essentials",
+        "full" => "full",
+        _ => return Err(malformed()),
+    };
+    Ok(json!({"tool_documentation":{"topic":tool,"depth":depth}}))
+}
+
+fn public_template_search_input(input: &Value) -> Result<serde_json::Map<String, Value>, AppError> {
+    let malformed = || AppError::new("invalid_operation_input");
+    let object = input.as_object().ok_or_else(malformed)?;
+    let selectors = ["query", "nodeTypes", "task", "metadata"]
+        .into_iter()
+        .filter(|key| object.contains_key(*key))
+        .collect::<Vec<_>>();
+    if selectors.len() != 1 {
+        return Err(malformed());
+    }
+    let mut arguments = serde_json::Map::new();
+    let mode = match selectors[0] {
+        "query" => "keyword",
+        "nodeTypes" => "by_nodes",
+        "task" => "by_task",
+        "metadata" => "by_metadata",
+        _ => return Err(malformed()),
+    };
+    arguments.insert("searchMode".into(), json!(mode));
+    if selectors[0] == "metadata" {
+        let metadata = input["metadata"]
+            .as_object()
+            .filter(|metadata| !metadata.is_empty())
+            .ok_or_else(malformed)?;
+        for (key, value) in metadata {
+            if !matches!(
+                key.as_str(),
+                "category"
+                    | "complexity"
+                    | "maxSetupMinutes"
+                    | "minSetupMinutes"
+                    | "requiredService"
+                    | "targetAudience"
+            ) {
+                return Err(malformed());
+            }
+            arguments.insert(key.clone(), value.clone());
+        }
+    } else {
+        arguments.insert(selectors[0].into(), input[selectors[0]].clone());
+    }
+    let page = input
+        .get("page")
+        .map(|page| page.as_object().ok_or_else(malformed))
+        .transpose()?;
+    if page.is_some_and(|page| {
+        page.keys()
+            .any(|key| !matches!(key.as_str(), "limit" | "offset"))
+    }) {
+        return Err(malformed());
+    }
+    let limit = page
+        .and_then(|page| page.get("limit"))
+        .map(|value| value.as_u64().ok_or_else(malformed))
+        .transpose()?
+        .unwrap_or(20);
+    let offset = page
+        .and_then(|page| page.get("offset"))
+        .map(|value| value.as_u64().ok_or_else(malformed))
+        .transpose()?
+        .unwrap_or(0);
+    if !(1..=100).contains(&limit) || offset > 2000 {
+        return Err(malformed());
+    }
+    arguments.insert("limit".into(), json!(limit));
+    arguments.insert("offset".into(), json!(offset));
+    json!({"action":{"search_templates":arguments}})
+        .as_object()
+        .cloned()
+        .ok_or_else(malformed)
+}
+
+fn local_knowledge_native_responses(response: &Value) -> Result<&[Value], AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if response["schema"] != LOCAL_RUN_ONCE_SCHEMA
+        || response["provider"] != "local_mcp"
+        || response["response"]["operation"] != "knowledge_query"
+        || response["response"]["result"]["status"] != "Completed"
+        || !response["response"]["result"]["teardown_error_code"].is_null()
+    {
+        return Err(malformed());
+    }
+    let responses = response["response"]["result"]["responses"]
+        .as_array()
+        .ok_or_else(malformed)?;
+    if responses.is_empty()
+        || responses.len() > 20
+        || responses
+            .iter()
+            .any(|response| response.get("isError").is_some_and(|value| value != false))
+    {
+        return Err(malformed());
+    }
+    Ok(responses)
+}
+
+fn local_knowledge_text(native: &Value) -> Result<&str, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    let content = native["content"]
+        .as_array()
+        .filter(|content| content.len() == 1 && content[0]["type"] == "text")
+        .ok_or_else(malformed)?;
+    content[0]["text"]
+        .as_str()
+        .filter(|text| {
+            text.len() <= 256 * 1024
+                && !text.chars().any(|character| {
+                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                })
+        })
+        .ok_or_else(malformed)
+}
+
+fn local_knowledge_json(native: &Value) -> Result<Value, AppError> {
+    let value: Value = serde_json::from_str(local_knowledge_text(native)?)
+        .map_err(|_| AppError::new("knowledge_provider_response_invalid"))?;
+    if native
+        .get("structuredContent")
+        .is_some_and(|structured| structured != &value)
+    {
+        return Err(AppError::new("knowledge_provider_response_invalid"));
+    }
+    Ok(value)
+}
+
+fn project_local_knowledge_result(input: &Value, response: &Value) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    let action = input["action"].as_str().ok_or_else(malformed)?;
+    if action == "get_node" {
+        return project_local_get_node_result(input, response);
+    }
+    let responses = local_knowledge_native_responses(response)?;
+    let data = match action {
+        "tool_documentation" => {
+            if responses.len() != 1 {
+                return Err(malformed());
+            }
+            let documentation = local_knowledge_text(&responses[0])?;
+            if documentation.is_empty()
+                || responses[0]
+                    .get("structuredContent")
+                    .is_some_and(|value| value.as_str() != Some(documentation))
+            {
+                return Err(malformed());
+            }
+            json!({"toolName":input["toolName"],"documentation":documentation,
+                "digest":format!("sha256:{}",hex::encode(Sha256::digest(documentation.as_bytes())))})
+        }
+        "search_nodes" => {
+            let queries = input["queries"].as_array().ok_or_else(malformed)?;
+            if responses.len() != queries.len() {
+                return Err(malformed());
+            }
+            let mut nodes = BTreeMap::new();
+            for (response, query) in responses.iter().zip(queries) {
+                let native = local_knowledge_json(response)?;
+                if native["query"] != *query {
+                    return Err(malformed());
+                }
+                let rows = native["results"]
+                    .as_array()
+                    .filter(|rows| rows.len() <= 20)
+                    .ok_or_else(malformed)?;
+                for row in rows {
+                    let kind = row["nodeType"]
+                        .as_str()
+                        .filter(|kind| {
+                            !kind.is_empty()
+                                && kind.len() <= 256
+                                && !kind.chars().any(char::is_control)
+                        })
+                        .ok_or_else(malformed)?;
+                    let display = row["displayName"]
+                        .as_str()
+                        .filter(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+                        .ok_or_else(malformed)?;
+                    let source = if row["isVerified"] == true {
+                        "verified"
+                    } else if row["isCommunity"] == true {
+                        "community"
+                    } else {
+                        "core"
+                    };
+                    if input.get("source").is_some_and(|expected| {
+                        expected != source && !(expected == "community" && source == "verified")
+                    }) {
+                        return Err(malformed());
+                    }
+                    let mut node = json!({"resourceUri":format!("fwc-n8n://local/nodes/{}",encode_host_resource_segment(kind)),"nodeType":kind,"displayName":display,"source":source});
+                    if let Some(examples) = row.get("examples") {
+                        node["exampleCount"] = json!(
+                            examples
+                                .as_array()
+                                .filter(|examples| examples.len() <= 100)
+                                .ok_or_else(malformed)?
+                                .len()
+                        );
+                    }
+                    if nodes
+                        .insert(kind.to_owned(), node.clone())
+                        .is_some_and(|previous| previous != node)
+                    {
+                        return Err(malformed());
+                    }
+                }
+            }
+            json!({"nodes":nodes.into_values().collect::<Vec<_>>()})
+        }
+        "search_templates" => project_local_template_search(input, responses)?,
+        "get_template" => project_local_template(
+            input,
+            &local_knowledge_json(
+                responses
+                    .first()
+                    .filter(|_| responses.len() == 1)
+                    .ok_or_else(malformed)?,
+            )?,
+        )?,
+        _ => return Err(malformed()),
+    };
+    Ok(json!({"action":action,"data":data}))
+}
+
+fn project_local_template_search(input: &Value, responses: &[Value]) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if responses.len() != 1 {
+        return Err(malformed());
+    }
+    let native = local_knowledge_json(&responses[0])?;
+    let rows = native["items"]
+        .as_array()
+        .filter(|rows| rows.len() <= 100)
+        .ok_or_else(malformed)?;
+    let total = native["total"].as_u64().ok_or_else(malformed)?;
+    let mut templates = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row["id"]
+            .as_u64()
+            .filter(|id| *id > 0)
+            .ok_or_else(malformed)?;
+        let name = row["name"]
+            .as_str()
+            .filter(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+            .ok_or_else(malformed)?;
+        let mut template =
+            json!({"resourceUri":format!("fwc-n8n://local/templates/{id}"),"id":id,"name":name});
+        if let Some(description) = row.get("description") {
+            template["description"] = description
+                .as_str()
+                .filter(|description| description.len() <= 8192)
+                .map(json_string)
+                .ok_or_else(malformed)?;
+        }
+        if let Some(nodes) = row.get("nodeTypes").or_else(|| row.get("nodes")) {
+            let nodes = nodes
+                .as_array()
+                .filter(|nodes| {
+                    nodes.len() <= 1000
+                        && nodes.iter().all(|node| {
+                            node.as_str().is_some_and(|node| {
+                                node.len() <= 256 && !node.chars().any(char::is_control)
+                            })
+                        })
+                })
+                .ok_or_else(malformed)?;
+            template["nodeTypes"] = json!(nodes);
+        }
+        templates.push(template);
+    }
+    let limit = input
+        .pointer("/page/limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20);
+    let offset = input
+        .pointer("/page/offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if rows.len() as u64 > limit || (!rows.is_empty() && total < offset + rows.len() as u64) {
+        return Err(malformed());
+    }
+    Ok(
+        json!({"templates":templates,"page":{"limit":limit,"offset":offset,"returnedCount":rows.len(),"total":total,"hasMore":offset + (rows.len() as u64) < total}}),
+    )
+}
+
+fn json_string(value: &str) -> Value {
+    Value::String(value.to_owned())
+}
+
+fn project_local_template(input: &Value, native: &Value) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if native["mode"] != input["mode"] || native["template"]["id"] != input["templateId"] {
+        return Err(malformed());
+    }
+    let source = &native["template"];
+    let name = source["name"]
+        .as_str()
+        .filter(|name| name.len() <= 1024 && !name.chars().any(char::is_control))
+        .ok_or_else(malformed)?;
+    let mode = input["mode"].as_str().ok_or_else(malformed)?;
+    let graph = if mode == "full" {
+        &source["workflow"]
+    } else {
+        source
+    };
+    let nodes = graph["nodes"]
+        .as_array()
+        .filter(|nodes| nodes.len() <= 1000)
+        .ok_or_else(malformed)?;
+    let mut safe_nodes = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let object = node.as_object().ok_or_else(malformed)?;
+        let mut safe = serde_json::Map::new();
+        for field in ["id", "name", "type"] {
+            if let Some(value) = object.get(field) {
+                let value = value
+                    .as_str()
+                    .filter(|value| value.len() <= 1024 && !value.chars().any(char::is_control))
+                    .ok_or_else(malformed)?;
+                safe.insert(field.into(), json!(value));
+            }
+        }
+        if !safe.contains_key("type") || !safe.contains_key("name") {
+            return Err(malformed());
+        }
+        if let Some(position) = node.get("position") {
+            safe.insert(
+                "position".into(),
+                json!(
+                    position
+                        .as_array()
+                        .filter(
+                            |position| position.len() == 2 && position.iter().all(Value::is_number)
+                        )
+                        .ok_or_else(malformed)?
+                ),
+            );
+        }
+        if let Some(parameters) = node.get("parameters") {
+            safe.insert(
+                "parametersDigest".into(),
+                json!(format!(
+                    "sha256:{}",
+                    hex::encode(Sha256::digest(
+                        serde_json::to_vec(parameters).map_err(|_| malformed())?
+                    ))
+                )),
+            );
+        }
+        safe_nodes.push(Value::Object(safe));
+    }
+    let mut template = json!({"resourceUri":format!("fwc-n8n://local/templates/{}",input["templateId"].as_u64().ok_or_else(malformed)?),
+        "id":input["templateId"],"name":name,"mode":mode,
+        "digest":format!("sha256:{}",hex::encode(Sha256::digest(serde_json::to_vec(source).map_err(|_| malformed())?)))});
+    if mode == "nodes_only" {
+        template["nodes"] = json!(safe_nodes);
+    } else {
+        let connections = graph["connections"].as_object().ok_or_else(malformed)?;
+        template["graph"] = json!({"nodes":safe_nodes,"connectionsDigest":format!("sha256:{}",hex::encode(Sha256::digest(serde_json::to_vec(connections).map_err(|_| malformed())?)))});
+    }
+    Ok(json!({"template":template}))
+}
+
+fn public_local_get_node_input(input: &Value) -> Result<serde_json::Map<String, Value>, AppError> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "action"
+                | "nodeType"
+                | "mode"
+                | "detail"
+                | "propertyQuery"
+                | "fromVersion"
+                | "toVersion"
+        )
+    }) || input["action"] != "get_node"
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let mut arguments = object.clone();
+    arguments.remove("action");
+    arguments.entry("mode").or_insert(json!("info"));
+    arguments.entry("detail").or_insert(json!("standard"));
+    if arguments.values().any(Value::is_null) {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let mode = arguments["mode"]
+        .as_str()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    let has_from = arguments.contains_key("fromVersion");
+    let has_to = arguments.contains_key("toVersion");
+    let has_query = arguments.contains_key("propertyQuery");
+    if !matches!(
+        mode,
+        "info" | "docs" | "search_properties" | "versions" | "compare" | "breaking" | "migrations"
+    ) || matches!(mode, "info" | "docs" | "versions" | "search_properties")
+        && (has_from || has_to)
+        || (mode == "search_properties") != has_query
+        || matches!(mode, "compare" | "breaking" | "migrations") && !has_from
+        || mode == "migrations" && !has_to
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    json!({"action":{"get_node":arguments}})
+        .as_object()
+        .cloned()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))
+}
+
+fn project_local_get_node_result(input: &Value, response: &Value) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if response["schema"] != LOCAL_RUN_ONCE_SCHEMA
+        || response["provider"] != "local_mcp"
+        || response["response"]["operation"] != "knowledge_query"
+        || response["response"]["result"]["status"] != "Completed"
+        || !response["response"]["result"]["teardown_error_code"].is_null()
+    {
+        return Err(malformed());
+    }
+    let responses = response["response"]["result"]["responses"]
+        .as_array()
+        .ok_or_else(malformed)?;
+    if responses.len() != 1
+        || responses[0]
+            .get("isError")
+            .is_some_and(|value| value != false)
+    {
+        return Err(malformed());
+    }
+    let content = responses[0]["content"].as_array().ok_or_else(malformed)?;
+    if content.len() != 1 || content[0]["type"] != "text" {
+        return Err(malformed());
+    }
+    let text = content[0]["text"]
+        .as_str()
+        .filter(|text| text.len() <= 256 * 1024)
+        .ok_or_else(malformed)?;
+    let native: Value = serde_json::from_str(text).map_err(|_| malformed())?;
+    if responses[0]
+        .get("structuredContent")
+        .is_some_and(|value| value != &native)
+    {
+        return Err(malformed());
+    }
+    let normalize = |name: &str| {
+        name.strip_prefix("n8n-nodes-base.")
+            .map(|tail| format!("nodes-base.{tail}"))
+            .or_else(|| {
+                name.strip_prefix("@n8n/n8n-nodes-langchain.")
+                    .map(|tail| format!("nodes-langchain.{tail}"))
+            })
+            .or_else(|| {
+                name.strip_prefix("n8n-nodes-langchain.")
+                    .map(|tail| format!("nodes-langchain.{tail}"))
+            })
+            .unwrap_or_else(|| name.to_owned())
+    };
+    let requested = input["nodeType"].as_str().ok_or_else(malformed)?;
+    if normalize(native["nodeType"].as_str().ok_or_else(malformed)?) != normalize(requested) {
+        return Err(malformed());
+    }
+    let detail = input
+        .get("detail")
+        .cloned()
+        .unwrap_or_else(|| json!("standard"));
+    let mode = input["mode"].as_str().unwrap_or("info");
+    validate_local_node_versions(input, &native, mode)?;
+    project_bound_local_node(&native, requested, &detail, mode)
+}
+
+fn validate_local_node_versions(input: &Value, native: &Value, mode: &str) -> Result<(), AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if matches!(mode, "versions" | "compare" | "breaking" | "migrations") {
+        if !native["available"].is_boolean() {
+            return Err(malformed());
+        }
+        let (count, rows) = match mode {
+            "versions" => ("totalVersions", "versions"),
+            "breaking" => ("totalBreakingChanges", "changes"),
+            "migrations" => ("autoMigratableChanges", "migrations"),
+            _ => ("totalChanges", "changes"),
+        };
+        let count = native[count]
+            .as_u64()
+            .filter(|count| *count <= 1000)
+            .ok_or_else(malformed)?;
+        let rows = native[rows].as_array().ok_or_else(malformed)?;
+        if count != rows.len() as u64 {
+            return Err(malformed());
+        }
+        for key in ["fromVersion", "toVersion"] {
+            if let Some(requested) = input.get(key) {
+                // The local catalog normalizes numeric node versions. This
+                // binds version selectors, not arbitrary provider field values.
+                let version = |value: &Value| {
+                    value
+                        .as_str()
+                        .filter(|text| {
+                            !text.is_empty()
+                                && text.len() <= 32
+                                && text
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                        })
+                        .and_then(|text| text.parse::<f64>().ok())
+                        .filter(|number| number.is_finite() && *number > 0.0)
+                };
+                let requested = version(requested).ok_or_else(malformed)?;
+                if version(&native[key]) != Some(requested) {
+                    return Err(malformed());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn project_bound_local_node(
+    native: &Value,
+    requested: &str,
+    detail: &Value,
+    mode: &str,
+) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    let mut node = json!({"resourceUri":format!("fwc-n8n://local/nodes/{}",encode_host_resource_segment(requested)),"nodeType":requested,"detail":detail});
+    if mode == "docs" {
+        node["documentation"] = native
+            .get("documentation")
+            .filter(|value| value.is_string())
+            .cloned()
+            .ok_or_else(malformed)?;
+    } else {
+        let mut definition = serde_json::Map::new();
+        for key in [
+            "displayName",
+            "description",
+            "category",
+            "version",
+            "available",
+            "versionInfo",
+            "totalVersions",
+            "versions",
+            "requiredProperties",
+            "commonProperties",
+            "properties",
+            "operations",
+            "inputs",
+            "outputs",
+            "matches",
+            "fromVersion",
+            "toVersion",
+            "totalChanges",
+            "totalBreakingChanges",
+            "autoMigratableChanges",
+            "noActionRequired",
+            "requiresManualMigration",
+            "upgradeSafe",
+            "changes",
+            "migrations",
+        ] {
+            if let Some(value) = native.get(key) {
+                definition.insert(key.into(), project_catalog_metadata(value, 0)?);
+            }
+        }
+        if definition.is_empty() {
+            return Err(malformed());
+        }
+        node["definition"] = Value::Object(definition);
+    }
+    Ok(json!({"action":"get_node","data":{"node":node}}))
+}
+
+fn project_catalog_metadata(value: &Value, depth: usize) -> Result<Value, AppError> {
+    if depth > 12 {
+        return Err(AppError::new("knowledge_provider_response_invalid"));
+    }
+    match value {
+        Value::Array(items) => {
+            if items.len() > 1000 {
+                return Err(AppError::new("knowledge_provider_response_invalid"));
+            }
+            items
+                .iter()
+                .map(|item| project_catalog_metadata(item, depth + 1))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Value::Array)
+        }
+        Value::Object(object) => {
+            if object.len() > 256 {
+                return Err(AppError::new("knowledge_provider_response_invalid"));
+            }
+            let mut projected = serde_json::Map::new();
+            for (key, value) in object {
+                if key == "displayOptions" {
+                    projected.insert(key.clone(), project_catalog_display_options(value)?);
+                } else if matches!(key.as_str(), "default" | "oldValue" | "newValue") {
+                    let bytes = serde_json::to_vec(value)
+                        .map_err(|_| AppError::new("knowledge_provider_response_invalid"))?;
+                    projected.insert(
+                        format!("{key}Digest"),
+                        json!(format!("sha256:{}", hex::encode(Sha256::digest(bytes)))),
+                    );
+                } else if matches!(
+                    key.as_str(),
+                    "name"
+                        | "displayName"
+                        | "description"
+                        | "type"
+                        | "version"
+                        | "isCurrent"
+                        | "available"
+                        | "required"
+                        | "options"
+                        | "value"
+                        | "displayOptions"
+                        | "show"
+                        | "hide"
+                        | "path"
+                        | "property"
+                        | "changeType"
+                        | "isBreaking"
+                        | "severity"
+                        | "migrationHint"
+                        | "autoMigratable"
+                        | "source"
+                        | "hasBreakingChanges"
+                        | "breakingChangesCount"
+                        | "deprecatedProperties"
+                        | "addedProperties"
+                        | "currentVersion"
+                        | "totalVersions"
+                        | "hasVersionHistory"
+                ) {
+                    projected.insert(key.clone(), project_catalog_metadata(value, depth + 1)?);
+                }
+            }
+            Ok(Value::Object(projected))
+        }
+        Value::String(text)
+            if text.len() > 64 * 1024
+                || text.chars().any(|character| {
+                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                }) =>
+        {
+            Err(AppError::new("knowledge_provider_response_invalid"))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// Public node-definition conditions are schema metadata, not node parameters.
+/// Retain their property bindings instead of dropping dynamic names via the
+/// general metadata allowlist. Unknown shapes refuse rather than appearing empty.
+fn project_catalog_display_options(value: &Value) -> Result<Value, AppError> {
+    let refused = || AppError::new("knowledge_provider_response_invalid");
+    let object = value
+        .as_object()
+        .filter(|object| object.len() <= 2)
+        .ok_or_else(refused)?;
+    let mut result = serde_json::Map::new();
+    for (kind, conditions) in object {
+        if !matches!(kind.as_str(), "show" | "hide") {
+            return Err(refused());
+        }
+        let conditions = conditions
+            .as_object()
+            .filter(|object| object.len() <= 64)
+            .ok_or_else(refused)?;
+        let mut bound = serde_json::Map::new();
+        for (property, values) in conditions {
+            if property.is_empty() || property.len() > 256 || property.chars().any(char::is_control)
+            {
+                return Err(refused());
+            }
+            let values = values
+                .as_array()
+                .filter(|values| values.len() <= 100)
+                .ok_or_else(refused)?;
+            if values.iter().any(|value| match value {
+                Value::Null | Value::Bool(_) | Value::Number(_) => false,
+                Value::String(text) => text.len() > 1024 || text.chars().any(char::is_control),
+                _ => true,
+            }) {
+                return Err(refused());
+            }
+            bound.insert(property.clone(), json!(values));
+        }
+        result.insert(kind.clone(), Value::Object(bound));
+    }
+    Ok(Value::Object(result))
+}
+
+/// Interpret a completed MCP validation result without exposing native text,
+/// node names, details, suggestions or transport lifecycle internals.
+fn project_local_validation_result(envelope: &Value) -> Result<Value, AppError> {
+    let malformed = || AppError::new("validation_provider_response_invalid");
+    if envelope["schema"] != LOCAL_RUN_ONCE_SCHEMA
+        || envelope["provider"] != "local_mcp"
+        || envelope["response"]["operation"] != "validation_run"
+    {
+        return Err(malformed());
+    }
+    let result = &envelope["response"]["result"];
+    if result["status"] != "Completed" || !result["teardown_error_code"].is_null() {
+        return Err(AppError::new("local_provider_failed"));
+    }
+    let responses = result["responses"].as_array().ok_or_else(malformed)?;
+    if responses.len() != 1 {
+        return Err(malformed());
+    }
+    fcp_host::project_local_n8n_validation_call(&responses[0]).map_err(|_| malformed())
+}
+
+/// Translate the public graph contract into the fixed local JSON validator.
+/// SDK source is deliberately never treated as a graph or evaluated here.
+fn public_local_validation_input(input: Value) -> Result<serde_json::Map<String, Value>, AppError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GraphValidation {
+        subject: String,
+        graph: Value,
+        #[serde(default)]
+        profile: Option<String>,
+    }
+    let input: GraphValidation =
+        serde_json::from_value(input).map_err(|_| AppError::new("invalid_operation_input"))?;
+    if input.subject != "graph" || !input.graph.is_object() {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    let profile = match input.profile.as_deref().unwrap_or("runtime") {
+        "minimal" => "minimal",
+        "runtime" => "runtime",
+        "ai_friendly" => "ai-friendly",
+        "strict" => "strict",
+        _ => return Err(AppError::new("invalid_operation_input")),
+    };
+    json!({"subject": {"workflow": {"workflow": input.graph, "options": {
+        "validateNodes": true, "validateConnections": true,
+        "validateExpressions": true, "profile": profile
+    }}}})
+    .as_object()
+    .cloned()
+    .ok_or_else(|| AppError::new("invalid_operation_input"))
 }
 
 fn execute_local_run_once(request: LocalN8nDispatchRequest) -> Result<Value, AppError> {
-    let bundle = fwc_n8n_bundle::verify_current_release_bundle_for_bridge()
+    let proof = fcp_host::n8n_release_read::verify_signed_local_provider_current()
         .map_err(|_| AppError::new("bundle_unavailable"))?;
-    let provider = LocalMcpProvider::new(bundle.local_mcp_policy().clone())
+    let provider = LocalMcpProvider::from_verified_signed_current(proof)
         .map_err(|_| AppError::new("local_provider_policy_invalid"))?;
     let dispatcher = LocalN8nDispatcher::new(provider);
     let response = dispatcher
@@ -1483,6 +2848,21 @@ where
     )
 }
 
+fn apply_public_read_defaults(
+    operation: HostRunOnceOperation,
+    input: &mut Value,
+) -> Result<(), AppError> {
+    if operation == HostRunOnceOperation::WorkflowsGet {
+        let object = input
+            .as_object_mut()
+            .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+        object.entry("version").or_insert(json!("draft"));
+        object.entry("detail").or_insert(json!("standard"));
+        object.entry("includeCode").or_insert(json!(false));
+    }
+    Ok(())
+}
+
 fn run_once_from_bytes_at_with_receipt_io<F, P>(
     operation: &str,
     bytes: &[u8],
@@ -1496,7 +2876,9 @@ where
     P: FnOnce(&File, &str, &ExecuteWrapperReceipt) -> Result<(), AppError>,
 {
     let operation = HostRunOnceOperation::parse(operation)?;
-    let input = parse_host_run_once_input(bytes)?;
+    let normalized = normalize_public_read_target(operation, bytes)?;
+    let mut input = parse_host_run_once_input(&normalized)?;
+    apply_public_read_defaults(operation, &mut input.input)?;
     let is_execute = operation == HostRunOnceOperation::WorkflowsExecute;
     let early_execute_correlation_id = if is_execute {
         validated_execute_receipt_correlation(&input)
@@ -3188,7 +4570,9 @@ fn execute_host_run_once(
         None
     };
     let mut dispatch_provider = || -> Result<Value, AppError> {
-        let credential_purpose = envelope.operation.credential_purpose();
+        let credential_purpose = envelope
+            .operation
+            .effective_credential_purpose(&envelope.input);
         let credential =
             broker_credential_for(envelope.server_id, credential_purpose, request_deadline_at)?;
 
@@ -3206,7 +4590,7 @@ fn execute_host_run_once(
                     .map(|correlation_id| correlation_id.to_string()),
             )
         })?;
-        normalize_host_run_once_response(operation, server_id, response)
+        decode_host_read_response(operation, server_id, &envelope.input, response)
     };
 
     if mcp_access_reconcile {
@@ -3220,6 +4604,31 @@ fn execute_host_run_once(
     } else {
         dispatch_provider()
     }
+}
+
+fn decode_host_read_response(
+    operation: HostRunOnceOperation,
+    server_id: HostRunOnceServerId,
+    input: &Value,
+    response: Value,
+) -> Result<Value, AppError> {
+    if operation == HostRunOnceOperation::CredentialsList {
+        return decode_official_credentials_response(server_id, input, response);
+    }
+    if operation == HostRunOnceOperation::StructureSearch {
+        return decode_official_structure_response(server_id, input, response);
+    }
+    if operation == HostRunOnceOperation::WorkflowsSearch {
+        return decode_official_workflow_search_response(server_id, input, response);
+    }
+    if matches!(
+        operation,
+        HostRunOnceOperation::OfficialKnowledge | HostRunOnceOperation::OfficialSdkValidation
+    ) && input["subject"] != "remote_workflow"
+    {
+        return decode_official_sdk_response(server_id, operation, input, response);
+    }
+    normalize_host_run_once_response(operation, server_id, response)
 }
 
 trait McpAccessLedgerPort {
@@ -3326,6 +4735,388 @@ fn replay_mcp_access_response(receipt: &Value) -> Value {
             "receipt": receipt,
         }
     })
+}
+
+fn decode_official_workflow_search_response(
+    server: HostRunOnceServerId,
+    input: &Value,
+    mut response: Value,
+) -> Result<Value, AppError> {
+    fcp_host::official_n8n_workflow_search_arguments(input).map_err(AppError::new)?;
+    let invalid = || AppError::new("official_workflow_search_response_invalid");
+    if response["status"] != "ok" || response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(AppError::new("official_workflow_search_provider_failed"));
+    }
+    let result = response["result"].as_object().ok_or_else(invalid)?;
+    if result.len() != 3
+        || result.get("serverId").and_then(Value::as_str) != Some(server.as_str())
+        || result["action"] != "workflows"
+    {
+        return Err(invalid());
+    }
+    let data = result
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    let rows = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    if data.len() != 2
+        || rows.len() > 200
+        || data["page"]["returnedCount"].as_u64() != Some(rows.len() as u64)
+        || data["page"]["total"].as_u64() != Some(rows.len() as u64)
+        || data["page"]["completeness"] != "complete"
+        || data["page"]["continuation"] != "unavailable"
+        || data["page"]["limit"] != 200
+    {
+        return Err(AppError::new(
+            "official_workflow_complete_snapshot_required",
+        ));
+    }
+    let records = bound_official_workflow_rows(server, input, rows)?;
+    let search = fcp_n8n::types::MetadataSearch::parse("n8n.workflows.search", input)
+        .map_err(AppError::new)?;
+    response["result"] =
+        fcp_n8n::connector::project_official_workflow_search(&search, records, server.as_str())
+            .map_err(|_| invalid())?;
+    Ok(response)
+}
+
+fn bound_official_workflow_rows(
+    server: HostRunOnceServerId,
+    input: &Value,
+    rows: &[Value],
+) -> Result<Vec<Value>, AppError> {
+    let invalid = || AppError::new("official_workflow_search_response_invalid");
+    let mut records = Vec::new();
+    for row in rows {
+        let object = row.as_object().ok_or_else(invalid)?;
+        let allowed = [
+            "id",
+            "name",
+            "resourceUri",
+            "active",
+            "availableInMCP",
+            "createdAt",
+            "updatedAt",
+            "parentFolderId",
+            "tags",
+        ];
+        if object.len() != allowed.len()
+            || object.keys().any(|key| !allowed.contains(&key.as_str()))
+        {
+            return Err(invalid());
+        }
+        for key in ["id", "name", "createdAt", "updatedAt"] {
+            if row[key].as_str().is_none_or(|text| {
+                text.is_empty() || text.len() > 256 || text.chars().any(char::is_control)
+            }) {
+                return Err(invalid());
+            }
+        }
+        let id = row["id"].as_str().ok_or_else(invalid)?;
+        if row["resourceUri"]
+            != format!(
+                "fwc-n8n://{}/workflows/{}",
+                server.as_str(),
+                percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+            )
+            || !row["active"].is_boolean()
+            || !row["availableInMCP"].is_boolean()
+            || !(row["parentFolderId"].is_null()
+                || row["parentFolderId"].as_str().is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+                }))
+        {
+            return Err(invalid());
+        }
+        let tags = row["tags"]
+            .as_array()
+            .filter(|tags| tags.len() <= 100)
+            .ok_or_else(invalid)?;
+        for tag in tags {
+            if tag.as_object().is_none_or(|object| object.len() != 2)
+                || ["id", "name"].iter().any(|key| {
+                    tag[*key].as_str().is_none_or(|text| {
+                        text.is_empty() || text.len() > 256 || text.chars().any(char::is_control)
+                    })
+                })
+            {
+                return Err(invalid());
+            }
+        }
+        let mut record = row.clone();
+        record["isArchived"] = json!(false);
+        if let Some(project) = input.get("projectId") {
+            record["projectId"] = project.clone();
+        }
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn decode_official_structure_response(
+    server: HostRunOnceServerId,
+    input: &Value,
+    mut response: Value,
+) -> Result<Value, AppError> {
+    fcp_host::official_n8n_structure_arguments(input).map_err(AppError::new)?;
+    let invalid = || AppError::new("official_structure_response_invalid");
+    if response["status"] != "ok" || response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(AppError::new("official_structure_provider_failed"));
+    }
+    let result = response["result"].as_object().ok_or_else(invalid)?;
+    if result.len() != 3
+        || result.get("serverId").and_then(Value::as_str) != Some(server.as_str())
+        || result.get("action") != input.get("kind")
+    {
+        return Err(invalid());
+    }
+    let data = result
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(invalid)?;
+    let rows = data
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    let cap = if input["kind"] == "tags" { 500 } else { 100 };
+    if data.len() != 2
+        || rows.len() > cap
+        || data["page"]["returnedCount"].as_u64() != Some(rows.len() as u64)
+        || data["page"]["total"].as_u64() != Some(rows.len() as u64)
+        || data["page"]["completeness"] != "complete"
+        || data["page"]["continuation"] != "unavailable"
+        || data["page"]["limit"].as_u64() != Some(cap as u64)
+    {
+        return Err(AppError::new(
+            "official_structure_complete_snapshot_required",
+        ));
+    }
+    for row in rows {
+        let object = row.as_object().ok_or_else(invalid)?;
+        let allowed: &[&str] = match input["kind"].as_str() {
+            Some("projects") => &["id", "name", "type", "resourceUri"],
+            Some("folders") => &[
+                "id",
+                "name",
+                "type",
+                "resourceUri",
+                "projectId",
+                "parentFolderId",
+                "path",
+            ],
+            Some("tags") => &["id", "name", "type", "resourceUri", "usageCount"],
+            _ => return Err(invalid()),
+        };
+        if object.len() != allowed.len()
+            || object.keys().any(|key| !allowed.contains(&key.as_str()))
+        {
+            return Err(invalid());
+        }
+        let id = row["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+            .ok_or_else(invalid)?;
+        if row["resourceUri"]
+            != format!(
+                "fwc-n8n://{}/{}/{}",
+                server.as_str(),
+                input["kind"].as_str().ok_or_else(invalid)?,
+                percent_encoding::utf8_percent_encode(id, percent_encoding::NON_ALPHANUMERIC)
+            )
+        {
+            return Err(invalid());
+        }
+        match input["kind"].as_str() {
+            Some("projects") if !matches!(row["type"].as_str(), Some("personal" | "team")) => {
+                return Err(invalid());
+            }
+            Some("folders")
+                if row["type"] != "folder"
+                    || row.get("projectId") != input.get("projectId")
+                    || !(row["parentFolderId"].is_null() || row["parentFolderId"].is_string())
+                    || !row["path"].is_array() =>
+            {
+                return Err(invalid());
+            }
+            Some("tags") if row["type"] != "tag" || row["usageCount"].as_u64().is_none() => {
+                return Err(invalid());
+            }
+            _ => {}
+        }
+    }
+    let search = fcp_n8n::types::MetadataSearch::parse("n8n.structure.search", input)
+        .map_err(AppError::new)?;
+    response["result"] = fcp_n8n::connector::project_metadata_search(
+        "n8n.structure.search",
+        &search,
+        rows.clone(),
+        server.as_str(),
+    )
+    .map_err(|_| invalid())?;
+    Ok(response)
+}
+
+fn decode_official_sdk_response(
+    server: HostRunOnceServerId,
+    operation: HostRunOnceOperation,
+    input: &Value,
+    mut response: Value,
+) -> Result<Value, AppError> {
+    fcp_host::official_n8n_sdk_arguments(operation.as_str(), input).map_err(AppError::new)?;
+    let invalid = || AppError::new("official_sdk_response_invalid");
+    if response["status"] != "ok" || response.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(AppError::new("official_sdk_provider_failed"));
+    }
+    let action = if operation == HostRunOnceOperation::OfficialSdkValidation {
+        input["subject"].as_str().ok_or_else(invalid)?
+    } else {
+        input["action"].as_str().ok_or_else(invalid)?
+    };
+    let projected = response["result"].as_object().ok_or_else(invalid)?;
+    if projected.len() != 3
+        || projected.get("serverId").and_then(Value::as_str) != Some(server.as_str())
+        || projected.get("action").and_then(Value::as_str) != Some(action)
+    {
+        return Err(invalid());
+    }
+    let data = projected
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(invalid)?;
+    if serde_json::to_vec(data).map_err(|_| invalid())?.len() > 256 * 1024 {
+        return Err(invalid());
+    }
+    response["result"] = project_official_sdk_result(operation, input, action, data)?;
+    Ok(response)
+}
+
+fn project_official_sdk_result(
+    operation: HostRunOnceOperation,
+    input: &Value,
+    action: &str,
+    data: &Value,
+) -> Result<Value, AppError> {
+    let invalid = || AppError::new("official_sdk_response_invalid");
+    Ok(
+        if operation == HostRunOnceOperation::OfficialSdkValidation {
+            let object = data.as_object().ok_or_else(invalid)?;
+            let valid = data["valid"].as_bool().ok_or_else(invalid)?;
+            let errors = data["errors"]
+                .as_array()
+                .filter(|items| items.len() <= 256)
+                .ok_or_else(invalid)?;
+            let warnings = data["warnings"]
+                .as_array()
+                .filter(|items| items.len() <= 256)
+                .ok_or_else(invalid)?;
+            if object.len() != 3 || valid != errors.is_empty() {
+                return Err(invalid());
+            }
+            for (items, warning) in [(errors, false), (warnings, true)] {
+                for item in items {
+                    let object = item.as_object().ok_or_else(invalid)?;
+                    let path = item["path"].as_str().ok_or_else(invalid)?;
+                    let (code, message) = if action == "nodes" {
+                        if warning {
+                            return Err(invalid());
+                        }
+                        let bound = input["nodes"].as_array().ok_or_else(invalid)?.len();
+                        let index = path
+                            .strip_prefix("nodes[")
+                            .and_then(|path| path.strip_suffix(']'))
+                            .and_then(|index| index.parse::<usize>().ok())
+                            .filter(|index| *index < bound)
+                            .ok_or_else(invalid)?;
+                        if path != format!("nodes[{index}]") {
+                            return Err(invalid());
+                        }
+                        (
+                            "sdk_node_validation_error",
+                            "Native node validator reported an error",
+                        )
+                    } else {
+                        if path != "workflow_code" {
+                            return Err(invalid());
+                        }
+                        if warning {
+                            (
+                                "sdk_validation_warning",
+                                "Native SDK validator reported a warning",
+                            )
+                        } else {
+                            (
+                                "sdk_validation_error",
+                                "Native SDK validator reported an error",
+                            )
+                        }
+                    };
+                    if object.len() != 3 || item["code"] != code || item["message"] != message {
+                        return Err(invalid());
+                    }
+                }
+            }
+            data.clone()
+        } else {
+            let (text, native) = if action == "sdk_reference" {
+                let text = data["reference"].as_str().ok_or_else(invalid)?;
+                (text, json!({"reference":text}))
+            } else {
+                let text = data["guidance"].as_str().ok_or_else(invalid)?;
+                (
+                    text,
+                    json!({"technique":input["technique"],"message":text,"documentation":text}),
+                )
+            };
+            let expected = fcp_n8n::types::project_official_knowledge(input, &native, text)
+                .map_err(AppError::new)?;
+            if &expected["data"] != data {
+                return Err(invalid());
+            }
+            expected
+        },
+    )
+}
+
+fn decode_official_credentials_response(
+    server: HostRunOnceServerId,
+    input: &Value,
+    mut response: Value,
+) -> Result<Value, AppError> {
+    let invalid = || AppError::new("official_credential_response_invalid");
+    let arguments = fcp_n8n::types::official_credentials_input(input).map_err(AppError::new)?;
+    if response["status"].as_str() != Some("ok")
+        || response.get("error").is_some_and(|value| !value.is_null())
+    {
+        return Err(AppError::new("official_credential_provider_failed"));
+    }
+    let projected = response
+        .get("result")
+        .filter(|value| value.is_object())
+        .ok_or_else(invalid)?;
+    if projected.as_object().is_none_or(|object| object.len() != 3)
+        || projected["serverId"] != server.as_str()
+        || projected["action"] != "credentials"
+    {
+        return Err(invalid());
+    }
+    let data = projected
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(invalid)?;
+    let rows = data["credentials"].as_array().ok_or_else(invalid)?;
+    let decoded = json!({"data":rows,"count":rows.len()});
+    let limit =
+        usize::try_from(arguments["limit"].as_u64().ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let expected = fcp_n8n::types::project_official_credentials(&decoded, server.as_str(), limit)
+        .map_err(AppError::new)?;
+    if &expected != data {
+        return Err(invalid());
+    }
+    response["result"] = expected;
+    Ok(response)
 }
 
 fn normalize_host_run_once_response(
@@ -3436,7 +5227,10 @@ fn run_schema_export(source: SchemaExportSource, check_only: bool) -> Result<Val
         let proof = fwc_n8n_provision::verify_current()
             .map_err(|_| AppError::new("schema_export_signature_denied"))?;
         let runtime = verify_schema_export_runtime(&proof)?;
-        let server_id = if source == SchemaExportSource::Eec {
+        let server_id = if matches!(
+            source,
+            SchemaExportSource::Eec | SchemaExportSource::EecReadParity
+        ) {
             HostRunOnceServerId::Eec
         } else {
             HostRunOnceServerId::Hetzner
@@ -3697,7 +5491,16 @@ fn save_schema_originals(source: SchemaExportSource, packet: &Value) -> Result<V
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        let root = std::path::Path::new("/srv/dev-ssd/fcp/nqm81-34");
+        let root = std::path::Path::new(
+            if matches!(
+                source,
+                SchemaExportSource::EecReadParity | SchemaExportSource::HetznerReadParity
+            ) {
+                "/srv/dev-ssd/fcp/nqm81-35"
+            } else {
+                "/srv/dev-ssd/fcp/nqm81-34"
+            },
+        );
         if std::fs::canonicalize(root).ok().as_deref() != Some(root)
             || std::fs::metadata(root)
                 .map_err(|_| AppError::new("schema_export_destination_unsafe"))?
@@ -3851,13 +5654,35 @@ fn build_host_run_once_envelope(
     })
 }
 
-const fn host_run_once_input_fields(
+fn host_run_once_input_fields(
     operation: HostRunOnceOperation,
 ) -> (&'static [&'static str], &'static [&'static str]) {
     match operation {
+        HostRunOnceOperation::WorkflowsSearch
+        | HostRunOnceOperation::ExecutionsSearch
+        | HostRunOnceOperation::StructureSearch => (
+            fcp_n8n::types::metadata_search_fields(operation.as_str())
+                .expect("closed metadata operation"),
+            if operation == HostRunOnceOperation::StructureSearch {
+                &["kind"]
+            } else {
+                &[]
+            },
+        ),
         HostRunOnceOperation::CapabilitiesInspect => (&[], &[]),
-        HostRunOnceOperation::CredentialsList
-        | HostRunOnceOperation::ExecutionsList
+        HostRunOnceOperation::AuditInspect => (&["categories"], &["categories"]),
+        HostRunOnceOperation::CredentialsList => (
+            &["query", "type", "projectId", "onlySharedWithMe", "page"],
+            &[],
+        ),
+        HostRunOnceOperation::OfficialKnowledge => {
+            (&["action", "section", "technique"], &["action"])
+        }
+        HostRunOnceOperation::OfficialSdkValidation => (
+            &["subject", "code", "nodes", "profile", "id", "version"],
+            &["subject"],
+        ),
+        HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList => (&["cursor", "limit"], &[]),
@@ -3871,7 +5696,13 @@ const fn host_run_once_input_fields(
             &["parent_folder_id", "project_id", "skip", "take"],
             &["project_id"],
         ),
-        HostRunOnceOperation::WorkflowsGet => (&["id"], &["id"]),
+        HostRunOnceOperation::WorkflowsGet => {
+            (&["id", "version", "detail", "includeCode"], &["id"])
+        }
+        HostRunOnceOperation::WorkflowsCompare => (
+            &["id", "leftVersion", "rightVersion", "detail"],
+            &["id", "leftVersion", "rightVersion"],
+        ),
         HostRunOnceOperation::WorkflowsActivate => (
             &["id", "active", "versionId", "guard"],
             &["id", "active", "guard"],
@@ -3928,6 +5759,27 @@ const fn host_run_once_input_fields(
     }
 }
 
+fn validate_public_audit_categories(
+    object: &serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let categories = object
+        .get("categories")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= 4)
+        .ok_or_else(|| AppError::new("audit_instance_external_effect_not_admitted"))?;
+    let mut seen = BTreeSet::new();
+    for category in categories {
+        let category = category
+            .as_str()
+            .filter(|value| matches!(*value, "credentials" | "database" | "filesystem" | "nodes"))
+            .ok_or_else(|| AppError::new("audit_instance_external_effect_not_admitted"))?;
+        if !seen.insert(category) {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+    }
+    Ok(())
+}
+
 fn validate_host_run_once_input(
     operation: HostRunOnceOperation,
     input: &Value,
@@ -3943,9 +5795,39 @@ fn validate_host_run_once_input(
     }
 
     match operation {
+        HostRunOnceOperation::ExecutionsSearch | HostRunOnceOperation::StructureSearch => {
+            fcp_n8n::types::MetadataSearch::parse(operation.as_str(), input)
+                .map(|_| ())
+                .map_err(AppError::new)
+        }
+        HostRunOnceOperation::WorkflowsSearch => {
+            fcp_n8n::types::MetadataSearch::parse(operation.as_str(), input)
+                .map_err(AppError::new)?;
+            fcp_host::official_n8n_workflow_search_arguments(input)
+                .map(|_| ())
+                .map_err(AppError::new)
+        }
         HostRunOnceOperation::CapabilitiesInspect => Ok(()),
-        HostRunOnceOperation::CredentialsList
-        | HostRunOnceOperation::ExecutionsList
+        HostRunOnceOperation::AuditInspect => validate_public_audit_categories(object),
+        HostRunOnceOperation::CredentialsList => fcp_n8n::types::official_credentials_input(input)
+            .map(|_| ())
+            .map_err(AppError::new),
+        HostRunOnceOperation::OfficialSdkValidation if input["subject"] == "remote_workflow" => {
+            fcp_n8n::types::RemoteWorkflowValidationInput::parse(input)
+                .map(|_| ())
+                .map_err(AppError::new)
+        }
+        HostRunOnceOperation::OfficialKnowledge | HostRunOnceOperation::OfficialSdkValidation => {
+            fcp_host::official_n8n_sdk_arguments(operation.as_str(), input)
+                .map_err(AppError::new)?;
+            if input["subject"] == "workflow_code" {
+                return Err(AppError::new(
+                    "native_workflow_code_effect_admission_pending",
+                ));
+            }
+            Ok(())
+        }
+        HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList => validate_page_input(object),
@@ -3967,9 +5849,13 @@ fn validate_host_run_once_input(
             validate_bounded_integer(object, "skip", 0, u64::MAX)?;
             validate_bounded_integer(object, "take", 1, 200)
         }
-        HostRunOnceOperation::WorkflowsGet => {
-            host_run_once_input_id(input, "id")?;
-            Ok(())
+        HostRunOnceOperation::WorkflowsGet => fcp_n8n::types::WorkflowReadInput::parse(input)
+            .map(|_| ())
+            .map_err(AppError::new),
+        HostRunOnceOperation::WorkflowsCompare => {
+            fcp_n8n::types::WorkflowCompareInput::parse(input)
+                .map(|_| ())
+                .map_err(AppError::new)
         }
         HostRunOnceOperation::WorkflowsCreateDraft | HostRunOnceOperation::WorkflowsUpdateDraft => {
             validate_workflow_draft_input(operation, input, object)
@@ -4762,6 +6648,20 @@ fn validate_bounded_integer(
     Ok(())
 }
 
+fn official_sdk_resource_uri(
+    server: HostRunOnceServerId,
+    operation: HostRunOnceOperation,
+    input: &Value,
+) -> Result<String, AppError> {
+    let (tool, _) =
+        fcp_host::official_n8n_sdk_arguments(operation.as_str(), input).map_err(AppError::new)?;
+    Ok(format!(
+        "fwc-mcp-bridge://{}/tools/{}",
+        server.as_str(),
+        encode_host_resource_segment(tool)
+    ))
+}
+
 fn expected_host_run_once_resource_uri(
     server_id: HostRunOnceServerId,
     operation: HostRunOnceOperation,
@@ -4769,14 +6669,46 @@ fn expected_host_run_once_resource_uri(
 ) -> Result<String, AppError> {
     let root = format!("fwc-n8n://{}", server_id.as_str());
     match operation {
+        HostRunOnceOperation::WorkflowsSearch => {
+            fcp_host::official_n8n_workflow_search_arguments(input).map_err(AppError::new)?;
+            Ok(format!(
+                "fwc-mcp-bridge://{}/tools/search%5Fworkflows",
+                server_id.as_str()
+            ))
+        }
+        HostRunOnceOperation::StructureSearch => {
+            let (tool, _) =
+                fcp_host::official_n8n_structure_arguments(input).map_err(AppError::new)?;
+            Ok(format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                server_id.as_str(),
+                encode_host_resource_segment(tool)
+            ))
+        }
         HostRunOnceOperation::CapabilitiesInspect => {
             Ok(format!("fwc-mcp-bridge://{}", server_id.as_str()))
         }
-        HostRunOnceOperation::CredentialsList
+        HostRunOnceOperation::CredentialsList => Ok(format!(
+            "fwc-mcp-bridge://{}/tools/list%5Fcredentials",
+            server_id.as_str()
+        )),
+        HostRunOnceOperation::OfficialSdkValidation if input["subject"] == "remote_workflow" => {
+            let read = fcp_n8n::types::RemoteWorkflowValidationInput::parse(input)
+                .map_err(AppError::new)?;
+            Ok(format!(
+                "{root}/workflows/{}",
+                encode_host_resource_segment(&read.id)
+            ))
+        }
+        HostRunOnceOperation::OfficialKnowledge | HostRunOnceOperation::OfficialSdkValidation => {
+            official_sdk_resource_uri(server_id, operation, input)
+        }
+        HostRunOnceOperation::ExecutionsSearch
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList
+        | HostRunOnceOperation::AuditInspect
         | HostRunOnceOperation::McpAccessReconcile => Ok(root),
         HostRunOnceOperation::WorkflowsLifecycle => {
             let tool = match input.get("action").and_then(Value::as_str) {
@@ -4799,6 +6731,7 @@ fn expected_host_run_once_resource_uri(
             server_id.as_str()
         )),
         HostRunOnceOperation::WorkflowsGet
+        | HostRunOnceOperation::WorkflowsCompare
         | HostRunOnceOperation::WorkflowsActivate
         | HostRunOnceOperation::WorkflowsUpdateDraft
         | HostRunOnceOperation::WorkflowsUnarchive
@@ -4958,7 +6891,759 @@ const fn route_error_code(code: fcp_n8n::router::RouteErrorCode) -> &'static str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn public_local_knowledge_actions_project_real_serialized_native_shapes() {
+        let envelope = |responses: Vec<Value>| {
+            json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp",
+            "response":{"operation":"knowledge_query","result":{"status":"Completed","teardown_error_code":null,"responses":responses}}})
+        };
+        let native = |value: Value| json!({"content":[{"type":"text","text":serde_json::to_string(&value).unwrap()}],"structuredContent":value});
+        let docs_input =
+            json!({"action":"tool_documentation","toolName":"get_node","detail":"full"});
+        let docs_bytes = serde_json::to_vec(&json!({"input":docs_input})).unwrap();
+        let result = run_local_once_from_bytes("n8n.knowledge.query",&docs_bytes,|request| {
+            assert_eq!(request.internal_tool(),fcp_host::LocalN8nTool::ToolsDocumentation);
+            assert_eq!(serde_json::to_value(&request).unwrap()["input"]["action"]["tool_documentation"]["topic"],"get_node");
+            Ok(envelope(vec![json!({"content":[{"type":"text","text":"# Public catalog documentation\nRead only."}]})]))
+        }).unwrap();
+        assert_eq!(result["data"]["toolName"], "get_node");
+        assert!(
+            result["data"]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        let search = json!({"action":"search_nodes","queries":["first","second"],"source":"verified","includeExamples":true});
+        let responses = envelope(["first","second"].map(|query| native(json!({"query":query,"totalCount":1,
+            "results":[{"nodeType":"nodes-base.test","displayName":"Test","isCommunity":true,"isVerified":true,
+                "examples":[{"parameters":{"secret":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"}}],"token":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"}]}))).to_vec());
+        let result = run_local_once_from_bytes(
+            "n8n.knowledge.query",
+            &serde_json::to_vec(&json!({"input":search})).unwrap(),
+            |request| {
+                assert_eq!(request.internal_tool(), fcp_host::LocalN8nTool::SearchNodes);
+                assert_eq!(
+                    serde_json::to_value(request).unwrap()["input"]["action"]["search_nodes_batch"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                Ok(responses.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(result["data"]["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(result["data"]["nodes"][0]["exampleCount"], 1);
+        assert!(
+            !result
+                .to_string()
+                .contains("PRIVATE_LOCAL_KNOWLEDGE_CANARY")
+        );
+        let templates =
+            json!({"action":"search_templates","query":"synthetic","page":{"limit":2,"offset":0}});
+        let result = run_local_once_from_bytes("n8n.knowledge.query",&serde_json::to_vec(&json!({"input":templates})).unwrap(),|request| {
+            assert_eq!(request.internal_tool(),fcp_host::LocalN8nTool::SearchTemplates);
+            assert_eq!(serde_json::to_value(request).unwrap()["input"]["action"]["search_templates"]["searchMode"],"keyword");
+            Ok(envelope(vec![native(json!({"items":[{"id":1,"name":"Public template","nodes":["nodes-base.noOp"],"workflow":{"secret":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"}}],"total":3}))]))
+        }).unwrap();
+        assert_eq!(result["data"]["page"]["hasMore"], true);
+        assert!(
+            !result
+                .to_string()
+                .contains("PRIVATE_LOCAL_KNOWLEDGE_CANARY")
+        );
+        let empty =
+            json!({"action":"search_templates","query":"synthetic","page":{"limit":2,"offset":20}});
+        let result = run_local_once_from_bytes(
+            "n8n.knowledge.query",
+            &serde_json::to_vec(&json!({"input":empty})).unwrap(),
+            |_| Ok(envelope(vec![native(json!({"items":[],"total":3}))])),
+        )
+        .unwrap();
+        assert_eq!(result["data"]["page"]["returnedCount"], 0);
+        assert_eq!(result["data"]["page"]["hasMore"], false);
+        for mode in ["nodes_only", "structure", "full"] {
+            let input = json!({"action":"get_template","templateId":1,"mode":mode});
+            let graph = json!({"nodes":[{"id":"one","name":"Public node","type":"nodes-base.noOp","position":[0,0],
+                "parameters":{"private":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"},"credentials":{"token":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"}}],"connections":{}});
+            let mut template =
+                json!({"id":1,"name":"Public template","token":"PRIVATE_LOCAL_KNOWLEDGE_CANARY"});
+            if mode == "full" {
+                template["workflow"] = graph;
+            } else {
+                template["nodes"] = graph["nodes"].clone();
+                template["connections"] = graph["connections"].clone();
+            }
+            let response = envelope(vec![native(json!({"mode":mode,"template":template}))]);
+            let result = run_local_once_from_bytes(
+                "n8n.knowledge.query",
+                &serde_json::to_vec(&json!({"input":input})).unwrap(),
+                |request| {
+                    assert_eq!(request.internal_tool(), fcp_host::LocalN8nTool::GetTemplate);
+                    Ok(response.clone())
+                },
+            )
+            .unwrap();
+            assert_eq!(result["data"]["template"]["mode"], mode);
+            assert!(
+                !result
+                    .to_string()
+                    .contains("PRIVATE_LOCAL_KNOWLEDGE_CANARY")
+            );
+        }
+        for input in [
+            json!({"action":"tool_documentation","toolName":"execute_workflow"}),
+            json!({"action":"search_nodes","queries":[]}),
+            json!({"action":"search_nodes","queries":["duplicate","duplicate"]}),
+            json!({"action":"search_nodes","queries":["one"],"limit":"20"}),
+            json!({"action":"search_templates","query":"one","page":{"cursor":"unsupported"}}),
+            json!({"action":"get_template","templateId":1,"mode":"execute"}),
+        ] {
+            assert!(
+                run_local_once_from_bytes(
+                    "n8n.knowledge.query",
+                    &serde_json::to_vec(&json!({"input":input})).unwrap(),
+                    |_| panic!("invalid public knowledge cannot dispatch")
+                )
+                .is_err()
+            );
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values() {
+        for mode in [
+            "info",
+            "docs",
+            "search_properties",
+            "versions",
+            "compare",
+            "breaking",
+            "migrations",
+        ] {
+            let mut input = json!({"action":"get_node","nodeType":"n8n-nodes-base.noOp","mode":mode,"detail":"standard"});
+            if mode == "search_properties" {
+                input["propertyQuery"] = json!("mode");
+            }
+            if matches!(mode, "compare" | "breaking" | "migrations") {
+                input["fromVersion"] = json!("1");
+            }
+            if mode == "migrations" {
+                input["toVersion"] = json!("2");
+            }
+            let mut native = json!({"nodeType":"nodes-base.noOp","displayName":"No Operation","documentation":"Public node documentation",
+                "properties":[{"name":"mode","type":"string","default":"PRIVATE_KNOWLEDGE_CANARY","credentials":{"id":"PRIVATE_KNOWLEDGE_CANARY"}}],
+                "token":"PRIVATE_KNOWLEDGE_CANARY"});
+            match mode {
+                "versions" => {
+                    native["available"] = json!(true);
+                    native["totalVersions"] = json!(1);
+                    native["versions"] = json!([{"version":"1","isCurrent":true}]);
+                }
+                "compare" | "breaking" | "migrations" => {
+                    native["available"] = json!(true);
+                    native["fromVersion"] = json!("1");
+                    native["toVersion"] = json!("2");
+                    native["totalChanges"] = json!(0);
+                    native["totalBreakingChanges"] = json!(0);
+                    native["autoMigratableChanges"] = json!(0);
+                    native["changes"] = json!([]);
+                    native["migrations"] = json!([]);
+                }
+                _ => {}
+            }
+            let response = json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp",
+                "response":{"operation":"knowledge_query","result":{"status":"Completed","teardown_error_code":null,
+                    "responses":[{"content":[{"type":"text","text":serde_json::to_string(&native).unwrap()}],"structuredContent":native}]}}});
+            let bytes = serde_json::to_vec(&json!({"input":input})).unwrap();
+            let result = run_local_once_from_bytes("n8n.knowledge.query", &bytes, |request| {
+                assert_eq!(request.internal_tool(), fcp_host::LocalN8nTool::GetNode);
+                assert_eq!(
+                    serde_json::to_value(&request).unwrap()["input"]["action"]["get_node"]["mode"],
+                    mode
+                );
+                Ok(response.clone())
+            })
+            .unwrap();
+            assert_eq!(result["action"], "get_node");
+            assert_eq!(result["data"]["node"]["nodeType"], "n8n-nodes-base.noOp");
+            assert!(result.get("provider").is_none());
+            assert!(
+                !serde_json::to_string(&result)
+                    .unwrap()
+                    .contains("PRIVATE_KNOWLEDGE_CANARY")
+            );
+            let mut wrong = response.clone();
+            wrong["response"]["result"]["responses"][0]["isError"] = json!(true);
+            assert!(project_local_get_node_result(&input, &wrong).is_err());
+            if matches!(mode, "compare" | "breaking" | "migrations") {
+                let mut wrong_native = native.clone();
+                wrong_native["fromVersion"] = json!("3");
+                let call = &mut wrong["response"]["result"]["responses"][0];
+                call["isError"] = json!(false);
+                call["structuredContent"] = wrong_native.clone();
+                call["content"][0]["text"] = json!(serde_json::to_string(&wrong_native).unwrap());
+                assert!(project_local_get_node_result(&input, &wrong).is_err());
+            }
+        }
+        for invalid in [
+            json!({"action":"get_node","nodeType":"x","mode":"compare"}),
+            json!({"action":"get_node","nodeType":"x","mode":"info","fromVersion":"1"}),
+            json!({"action":"get_node","nodeType":"x","url":"https://hostile.invalid"}),
+        ] {
+            assert!(public_local_get_node_input(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn public_read_targets_bind_actual_dispatch_without_caller_url_or_server_substitution() {
+        for (operation, input, resource) in [
+            (
+                "n8n.workflows.get",
+                json!({"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1"}}),
+                "fwc-n8n://eec/workflows/wf1",
+            ),
+            (
+                "n8n.workflows.compare",
+                json!({"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1"},"leftVersion":"draft","rightVersion":"published"}),
+                "fwc-n8n://eec/workflows/wf1",
+            ),
+            (
+                "n8n.executions.get",
+                json!({"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1/executions/123"}}),
+                "fwc-n8n://eec/workflows/wf1/executions/123",
+            ),
+            (
+                "n8n.executions.search",
+                json!({"target":{"server":"eec"},"status":["running"]}),
+                "fwc-n8n://eec",
+            ),
+        ] {
+            run_once_from_bytes_at(
+                operation,
+                &serde_json::to_vec(&json!({"input":input})).unwrap(),
+                Instant::now(),
+                |request, _| {
+                    assert_eq!(request.server_id, HostRunOnceServerId::Eec);
+                    assert_eq!(request.resource_uri, resource);
+                    assert!(request.input.get("target").is_none());
+                    Ok(json!({"status":"ok"}))
+                },
+            )
+            .unwrap();
+        }
+        for input in [
+            json!({"server_id":"hetzner","input":{"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1"}}}),
+            json!({"input":{"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1","url":"https://hostile.invalid"}}}),
+            json!({"input":{"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1/versions/old"}}}),
+            json!({"input":{"target":{"resourceUri":"fwc-n8n://eec/workflows/wf1"},"id":"other"}}),
+        ] {
+            let mut called = false;
+            assert!(
+                run_once_from_bytes_at(
+                    "n8n.workflows.get",
+                    &serde_json::to_vec(&input).unwrap(),
+                    Instant::now(),
+                    |_, _| {
+                        called = true;
+                        Ok(json!({}))
+                    }
+                )
+                .is_err()
+            );
+            assert!(!called);
+        }
+    }
+
+    #[test]
+    fn remote_workflow_public_target_binds_rest_current_version_and_all_profiles() {
+        for profile in ["minimal", "runtime", "ai_friendly", "strict"] {
+            let bytes = serde_json::to_vec(&json!({"input":{"subject":"remote_workflow",
+                "target":{"resourceUri":"fwc-n8n://eec/workflows/wf%2Done"},"version":"published","profile":profile}})).unwrap();
+            let normalized = normalize_remote_validation_target(&bytes).unwrap();
+            run_once_from_bytes_at("n8n.validation.run",&normalized,Instant::now(),|request,_| {
+                assert_eq!(request.input,json!({"subject":"remote_workflow","id":"wf-one","version":"published","profile":profile}));
+                assert_eq!(request.resource_uri,"fwc-n8n://eec/workflows/wf%2Done");
+                assert_eq!(request.operation.effective_credential_purpose(&request.input),BrokerCredentialPurpose::RestApi);
+                Ok(json!({"status":"ok","result":{"valid":true,"errors":[],"warnings":[]}}))
+            }).unwrap();
+        }
+        for input in [
+            json!({"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec"}}),
+            json!({"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"},"version":"historical-id"}),
+            json!({"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"},"graph":{"secret":"REMOTE_CANARY"}}),
+            json!({"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"},"id":"substituted"}),
+            json!({"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"},"profile":"unknown"}),
+        ] {
+            assert!(
+                normalize_remote_validation_target(
+                    &serde_json::to_vec(&json!({"input":input})).unwrap()
+                )
+                .is_err()
+            );
+        }
+        assert!(normalize_remote_validation_target(br#"{"server_id":"hetzner","input":{"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"}}}"#).is_err());
+    }
+
+    #[test]
+    fn current_workflow_read_public_defaults_and_comparison_binding() {
+        let bytes = br#"{"server_id":"eec","input":{"id":"wf-one"}}"#;
+        run_once_from_bytes_at("n8n.workflows.get", bytes, Instant::now(), |request, _| {
+            assert_eq!(
+                request.input,
+                json!({"id":"wf-one","version":"draft","detail":"standard","includeCode":false})
+            );
+            assert_eq!(request.resource_uri, "fwc-n8n://eec/workflows/wf%2Done");
+            Ok(json!({"status":"ok","result":{"workflow":{"id":"wf-one"}}}))
+        })
+        .unwrap();
+        let request = build_host_run_once_envelope(
+            HostRunOnceOperation::WorkflowsCompare,
+            host_input(
+                HostRunOnceServerId::Hetzner,
+                json!({"id":"wf-one","leftVersion":"draft","rightVersion":"published"}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(request.resource_uri, "fwc-n8n://hetzner/workflows/wf%2Done");
+        assert_eq!(
+            request.operation.credential_purpose(),
+            BrokerCredentialPurpose::RestApi
+        );
+        for invalid in [
+            json!({"id":"wf-one","leftVersion":"historic","rightVersion":"published"}),
+            json!({"id":"wf-one","leftVersion":"draft","rightVersion":"published","url":"https://hostile.invalid"}),
+        ] {
+            assert!(
+                build_host_run_once_envelope(
+                    HostRunOnceOperation::WorkflowsCompare,
+                    host_input(HostRunOnceServerId::Eec, invalid)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_status_never_infers_global_idle_from_invocation_or_bundle() {
+        let result = runtime_status_from_bytes(br#"{"input":{}}"#).unwrap();
+        assert!(result["idle"].is_null());
+        assert!(result["activeRuns"].is_null());
+        assert_eq!(result["observation"]["sessions"], "not_collected");
+        for input in [
+            br#"{"input":{"url":"https://hostile.invalid"}}"#.as_slice(),
+            br#"{"input":{},"correlation_id":"invalid"}"#.as_slice(),
+            br#"{"input":{},"server_id":"eec"}"#.as_slice(),
+        ] {
+            assert!(runtime_status_from_bytes(input).is_err());
+        }
+    }
+
+    #[test]
+    fn node_catalog_conditions_keep_bound_property_names_and_refuse_unknown_shapes() {
+        let metadata = json!({"name":"operation","default":"CATALOG_DEFAULT_CANARY",
+            "displayOptions":{"show":{"resource":["message"],"@version":[1,2]},"hide":{"operation":["delete"]}}});
+        let projected = project_catalog_metadata(&metadata, 0).unwrap();
+        assert_eq!(projected["displayOptions"], metadata["displayOptions"]);
+        assert!(!projected.to_string().contains("CATALOG_DEFAULT_CANARY"));
+        for invalid in [
+            json!({"unknown":{}}),
+            json!({"show":{"resource":{"secret":"CONDITION_CANARY"}}}),
+            json!({"show":{"resource":[{"secret":"CONDITION_CANARY"}]}}),
+            json!({"show":{"bad\nname":[true]}}),
+        ] {
+            assert!(project_catalog_display_options(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn public_targets_resolve_uses_explicit_authority_and_conflict_checks() {
+        let result =
+            public_targets_resolve(br#"{"input":{"server":"eec","workflowId":"wf/one"}}"#).unwrap();
+        assert_eq!(result["resolution"], "resolved");
+        assert_eq!(
+            result["target"]["resourceUri"],
+            "fwc-n8n://eec/workflows/wf%2Fone"
+        );
+        for input in [
+            json!({"workflowId":"bare"}),
+            json!({"server":"eec","resourceUri":"fwc-n8n://hetzner/workflows/wf"}),
+            json!({"server":"legacy"}),
+            json!({"server":"eec","workflowId":"wf","resourceUri":"fwc-n8n://eec/workflows/other"}),
+            json!({"server":"eec","executionId":"e1"}),
+            json!({"project_mapping":{"server":"eec","project_id":"forged"}}),
+        ] {
+            assert!(
+                public_targets_resolve(&serde_json::to_vec(&json!({"input":input})).unwrap())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn public_targets_resolve_bounds_explicit_candidates_without_claiming_existence() {
+        let resolve = |input: Value| {
+            public_targets_resolve(&serde_json::to_vec(&json!({"input":input})).unwrap())
+        };
+        let result =
+            resolve(json!({"candidateServers":["eec","hetzner"],"workflowId":"synthetic"}))
+                .unwrap();
+        assert_eq!(result["resolution"], "ambiguous");
+        let result = resolve(json!({"candidateServers":["eec"],"workflowId":"synthetic"})).unwrap();
+        assert_eq!(result["resolution"], "resolved");
+        for input in [
+            json!({"candidateServers":["eec","eec"],"workflowId":"synthetic"}),
+            json!({"candidateServers":["unknown"],"workflowId":"synthetic"}),
+            json!({"candidateServers":["eec"],"server":"eec","workflowId":"synthetic"}),
+            json!({"candidateServers":["eec"],"resourceUri":"fwc-n8n://eec/workflows/synthetic"}),
+        ] {
+            assert!(resolve(input).is_err());
+        }
+    }
+
+    #[test]
+    fn official_sdk_public_dispatch_and_native_projection_bind_exact_tools() {
+        let normalized = normalize_official_sdk_target(&serde_json::to_vec(&json!({"input":{"target":{"server":"eec"},"action":"sdk_reference","section":"rules"}})).unwrap()).unwrap();
+        let parsed = parse_host_run_once_input(&normalized).unwrap();
+        assert_eq!(parsed.server_id, HostRunOnceServerId::Eec);
+        assert!(parsed.input.get("target").is_none());
+        for invalid in [
+            json!({"server_id":"hetzner","input":{"target":{"server":"eec"}}}),
+            json!({"input":{"target":{"server":"legacy"}}}),
+            json!({"input":{"target":{"server":"eec","url":"https://denied.invalid"}}}),
+            json!({"input":{}}),
+        ] {
+            assert!(normalize_official_sdk_target(&serde_json::to_vec(&invalid).unwrap()).is_err());
+        }
+        for (operation, input, tool) in [
+            (
+                HostRunOnceOperation::OfficialKnowledge,
+                json!({"action":"sdk_reference","section":"patterns"}),
+                "get_workflow_sdk_reference",
+            ),
+            (
+                HostRunOnceOperation::OfficialKnowledge,
+                json!({"action":"workflow_best_practices","technique":"list"}),
+                "get_workflow_best_practices",
+            ),
+            (
+                HostRunOnceOperation::OfficialSdkValidation,
+                json!({"subject":"nodes","nodes":[{"type":"@n8n/n8n-nodes-langchain.agent","typeVersion":2.2,"parameters":{},"subnodes":{"model":{"type":"@n8n/n8n-nodes-langchain.lmChatOpenAi","version":1}},"isToolNode":true}]}),
+                "validate_node_config",
+            ),
+        ] {
+            assert!(is_official_sdk_input(operation.as_str(), &input));
+            for server in [HostRunOnceServerId::Eec, HostRunOnceServerId::Hetzner] {
+                let bytes = serde_json::to_vec(&json!({"server_id":server,"input":input})).unwrap();
+                run_once_from_bytes_at(operation.as_str(), &bytes, Instant::now(), |request, _| {
+                    assert_eq!(request.operation, operation);
+                    assert_eq!(
+                        request.operation.credential_purpose(),
+                        BrokerCredentialPurpose::OfficialMcp
+                    );
+                    assert_eq!(
+                        request.resource_uri,
+                        format!(
+                            "fwc-mcp-bridge://{}/tools/{}",
+                            server.as_str(),
+                            encode_host_resource_segment(tool)
+                        )
+                    );
+                    assert_eq!(request.input, input);
+                    Ok(json!({"status":"ok","result":{}}))
+                })
+                .unwrap();
+            }
+        }
+        for server in [HostRunOnceServerId::Eec, HostRunOnceServerId::Hetzner] {
+            let bytes = serde_json::to_vec(&json!({"server_id":server,"input":{"subject":"workflow_code","code":"HOSTILE_SDK_CANARY"}})).unwrap();
+            let mut called = false;
+            let error =
+                run_once_from_bytes_at("n8n.validation.run", &bytes, Instant::now(), |_, _| {
+                    called = true;
+                    panic!("pending SDK effects must refuse before host dispatch")
+                })
+                .unwrap_err();
+            assert!(!called);
+            assert_eq!(error.code, "native_workflow_code_effect_admission_pending");
+        }
+        let input = json!({"subject":"workflow_code","code":"synthetic"});
+        let invalid = json!({"valid":false,"errors":["HOSTILE_PROVIDER_CANARY"],"warnings":[]});
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"workflow_code","code":"synthetic"}),"eec",&json!({"isError":true,"structuredContent":invalid,"content":[{"type":"text","text":invalid.to_string()}]})).unwrap();
+        let native = json!({"status":"ok","result":bridge});
+        let projected = decode_official_sdk_response(
+            HostRunOnceServerId::Eec,
+            HostRunOnceOperation::OfficialSdkValidation,
+            &input,
+            native.clone(),
+        )
+        .unwrap();
+        assert_eq!(projected["result"]["valid"], false);
+        assert!(!projected.to_string().contains("HOSTILE_PROVIDER_CANARY"));
+        let mut mismatch = native.clone();
+        mismatch["result"]["data"]["valid"] = json!(true);
+        assert!(
+            decode_official_sdk_response(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::OfficialSdkValidation,
+                &input,
+                mismatch
+            )
+            .is_err()
+        );
+        let mut transport = native;
+        transport["status"] = json!("error");
+        assert_eq!(
+            decode_official_sdk_response(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::OfficialSdkValidation,
+                &input,
+                transport
+            )
+            .unwrap_err()
+            .code,
+            "official_sdk_provider_failed"
+        );
+        let knowledge = json!({"action":"sdk_reference","section":"rules"});
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(knowledge.clone(),"eec",&json!({"structuredContent":{"reference":"Public SDK rules"},"content":[{"type":"text","text":"Public SDK rules"}]})).unwrap();
+        let response = json!({"status":"ok","result":bridge});
+        assert_eq!(
+            decode_official_sdk_response(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::OfficialKnowledge,
+                &knowledge,
+                response
+            )
+            .unwrap()["result"]["data"]["section"],
+            "rules"
+        );
+        let input = json!({"subject":"nodes","nodes":[{"name":"Synthetic","type":"n8n-nodes-base.set","typeVersion":3.4,"parameters":{}}]});
+        let native = json!({"valid":false,"results":[{"index":0,"name":"Synthetic","type":"n8n-nodes-base.set","valid":false,"errors":[{"path":"HOSTILE_PATH_CANARY","message":"HOSTILE_NODE_CANARY"}]}]});
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"nodes","nodes":input["nodes"]}),"eec",&json!({"structuredContent":native,"content":[{"type":"text","text":native.to_string()}]})).unwrap();
+        let response = json!({"status":"ok","result":bridge});
+        let projected = decode_official_sdk_response(
+            HostRunOnceServerId::Eec,
+            HostRunOnceOperation::OfficialSdkValidation,
+            &input,
+            response,
+        )
+        .unwrap();
+        assert_eq!(projected["result"]["valid"], false);
+        assert!(!projected.to_string().contains("HOSTILE"));
+        let mut changed = native.clone();
+        changed["results"][0]["type"] = json!("n8n-nodes-base.webhook");
+        assert!(fcp_n8n::types::project_official_node_validation(&input, &changed, false).is_err());
+        changed = native.clone();
+        changed["valid"] = json!(true);
+        assert!(fcp_n8n::types::project_official_node_validation(&input, &changed, false).is_err());
+        assert!(fcp_n8n::types::project_official_node_validation(&input, &native, true).is_err());
+        for bad in [
+            json!({"subject":"nodes","nodes":[]}),
+            json!({"subject":"nodes","nodes":vec![json!({"type":"n8n-nodes-base.set"});51]}),
+            json!({"subject":"nodes","nodes":[{"type":"n8n-nodes-base.set","typeVersion":0}]}),
+            json!({"subject":"nodes","nodes":[{"type":"n8n-nodes-base.set","isToolNode":"true"}]}),
+            json!({"subject":"nodes","nodes":[{"type":"n8n-nodes-base.set","subnodes":{"url":"https://denied.invalid"}}]}),
+        ] {
+            assert!(
+                build_host_run_once_envelope(
+                    HostRunOnceOperation::OfficialSdkValidation,
+                    host_input(HostRunOnceServerId::Eec, bad)
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            fcp_host::official_n8n_sdk_arguments(
+                "n8n.validation.run",
+                &json!({"subject":"nodes","nodes":vec![json!({"type":"n8n-nodes-base.set"});50]})
+            )
+            .is_ok()
+        );
+        for bad in [
+            json!({"action":"sdk_reference","section":"groups"}),
+            json!({"subject":"workflow_code","code":"x","url":"https://denied.invalid"}),
+            json!({"subject":"workflow_code","code":"x","profile":"runtime"}),
+        ] {
+            let operation = if bad.get("action").is_some() {
+                HostRunOnceOperation::OfficialKnowledge
+            } else {
+                HostRunOnceOperation::OfficialSdkValidation
+            };
+            assert!(
+                build_host_run_once_envelope(operation, host_input(HostRunOnceServerId::Eec, bad))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn official_workflow_search_native_query_is_not_replaced_with_page_local_name_filter() {
+        let output = json!({"data":[{"id":"w","name":"Synthetic","active":true,"availableInMCP":false,"createdAt":"2026-10-04T00:00:00Z","updatedAt":"2026-10-04T00:00:00Z","parentFolderId":"child-folder","tags":[{"id":"t","name":"fixture"}],"description":"query matched this hidden native description","settings":{"secret":"PRIVATE_CANARY"}}],"count":1});
+        let input = json!({"query":"hidden native description","projectId":"p","folderId":"parent-folder","tags":["fixture"],"active":true,"sort":"updatedAt:desc","page":{"limit":1}});
+        let arguments = fcp_host::official_n8n_workflow_search_arguments(&input).unwrap();
+        assert_eq!(arguments["query"], input["query"]);
+        assert_eq!(arguments["folderId"], "parent-folder");
+        assert!(arguments.get("active").is_none() && arguments.get("page").is_none());
+        let mut typed = arguments;
+        typed["action"] = json!("workflows");
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(typed,"eec",&json!({"structuredContent":output,"content":[{"type":"text","text":output.to_string()}]})).unwrap();
+        let response = json!({"status":"ok","result":bridge});
+        let result = decode_official_workflow_search_response(
+            HostRunOnceServerId::Eec,
+            &input,
+            response.clone(),
+        )
+        .unwrap();
+        assert_eq!(result["result"]["workflows"].as_array().unwrap().len(), 1);
+        assert_eq!(result["result"]["workflows"][0]["projectId"], "p");
+        assert_eq!(result["result"]["workflows"][0]["isArchived"], false);
+        assert!(!result.to_string().contains("PRIVATE_CANARY"));
+        assert!(!result.to_string().contains("hidden native description"));
+        let mut inactive = input.clone();
+        inactive["active"] = json!(false);
+        assert!(
+            decode_official_workflow_search_response(
+                HostRunOnceServerId::Eec,
+                &inactive,
+                response.clone()
+            )
+            .unwrap()["result"]["workflows"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut partial = response.clone();
+        partial["result"]["data"]["page"]["total"] = json!(201);
+        assert!(
+            decode_official_workflow_search_response(HostRunOnceServerId::Eec, &input, partial)
+                .is_err()
+        );
+        assert!(
+            decode_official_workflow_search_response(
+                HostRunOnceServerId::Hetzner,
+                &input,
+                response
+            )
+            .is_err()
+        );
+        assert!(
+            fcp_host::official_n8n_workflow_search_arguments(&json!({"isArchived":true})).is_err()
+        );
+    }
+
+    #[test]
+    fn official_structure_bridge_projection_supports_complete_snapshot_pages() {
+        let native_data = json!({"data":[{"id":"p2","name":"Synthetic B","type":"team"},{"id":"p1","name":"Synthetic A","type":"personal"}],"count":2,"hint":"PRIVATE_CANARY"});
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"projects","limit":100}),"eec",&json!({"structuredContent":native_data,"content":[{"type":"text","text":native_data.to_string()}]})).unwrap();
+        let response = json!({"status":"ok","result":bridge});
+        let first = decode_official_structure_response(
+            HostRunOnceServerId::Eec,
+            &json!({"kind":"projects","page":{"limit":1}}),
+            response.clone(),
+        )
+        .unwrap();
+        assert_eq!(first["result"]["items"][0]["id"], "p1");
+        assert!(!first.to_string().contains("PRIVATE_CANARY"));
+        let cursor = first["result"]["page"]["nextCursor"].clone();
+        let second = decode_official_structure_response(
+            HostRunOnceServerId::Eec,
+            &json!({"kind":"projects","page":{"limit":1,"cursor":cursor}}),
+            response.clone(),
+        )
+        .unwrap();
+        assert_eq!(second["result"]["items"][0]["id"], "p2");
+        assert_eq!(second["result"]["page"]["nextCursor"], Value::Null);
+        let mut stale = response.clone();
+        stale["result"]["data"]["items"][0]["name"] = json!("Changed");
+        assert!(
+            decode_official_structure_response(
+                HostRunOnceServerId::Eec,
+                &json!({"kind":"projects","page":{"cursor":cursor}}),
+                stale
+            )
+            .is_err()
+        );
+        let mut truncated = response.clone();
+        truncated["result"]["data"]["page"]["total"] = json!(101);
+        truncated["result"]["data"]["page"]["completeness"] = json!("partial");
+        assert_eq!(
+            decode_official_structure_response(
+                HostRunOnceServerId::Eec,
+                &json!({"kind":"projects"}),
+                truncated
+            )
+            .unwrap_err()
+            .code,
+            "official_structure_complete_snapshot_required"
+        );
+        assert!(
+            decode_official_structure_response(
+                HostRunOnceServerId::Hetzner,
+                &json!({"kind":"projects"}),
+                response
+            )
+            .is_err()
+        );
+        assert_eq!(
+            HostRunOnceOperation::StructureSearch.credential_purpose(),
+            BrokerCredentialPurpose::OfficialMcp
+        );
+        assert_eq!(
+            expected_host_run_once_resource_uri(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::StructureSearch,
+                &json!({"kind":"folders","projectId":"p"})
+            )
+            .unwrap(),
+            "fwc-mcp-bridge://eec/tools/search%5Ffolders"
+        );
+    }
+
+    #[test]
+    fn official_credentials_native_serialized_response_is_bounded_and_redacted() {
+        let output = json!({"data":[{"id":"c1","name":"Synthetic","type":"httpHeaderAuth","scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":{"id":"p1","name":"Synthetic","type":"team"},"description":"PRIVATE_CANARY"}],"count":1});
+        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"credentials","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":1}),"eec",&json!({"structuredContent":output,"content":[{"type":"text","text":output.to_string()}]})).unwrap();
+        let response = json!({"status":"ok","result":bridge});
+        let projected = decode_official_credentials_response(
+            HostRunOnceServerId::Eec,
+            &json!({"type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":1}}),
+            response.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            projected["result"]["credentials"][0]["type"],
+            "httpHeaderAuth"
+        );
+        assert!(!projected.to_string().contains("PRIVATE_CANARY"));
+        assert_eq!(
+            HostRunOnceOperation::CredentialsList.credential_purpose(),
+            BrokerCredentialPurpose::OfficialMcp
+        );
+        assert_eq!(
+            expected_host_run_once_resource_uri(
+                HostRunOnceServerId::Eec,
+                HostRunOnceOperation::CredentialsList,
+                &json!({})
+            )
+            .unwrap(),
+            "fwc-mcp-bridge://eec/tools/list%5Fcredentials"
+        );
+        let mut changed = response.clone();
+        changed["result"]["data"]["page"]["returnedCount"] = json!(2);
+        assert!(
+            decode_official_credentials_response(HostRunOnceServerId::Eec, &json!({}), changed)
+                .is_err()
+        );
+        let mut failed = response;
+        failed["result"]["serverId"] = json!("hetzner");
+        assert!(
+            decode_official_credentials_response(HostRunOnceServerId::Eec, &json!({}), failed)
+                .is_err()
+        );
+    }
 
     fn schema_export_fixture(source: SchemaExportSource) -> Value {
         json!({"status":"ok", "result":{"tools":source.tools().iter().map(|name| json!({
@@ -4974,6 +7659,8 @@ mod tests {
             SchemaExportSource::Eec,
             SchemaExportSource::Hetzner,
             SchemaExportSource::Local,
+            SchemaExportSource::EecReadParity,
+            SchemaExportSource::HetznerReadParity,
         ] {
             let response = schema_export_fixture(source);
             let packet = project_schema_originals(source, &response).expect("original projection");
@@ -5003,6 +7690,30 @@ mod tests {
                 assert!(row["output_schema_present"] == true);
             }
         }
+    }
+
+    #[test]
+    fn read_parity_schema_evidence_is_closed_and_does_not_enroll_tools() {
+        for source in [
+            SchemaExportSource::EecReadParity,
+            SchemaExportSource::HetznerReadParity,
+        ] {
+            let response = schema_export_fixture(source);
+            let packet = project_schema_originals(source, &response).unwrap();
+            assert_eq!(packet["source"], source.name());
+            assert_eq!(packet["tools"].as_array().unwrap().len(), 9);
+            assert!(packet.get("authority").is_none());
+            assert_eq!(packet["reviewed"], false);
+            let mut missing = response.clone();
+            missing["result"]["tools"].as_array_mut().unwrap().remove(0);
+            assert_eq!(
+                project_schema_originals(source, &missing).unwrap_err().code,
+                "schema_export_tool_missing"
+            );
+        }
+        assert_eq!(SchemaExportSource::Eec.tools().len(), 4);
+        assert_eq!(SchemaExportSource::Hetzner.tools().len(), 4);
+        assert!(SchemaExportSource::parse("caller-selected-tool").is_err());
     }
 
     #[test]
@@ -7367,6 +10078,129 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the pinned retained installed-process receipt; run with FWC_N8N_VALIDATION_PRIMARY_RECEIPT and --ignored"]
+    fn public_validation_projects_primary_installed_process_receipt() {
+        let path = std::env::var("FWC_N8N_VALIDATION_PRIMARY_RECEIPT")
+            .expect("explicit primary installed receipt required");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "517ce0bfa545144296f626a07e51b8bc3784f22ac3934dc5bd041cd82702a9fa"
+        );
+        let receipt: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(receipt["exit"], 0);
+        let output = project_local_validation_result(&receipt["stdout"]).unwrap();
+        assert_eq!(output["valid"], true);
+        assert_eq!(output["errors"], json!([]));
+        assert_eq!(output["warnings"].as_array().unwrap().len(), 1);
+        assert!(!output.to_string().contains("Workflow is empty"));
+        assert!(output.get("summary").is_none());
+        assert!(output.get("suggestions").is_none());
+    }
+
+    #[test]
+    fn public_validation_projects_serialized_native_invalid_and_denies_contradictions() {
+        let envelope = |native: Value, is_error: bool| {
+            json!({
+                "schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp",
+                "response":{"operation":"validation_run","result":{
+                    "status":"Completed","teardown_error_code":null,
+                    "responses":[{"isError":is_error,"content":[{"type":"text",
+                        "text":serde_json::to_string(&native).unwrap()}]}]
+                }}
+            })
+        };
+        let invalid = envelope(
+            json!({"valid":false,"summary":{},
+            "errors":[{"node":"SECRET_CANARY","message":"SECRET_CANARY","details":{"secret":"SECRET_CANARY"}}],
+            "warnings":[]}),
+            false,
+        );
+        let output = project_local_validation_result(&invalid).unwrap();
+        assert_eq!(output["valid"], false);
+        assert_eq!(output["errors"].as_array().unwrap().len(), 1);
+        assert!(!output.to_string().contains("SECRET_CANARY"));
+        for native in [
+            json!({"valid":true,"errors":[{"message":"SECRET_CANARY"}],"warnings":[]}),
+            json!({"valid":false,"errors":[],"warnings":[]}),
+            json!({"valid":false,"error":"SECRET_CANARY"}),
+            json!({"valid":true,"errors":[],"warnings":"SECRET_CANARY"}),
+        ] {
+            assert!(project_local_validation_result(&envelope(native, false)).is_err());
+        }
+        assert!(
+            project_local_validation_result(&envelope(
+                json!({"valid":true,"errors":[],"warnings":[]}),
+                true
+            ))
+            .is_err()
+        );
+        let mut failed = invalid;
+        let mut contradictory = failed.clone();
+        contradictory["response"]["result"]["responses"][0]["structuredContent"] =
+            json!({"valid":true,"errors":[],"warnings":[]});
+        assert!(project_local_validation_result(&contradictory).is_err());
+        failed["response"]["result"]["status"] = json!("Failed");
+        assert_eq!(
+            project_local_validation_result(&failed).unwrap_err().code,
+            "local_provider_failed"
+        );
+    }
+
+    #[test]
+    fn public_graph_validation_reaches_typed_dispatch_with_exact_profiles() {
+        for (public, provider) in [
+            ("minimal", "minimal"),
+            ("runtime", "runtime"),
+            ("ai_friendly", "ai-friendly"),
+            ("strict", "strict"),
+        ] {
+            let input = json!({"input": {"subject": "graph", "graph": {
+                "nodes": [], "connections": {}
+            }, "profile": public}});
+            run_local_once_from_bytes(
+                "n8n.validation.run",
+                &serde_json::to_vec(&input).unwrap(),
+                |request| {
+                    assert_eq!(
+                        request.internal_tool(),
+                        fcp_host::LocalN8nTool::ValidateWorkflow
+                    );
+                    let encoded = serde_json::to_value(request).unwrap();
+                    assert_eq!(
+                        encoded["input"]["subject"]["workflow"]["options"]["profile"],
+                        provider
+                    );
+                    Ok(json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp",
+                        "response":{"operation":"validation_run","result":{
+                            "status":"Completed","teardown_error_code":null,
+                            "responses":[{"content":[{"type":"text","text":"{\"valid\":true,\"errors\":[],\"warnings\":[]}"}]}]
+                        }}}))
+                },
+            )
+            .expect("public graph reaches fixed dispatch");
+        }
+    }
+
+    #[test]
+    fn public_graph_validation_denies_code_extra_fields_and_unknown_profile() {
+        for input in [
+            json!({"subject":"workflow_code","graph":{},"workflowCode":"HOSTILE_CANARY"}),
+            json!({"subject":"graph","graph":{},"profile":"unknown"}),
+            json!({"subject":"graph","graph":{},"executable":"HOSTILE_CANARY"}),
+            json!({"subject":"graph","graph":"HOSTILE_CANARY"}),
+        ] {
+            let input = serde_json::to_vec(&json!({"input":input})).unwrap();
+            let error = run_local_once_from_bytes("n8n.validation.run", &input, |_| {
+                panic!("invalid public input cannot dispatch")
+            })
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_operation_input");
+            assert!(!error.code.contains("HOSTILE_CANARY"));
+        }
+    }
+
+    #[test]
     fn local_run_once_builds_only_the_typed_local_dispatch_request() {
         let input = json!({
             "input": {
@@ -9616,7 +12450,11 @@ mod tests {
                 json!({}),
                 "fwc-mcp-bridge://eec",
             ),
-            ("n8n.credentials.list", json!({}), "fwc-n8n://eec"),
+            (
+                "n8n.credentials.list",
+                json!({}),
+                "fwc-mcp-bridge://eec/tools/list%5Fcredentials",
+            ),
             (
                 "n8n.executions.get",
                 json!({"workflow_id": "workflow-1", "id": "execution-1"}),

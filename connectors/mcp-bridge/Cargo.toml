@@ -12,6 +12,9 @@ authors.workspace = true
 name = "fcp_mcp_bridge"
 path = "src/lib.rs"
 
+[features]
+n8n-test-support = []
+
 [[bin]]
 name = "fcp-mcp-bridge"
 path = "src/main.rs"

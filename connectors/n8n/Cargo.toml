@@ -62,6 +62,8 @@ rustix = { version = "1.1", features = ["fs", "process"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+fcp-mcp-bridge = { path = "../mcp-bridge", features = ["n8n-test-support"] }
+fcp-host = { path = "../../crates/fcp-host", features = ["n8n-test-support"] }
 ciborium.workspace = true
 chrono.workspace = true
 wiremock.workspace = true

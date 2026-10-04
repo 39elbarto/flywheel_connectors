@@ -757,6 +757,62 @@ impl McpClient {
         decode_raw_response(&response)
     }
 
+    /// One fixed typed read, with no approval relaxation for generic calls.
+    pub(crate) async fn typed_n8n_read_with_context(
+        &self,
+        read: &crate::types::TypedN8nRead,
+        context: HostEgressContext,
+    ) -> McpBridgeResult<serde_json::Value> {
+        if context.operation_id != "mcp.n8n.read" || context.connector_id != "fcp.mcp-bridge" {
+            return Err(McpBridgeError::InvalidInput(
+                "typed read attribution invalid".into(),
+            ));
+        }
+        let arguments = read
+            .arguments()
+            .map_err(|_| McpBridgeError::InvalidInput("typed read input invalid".into()))?;
+        let params = tools_call_params(read.tool(), &arguments)?;
+        let session = self.legacy_session.lock().await.clone();
+        let version = session
+            .as_ref()
+            .map_or(ProtocolVersion::V20260728, |session| {
+                session.protocol_version
+            });
+        let response = self
+            .send_request(
+                McpMethod::ToolsCall,
+                version,
+                session.as_ref(),
+                params,
+                Some(context),
+                session.is_none(),
+            )
+            .await?;
+        if !response.status.is_success() {
+            return map_raw_status(&response);
+        }
+        let content_type = single_header(&response.headers, "content-type")?.ok_or_else(|| {
+            McpBridgeError::InvalidInput("typed read content type missing".into())
+        })?;
+        let parsed = parse_response(
+            &normalize_content_type(&content_type),
+            &response.body,
+            response.request_id,
+        )
+        .map_err(|_| McpBridgeError::InvalidInput("typed read RPC response malformed".into()))?;
+        if let Some(error) = parsed.error {
+            return Err(McpBridgeError::ProviderResponse {
+                phase: Some(crate::error::McpErrorPhase::ExecuteCall),
+                kind: McpErrorKind::JsonRpc,
+                rpc_code: i32::try_from(error.code).ok(),
+            });
+        }
+        // The closed projector distinguishes an invalid SDK input from an
+        // internal/provider failure. Generic decode_rpc_response still denies
+        // every isError:true result.
+        Ok(parsed.result.unwrap_or(serde_json::Value::Null))
+    }
+
     /// List resources from the MCP server.
     pub async fn resources_list(&self) -> McpBridgeResult<serde_json::Value> {
         self.resources_list_with_context(None).await

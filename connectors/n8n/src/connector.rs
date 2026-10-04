@@ -55,11 +55,11 @@ use crate::{
     },
     error::{N8nError, N8nResult},
     types::{
-        ActiveVersionId, CredentialMetadataView, DraftMutationPrecondition, FolderListView,
-        ListView, Workflow, WorkflowDeleteDisposableInput, WorkflowDetail,
-        WorkflowDraftMutationInput, WorkflowExecuteInput, WorkflowExecuteMode,
-        WorkflowGraphSummary, WorkflowLifecycleAction, WorkflowLifecycleGuard,
-        WorkflowLifecycleInput, WorkflowStateView, WorkflowUnarchiveInput, WorkflowVersion,
+        ActiveVersionId, DraftMutationPrecondition, FolderListView, ListView, MetadataSearch,
+        Workflow, WorkflowDeleteDisposableInput, WorkflowDetail, WorkflowDraftMutationInput,
+        WorkflowExecuteInput, WorkflowExecuteMode, WorkflowGraphSummary, WorkflowLifecycleAction,
+        WorkflowLifecycleGuard, WorkflowLifecycleInput, WorkflowStateView, WorkflowUnarchiveInput,
+        WorkflowVersion,
     },
 };
 
@@ -906,12 +906,24 @@ impl N8nConnector {
         )?;
 
         let result = match operation {
+            "n8n.workflows.search" | "n8n.executions.search" | "n8n.structure.search" => {
+                self.invoke_metadata_search(client, operation, &input, Some(context.clone()))
+                    .await
+            }
             "n8n.workflows.list" => {
                 self.invoke_workflows_list(client, &input, Some(context.clone()))
                     .await
             }
             "n8n.workflows.get" => {
                 self.invoke_workflows_get(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.workflows.compare" => {
+                self.invoke_workflows_compare(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.validation.run" => {
+                self.invoke_remote_workflow_validation(client, &input, Some(context.clone()))
                     .await
             }
             "n8n.executions.list" => {
@@ -932,6 +944,10 @@ impl N8nConnector {
             }
             "n8n.credentials.list" => {
                 self.invoke_credentials_list(client, &input, Some(context.clone()))
+                    .await
+            }
+            "n8n.audit.inspect" => {
+                self.invoke_audit(client, &input, Some(context.clone()))
                     .await
             }
             "n8n.tags.list" => {
@@ -1056,6 +1072,320 @@ impl N8nConnector {
             next_cursor: resp.next_cursor,
         })
         .map_err(N8nError::from)
+    }
+
+    async fn invoke_metadata_search(
+        &self,
+        client: &N8nClient,
+        operation: &str,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        let search = MetadataSearch::parse(operation, input)
+            .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        if operation == "n8n.executions.search" {
+            return self.invoke_execution_search(client, &search, context).await;
+        }
+        if operation == "n8n.workflows.search"
+            && (search.folder_id.is_some() || search.query.is_some())
+        {
+            // The public REST select has no description/folder metadata and
+            // does not apply folder filtering. A name-only approximation must
+            // not become a successful name-or-description search.
+            return Err(N8nError::InvalidInput(
+                "workflow_search_requires_admitted_official_mcp".into(),
+            ));
+        }
+        let mut records = Vec::new();
+        let mut cursor = None;
+        let mut seen_cursors = BTreeSet::new();
+        let mut complete = false;
+        let mut folder_count = None;
+        for _ in 0..10 {
+            let query = ListQuery::new(200, cursor.clone())?;
+            let (page, next) = match operation {
+                "n8n.workflows.search" => {
+                    let response = client
+                        .search_workflows_typed(&query, &search, context.clone())
+                        .await?;
+                    (
+                        response
+                            .data
+                            .into_iter()
+                            .map(|item| {
+                                let mut view = item.into_view();
+                                if search
+                                    .active
+                                    .is_some_and(|active| view.active != Some(active))
+                                {
+                                    return Err(N8nError::MalformedProviderResponse);
+                                }
+                                if let Some(project) = &search.project_id {
+                                    if view
+                                        .project_id
+                                        .as_ref()
+                                        .is_some_and(|actual| actual != project)
+                                    {
+                                        return Err(N8nError::MalformedProviderResponse);
+                                    }
+                                    // Membership follows the same exact native
+                                    // projectId query on every collected page;
+                                    // it is not inferred from an absent DTO.
+                                    view.project_id = Some(project.clone());
+                                }
+                                serde_json::to_value(view).map_err(N8nError::from)
+                            })
+                            .collect::<N8nResult<Vec<_>>>()?,
+                        response.next_cursor,
+                    )
+                }
+                "n8n.executions.search" => {
+                    let response = client
+                        .list_executions_typed(&query, context.clone())
+                        .await?;
+                    (
+                        response
+                            .data
+                            .into_iter()
+                            .map(|item| serde_json::to_value(item.into_view()))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        response.next_cursor,
+                    )
+                }
+                "n8n.credentials.list" => {
+                    let response = client
+                        .list_credentials_typed(&query, context.clone())
+                        .await?;
+                    let server = self.configured_server_id()?;
+                    (
+                        response
+                            .data
+                            .into_iter()
+                            .map(|item| {
+                                let uri = credential_resource_uri(server, &item.id)
+                                    .map_err(|_| N8nError::MalformedProviderResponse)?;
+                                serde_json::to_value(item.into_view(uri)).map_err(N8nError::from)
+                            })
+                            .collect::<N8nResult<Vec<_>>>()?,
+                        response.next_cursor,
+                    )
+                }
+                "n8n.structure.search" => match search.kind.as_deref() {
+                    Some("projects") => {
+                        let response = client.list_projects_typed(&query, context.clone()).await?;
+                        (
+                            response
+                                .data
+                                .into_iter()
+                                .map(|item| serde_json::to_value(item.into_view()))
+                                .collect::<Result<Vec<_>, _>>()?,
+                            response.next_cursor,
+                        )
+                    }
+                    Some("tags") => {
+                        let response = client.list_tags_typed(&query, context.clone()).await?;
+                        (
+                            response
+                                .data
+                                .into_iter()
+                                .map(|item| serde_json::to_value(item.into_view()))
+                                .collect::<Result<Vec<_>, _>>()?,
+                            response.next_cursor,
+                        )
+                    }
+                    Some("folders") => {
+                        let mut folder_input = json!({
+                            "project_id":search.project_id,
+                            "skip":records.len(),"take":200
+                        });
+                        if let Some(parent) = &search.parent_folder_id {
+                            folder_input["parent_folder_id"] = json!(parent);
+                        }
+                        let response = self
+                            .invoke_folders_list(client, &folder_input, context.clone())
+                            .await?;
+                        let count = response["count"]
+                            .as_u64()
+                            .filter(|count| *count <= 2000)
+                            .ok_or_else(|| {
+                                N8nError::InvalidInput("metadata_snapshot_bound_exceeded".into())
+                            })?;
+                        if folder_count.is_some_and(|previous| previous != count) {
+                            return Err(N8nError::MalformedProviderResponse);
+                        }
+                        folder_count = Some(count);
+                        let items = response["data"]
+                            .as_array()
+                            .ok_or(N8nError::MalformedProviderResponse)?
+                            .clone();
+                        let next = (records.len() + items.len() < count as usize)
+                            .then(|| (records.len() + items.len()).to_string());
+                        (items, next)
+                    }
+                    _ => return Err(N8nError::MalformedProviderResponse),
+                },
+                _ => return Err(N8nError::MalformedProviderResponse),
+            };
+            if page.len() > 200 || page.is_empty() && next.is_some() {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            records.extend(page);
+            if records.len() > 2000 {
+                return Err(N8nError::InvalidInput(
+                    "metadata_snapshot_bound_exceeded".into(),
+                ));
+            }
+            let Some(next) = next else {
+                complete = true;
+                break;
+            };
+            if !seen_cursors.insert(next.clone()) {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            cursor = Some(next);
+        }
+        if !complete {
+            return Err(N8nError::InvalidInput(
+                "metadata_snapshot_bound_exceeded".into(),
+            ));
+        }
+        project_metadata_search(operation, &search, records, self.configured_server_id()?)
+    }
+
+    async fn invoke_execution_search(
+        &self,
+        client: &N8nClient,
+        search: &MetadataSearch,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        #[derive(Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cursor {
+            binding: String,
+            group: usize,
+            native: Option<String>,
+        }
+        let mut bound_query = serde_json::to_value(search)?;
+        bound_query["page"] = Value::Null;
+        let binding = digest_canonical_json(
+            b"fwc-n8n.execution-search.v1",
+            &json!({"server":self.configured_server_id()?,"query":bound_query}),
+        )?;
+        // The default endpoint omits running, so all-status coverage needs a
+        // disjoint explicit running subset in addition to the native default.
+        let groups: Vec<Option<&str>> = search.status.as_ref().map_or_else(
+            || vec![None, Some("running")],
+            |statuses| {
+                statuses
+                    .iter()
+                    .map(|status| Some(status.as_str()))
+                    .collect()
+            },
+        );
+        let mut position =
+            if let Some(cursor) = search.page.as_ref().and_then(|page| page.cursor.as_deref()) {
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(cursor)
+                    .map_err(|_| N8nError::InvalidInput("invalid_execution_cursor".into()))?;
+                serde_json::from_slice::<Cursor>(&bytes)
+                    .map_err(|_| N8nError::InvalidInput("invalid_execution_cursor".into()))?
+            } else {
+                Cursor {
+                    binding: binding.clone(),
+                    group: 0,
+                    native: None,
+                }
+            };
+        if position.binding != binding || position.group >= groups.len() {
+            return Err(N8nError::InvalidInput("invalid_execution_cursor".into()));
+        }
+        let limit = search
+            .page
+            .as_ref()
+            .and_then(|page| page.limit)
+            .unwrap_or(50);
+        let mut rows = Vec::new();
+        let mut cursors = BTreeSet::new();
+        for _ in 0..8 {
+            let query = ListQuery::new(limit - rows.len() as u64, position.native.clone())?;
+            let response = client
+                .search_executions_typed(&query, search, groups[position.group], context.clone())
+                .await?;
+            if response.data.len() > query.limit as usize
+                || response.data.is_empty() && response.next_cursor.is_some()
+            {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            for execution in response.data {
+                if groups[position.group]
+                    .is_some_and(|status| execution.status.as_deref() != Some(status))
+                    || groups[position.group].is_none()
+                        && execution.status.as_deref() == Some("running")
+                {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                if search
+                    .workflow_id
+                    .as_ref()
+                    .is_some_and(|expected| execution.workflow_id.as_ref() != Some(expected))
+                {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                if search.started_after.is_some() || search.started_before.is_some() {
+                    let actual = execution
+                        .started_at
+                        .as_deref()
+                        .and_then(|value| fcp_prelude::DateTime::parse_from_rfc3339(value).ok())
+                        .ok_or(N8nError::MalformedProviderResponse)?;
+                    for (bound, after) in [
+                        (&search.started_after, true),
+                        (&search.started_before, false),
+                    ] {
+                        if let Some(bound) = bound {
+                            let bound = fcp_prelude::DateTime::parse_from_rfc3339(bound)
+                                .map_err(|_| N8nError::MalformedProviderResponse)?;
+                            if after && actual < bound || !after && actual > bound {
+                                return Err(N8nError::MalformedProviderResponse);
+                            }
+                        }
+                    }
+                }
+                rows.push(serde_json::to_value(execution.into_view())?);
+            }
+            if let Some(next) = response.next_cursor {
+                if position.native.as_deref() == Some(&next)
+                    || !cursors.insert((position.group, next.clone()))
+                {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                position.native = Some(next);
+            } else {
+                position.group += 1;
+                position.native = None;
+            }
+            if rows.len() == limit as usize || position.group == groups.len() {
+                break;
+            }
+        }
+        let next = if position.group < groups.len() {
+            let bytes = serde_json::to_vec(&position)?;
+            Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        } else {
+            None
+        };
+        let mut projection_query = search.clone();
+        projection_query.page = Some(crate::types::MetadataPage {
+            limit: Some(200),
+            cursor: None,
+        });
+        let mut result = project_metadata_search(
+            "n8n.executions.search",
+            &projection_query,
+            rows,
+            self.configured_server_id()?,
+        )?;
+        result["page"] = json!({"nextCursor":next,"scope":"native_page"});
+        Ok(result)
     }
 
     async fn invoke_mcp_access_reconcile(
@@ -1327,18 +1657,86 @@ impl N8nConnector {
         }))
     }
 
+    async fn invoke_remote_workflow_validation(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        let read = crate::types::RemoteWorkflowValidationInput::parse(input)
+            .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        let workflow = client.get_workflow_typed(&read.id, context).await?;
+        if workflow.id != read.id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let (version, nodes, connections) = if read.version == "draft" {
+            (&workflow.version_id, &workflow.nodes, &workflow.connections)
+        } else {
+            let published = match &workflow.active_version {
+                crate::types::RequiredNullable::Value(published) => published,
+                crate::types::RequiredNullable::Null => {
+                    return Err(N8nError::InvalidInput(
+                        "published_version_unavailable".into(),
+                    ));
+                }
+            };
+            (
+                &published.version_id,
+                &published.nodes,
+                &published.connections,
+            )
+        };
+        let (semantic, _) = fcp_host::n8n_comparison_graph_digests(nodes, connections)
+            .map_err(|_| N8nError::MalformedProviderResponse)?;
+        // Private composition binding only. The host must replace this marker
+        // with a completed native validation result; it is never valid:true.
+        Ok(
+            json!({"status":"validation_required","id":read.id,"version":read.version,
+            "versionId":version,"profile":read.profile,"graphDigest":semantic}),
+        )
+    }
+
+    async fn invoke_workflows_compare(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        let read = crate::types::WorkflowCompareInput::parse(input)
+            .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        let workflow = client.get_workflow_typed(&read.id, context).await?;
+        if workflow.id != read.id {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        project_workflow_comparison(
+            &workflow,
+            &read,
+            self.config
+                .as_ref()
+                .ok_or(N8nError::MalformedProviderResponse)?
+                .server_id
+                .as_str(),
+        )
+    }
+
     async fn invoke_workflows_get(
         &self,
         client: &N8nClient,
         input: &serde_json::Value,
         context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
-        let id = require_str(input, "id")?;
-        let workflow = client.get_workflow_typed(id, context).await?;
-        if workflow.id != id {
+        let read = crate::types::WorkflowReadInput::parse(input)
+            .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        let workflow = client.get_workflow_typed(&read.id, context).await?;
+        if workflow.id != read.id {
             return Err(N8nError::MalformedProviderResponse);
         }
-        Ok(serde_json::to_value(normalize_workflow_state(workflow)?)?)
+        // Private lifecycle readbacks retain the state-only representation.
+        // Public callers always supply explicit current-version defaults.
+        if read.version.is_none() && read.detail.is_none() && read.include_code.is_none() {
+            return Ok(serde_json::to_value(normalize_workflow_state(workflow)?)?);
+        }
+        project_workflow_read(workflow, &read)
     }
 
     async fn invoke_workflow_draft_write(
@@ -1787,29 +2185,28 @@ impl N8nConnector {
         .map_err(N8nError::from)
     }
 
-    async fn invoke_credentials_list(
+    async fn invoke_audit(
         &self,
         client: &N8nClient,
-        input: &serde_json::Value,
+        input: &Value,
         context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        let categories = parse_audit_categories(input)?;
+        let response = client.inspect_audit(&categories, context).await?;
+        project_audit_findings(&response, &categories)
+    }
+
+    async fn invoke_credentials_list(
+        &self,
+        _client: &N8nClient,
+        _input: &serde_json::Value,
+        _context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
-        let query = parse_list_query(input)?;
-        let resp = client.list_credentials_typed(&query, context).await?;
-        let server_id = self.configured_server_id()?;
-        let data = resp
-            .data
-            .into_iter()
-            .map(|credential| {
-                let resource_uri = credential_resource_uri(server_id, &credential.id)
-                    .map_err(|_| N8nError::MalformedProviderResponse)?;
-                Ok(credential.into_view(resource_uri))
-            })
-            .collect::<N8nResult<Vec<CredentialMetadataView>>>()?;
-        serde_json::to_value(ListView {
-            data,
-            next_cursor: resp.next_cursor,
-        })
-        .map_err(N8nError::from)
+        // No REST result can satisfy the advertised official metadata contract.
+        // Host mediation remains required; this refusal is not parity completion.
+        Err(N8nError::InvalidInput(
+            "credentials_require_admitted_official_mcp".into(),
+        ))
     }
 
     fn host_egress_context(
@@ -1890,6 +2287,10 @@ impl N8nConnector {
     ) -> Result<serde_json::Value, N8nError> {
         let id = require_str(input, "id")?;
         let execution = client.get_execution_typed(id, context).await?;
+        let workflow_id = require_str(input, "workflow_id")?;
+        if execution.id != id || execution.workflow_id.as_deref() != Some(workflow_id) {
+            return Err(N8nError::MalformedProviderResponse);
+        }
         Ok(serde_json::to_value(execution.into_view())?)
     }
 
@@ -2213,9 +2614,13 @@ impl N8nConnector {
             .as_str();
         let resource = match operation {
             "n8n.workflows.list"
+            | "n8n.workflows.search"
+            | "n8n.executions.search"
+            | "n8n.structure.search"
             | "n8n.executions.list"
             | "n8n.projects.list"
             | "n8n.credentials.list"
+            | "n8n.audit.inspect"
             | "n8n.tags.list"
             | "n8n.mcp_access.reconcile" => instance_resource_uri(server_id),
             "n8n.workflows.create_draft" => {
@@ -2241,6 +2646,8 @@ impl N8nConnector {
                     .map_err(|error| error.to_fcp_error())?
             }
             "n8n.workflows.get"
+            | "n8n.workflows.compare"
+            | "n8n.validation.run"
             | "n8n.workflows.activate"
             | "n8n.workflows.update_draft"
             | "n8n.workflows.lifecycle"
@@ -2764,6 +3171,148 @@ const GRAPH_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.graph-digest.v1";
 const STATE_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.state-digest.v1";
 const MUTATION_DIGEST_DOMAIN_V1: &[u8] = b"fwc-n8n.mutation-digest.v1";
 
+fn comparison_graph_digests(nodes: &[Value], connections: &Value) -> N8nResult<(String, String)> {
+    fcp_host::n8n_comparison_graph_digests(nodes, connections)
+        .map_err(|_| N8nError::MalformedProviderResponse)
+}
+
+fn project_workflow_comparison(
+    workflow: &WorkflowDetail,
+    read: &crate::types::WorkflowCompareInput,
+    server: &str,
+) -> N8nResult<Value> {
+    normalize_workflow_state(workflow.clone())?;
+    let published = workflow.active_version.clone().into_option();
+    let graph = |selector: &str| -> N8nResult<(&str, &[Value], &Value)> {
+        if selector == "draft" {
+            return Ok((&workflow.version_id, &workflow.nodes, &workflow.connections));
+        }
+        let active = published
+            .as_ref()
+            .ok_or_else(|| N8nError::InvalidInput("published_version_unavailable".into()))?;
+        Ok((&active.version_id, &active.nodes, &active.connections))
+    };
+    let (left_version, left_nodes, left_connections) = graph(&read.left_version)?;
+    let (right_version, right_nodes, right_connections) = graph(&read.right_version)?;
+    let (left_semantic, left_layout) = comparison_graph_digests(left_nodes, left_connections)?;
+    let (right_semantic, right_layout) = comparison_graph_digests(right_nodes, right_connections)?;
+    let resource = workflow_resource_uri(server, &workflow.id)?;
+    Ok(json!({"leftUri":resource,"rightUri":resource,
+        "leftVersionId":left_version,"rightVersionId":right_version,
+        "semanticDiff":{"changed":left_semantic != right_semantic,"leftDigest":left_semantic,"rightDigest":right_semantic},
+        "layoutDiff":{"changed":left_layout != right_layout,"leftDigest":left_layout,"rightDigest":right_layout},
+        "validationDelta":{"status":"not_collected","reason":"trusted_local_validation_composition_required"}}))
+}
+
+fn project_workflow_read(
+    workflow: WorkflowDetail,
+    read: &crate::types::WorkflowReadInput,
+) -> N8nResult<Value> {
+    let state = normalize_workflow_state(workflow.clone())?;
+    let mut result = json!({"workflow": state});
+    let selection = read.version.as_deref().unwrap_or("draft");
+    let mut graphs = serde_json::Map::new();
+    let mut code_nodes = Vec::new();
+    let mut project = |label: &str,
+                       version: &str,
+                       nodes: &[Value],
+                       connections: &Value|
+     -> N8nResult<()> {
+        if nodes.len() > 1000 || !connections.is_object() {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let mut safe_nodes = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let object = node
+                .as_object()
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            let mut safe = serde_json::Map::new();
+            for key in ["id", "name", "type"] {
+                let text = object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .ok_or(N8nError::MalformedProviderResponse)?;
+                if text.is_empty() || text.len() > 256 || text.chars().any(char::is_control) {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                safe.insert(key.into(), json!(text));
+            }
+            if let Some(value) = object.get("typeVersion") {
+                if !value.is_number() {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                safe.insert("typeVersion".into(), value.clone());
+            }
+            if let Some(position) = object.get("position") {
+                let coordinates = position
+                    .as_array()
+                    .ok_or(N8nError::MalformedProviderResponse)?;
+                if coordinates.len() != 2 || coordinates.iter().any(|value| !value.is_number()) {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                safe.insert("position".into(), position.clone());
+            }
+            safe.insert(
+                "parametersDigest".into(),
+                json!(digest_canonical_json(
+                    b"FCP/n8n/read-parameters/v1\0",
+                    object.get("parameters").unwrap_or(&Value::Null)
+                )?),
+            );
+            if read.include_code.unwrap_or(false)
+                && object.get("type").and_then(Value::as_str) == Some("n8n-nodes-base.code")
+            {
+                // Explicit code inclusion exposes fingerprints, never provider source text.
+                for language in ["jsCode", "pythonCode"] {
+                    if let Some(code) = object
+                        .get("parameters")
+                        .and_then(|parameters| parameters.get(language))
+                    {
+                        let source = code.as_str().ok_or(N8nError::MalformedProviderResponse)?;
+                        if source.len() > 300_000 {
+                            return Err(N8nError::MalformedProviderResponse);
+                        }
+                        code_nodes.push(json!({"name": object["name"], "version": label,
+                            "digest": digest_canonical_json(b"FCP/n8n/read-code/v1\0", code)?}));
+                    }
+                }
+            }
+            safe_nodes.push(Value::Object(safe));
+        }
+        // Connection values are not returned: hostile provider extras cannot escape.
+        graphs.insert(label.into(), json!({"versionId": version, "nodes": safe_nodes,
+            "connectionsDigest": digest_canonical_json(b"FCP/n8n/read-connections/v1\0", connections)?}));
+        Ok(())
+    };
+    if matches!(selection, "draft" | "both") {
+        project(
+            "draft",
+            &workflow.version_id,
+            &workflow.nodes,
+            &workflow.connections,
+        )?;
+    }
+    if matches!(selection, "published" | "both") {
+        if let Some(published) = workflow.active_version.into_option() {
+            project(
+                "published",
+                &published.version_id,
+                &published.nodes,
+                &published.connections,
+            )?;
+        } else {
+            graphs.insert("published".into(), Value::Null);
+        }
+    }
+    if read.detail.as_deref().unwrap_or("standard") != "minimal" {
+        result["graph"] = Value::Object(graphs);
+    }
+    if read.include_code.unwrap_or(false) {
+        result["codeNodes"] = json!(code_nodes);
+    }
+    Ok(result)
+}
+
 fn normalize_workflow_state(workflow: WorkflowDetail) -> N8nResult<WorkflowStateView> {
     let WorkflowDetail {
         id,
@@ -3075,16 +3624,31 @@ fn parse_folder_get_input(input: &serde_json::Value) -> N8nResult<FolderGetInput
 
 fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nResult<()> {
     match operation {
+        "n8n.workflows.search" | "n8n.executions.search" | "n8n.structure.search" => {
+            MetadataSearch::parse(operation, input)
+                .map(|_| ())
+                .map_err(|code| N8nError::InvalidInput(code.into()))
+        }
+        "n8n.credentials.list" if input.get("limit").is_none() && input.get("cursor").is_none() => {
+            MetadataSearch::parse(operation, input)
+                .map(|_| ())
+                .map_err(|code| N8nError::InvalidInput(code.into()))
+        }
+        "n8n.audit.inspect" => parse_audit_categories(input).map(|_| ()),
         "n8n.workflows.list"
         | "n8n.executions.list"
         | "n8n.projects.list"
         | "n8n.credentials.list"
         | "n8n.tags.list" => parse_list_query(input).map(|_| ()),
-        "n8n.workflows.get" => {
-            require_exact_object(input, &["id"], "workflow get input")?;
-            require_str(input, "id")?;
-            Ok(())
-        }
+        "n8n.workflows.get" => crate::types::WorkflowReadInput::parse(input)
+            .map(|_| ())
+            .map_err(|code| N8nError::InvalidInput(code.into())),
+        "n8n.workflows.compare" => crate::types::WorkflowCompareInput::parse(input)
+            .map(|_| ())
+            .map_err(|code| N8nError::InvalidInput(code.into())),
+        "n8n.validation.run" => crate::types::RemoteWorkflowValidationInput::parse(input)
+            .map(|_| ())
+            .map_err(|code| N8nError::InvalidInput(code.into())),
         "n8n.workflows.activate" => parse_workflow_activation_input(input).map(|_| ()),
         "n8n.workflows.lifecycle" => parse_workflow_lifecycle_input(input).map(|_| ()),
         "n8n.workflows.execute" => parse_workflow_execute_input(input).map(|_| ()),
@@ -3118,6 +3682,329 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         "n8n.mcp_access.reconcile" => parse_mcp_access_input(input).map(|_| ()),
         _ => Ok(()),
     }
+}
+
+/// Project a complete, already bounded metadata snapshot. No provider calls or
+/// authority construction occur here; callers must establish completeness.
+pub fn project_metadata_search(
+    operation: &str,
+    search: &MetadataSearch,
+    records: Vec<Value>,
+    server: &str,
+) -> N8nResult<Value> {
+    project_metadata_search_bound(operation, search, records, server, false)
+}
+
+/// Project a complete official workflow result whose native name/description,
+/// project, folder and tag filters were applied to the same bound request.
+pub fn project_official_workflow_search(
+    search: &MetadataSearch,
+    records: Vec<Value>,
+    server: &str,
+) -> N8nResult<Value> {
+    project_metadata_search_bound("n8n.workflows.search", search, records, server, true)
+}
+
+fn project_metadata_search_bound(
+    operation: &str,
+    search: &MetadataSearch,
+    records: Vec<Value>,
+    server: &str,
+    native_workflow_filters: bool,
+) -> N8nResult<Value> {
+    fn required_text<'a>(row: &'a Value, key: &str) -> N8nResult<&'a str> {
+        row.get(key)
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+            })
+            .ok_or(N8nError::MalformedProviderResponse)
+    }
+    let malformed = || N8nError::MalformedProviderResponse;
+    let mut ids = BTreeSet::new();
+    let mut selected = Vec::new();
+    for mut record in records {
+        let id = required_text(&record, "id")?.to_owned();
+        if !ids.insert(id.clone()) {
+            return Err(malformed());
+        }
+        if let Some(query) = &search.query
+            && !native_workflow_filters
+        {
+            let query = query.to_lowercase();
+            let name = required_text(&record, "name")?.to_lowercase();
+            let description = record["description"].as_str().unwrap_or("").to_lowercase();
+            if !(name.contains(&query)
+                || operation == "n8n.workflows.search" && description.contains(&query))
+            {
+                continue;
+            }
+        }
+        let mut matched = true;
+        for (field, expected) in [
+            ("projectId", &search.project_id),
+            ("parentFolderId", &search.folder_id),
+            ("workflowId", &search.workflow_id),
+            ("type", &search.credential_type),
+        ] {
+            if let Some(expected) = expected {
+                if native_workflow_filters && matches!(field, "projectId" | "parentFolderId") {
+                    continue;
+                }
+                if operation == "n8n.structure.search" && field == "projectId" {
+                    continue;
+                }
+                matched &= required_text(&record, field)? == expected;
+            }
+        }
+        for (field, expected) in [
+            ("active", search.active),
+            ("isArchived", search.is_archived),
+            ("onlySharedWithMe", search.only_shared_with_me),
+        ] {
+            if let Some(expected) = expected {
+                matched &= record
+                    .get(field)
+                    .and_then(Value::as_bool)
+                    .ok_or_else(malformed)?
+                    == expected;
+            }
+        }
+        if let Some(statuses) = &search.status {
+            matched &= statuses
+                .iter()
+                .any(|status| record["status"].as_str() == Some(status));
+            if !record["status"].is_string() {
+                return Err(malformed());
+            }
+        }
+        if let Some(parent) = &search.parent_folder_id {
+            matched &= record
+                .get("parentFolderId")
+                .and_then(Value::as_str)
+                .ok_or_else(malformed)?
+                == parent;
+        }
+        if search.started_after.is_some() || search.started_before.is_some() {
+            let started =
+                fcp_prelude::DateTime::parse_from_rfc3339(required_text(&record, "startedAt")?)
+                    .map_err(|_| malformed())?;
+            for (bound, is_after) in [
+                (&search.started_after, true),
+                (&search.started_before, false),
+            ] {
+                if let Some(bound) = bound {
+                    let bound = fcp_prelude::DateTime::parse_from_rfc3339(bound)
+                        .map_err(|_| malformed())?;
+                    matched &= if is_after {
+                        started >= bound
+                    } else {
+                        started <= bound
+                    };
+                }
+            }
+        }
+        if let Some(tags) = &search.tags
+            && !native_workflow_filters
+        {
+            let actual = record["tags"].as_array().ok_or_else(malformed)?;
+            matched &= tags.iter().all(|tag| {
+                actual.iter().any(|actual| {
+                    actual["id"].as_str() == Some(tag.as_str())
+                        || actual["name"].as_str() == Some(tag.as_str())
+                })
+            });
+        }
+        if !matched {
+            continue;
+        }
+        let collection = match operation {
+            "n8n.workflows.search" => "workflows",
+            "n8n.credentials.list" => "credentials",
+            "n8n.structure.search" => search.kind.as_deref().ok_or_else(malformed)?,
+            "n8n.executions.search" => "executions",
+            _ => return Err(malformed()),
+        };
+        record["resourceUri"] = if operation == "n8n.executions.search" {
+            let workflow = required_text(&record, "workflowId")?;
+            json!(format!(
+                "fwc-n8n://{server}/workflows/{}/executions/{}",
+                encode_resource_segment(workflow),
+                encode_resource_segment(&id)
+            ))
+        } else {
+            json!(format!(
+                "fwc-n8n://{server}/{collection}/{}",
+                encode_resource_segment(&id)
+            ))
+        };
+        if operation == "n8n.structure.search" {
+            record = json!({"resourceUri":record["resourceUri"],"id":id,"name":required_text(&record,"name")?,"type":collection,
+                "parentUri":if collection=="folders" {search.project_id.as_ref().map(|id| format!("fwc-n8n://{server}/projects/{}",encode_resource_segment(id)))} else {None}});
+        }
+        selected.push(record);
+    }
+    let sort = search.sort.as_deref().unwrap_or("id:asc");
+    let (field, direction) = sort.split_once(':').ok_or_else(malformed)?;
+    if field != "id" && selected.iter().any(|row| !row[field].is_string()) {
+        return Err(malformed());
+    }
+    selected.sort_by(|a, b| {
+        let order = a[field].as_str().cmp(&b[field].as_str());
+        let order = if direction == "desc" {
+            order.reverse()
+        } else {
+            order
+        };
+        order.then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    let mut binding = serde_json::to_value(search)?;
+    binding["page"] = Value::Null;
+    let snapshot = digest_canonical_json(
+        b"fwc-n8n.metadata-snapshot.v1",
+        &json!({"server":server,"operation":operation,"query":binding,"rows":selected}),
+    )?;
+    let offset = if let Some(cursor) = search.page.as_ref().and_then(|page| page.cursor.as_deref())
+    {
+        let (offset, digest) = cursor
+            .split_once(':')
+            .ok_or_else(|| N8nError::InvalidInput("invalid_metadata_cursor".into()))?;
+        if digest != snapshot {
+            return Err(N8nError::InvalidInput("stale_metadata_cursor".into()));
+        }
+        offset
+            .parse::<usize>()
+            .map_err(|_| N8nError::InvalidInput("invalid_metadata_cursor".into()))?
+    } else {
+        0
+    };
+    if offset > selected.len() {
+        return Err(N8nError::InvalidInput("invalid_metadata_cursor".into()));
+    }
+    let limit = search
+        .page
+        .as_ref()
+        .and_then(|page| page.limit)
+        .unwrap_or(50) as usize;
+    let end = offset.saturating_add(limit).min(selected.len());
+    let next = (end < selected.len()).then(|| format!("{end}:{snapshot}"));
+    let key = match operation {
+        "n8n.workflows.search" => "workflows",
+        "n8n.executions.search" => "executions",
+        "n8n.credentials.list" => "credentials",
+        _ => "items",
+    };
+    Ok(
+        json!({key:selected[offset..end],"page":{"nextCursor":next,"total":selected.len(),"snapshotDigest":snapshot}}),
+    )
+}
+
+fn encode_resource_segment(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
+fn parse_audit_categories(input: &Value) -> N8nResult<Vec<String>> {
+    require_exact_object(input, &["categories"], "audit input")?;
+    let categories = input
+        .get("categories")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= 4)
+        .ok_or_else(|| {
+            N8nError::InvalidInput("audit_instance_external_effect_not_admitted".into())
+        })?;
+    let mut seen = BTreeSet::new();
+    for category in categories {
+        let category = category
+            .as_str()
+            .filter(|value| matches!(*value, "credentials" | "database" | "filesystem" | "nodes"))
+            .ok_or_else(|| {
+                N8nError::InvalidInput("audit_instance_external_effect_not_admitted".into())
+            })?;
+        if !seen.insert(category.to_string()) {
+            return Err(N8nError::InvalidInput("audit duplicate category".into()));
+        }
+    }
+    Ok(seen.into_iter().collect())
+}
+
+/// Provider names, paths, descriptions and recommendations are never copied
+/// into the public audit result. Each supported finding has a static code.
+fn project_audit_findings(response: &Value, categories: &[String]) -> N8nResult<Value> {
+    let mut findings = Vec::new();
+    if response.as_array().is_some_and(Vec::is_empty) {
+        return Ok(
+            json!({"summary":{"categories":categories,"fullAudit":false},"findings":findings}),
+        );
+    }
+    let reports = response
+        .as_object()
+        .ok_or(N8nError::MalformedProviderResponse)?;
+    if reports.len() > categories.len() {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    let mut seen = BTreeSet::new();
+    for (report_title, report) in reports {
+        let category = report
+            .get("risk")
+            .and_then(Value::as_str)
+            .filter(|value| categories.iter().any(|category| category == value))
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        let expected_title = match category {
+            "credentials" => "Credentials Risk Report",
+            "database" => "Database Risk Report",
+            "filesystem" => "Filesystem Risk Report",
+            "nodes" => "Nodes Risk Report",
+            _ => return Err(N8nError::MalformedProviderResponse),
+        };
+        if report_title != expected_title {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        if !seen.insert(category) {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let sections = report
+            .get("sections")
+            .and_then(Value::as_array)
+            .filter(|sections| sections.len() <= 3)
+            .ok_or(N8nError::MalformedProviderResponse)?;
+        for section in sections {
+            let title = section
+                .get("title")
+                .and_then(Value::as_str)
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            let code = match (category, title) {
+                ("credentials", "Credentials not used in any workflow") => "credentials_unused",
+                ("credentials", "Credentials not used in any active workflow") => {
+                    "credentials_inactive"
+                }
+                ("credentials", "Credentials not used in recently executed workflows") => {
+                    "credentials_not_recent"
+                }
+                ("database", "Expressions in \"Execute Query\" fields in SQL nodes") => {
+                    "sql_query_expression"
+                }
+                ("database", "Expressions in \"Query Parameters\" fields in SQL nodes") => {
+                    "sql_parameter_expression"
+                }
+                ("database", "Unused \"Query Parameters\" fields in SQL nodes") => {
+                    "sql_parameters_unused"
+                }
+                ("filesystem", "Nodes that interact with the filesystem") => "filesystem_nodes",
+                ("nodes", "Official risky nodes") => "official_risky_nodes",
+                ("nodes", "Community nodes") => "community_nodes",
+                ("nodes", "Custom nodes") => "custom_nodes",
+                _ => return Err(N8nError::MalformedProviderResponse),
+            };
+            let locations = section
+                .get("location")
+                .and_then(Value::as_array)
+                .filter(|locations| locations.len() <= 10_000)
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            findings.push(json!({"category":category,"severity":"warning","code":code,
+                "message":"Native security audit reported a risk", "affectedCount":locations.len()}));
+        }
+    }
+    Ok(json!({"summary":{"categories":categories,"fullAudit":false},"findings":findings}))
 }
 
 fn parse_mcp_access_input(input: &Value) -> N8nResult<McpAccessReconcileInput> {
@@ -4313,6 +5200,24 @@ fn workflow_state_view_schema() -> serde_json::Value {
     })
 }
 
+fn workflow_read_output_schema() -> Value {
+    let mut schema = workflow_state_view_schema();
+    let state_required = schema["required"].clone();
+    schema["required"] = json!([]);
+    schema["oneOf"] = json!([
+        {"required":state_required,"not":{"required":["workflow"]}},
+        {"required":["workflow"],"not":{"required":["id"]}}
+    ]);
+    schema["properties"]["workflow"] = workflow_state_view_schema();
+    schema["properties"]["graph"] = json!({"type":"object"});
+    schema["properties"]["codeNodes"] = json!({"type":"array","maxItems":10000,"items":{
+        "type":"object","additionalProperties":false,"required":["name","digest","version"],
+        "properties":{"name":{"type":"string"},"digest":{"type":"string","pattern":"^blake3-256:[0-9a-f]{64}$"},
+            "version":{"type":"string","enum":["draft","published"]}}
+    }});
+    schema
+}
+
 fn execution_view_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -5179,7 +6084,30 @@ fn mcp_access_reconcile_output_schema() -> serde_json::Value {
 
 /// Build the operations info for introspection.
 fn operations_info() -> Vec<OperationInfo> {
-    vec![
+    let mut operations = vec![
+        op_info(
+            "n8n.audit.inspect",
+            "Inspect explicitly selected local-read security audit categories",
+            json!({"type":"object","additionalProperties":false,"required":["categories"],"properties":{
+                "categories":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{
+                    "type":"string","enum":["credentials","database","filesystem","nodes"]}}
+            }}),
+            json!({"type":"object","additionalProperties":false,"required":["summary","findings"],"properties":{
+                "summary":{"type":"object","additionalProperties":false,"required":["categories","fullAudit"],"properties":{
+                    "categories":{"type":"array","items":{"type":"string"}},"fullAudit":{"type":"boolean","const":false}}},
+                "findings":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,
+                    "required":["category","severity","code","message","affectedCount"],"properties":{
+                        "category":{"type":"string"},"severity":{"type":"string","const":"warning"},
+                        "code":{"type":"string"},"message":{"type":"string"},"affectedCount":{"type":"integer","minimum":0,"maximum":10000}}}}
+            }}),
+            "n8n.audit.read", RiskLevel::High, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Inspect safe native audit findings without names, paths or provider descriptions.".into(),
+                common_mistakes: vec!["Instance and default-all audit are denied before HTTP because the native instance reporter contacts a third party.".into()],
+                examples: vec![r#"{"categories":["credentials","database","filesystem","nodes"]}"#.into()],
+                related: vec![],
+            },
+        ),
         op_info(
             "n8n.workflows.list",
             "List all workflows in the n8n instance",
@@ -5205,8 +6133,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.workflows.get",
             "Get a specific workflow by ID",
-            json!({"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "description": "Workflow identifier"}}}),
-            workflow_state_view_schema(),
+            crate::types::workflow_read_input_schema(),
+            workflow_read_output_schema(),
             "n8n.workflows.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -5503,8 +6431,8 @@ fn operations_info() -> Vec<OperationInfo> {
         op_info(
             "n8n.credentials.list",
             "List safe credential metadata in the n8n instance",
-            list_input_schema(),
-            list_output_schema(&credential_metadata_view_schema()),
+            crate::types::official_credentials_input_schema(),
+            crate::types::official_credentials_output_schema(),
             "n8n.credentials.metadata.read",
             RiskLevel::Low,
             SafetyTier::Safe,
@@ -5515,7 +6443,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "The upstream endpoint requires the credential:list scope and owner or admin access.".into(),
                     "Credential values, secret maps, auth headers, and configuration data are never returned.".into(),
                     "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.".into(),
-                    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.".into(),
+                    "The admitted official tool has no cursor; page completeness and continuation are not established.".into(),
                 ],
                 examples: vec!["{}".into()],
                 related: vec![CapabilityId::from_static("n8n.projects.list")],
@@ -5632,7 +6560,39 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
             },
         ),
-    ]
+    ];
+    for (operation, capability) in [
+        ("n8n.workflows.search", "n8n.workflows.read"),
+        ("n8n.executions.search", "n8n.executions.read"),
+        ("n8n.structure.search", "n8n.structure.read"),
+    ] {
+        operations.push(op_info(operation,"Search a complete bounded metadata snapshot",
+            if operation == "n8n.workflows.compare" { crate::types::workflow_compare_input_schema() }
+                else { crate::types::metadata_search_schema(operation) },json!({"type":"object"}),
+            capability,RiskLevel::Low,SafetyTier::Safe,IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use:"Use typed metadata filters and snapshot-bound pagination.".into(),
+                common_mistakes:vec!["Snapshots exceeding 2000 rows or ten native pages are refused; no partial search is reported as complete.".into()],
+                examples:vec!["{}".into()],related:vec![],
+            }));
+    }
+    operations.push(op_info("n8n.validation.run",
+        "Read one selected current graph for host-owned signed local validation",
+        crate::types::remote_workflow_validation_input_schema(), json!({"type":"object"}),
+        "n8n.workflows.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+        AgentHint { when_to_use:"Validate a current draft or published graph under the invocation deadline.".into(),
+            common_mistakes:vec!["validation_required is an incomplete private binding, never a successful validation.".into()],
+            examples:vec![r#"{"subject":"remote_workflow","id":"1001","version":"draft","profile":"runtime"}"#.into()],
+            related:vec![CapabilityId::from_static("n8n.workflows.get")] }));
+    operations.push(op_info("n8n.workflows.compare",
+        "Compare the current draft and current published graph without retrieving history",
+        crate::types::workflow_compare_input_schema(), json!({"type":"object"}),
+        "n8n.workflows.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
+        AgentHint { when_to_use:"Compare current graph semantics and layout; validation requires a separately collected native result.".into(),
+            common_mistakes:vec!["Historical version IDs are not supported by this operation.".into()],
+            examples:vec![r#"{"id":"1001","leftVersion":"draft","rightVersion":"published"}"#.into()],
+            related:vec![CapabilityId::from_static("n8n.workflows.get")] }));
+    operations
 }
 
 #[cfg(test)]
@@ -5640,6 +6600,112 @@ mod tests {
     use super::*;
     use crate::types::RequiredNullable;
     use fcp_prelude::ExecutionScope;
+
+    #[test]
+    fn audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes() {
+        let categories = vec!["credentials".to_owned()];
+        assert_eq!(
+            project_audit_findings(&json!([]), &categories).unwrap(),
+            json!({"summary":{"categories":["credentials"],"fullAudit":false},"findings":[]})
+        );
+        for malformed in [
+            json!([{"risk":"credentials","sections":[]}]),
+            json!(null),
+            json!("AUDIT_HOSTILE_CANARY"),
+            json!({"AUDIT_HOSTILE_CANARY":{"risk":"credentials","sections":[]}}),
+            json!({"Credentials Risk Report":{"risk":"credentials","sections":[{"title":"AUDIT_HOSTILE_CANARY","location":[]}]}}),
+            json!({"Credentials Risk Report":{"risk":"instance","sections":[]}}),
+        ] {
+            assert!(matches!(
+                project_audit_findings(&malformed, &categories),
+                Err(N8nError::MalformedProviderResponse)
+            ));
+        }
+    }
+
+    #[test]
+    fn current_workflow_comparison_separates_layout_and_sensitive_semantics() {
+        let baseline = vec![
+            json!({"id":"one", "name":"Code", "type":"n8n-nodes-base.code",
+            "position":[0,0], "parameters":{"jsCode":"PRIVATE_CANARY"},
+            "credentials":{"api":{"id":"credential-one"}}}),
+        ];
+        let mut layout = baseline.clone();
+        layout[0]["position"] = json!([10, 20]);
+        let first = comparison_graph_digests(&baseline, &json!({})).unwrap();
+        let moved = comparison_graph_digests(&layout, &json!({})).unwrap();
+        assert_eq!(first.0, moved.0);
+        assert_ne!(first.1, moved.1);
+        let mut sensitive = baseline.clone();
+        sensitive[0]["credentials"]["api"]["id"] = json!("credential-two");
+        assert_ne!(
+            first.0,
+            comparison_graph_digests(&sensitive, &json!({})).unwrap().0
+        );
+        let mut workflow = digest_test_workflow();
+        workflow.nodes = layout;
+        workflow.active_version_id = RequiredNullable::Value("published-v1".into());
+        workflow.active_version = serde_json::from_value(json!({"versionId":"published-v1",
+            "nodes":baseline,"connections":{}}))
+        .unwrap();
+        let read = crate::types::WorkflowCompareInput::parse(&json!({"id":workflow.id,
+            "leftVersion":"draft","rightVersion":"published"}))
+        .unwrap();
+        let result = project_workflow_comparison(&workflow, &read, "eec").unwrap();
+        assert_eq!(result["semanticDiff"]["changed"], false);
+        assert_eq!(result["layoutDiff"]["changed"], true);
+        assert_eq!(result["validationDelta"]["status"], "not_collected");
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("PRIVATE_CANARY")
+        );
+        assert!(
+            crate::types::WorkflowCompareInput::parse(&json!({"id":"x",
+            "leftVersion":"old-version-id","rightVersion":"published"}))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn current_workflow_read_selectors_and_redaction() {
+        let mut workflow = digest_test_workflow();
+        workflow.nodes = vec![
+            json!({"id":"code", "name":"Code", "type":"n8n-nodes-base.code",
+            "typeVersion":2, "position":[1,2], "credentials":{"secret":"PRIVATE_CANARY"},
+            "parameters":{"jsCode":"PRIVATE_CANARY", "token":"PRIVATE_CANARY"}}),
+        ];
+        let read = crate::types::WorkflowReadInput::parse(&json!({"id":workflow.id,
+            "version":"both", "detail":"full", "includeCode":true}))
+        .unwrap();
+        let output = project_workflow_read(workflow.clone(), &read).unwrap();
+        assert_eq!(output["graph"]["draft"]["nodes"][0]["name"], "Code");
+        assert!(
+            output["codeNodes"][0]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("blake3-256:")
+        );
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("PRIVATE_CANARY")
+        );
+        let minimal = crate::types::WorkflowReadInput::parse(&json!({"id":workflow.id,
+            "version":"draft", "detail":"minimal"}))
+        .unwrap();
+        let output = project_workflow_read(workflow, &minimal).unwrap();
+        assert!(output.get("graph").is_none());
+        assert!(output.get("codeNodes").is_none());
+        for input in [
+            json!({"id":"x","version":"historic-id"}),
+            json!({"id":"x","includeCode":null}),
+            json!({"id":"x","detail":"unknown"}),
+            json!({"id":"x","url":"https://other"}),
+        ] {
+            assert!(crate::types::WorkflowReadInput::parse(&input).is_err());
+        }
+    }
 
     fn digest_test_workflow() -> WorkflowDetail {
         serde_json::from_value(json!({
@@ -6146,9 +7212,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_19_operations() {
+    fn operations_info_has_23_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 19);
+        assert_eq!(ops.len(), 23);
         let operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
@@ -6805,7 +7871,11 @@ mod tests {
                 );
                 assert_eq!(
                     op.risk_level,
-                    RiskLevel::Low,
+                    if op.id.as_ref() == "n8n.audit.inspect" {
+                        RiskLevel::High
+                    } else {
+                        RiskLevel::Low
+                    },
                     "read op {} should be low risk",
                     op.id.as_ref()
                 );
@@ -7025,6 +8095,52 @@ mod tests {
                 "workflowVersionId must remain optional in schema {schema}"
             );
         }
+    }
+
+    #[test]
+    fn current_workflow_read_manifest_and_executable_schema_are_identical() {
+        let manifest = fcp_manifest::ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).unwrap();
+        let runtime = operations_info()
+            .into_iter()
+            .find(|operation| operation.id.as_ref() == "n8n.workflows.get")
+            .unwrap();
+        let declared = &manifest.provides.operations["n8n.workflows.get"];
+        assert_eq!(declared.input_schema, runtime.input_schema);
+        assert_eq!(declared.output_schema, runtime.output_schema);
+        assert_eq!(
+            runtime.output_schema["properties"]["workflow"],
+            workflow_state_view_schema()
+        );
+        assert_eq!(runtime.output_schema["oneOf"].as_array().unwrap().len(), 2);
+        assert!(
+            runtime.output_schema["properties"]["codeNodes"]["items"]["properties"]
+                .get("source")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn official_credentials_public_manifest_schema_matches_executable_projection() {
+        // Schema parity only; full manifest/hash validation is a separate test.
+        let manifest = fcp_manifest::ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).unwrap();
+        let operation = &manifest.provides.operations["n8n.credentials.list"];
+        let runtime = operations_info()
+            .into_iter()
+            .find(|operation| operation.id.as_ref() == "n8n.credentials.list")
+            .unwrap();
+        assert_eq!(operation.input_schema, runtime.input_schema);
+        assert_eq!(operation.output_schema, runtime.output_schema);
+        assert!(runtime.input_schema.pointer("/properties/cursor").is_none());
+        assert!(
+            runtime
+                .input_schema
+                .pointer("/properties/page/properties/cursor")
+                .is_none()
+        );
+        assert_eq!(
+            runtime.output_schema["required"],
+            json!(["credentials", "page"])
+        );
     }
 
     #[test]

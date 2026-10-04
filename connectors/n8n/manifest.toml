@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2088cd622ecf7985c77e1c89ea7940fdb7b0e65826ea3604d645e084f9a4c9cb"
+interface_hash = "blake3-256:fcp.interface.v2:998cb3c78a121ae0be35836e0e9caf71e9c0a7e437a08c99a621a8db73e36755"
 
 [connector]
 id = "fcp.n8n"
@@ -42,11 +42,13 @@ required = [
     "storage.state",
 ]
 optional = [
+    "n8n.audit.read",
     "n8n.credentials.metadata.read",
     "n8n.executions.read",
     "n8n.folders.read",
     "n8n.mcp_access.write",
     "n8n.projects.read",
+    "n8n.structure.read",
     "n8n.tags.read",
     "n8n.workflows.lifecycle",
     "n8n.workflows.execute",
@@ -59,6 +61,173 @@ forbidden = [
     "media.upload",
     "media.download",
 ]
+
+[provides.operations."n8n.workflows.search"]
+description = "Search a complete bounded metadata snapshot"
+capability = "n8n.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = [], properties = { query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, folderId = { type = "string", minLength = 1, maxLength = 256 }, tags = { type = "array", minItems = 1, maxItems = 10, items = { type = "string", minLength = 1, maxLength = 256 } }, active = { type = "boolean" }, isArchived = { type = "boolean" }, sort = { type = "string", enum = ["updatedAt:asc", "updatedAt:desc", "createdAt:asc", "createdAt:desc", "name:asc", "name:desc"] }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 256 } } } } }
+output_schema = { type = "object" }
+[provides.operations."n8n.workflows.search".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+[provides.operations."n8n.workflows.search".ai_hints]
+when_to_use = "Use typed metadata filters and snapshot-bound pagination."
+common_mistakes = ["Snapshots exceeding 2000 rows or ten native pages are refused; no partial search is reported as complete."]
+examples = ["{}"]
+related = []
+
+[provides.operations."n8n.validation.run"]
+description = "Validate one selected current workflow through host-owned signed local composition"
+capability = "n8n.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["subject", "id"], properties = { subject = { type = "string", enum = ["remote_workflow"] }, id = { type = "string", minLength = 1, maxLength = 256 }, version = { type = "string", enum = ["draft", "published"], default = "draft" }, profile = { type = "string", enum = ["minimal", "runtime", "ai_friendly", "strict"], default = "runtime" } } }
+output_schema = { type = "object" }
+[provides.operations."n8n.validation.run".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+[provides.operations."n8n.validation.run".ai_hints]
+when_to_use = "Validate a current draft or published graph under the invocation deadline."
+common_mistakes = ["validation_required is an incomplete private binding, never a successful validation."]
+examples = ['{"subject":"remote_workflow","id":"1001","version":"draft","profile":"runtime"}']
+related = ["n8n.workflows.get"]
+
+[provides.operations."n8n.executions.search"]
+description = "Search a complete bounded metadata snapshot"
+capability = "n8n.executions.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = [], properties = { workflowId = { type = "string", minLength = 1, maxLength = 256 }, status = { type = "array", minItems = 1, maxItems = 8, uniqueItems = true, items = { type = "string", enum = ["new", "running", "success", "error", "waiting", "canceled", "crashed", "unknown"] } }, startedAfter = { type = "string", minLength = 1, maxLength = 256 }, startedBefore = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 8192 } } } } }
+output_schema = { type = "object" }
+[provides.operations."n8n.executions.search".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+[provides.operations."n8n.executions.search".ai_hints]
+when_to_use = "Use typed metadata filters and snapshot-bound pagination."
+common_mistakes = ["Snapshots exceeding 2000 rows or ten native pages are refused; no partial search is reported as complete."]
+examples = ["{}"]
+related = []
+
+[provides.operations."n8n.structure.search"]
+description = "Search a complete bounded metadata snapshot"
+capability = "n8n.structure.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["kind"], properties = { kind = { type = "string", enum = ["projects", "folders", "tags"] }, query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, parentFolderId = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 256 } } } } }
+output_schema = { type = "object" }
+[provides.operations."n8n.structure.search".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+[provides.operations."n8n.structure.search".ai_hints]
+when_to_use = "Use typed metadata filters and snapshot-bound pagination."
+common_mistakes = ["Snapshots exceeding 2000 rows or ten native pages are refused; no partial search is reported as complete."]
+examples = ["{}"]
+related = []
+
+[provides.operations."n8n.audit.inspect"]
+description = "Inspect explicitly selected local-read security audit categories"
+capability = "n8n.audit.read"
+risk_level = "high"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["categories"], properties = { categories = { type = "array", minItems = 1, maxItems = 4, uniqueItems = true, items = { type = "string", enum = ["credentials", "database", "filesystem", "nodes"] } } } }
+output_schema = { type = "object", additionalProperties = false, required = ["summary", "findings"], properties = { summary = { type = "object", additionalProperties = false, required = ["categories", "fullAudit"], properties = { categories = { type = "array", items = { type = "string" } }, fullAudit = { type = "boolean", const = false } } }, findings = { type = "array", maxItems = 12, items = { type = "object", additionalProperties = false, required = ["category", "severity", "code", "message", "affectedCount"], properties = { category = { type = "string" }, severity = { type = "string", const = "warning" }, code = { type = "string" }, message = { type = "string" }, affectedCount = { type = "integer", minimum = 0, maximum = 10000 } } } } } }
+
+[provides.operations."n8n.audit.inspect".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.audit.inspect".ai_hints]
+when_to_use = "Inspect safe native audit findings without names, paths or provider descriptions."
+common_mistakes = ["Instance and default-all audit are denied before HTTP because the native instance reporter contacts a third party."]
+examples = ['{"categories":["credentials","database","filesystem","nodes"]}']
+related = []
 
 [provides.operations."n8n.credentials.list"]
 description = "List safe credential metadata in the n8n instance"
@@ -73,50 +242,13 @@ revocation_freshness = "safe"
 additionalProperties = false
 required = []
 type = "object"
-
-[provides.operations."n8n.credentials.list".input_schema.properties.cursor]
-maxLength = 4096
-minLength = 1
-type = "string"
-
-[provides.operations."n8n.credentials.list".input_schema.properties.limit]
-default = 50
-maximum = 200
-minimum = 1
-type = "integer"
+properties = { query = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, onlySharedWithMe = { type = "boolean" }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 } } } }
 
 [provides.operations."n8n.credentials.list".output_schema]
 additionalProperties = false
-required = ["data"]
+required = ["credentials", "page"]
 type = "object"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data]
-type = "array"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data.items]
-additionalProperties = false
-required = [
-    "resourceUri",
-    "id",
-    "name",
-    "type",
-]
-type = "object"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.id]
-type = "string"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.name]
-type = "string"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.resourceUri]
-type = "string"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.data.items.properties.type]
-type = "string"
-
-[provides.operations."n8n.credentials.list".output_schema.properties.nextCursor]
-type = "string"
+properties = { credentials = { type = "array", maxItems = 200, items = { type = "object", additionalProperties = false, required = ["resourceUri", "id", "name", "type", "scopes", "isManaged", "isGlobal", "homeProject"], properties = { resourceUri = { type = "string" }, id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, scopes = { type = "array", maxItems = 64, items = { type = "string", minLength = 1, maxLength = 256 } }, isManaged = { type = "boolean" }, isGlobal = { type = "boolean" }, homeProject = { type = ["object", "null"], additionalProperties = false, required = ["id", "name", "type"], properties = { id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 } } } } } }, page = { type = "object", additionalProperties = false, required = ["returnedCount", "limit", "continuation", "completeness"], properties = { returnedCount = { type = "integer", minimum = 0, maximum = 200 }, limit = { type = "integer", minimum = 1, maximum = 200 }, continuation = { type = "string", enum = ["unavailable"] }, completeness = { type = "string", enum = ["not_established"] } } } }
 
 [provides.operations."n8n.credentials.list".network_constraints]
 host_allow = ["operator-configured"]
@@ -142,7 +274,7 @@ common_mistakes = [
     "The upstream endpoint requires the credential:list scope and owner or admin access.",
     "Credential values, secret maps, auth headers, and configuration data are never returned.",
     "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.",
-    "Only one bounded page is returned; pass an opaque nextCursor unchanged to continue.",
+    "The admitted official tool has no cursor; page completeness and continuation are not established.",
 ]
 examples = ["{}"]
 related = ["n8n.projects.list"]
@@ -2528,24 +2660,42 @@ type = "object"
 [provides.operations."n8n.workflows.get".input_schema.properties.id]
 description = "Workflow identifier"
 type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."n8n.workflows.get".input_schema.properties.version]
+type = "string"
+enum = ["draft", "published", "both"]
+
+[provides.operations."n8n.workflows.get".input_schema.properties.detail]
+type = "string"
+enum = ["minimal", "standard", "full"]
+
+[provides.operations."n8n.workflows.get".input_schema.properties.includeCode]
+type = "boolean"
 
 [provides.operations."n8n.workflows.get".output_schema]
 additionalProperties = false
-required = [
-    "id",
-    "name",
-    "projectId",
-    "folderId",
-    "versionId",
-    "active",
-    "activeVersionId",
-    "isArchived",
-    "draft",
-    "published",
-    "stateDigest",
-    "updatedAt",
+required = []
+oneOf = [
+    { required = ["id", "name", "projectId", "folderId", "versionId", "active", "activeVersionId", "isArchived", "draft", "published", "stateDigest", "updatedAt"], not = { required = ["workflow"] } },
+    { required = ["workflow"], not = { required = ["id"] } },
 ]
 type = "object"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.workflow]
+type = "object"
+additionalProperties = false
+required = ["id", "name", "projectId", "folderId", "versionId", "active", "activeVersionId", "isArchived", "draft", "published", "stateDigest", "updatedAt"]
+properties = { id = { type = "string" }, name = { type = ["string", "null"] }, projectId = { type = ["string", "null"] }, folderId = { type = ["string", "null"] }, versionId = { type = "string" }, active = { type = "boolean" }, activeVersionId = { type = ["string", "null"] }, isArchived = { type = "boolean" }, draft = { type = "object", additionalProperties = false, required = ["versionId", "graphDigest"], properties = { versionId = { type = "string" }, graphDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" } } }, published = { type = ["object", "null"], additionalProperties = false, required = ["versionId", "graphDigest"], properties = { versionId = { type = "string" }, graphDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" } } }, stateDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" }, updatedAt = { type = ["string", "null"] } }
+
+[provides.operations."n8n.workflows.get".output_schema.properties.graph]
+type = "object"
+
+[provides.operations."n8n.workflows.get".output_schema.properties.codeNodes]
+type = "array"
+maxItems = 10000
+items = { type = "object", additionalProperties = false, required = ["name", "digest", "version"], properties = { name = { type = "string" }, digest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" }, version = { type = "string", enum = ["draft", "published"] } } }
 
 [provides.operations."n8n.workflows.get".output_schema.properties.active]
 type = "boolean"
@@ -3044,6 +3194,13 @@ deny_exec = true
 deny_ptrace = true
 
 [[rate_limits.pools]]
+id = "n8n.audit.read"
+requests = 10
+window_ms = 60000
+burst = 1
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "n8n.credentials.metadata.read"
 requests = 200
 window_ms = 60000
@@ -3114,6 +3271,7 @@ burst = 20
 scope = "instance"
 
 [rate_limits.operation_pools]
+"n8n.audit.inspect" = ["n8n.audit.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
 "n8n.mcp_access.reconcile" = ["n8n.mcp_access.write"]
 "n8n.executions.get" = ["n8n.executions.read"]
@@ -3133,3 +3291,38 @@ scope = "instance"
 "n8n.workflows.create_draft" = ["n8n.workflows.write"]
 "n8n.workflows.get" = ["n8n.workflows.read"]
 "n8n.projects.list" = ["n8n.projects.read"]
+
+[provides.operations."n8n.workflows.compare"]
+description = "Compare the current draft and current published graph without retrieving history"
+capability = "n8n.workflows.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["id", "leftVersion", "rightVersion"], properties = { id = { type = "string", minLength = 1, maxLength = 256 }, leftVersion = { type = "string", enum = ["draft", "published"] }, rightVersion = { type = "string", enum = ["draft", "published"] }, detail = { type = "string", enum = ["minimal", "standard", "full"] } } }
+output_schema = { type = "object" }
+
+[provides.operations."n8n.workflows.compare".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.workflows.compare".ai_hints]
+when_to_use = "Compare current graph semantics and layout; validation requires a separately collected native result."
+common_mistakes = ["Historical version IDs are not supported by this operation."]
+examples = ['{"id":"1001","leftVersion":"draft","rightVersion":"published"}']
+related = ["n8n.workflows.get"]

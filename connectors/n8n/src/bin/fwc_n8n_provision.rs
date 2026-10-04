@@ -14,7 +14,11 @@ use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE, SIGNATURE_SIZE};
+use fcp_crypto::ed25519::{Ed25519VerifyingKey, PUBLIC_KEY_SIZE, SIGNATURE_SIZE};
+pub use fcp_host::{
+    N8nReceiptArtifact as Artifact, N8nReceiptBinding as OfficialMcpBinding,
+    N8nReceiptServer as ServerId, N8nSignedReleaseReceipt as ProvisionReceipt,
+};
 use fcp_manifest::LocalMcpPolicy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -288,61 +292,6 @@ struct LaunchBinding {
     launcher_digest: String,
     runtime_executable: String,
     runtime_executable_digest: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ServerId {
-    Eec,
-    Hetzner,
-}
-
-impl ServerId {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Eec => "eec",
-            Self::Hetzner => "hetzner",
-        }
-    }
-}
-
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct OfficialMcpBinding {
-    pub server: ServerId,
-    pub archive_input_schema_digest: String,
-    pub archive_output_schema_digest: String,
-    pub execute_input_schema_digest: String,
-    pub execute_output_schema_digest: String,
-}
-
-impl fmt::Debug for OfficialMcpBinding {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OfficialMcpBinding")
-            .field("server", &self.server)
-            .field("schema_digests", &"<redacted>")
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReleaseSignature {
-    pub(crate) algorithm: String,
-    pub(crate) key_id: String,
-    pub(crate) signature: String,
-}
-
-impl fmt::Debug for ReleaseSignature {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReleaseSignature")
-            .field("algorithm", &self.algorithm)
-            .field("key_id", &"<redacted>")
-            .field("signature", &"<redacted>")
-            .finish()
-    }
 }
 
 /// Explicit owner-provisioned public verification configuration.
@@ -1782,30 +1731,12 @@ struct Receipt {
     artifacts: Vec<Artifact>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Artifact {
-    pub(crate) path: String,
-    pub(crate) digest: String,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Provenance {
     schema: String,
     release_id: String,
     git_revision: String,
-}
-
-#[derive(Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProvisionReceipt {
-    pub(crate) schema: String,
-    pub(crate) release_id: String,
-    pub(crate) git_revision: String,
-    pub(crate) bindings: Vec<OfficialMcpBinding>,
-    pub(crate) artifacts: Vec<Artifact>,
-    pub(crate) signature: ReleaseSignature,
 }
 
 fn validate_request(request: &ProvisionRequest) -> Result<(), ProvisionError> {
@@ -2333,35 +2264,11 @@ fn validate_release_directories(root: &Path, expected_owner: u32) -> Result<(), 
     Ok(())
 }
 
-#[derive(Serialize)]
-struct UnsignedProvisionReceipt {
-    schema: String,
-    release_id: String,
-    git_revision: String,
-    bindings: Vec<OfficialMcpBinding>,
-    artifacts: Vec<Artifact>,
-}
-
 pub fn unsigned_provision_receipt_bytes(
     receipt: &ProvisionReceipt,
 ) -> Result<Vec<u8>, ProvisionError> {
-    let mut bindings = receipt.bindings.clone();
-    bindings.sort_by_key(|binding| binding.server);
-    let mut artifacts = receipt.artifacts.clone();
-    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
-    serde_json::to_vec(&UnsignedProvisionReceipt {
-        schema: receipt.schema.clone(),
-        release_id: receipt.release_id.clone(),
-        git_revision: receipt.git_revision.clone(),
-        bindings,
-        artifacts,
-    })
-    .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))
-}
-
-fn append_signing_field(payload: &mut Vec<u8>, field: &[u8]) {
-    payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
-    payload.extend_from_slice(field);
+    fcp_host::n8n_unsigned_receipt_bytes(receipt)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))
 }
 
 pub fn release_signing_payload(
@@ -2379,29 +2286,11 @@ fn release_signing_payload_with_binding_mode(
     allow_predecessor_execute: bool,
 ) -> Result<Vec<u8>, ProvisionError> {
     validate_binding_shape_with_predecessor(&receipt.bindings, allow_predecessor_execute)?;
-    let mut bindings = receipt.bindings.clone();
-    bindings.sort_by_key(|binding| binding.server);
-    let mut payload = Vec::from(b"FCP-N8N-RELEASE-SIGNING-V1\0".as_slice());
-    for field in [
-        receipt.release_id.as_bytes(),
-        receipt.git_revision.as_bytes(),
-        receipt_digest.as_bytes(),
-        provision_digest.as_bytes(),
-    ] {
-        append_signing_field(&mut payload, field);
-    }
-    for binding in bindings {
-        for field in [
-            binding.server.as_str().as_bytes(),
-            binding.archive_input_schema_digest.as_bytes(),
-            binding.archive_output_schema_digest.as_bytes(),
-            binding.execute_input_schema_digest.as_bytes(),
-            binding.execute_output_schema_digest.as_bytes(),
-        ] {
-            append_signing_field(&mut payload, field);
-        }
-    }
-    Ok(payload)
+    Ok(fcp_host::n8n_release_signing_payload(
+        receipt,
+        receipt_digest,
+        provision_digest,
+    ))
 }
 
 fn decode_hex<const N: usize>(value: &str) -> Result<[u8; N], ProvisionError> {
@@ -2459,10 +2348,13 @@ fn verify_release_signature_with_binding_mode(
         &provision_digest,
         allow_predecessor_execute,
     )?;
-    let signature = Ed25519Signature::from_bytes(&signature_bytes);
-    verifying_key
-        .verify_with_context(RELEASE_SIGNATURE_CONTEXT, &payload, &signature)
-        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Signature))
+    fcp_host::verify_n8n_release_signature_bytes(
+        &public_key_bytes,
+        &configured_key.key_id,
+        &signature_bytes,
+        &payload,
+    )
+    .map_err(|_| ProvisionError::new(ProvisionErrorCode::Signature))
 }
 
 #[cfg(unix)]
@@ -4330,7 +4222,7 @@ mod tests {
                 git_revision,
                 bindings,
                 artifacts,
-                signature: ReleaseSignature {
+                signature: fcp_host::N8nReleaseSignature {
                     algorithm: "ed25519".to_owned(),
                     key_id: test_signing_key().key_id().to_string(),
                     signature: "00".repeat(SIGNATURE_SIZE),

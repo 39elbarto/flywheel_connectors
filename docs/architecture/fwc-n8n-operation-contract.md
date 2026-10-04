@@ -1606,8 +1606,152 @@ The table specifies the exact operation-specific `data` shape.
 | `data_tables.search` | `target.server` | `query`, `projectId`, `page`, `includeSchema=false` | `{tables:[{resourceUri,id,name,projectId?,columns?,rowCount?}]}` |
 | `data_tables.mutate` | exact table target or target project for create, `action`, `guard` | action payload | `{before?,after,affectedRows?,schemaDigest}` |
 | `evaluations.manage` | exact workflow target, `action` | `runId`, `status`, `page`, `guard` | action-specific `{evaluationUri?,status?,runs?,cases?,summary?}` |
-| `audit.inspect` | `target.server` | `categories[]`, `detail` | `{summary,findings:[{category,severity,resourceUri?,code,message}]}` |
+| `audit.inspect` | `target.server` | `categories[]`, `detail` | `{summary:{categories,fullAudit:false},findings:[{category,severity,resourceUri?,code,message,affectedCount}]}` |
 | `mcp_access.reconcile` | `target.server`, `scope`, `desired`, `dryRun` | `guard`, `projectId`, `folderId`, `workflowIds[]` | `{planned,changed,skipped,exceptions,readbackDigest,receipt}` |
+
+`.35` credential implementation boundary (2026-10-04): the public identifier
+remains `n8n.credentials.list`. The official `list_credentials` tool accepts
+partial name/type filters and project/sharing filters. It supplies scopes,
+managed/global flags and nullable home project; the native REST list does not
+provide equivalent top-level fields. The remaining REST DTO/list method is an
+internal provider surface, not evidence for the public official contract.
+The official tool accepts a limit of 1–200 but no cursor. Candidate output
+therefore reports `page.returnedCount`, `limit`, `continuation:"unavailable"`
+and `completeness:"not_established"`; cursor requests refuse before dispatch.
+This bounded first-page behavior does not complete required continuation parity.
+The new typed bridge/schema projection is source-only until separately admitted;
+installed RC43c does not acquire these capabilities through discovery.
+
+Installed structure baseline (2026-10-04): the coordinator attempted
+`n8n.projects.list` with `{}` exactly once on each server through installed
+RC43c. Both calls exited 1 with `host_n8n_invoke_failed`; no project data or
+successful structure read was established. The closed derivative does not
+establish the cause. Primary evidence:
+`initial-installed-project-list-20261004.json`, SHA-256
+`cb7f036c1da63e09883e02e1ef5d148a0ee9f580abd321f0e10a0253bd97ff33`
+in `/srv/dev-ssd/fcp/nqm81-35`. Structure rows remain **needs correction / new
+source validation**, including projects, folders and tags. Discovery of native
+tools is not admission or successful dispatch; required filters must use their
+actual native contracts rather than invented REST fields or local-page sorting.
+
+Candidate read-route checkpoint (2026-10-04; source uncommitted, not installed):
+the closed `mcp.n8n.read` action set maps SDK reference, best practices, SDK code,
+node validation, credentials, projects, folders, tags and workflows to fixed
+native tools. Generic MCP calls retain their approval gate. Wrapper consumers
+accept the bridge's bounded `{serverId,action,data}` projection, with exact
+server/action bindings; they do not expect or expose raw MCP transport.
+Structure and workflow search use a complete bounded native snapshot before
+local filters or snapshot-bound public pagination. Native caps are 100 projects,
+100 folders, 500 tags and 200 workflows; a truncated result refuses. This is not
+unbounded search parity. Official workflow search excludes archives, so
+`isArchived:true` is an explicit unsupported capability, not an empty success.
+Native query/project/folder/tag filtering is bound to the same request; active
+filtering is applied only after completeness has been established.
+
+Direct FCP `n8n.credentials.list` remains open and refuses before HTTP. Its
+existing REST response cannot meet the advertised metadata contract. The
+gateway currently verifies an unbound token and retains no typed verified-parent
+constraint proof for child attenuation. Existing token issuance is a new grant,
+not a proven parent-to-child transformation, and cannot silently replace the
+original principal, instance, replay or caveat bindings. The separately checked
+wrapper/host official route does not close this direct-FCP criterion.
+Child-token attenuation is not the only possible design: a fixed native MCP
+transport inside the original instance-bound n8n invocation could avoid a
+child FCP token. That route is also unproven here. The existing host egress
+credential guard admits `fcp.n8n` only with the `n8n` profile and
+`X-N8N-API-KEY`; MCP bearer credentials are separately bound to
+`fcp.mcp-bridge`. An approved mapping must bind the original operation, server,
+resource, exact request body and credential profile before transport. Simply
+widening the connector condition, changing headers or allowing a caller to
+select a broker credential purpose would not establish that mapping. Both
+alternatives remain outside this stage; the pre-HTTP refusal stays in place.
+
+Candidate `runtime.status` returns `idle:null` and `activeRuns:null` when the
+host has no shared-supervisor observation. Its explicit `observation` reports
+sessions and memory as `not_collected`; an empty provider array does not mean
+that other invocations are idle or absent. This nullable/unavailable projection
+requires contract review and does not prove the later zero-idle criterion.
+
+Native SDK-code validation effect boundary (2026-10-04): the installed parser
+uses a restricted synchronous AST interpreter that invokes supplied SDK graph
+builders. This is not static-only parsing or business workflow execution.
+Caller functions, loops, dynamic imports, `process` and `fetch` are denied;
+the handler forces `generatePinData:false`, and that method is not admitted to
+caller SDK code. AST depth, statements and allocation have native limits.
+No demonstrated mechanism preempts synchronous SDK work: a client deadline
+does not establish server interruption. The reachable SDK callback/getter
+effect proof remains incomplete. Native interpreter errors include source
+frames; the tool forwards `error.message` to telemetry before public redaction.
+Both installed containers omit `N8N_DIAGNOSTICS_ENABLED`, whose native default
+is true; actual telemetry initialization or transmission was not observed.
+Thus this row remains pending effect/preemption/telemetry admission. No native
+SDK validation, attacker code or telemetry request was executed for discovery.
+Safe primary derivative: `sdk-validation-effect-boundary-20261004-1.json`,
+SHA-256 `406dfbd0e675579ac2bbc4ffb9bbea200d2411e231f8088bd70af47f71bd8902`.
+The selected callback/getter follow-up is
+`sdk-validation-effect-boundary-20261004-2.json`, SHA-256
+`9c6187d06f74dbe048c2bce546d22db7973b8ea3c73e332d7734c31c6b8f9e63`.
+Candidate wrapper dispatch and the typed bridge both refuse this action with
+`native_workflow_code_effect_admission_pending` before broker/provider calls.
+Projection-only invalid-result fixtures do not authorize native evaluation.
+
+#### .35 read-parity implementation matrix — source checkpoint 2026-10-04
+
+This matrix is not installed acceptance or closure. Installed source remains
+RC43c `09cebc4`; candidate source is uncommitted on base `a8ea96c`. Native
+catalog/source discovery proves availability and shapes, not a successful
+admitted invocation. Tests below are local source tests unless explicitly
+identified as retained installed evidence. All new official read actions need
+separate signed schema/profile and runtime admission before installed use.
+
+| Required row / submodes | Installed baseline | Candidate route and bounded result | Evidence / remaining boundary |
+|---|---|---|---|
+| `capabilities.inspect` | Retained EEC/Hetzner catalogs contain 53 tools | Fixed official `tools/list`, bounded name/schema-digest projection; every discovery entry remains unreviewed | `initial-installed-eec-catalog-20261004.json` and Hetzner counterpart; `official_mcp_catalog_*` and schema-export tests cover presence/drift/redaction, not admission or successful invocation of discovered tools |
+| `targets.resolve`: exact URI/server and ambiguity | Needs public-path validation | Wrapper canonical URI/server binding; 1–3 explicit server candidates, duplicate/unknown/conflicting candidates denied | `public_targets_resolve_*`; candidate resolution is identity syntax, not a provider existence/name search |
+| `runtime.status` | No proved global observer | Nullable global state and explicit `not_collected`; local owned calls already collect PID/group/memory/teardown | `runtime_status_never_infers_global_idle_from_invocation_or_bundle`; global observation and correlation lookup remain open |
+| Knowledge: tool documentation, node search, templates search/get | Local catalog exists; public projection needs validation | Fixed local tools, bounded action-specific projection, source/default digests and no raw transport | `public_local_knowledge_actions_project_real_serialized_native_shapes`; template modes nodes-only/structure/full covered; combined search selectors and installed call-count policy remain separate limits |
+| `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | Local tool available; public modes need validation | Closed mode-to-native arguments and bounded catalog projection; display-condition property bindings retained | `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`; native optional version semantics still require mode-specific proof |
+| SDK reference: all nine public sections; best practices | Official tools discovered on both servers | Closed typed bridge read action → exact server/action decoder → bounded reference result/digest | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`; discovery is not schema admission; native extra `groups` section is not auto-enrolled |
+| Validation: graph, four profiles | Actual installed synthetic empty graph valid with warning | Fixed network-disabled local validator; public valid/errors/warnings projection | Pinned installed receipt `517ce0bf…`; `public_validation_projects_primary_installed_process_receipt` explicitly run with `--ignored` and receipt environment; malformed/contradictory responses denied |
+| Validation: nodes 1–50/version/subnodes | Official validator source available | Fixed `validate_node_config`, typed arguments and safe invalid-result projection | `official_sdk_inputs_and_invalid_results_are_typed_and_redacted`; unsupported native profile options are not simulated |
+| Validation: workflow_code | Native restricted SDK interpreter available | Wrapper and typed bridge refuse before broker/provider calls; bounded invalid-result projection is tested only as a pure adapter | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`, `workflow_code_effect_admission_refuses_before_native_call`; admission pending synchronous-preemption, reachable effects and earlier telemetry leakage; no live SDK validation |
+| Validation: remote_workflow/current draft or published, four profiles | Missing installed public composition | One exact REST GET captured privately; ID/version/digest bound; same selected graph validated by signed local provider with shared deadline/cancel/teardown | `remote_workflow_public_target_*`, `remote_validation_capture_*`, actual ignored local four-profile test; new runtime admission required; historical versions excluded |
+| Structure: projects/folders/tags | Installed projects call failed on both servers; folders/tags unproved | Fixed official read actions, exact native filters and complete bounded snapshots | `official_structure_bridge_projection_supports_complete_snapshot_pages`; native caps 100/100/500, truncation refuses |
+| Workflows search: filters/page/sort | REST cannot supply folder/global sort equivalence | Fixed official native search for query/project/folder/tags/sort, complete snapshot before public paging/active filtering | `official_workflow_search_native_query_is_not_replaced_with_page_local_name_filter`; cap 200 and archived search remain explicit capability limits |
+| Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and Code fingerprints only; public defaults explicit | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, manifest/executable schema parity test |
+| Draft/published compare: semantic/layout/validation | New public composition missing | Same single GET crossbinds both graphs; semantic/layout digests; two owned local validations; no public raw graph | `captured_comparison_graphs` tests and retained native local comparison test; missing published/validator failure is limited outcome, not empty success |
+| Executions search/get metadata | Existing metadata routes; new filter parity needs validation | Native workflow/time/status pushdown; running explicitly requested/merged; queryless exact metadata GET, no execution payload | Six `metadata_*` HTTP tests passed; wrong workflow denied; payload/history/rollback remain outside .35 |
+| Credentials list query/type/project/sharing/page | REST lacks required official metadata | Wrapper/host fixed official adapter gives safe scopes/managed/global/homeProject metadata; direct FCP refuses pre-HTTP | `official_credentials_*`, native serialized projection tests; direct credential-profile/authority mapping and native continuation remain open |
+| Audit credentials/database/filesystem/nodes | Source-proved fixed native POST, no installed audit invocation | Explicit four-category selection and redacted report/count projection; legitimate native empty array accepted | `audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes`; instance/default-all denied before HTTP pending external-effect decision, never full-audit success |
+
+History/rollback (.36), external credential lookup (.39), execution payload (.40)
+and authoring (.42) are not implemented or accepted by this matrix. Existing
+remote upgrades, signed RC43c and .34 acceptance remain historical facts, not
+proof that this candidate is installed. Open rows prevent whole-.35 closure.
+
+Required submode boundaries remain **OPEN**, rather than implicit capability
+exclusions:
+
+- `targets.resolve` has no provider-existence verification, name lookup or
+  project-to-workflow mapping; canonical URI resolution alone does not prove
+  that the resource exists.
+- `get_node` compare/breaking/migrations bind native numeric `fromVersion` and
+  `toVersion` and expose `available:false` honestly. Missing native version
+  metadata leaves that pair unverified. Optional `version` selection for
+  info/docs/search_properties is not implemented; those calls describe the
+  native default version, not a requested historical version.
+- Workflow `active` filtering requires a complete native snapshot first.
+  `isArchived:true` is refused. Continuation beyond the native 200-workflow
+  bound is unsupported; no per-page sort/filter is claimed as global parity.
+- `workflows.get includeCode:true` returns Code fingerprints, not source text.
+  Raw Code source is not exposed; callers requiring source have an OPEN
+  capability gap. Draft/published/both graph selectors are separately tested.
+- Combined template-search selectors and the 20-query public node-search
+  maximum are not qualified against the installed seven-call policy.
+- Credential continuation completeness, direct-FCP credential mediation,
+  global runtime observation, instance audit effects and SDK-code effects
+  remain OPEN as described above. No source-only test closes installed
+  admission for these or other new routes.
 
 `knowledge.query.action` is one of:
 
@@ -1760,6 +1904,19 @@ are discovered; absence returns `capability_unavailable`, not a fallback guess.
 `audit.inspect.categories` is a subset of `credentials`, `database`,
 `filesystem`, `nodes`, and `instance`. Findings are summaries; raw workflow or
 execution content is not part of the audit result.
+
+The `.35` native REST adapter accepts an explicit nonempty selection of the
+four categories `credentials`, `database`, `filesystem`, and `nodes`.
+`instance` and default-all requests are refused before the provider call until
+the instance reporter's external version-check effect is admitted. Therefore
+`summary.fullAudit` is always `false`; `summary.categories` identifies the
+actual requested coverage. Native `[]` means no reported risks and projects to
+empty `findings`. Nonempty arrays, malformed reports, and unknown report or
+section titles are refused. `affectedCount` is the bounded number of native
+locations, not their contents. Codes and messages are static safe summaries;
+provider descriptions, paths, names, recommendations and location values are
+not exposed. This projected shape is a `.35` contract change requiring review,
+not a claim of installed parity or full-audit acceptance.
 
 `mcp_access.reconcile.scope` is exactly `workflow_ids`, `project`, `folder`, or
 `all_current`; `desired` is a boolean. `all_current` is an explicit bounded

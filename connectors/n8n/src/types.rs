@@ -5,6 +5,694 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 
+/// Current-version read selectors. Historical version identifiers are not accepted.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowReadInput {
+    pub id: String,
+    pub version: Option<String>,
+    pub detail: Option<String>,
+    pub include_code: Option<bool>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowCompareInput {
+    pub id: String,
+    pub left_version: String,
+    pub right_version: String,
+    pub detail: Option<String>,
+}
+
+/// One current graph selected for host-owned, network-disabled validation.
+/// Historical IDs and caller-supplied graphs are deliberately not accepted.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWorkflowValidationInput {
+    pub subject: String,
+    pub id: String,
+    #[serde(default = "remote_draft_version")]
+    pub version: String,
+    #[serde(default = "remote_runtime_profile")]
+    pub profile: String,
+}
+
+fn remote_draft_version() -> String {
+    "draft".into()
+}
+fn remote_runtime_profile() -> String {
+    "runtime".into()
+}
+
+impl RemoteWorkflowValidationInput {
+    pub fn parse(input: &Value) -> Result<Self, &'static str> {
+        let parsed: Self =
+            serde_json::from_value(input.clone()).map_err(|_| "invalid_remote_validation_input")?;
+        if parsed.subject != "remote_workflow"
+            || parsed.id.is_empty()
+            || parsed.id.len() > 256
+            || parsed.id.chars().any(char::is_control)
+            || !matches!(parsed.version.as_str(), "draft" | "published")
+            || !matches!(
+                parsed.profile.as_str(),
+                "minimal" | "runtime" | "ai_friendly" | "strict"
+            )
+        {
+            return Err("invalid_remote_validation_input");
+        }
+        Ok(parsed)
+    }
+}
+
+pub fn remote_workflow_validation_input_schema() -> Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"required":["subject","id"],"properties":{
+        "subject":{"type":"string","enum":["remote_workflow"]},
+        "id":{"type":"string","minLength":1,"maxLength":256},
+        "version":{"type":"string","enum":["draft","published"],"default":"draft"},
+        "profile":{"type":"string","enum":["minimal","runtime","ai_friendly","strict"],"default":"runtime"}}})
+}
+
+impl WorkflowCompareInput {
+    pub fn parse(input: &Value) -> Result<Self, &'static str> {
+        let parsed: Self =
+            serde_json::from_value(input.clone()).map_err(|_| "invalid_workflow_compare_input")?;
+        if parsed.id.is_empty()
+            || parsed.id.len() > 256
+            || parsed.id.chars().any(char::is_control)
+            || !matches!(parsed.left_version.as_str(), "draft" | "published")
+            || !matches!(parsed.right_version.as_str(), "draft" | "published")
+            || !matches!(
+                parsed.detail.as_deref(),
+                None | Some("minimal" | "standard" | "full")
+            )
+            || input.get("detail").is_some_and(Value::is_null)
+        {
+            return Err("invalid_workflow_compare_input");
+        }
+        Ok(parsed)
+    }
+}
+
+pub fn workflow_compare_input_schema() -> Value {
+    serde_json::json!({"type":"object","additionalProperties":false,
+        "required":["id","leftVersion","rightVersion"],"properties":{
+            "id":{"type":"string","minLength":1,"maxLength":256},
+            "leftVersion":{"type":"string","enum":["draft","published"]},
+            "rightVersion":{"type":"string","enum":["draft","published"]},
+            "detail":{"type":"string","enum":["minimal","standard","full"]}}})
+}
+
+pub fn workflow_read_input_schema() -> Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"required":["id"],"properties":{
+        "id":{"type":"string","description":"Workflow identifier","minLength":1,"maxLength":256},
+        "version":{"type":"string","enum":["draft","published","both"]},
+        "detail":{"type":"string","enum":["minimal","standard","full"]},
+        "includeCode":{"type":"boolean"}}})
+}
+
+/// Fixed official catalog reads, never authoring or arbitrary MCP names.
+pub fn official_knowledge_arguments(input: &Value) -> Result<(&'static str, Value), &'static str> {
+    let object = input.as_object().ok_or("invalid_knowledge_input")?;
+    let action = object
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or("invalid_knowledge_input")?;
+    match action {
+        "sdk_reference" => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "action" | "section"))
+            {
+                return Err("invalid_knowledge_input");
+            }
+            let section = input["section"].as_str().ok_or("invalid_knowledge_input")?;
+            if !matches!(
+                section,
+                "patterns"
+                    | "patterns_detailed"
+                    | "expressions"
+                    | "functions"
+                    | "rules"
+                    | "import"
+                    | "guidelines"
+                    | "design"
+                    | "all"
+            ) {
+                return Err("invalid_knowledge_input");
+            }
+            Ok((
+                "get_workflow_sdk_reference",
+                serde_json::json!({"section":section}),
+            ))
+        }
+        "workflow_best_practices" => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "action" | "technique"))
+            {
+                return Err("invalid_knowledge_input");
+            }
+            let technique = input["technique"]
+                .as_str()
+                .ok_or("invalid_knowledge_input")?;
+            if !matches!(
+                technique,
+                "list"
+                    | "scheduling"
+                    | "chatbot"
+                    | "form_input"
+                    | "scraping_and_research"
+                    | "monitoring"
+                    | "enrichment"
+                    | "triage"
+                    | "content_generation"
+                    | "document_processing"
+                    | "data_extraction"
+                    | "data_analysis"
+                    | "data_transformation"
+                    | "data_persistence"
+                    | "notification"
+                    | "knowledge_base"
+                    | "human_in_the_loop"
+                    | "web_app"
+            ) {
+                return Err("invalid_knowledge_input");
+            }
+            Ok((
+                "get_workflow_best_practices",
+                serde_json::json!({"technique":technique}),
+            ))
+        }
+        _ => Err("invalid_knowledge_input"),
+    }
+}
+
+pub fn project_official_knowledge(
+    input: &Value,
+    native: &Value,
+    text: &str,
+) -> Result<Value, &'static str> {
+    use sha2::{Digest, Sha256};
+    let (tool, _) = official_knowledge_arguments(input)?;
+    if !native.is_object()
+        || text.is_empty()
+        || text.len() > 256 * 1024
+        || text
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err("knowledge_provider_response_invalid");
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"FCP/n8n/knowledge-public/v1\0");
+    hasher.update(text.as_bytes());
+    let digest = format!("sha256:{}", hex::encode(hasher.finalize()));
+    let data = if tool == "get_workflow_sdk_reference" {
+        if native["reference"].as_str() != Some(text) {
+            return Err("knowledge_provider_response_invalid");
+        }
+        serde_json::json!({"section":input["section"],"reference":text,"digest":digest})
+    } else {
+        if native.get("technique") != input.get("technique") || !native["message"].is_string() {
+            return Err("knowledge_provider_response_invalid");
+        }
+        if let Some(documentation) = native.get("documentation") {
+            if documentation.as_str() != Some(text) {
+                return Err("knowledge_provider_response_invalid");
+            }
+        } else if input["technique"] != "list" && native["message"].as_str() != Some(text) {
+            return Err("knowledge_provider_response_invalid");
+        }
+        serde_json::json!({"technique":input["technique"],"guidance":text,"digest":digest})
+    };
+    Ok(serde_json::json!({"action":input["action"],"data":data}))
+}
+
+/// Bind each native node result to the exact submitted node and redact error
+/// text, which can contain parameter values.
+pub fn project_official_node_validation(
+    input: &Value,
+    native: &Value,
+    is_error: bool,
+) -> Result<Value, &'static str> {
+    let (_, arguments) = fcp_host::official_n8n_sdk_arguments("n8n.validation.run", input)?;
+    let nodes = arguments["nodes"]
+        .as_array()
+        .ok_or("validation_provider_response_invalid")?;
+    if is_error || native.get("error").is_some() {
+        return Err("validation_provider_failed");
+    }
+    let object = native
+        .as_object()
+        .ok_or("validation_provider_response_invalid")?;
+    let valid = object
+        .get("valid")
+        .and_then(Value::as_bool)
+        .ok_or("validation_provider_response_invalid")?;
+    let results = object
+        .get("results")
+        .and_then(Value::as_array)
+        .filter(|results| results.len() == nodes.len())
+        .ok_or("validation_provider_response_invalid")?;
+    let mut errors = Vec::new();
+    let mut all_valid = true;
+    for (index, (node, result)) in nodes.iter().zip(results).enumerate() {
+        let result = result
+            .as_object()
+            .ok_or("validation_provider_response_invalid")?;
+        if result.get("index").and_then(Value::as_u64) != Some(index as u64)
+            || result.get("type") != node.get("type")
+            || result.get("name") != node.get("name")
+        {
+            return Err("validation_provider_response_invalid");
+        }
+        let node_valid = result
+            .get("valid")
+            .and_then(Value::as_bool)
+            .ok_or("validation_provider_response_invalid")?;
+        let native_errors = match result.get("errors") {
+            None if node_valid => &[][..],
+            Some(Value::Array(errors)) => errors.as_slice(),
+            _ => return Err("validation_provider_response_invalid"),
+        };
+        if native_errors.len() > 256
+            || node_valid && !native_errors.is_empty()
+            || !node_valid && native_errors.is_empty()
+        {
+            return Err("validation_provider_response_invalid");
+        }
+        for error in native_errors {
+            if !error.is_object()
+                || error["path"]
+                    .as_str()
+                    .is_none_or(|value| value.len() > 1024)
+                || error["message"]
+                    .as_str()
+                    .is_none_or(|value| value.len() > 8192)
+                || errors.len() >= 256
+            {
+                return Err("validation_provider_response_invalid");
+            }
+            errors.push(serde_json::json!({"path":format!("nodes[{index}]"),"code":"sdk_node_validation_error","message":"Native node validator reported an error"}));
+        }
+        all_valid &= node_valid;
+    }
+    if valid != all_valid {
+        return Err("validation_provider_response_invalid");
+    }
+    Ok(serde_json::json!({"valid":valid,"errors":errors,"warnings":[]}))
+}
+
+pub fn project_official_sdk_validation(
+    native: &Value,
+    is_error: bool,
+) -> Result<Value, &'static str> {
+    let object = native
+        .as_object()
+        .ok_or("validation_provider_response_invalid")?;
+    let valid = object
+        .get("valid")
+        .and_then(Value::as_bool)
+        .ok_or("validation_provider_response_invalid")?;
+    let errors = match object.get("errors") {
+        None if valid => &[][..],
+        Some(Value::Array(errors)) => errors.as_slice(),
+        _ => return Err("validation_provider_response_invalid"),
+    };
+    let warnings = match object.get("warnings") {
+        None => &[][..],
+        Some(Value::Array(warnings)) => warnings.as_slice(),
+        _ => return Err("validation_provider_response_invalid"),
+    };
+    if errors.len() > 256
+        || warnings.len() > 256
+        || errors
+            .iter()
+            .any(|error| error.as_str().is_none_or(|text| text.len() > 8192))
+        || warnings.iter().any(|warning| {
+            !warning.is_object()
+                || warning["code"].as_str().is_none_or(|text| text.len() > 256)
+                || warning["message"]
+                    .as_str()
+                    .is_none_or(|text| text.len() > 8192)
+        })
+        || valid && (is_error || !errors.is_empty())
+        || !valid && errors.is_empty()
+    {
+        return Err("validation_provider_response_invalid");
+    }
+    Ok(serde_json::json!({"valid":valid,
+        "errors":errors.iter().map(|_| serde_json::json!({"path":"workflow_code","code":"sdk_validation_error","message":"Native SDK validator reported an error"})).collect::<Vec<_>>(),
+        "warnings":warnings.iter().map(|_| serde_json::json!({"path":"workflow_code","code":"sdk_validation_warning","message":"Native SDK validator reported a warning"})).collect::<Vec<_>>() }))
+}
+
+impl WorkflowReadInput {
+    pub fn parse(input: &Value) -> Result<Self, &'static str> {
+        if ["version", "detail", "includeCode"]
+            .iter()
+            .any(|key| input.get(key).is_some_and(Value::is_null))
+        {
+            return Err("invalid_workflow_read_input");
+        }
+        let parsed: Self =
+            serde_json::from_value(input.clone()).map_err(|_| "invalid_workflow_read_input")?;
+        if parsed.id.is_empty()
+            || parsed.id.len() > 256
+            || parsed.id.chars().any(char::is_control)
+            || !matches!(
+                parsed.version.as_deref(),
+                None | Some("draft" | "published" | "both")
+            )
+            || !matches!(
+                parsed.detail.as_deref(),
+                None | Some("minimal" | "standard" | "full")
+            )
+        {
+            return Err("invalid_workflow_read_input");
+        }
+        Ok(parsed)
+    }
+}
+
+/// Public metadata search, independent of native opaque pagination.
+///
+/// A complete
+/// bounded native snapshot is filtered before pagination; its cursor binds the
+/// request and snapshot so changed provider metadata cannot silently skip rows.
+#[derive(Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MetadataSearch {
+    pub query: Option<String>,
+    pub project_id: Option<String>,
+    pub folder_id: Option<String>,
+    pub parent_folder_id: Option<String>,
+    pub workflow_id: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub active: Option<bool>,
+    pub is_archived: Option<bool>,
+    pub status: Option<Vec<String>>,
+    pub started_after: Option<String>,
+    pub started_before: Option<String>,
+    #[serde(rename = "type")]
+    pub credential_type: Option<String>,
+    pub only_shared_with_me: Option<bool>,
+    pub kind: Option<String>,
+    pub sort: Option<String>,
+    pub page: Option<MetadataPage>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataPage {
+    pub limit: Option<u64>,
+    pub cursor: Option<String>,
+}
+
+impl MetadataSearch {
+    /// Reject unrelated fields as well as malformed scalar/list/page bounds.
+    pub fn parse(operation: &str, input: &Value) -> Result<Self, &'static str> {
+        let object = input.as_object().ok_or("invalid_metadata_search")?;
+        let allowed = metadata_search_fields(operation).ok_or("invalid_metadata_search")?;
+        if object
+            .iter()
+            .any(|(key, value)| !allowed.contains(&key.as_str()) || value.is_null())
+        {
+            return Err("invalid_metadata_search");
+        }
+        let typed: Self =
+            serde_json::from_value(input.clone()).map_err(|_| "invalid_metadata_search")?;
+        for value in [
+            &typed.query,
+            &typed.project_id,
+            &typed.folder_id,
+            &typed.parent_folder_id,
+            &typed.workflow_id,
+            &typed.credential_type,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                return Err("invalid_metadata_search");
+            }
+        }
+        if typed.tags.as_ref().is_some_and(|tags| {
+            tags.is_empty()
+                || tags.len() > 10
+                || tags.iter().any(|tag| {
+                    tag.is_empty() || tag.len() > 256 || tag.chars().any(char::is_control)
+                })
+        }) {
+            return Err("invalid_metadata_search");
+        }
+        if typed.status.as_ref().is_some_and(|statuses| {
+            statuses.is_empty()
+                || statuses.len() > 8
+                || statuses.iter().any(|status| {
+                    !matches!(
+                        status.as_str(),
+                        "new"
+                            | "running"
+                            | "success"
+                            | "error"
+                            | "waiting"
+                            | "canceled"
+                            | "crashed"
+                            | "unknown"
+                    )
+                })
+        }) {
+            return Err("invalid_metadata_search");
+        }
+        for items in [&typed.tags, &typed.status].into_iter().flatten() {
+            if items
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != items.len()
+            {
+                return Err("invalid_metadata_search");
+            }
+        }
+        let parse_date = |date: &Option<String>| {
+            date.as_ref()
+                .map(|date| {
+                    if date.len() > 40 {
+                        return Err("invalid_metadata_search");
+                    }
+                    let parsed = fcp_prelude::DateTime::parse_from_rfc3339(date)
+                        .map_err(|_| "invalid_metadata_search")?;
+                    if parsed.offset().local_minus_utc() != 0 {
+                        return Err("invalid_metadata_search");
+                    }
+                    Ok(parsed)
+                })
+                .transpose()
+        };
+        let after = parse_date(&typed.started_after)?;
+        let before = parse_date(&typed.started_before)?;
+        if matches!((after,before),(Some(after),Some(before)) if after>before) {
+            return Err("invalid_metadata_search");
+        }
+        if typed.sort.as_deref().is_some_and(|sort| {
+            !matches!(
+                sort,
+                "updatedAt:asc"
+                    | "updatedAt:desc"
+                    | "createdAt:asc"
+                    | "createdAt:desc"
+                    | "name:asc"
+                    | "name:desc"
+            )
+        }) {
+            return Err("invalid_metadata_search");
+        }
+        if let Some(page) = &typed.page {
+            if page.limit.is_some_and(|limit| !(1..=200).contains(&limit))
+                || page.cursor.as_ref().is_some_and(|cursor| {
+                    cursor.is_empty()
+                        || cursor.len() > 8192
+                        || !cursor.is_ascii()
+                        || cursor.chars().any(char::is_control)
+                })
+            {
+                return Err("invalid_metadata_search");
+            }
+        }
+        if operation == "n8n.structure.search" {
+            match typed.kind.as_deref() {
+                Some("folders") if typed.project_id.is_some() => {}
+                Some("projects" | "tags")
+                    if typed.project_id.is_none() && typed.parent_folder_id.is_none() => {}
+                _ => return Err("invalid_metadata_search"),
+            }
+        }
+        Ok(typed)
+    }
+}
+
+pub fn metadata_search_fields(operation: &str) -> Option<&'static [&'static str]> {
+    Some(match operation {
+        "n8n.workflows.search" => &[
+            "query",
+            "projectId",
+            "folderId",
+            "tags",
+            "active",
+            "isArchived",
+            "page",
+            "sort",
+        ],
+        "n8n.executions.search" => &[
+            "workflowId",
+            "status",
+            "startedAfter",
+            "startedBefore",
+            "page",
+        ],
+        "n8n.structure.search" => &["kind", "query", "projectId", "parentFolderId", "page"],
+        "n8n.credentials.list" => &["query", "type", "projectId", "onlySharedWithMe", "page"],
+        _ => return None,
+    })
+}
+
+/// Exact installed official `list_credentials` input. The native tool has no
+/// cursor; a full page cannot establish that no further credentials exist.
+pub fn official_credentials_input(input: &Value) -> Result<Value, &'static str> {
+    let search = MetadataSearch::parse("n8n.credentials.list", input)?;
+    if search
+        .page
+        .as_ref()
+        .is_some_and(|page| page.cursor.is_some())
+    {
+        return Err("credential_native_pagination_unavailable");
+    }
+    let mut arguments = serde_json::Map::new();
+    for field in ["query", "type", "projectId", "onlySharedWithMe"] {
+        if let Some(value) = input.get(field) {
+            arguments.insert(field.into(), value.clone());
+        }
+    }
+    arguments.insert(
+        "limit".into(),
+        Value::from(search.page.and_then(|page| page.limit).unwrap_or(200)),
+    );
+    Ok(Value::Object(arguments))
+}
+
+pub fn official_credentials_input_schema() -> Value {
+    let mut schema = metadata_search_schema("n8n.credentials.list");
+    schema["properties"]["page"] = serde_json::json!({"type":"object","additionalProperties":false,
+        "properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}});
+    schema
+}
+
+pub fn official_credentials_output_schema() -> Value {
+    serde_json::json!({"type":"object","additionalProperties":false,"required":["credentials","page"],"properties":{
+        "credentials":{"type":"array","maxItems":200,"items":{"type":"object","additionalProperties":false,
+            "required":["resourceUri","id","name","type","scopes","isManaged","isGlobal","homeProject"],"properties":{
+                "resourceUri":{"type":"string"},"id":{"type":"string","minLength":1,"maxLength":256},
+                "name":{"type":"string","minLength":1,"maxLength":256},"type":{"type":"string","minLength":1,"maxLength":256},
+                "scopes":{"type":"array","maxItems":64,"items":{"type":"string","minLength":1,"maxLength":256}},
+                "isManaged":{"type":"boolean"},"isGlobal":{"type":"boolean"},
+                "homeProject":{"type":["object","null"],"additionalProperties":false,"required":["id","name","type"],"properties":{
+                    "id":{"type":"string","minLength":1,"maxLength":256},"name":{"type":"string","minLength":1,"maxLength":256},"type":{"type":"string","minLength":1,"maxLength":256}}}}}},
+        "page":{"type":"object","additionalProperties":false,"required":["returnedCount","limit","continuation","completeness"],"properties":{
+            "returnedCount":{"type":"integer","minimum":0,"maximum":200},"limit":{"type":"integer","minimum":1,"maximum":200},
+            "continuation":{"type":"string","enum":["unavailable"]},"completeness":{"type":"string","enum":["not_established"]}}}}})
+}
+
+/// Project only the required official credential metadata. Descriptions,
+/// gateway suggestions and unknown provider fields never enter this output.
+pub fn project_official_credentials(
+    input: &Value,
+    server: &str,
+    limit: usize,
+) -> Result<Value, &'static str> {
+    use serde_json::json;
+    if !matches!(server, "eec" | "hetzner") || !(1..=200).contains(&limit) {
+        return Err("official_credential_response_invalid");
+    }
+    let object = input
+        .as_object()
+        .ok_or("official_credential_response_invalid")?;
+    if object.contains_key("error") {
+        return Err("official_credential_provider_failed");
+    }
+    let rows = object
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("official_credential_response_invalid")?;
+    if rows.len() > limit || object.get("count").and_then(Value::as_u64) != Some(rows.len() as u64)
+    {
+        return Err("official_credential_response_invalid");
+    }
+    let text = |value: &Value| -> Result<String, &'static str> {
+        value
+            .as_str()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+            })
+            .map(str::to_owned)
+            .ok_or("official_credential_response_invalid")
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = text(&row["id"])?;
+        if !ids.insert(id.clone()) {
+            return Err("official_credential_response_invalid");
+        }
+        let scopes = row["scopes"]
+            .as_array()
+            .filter(|items| items.len() <= 64)
+            .ok_or("official_credential_response_invalid")?
+            .iter()
+            .map(&text)
+            .collect::<Result<Vec<_>, _>>()?;
+        let home = match row.get("homeProject") {
+            Some(Value::Null) => Value::Null,
+            Some(home) if home.is_object() => {
+                json!({"id":text(&home["id"])? ,"name":text(&home["name"])? ,"type":text(&home["type"])?})
+            }
+            _ => return Err("official_credential_response_invalid"),
+        };
+        projected.push(json!({"resourceUri":format!("fwc-n8n://{server}/credentials/{}",percent_encoding::utf8_percent_encode(&id,percent_encoding::NON_ALPHANUMERIC)),
+            "id":id,"name":text(&row["name"])? ,"type":text(&row["type"])? ,"scopes":scopes,
+            "isManaged":row["isManaged"].as_bool().ok_or("official_credential_response_invalid")?,
+            "isGlobal":row["isGlobal"].as_bool().ok_or("official_credential_response_invalid")?,"homeProject":home}));
+    }
+    Ok(
+        json!({"credentials":projected,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}}),
+    )
+}
+
+pub fn metadata_search_schema(operation: &str) -> Value {
+    use serde_json::json;
+    let mut properties = serde_json::Map::new();
+    for field in metadata_search_fields(operation).unwrap_or(&[]) {
+        let schema = match *field {
+            "active" | "isArchived" | "onlySharedWithMe" => json!({"type":"boolean"}),
+            "tags" => {
+                json!({"type":"array","minItems":1,"maxItems":10,"items":{"type":"string","minLength":1,"maxLength":256}})
+            }
+            "status" => {
+                json!({"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","enum":["new","running","success","error","waiting","canceled","crashed","unknown"]}})
+            }
+            "page" => {
+                json!({"type":"object","additionalProperties":false,"properties":{"limit":{"type":"integer","minimum":1,"maximum":200},"cursor":{"type":"string","minLength":1,"maxLength":8192}}})
+            }
+            "sort" => {
+                json!({"type":"string","enum":["updatedAt:asc","updatedAt:desc","createdAt:asc","createdAt:desc","name:asc","name:desc"]})
+            }
+            "kind" => json!({"type":"string","enum":["projects","folders","tags"]}),
+            _ => json!({"type":"string","minLength":1,"maxLength":256}),
+        };
+        properties.insert((*field).into(), schema);
+    }
+    json!({"type":"object","additionalProperties":false,"required":if operation=="n8n.structure.search" {vec!["kind"]} else {vec![]},"properties":properties})
+}
+
 /// A required provider field that may explicitly contain JSON `null`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequiredNullable<T> {
@@ -502,6 +1190,26 @@ pub struct CredentialMetadata {
     pub name: String,
     #[serde(rename = "type")]
     pub credential_type: String,
+    #[serde(default, rename = "projectId")]
+    pub project_id: Option<String>,
+    #[serde(default, rename = "onlySharedWithMe")]
+    pub only_shared_with_me: Option<bool>,
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    #[serde(default, rename = "isManaged")]
+    pub is_managed: Option<bool>,
+    #[serde(default, rename = "isGlobal")]
+    pub is_global: Option<bool>,
+    #[serde(default, rename = "homeProject")]
+    pub home_project: Option<CredentialHomeProject>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CredentialHomeProject {
+    pub id: String,
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub project_type: Option<String>,
 }
 
 /// Deserialize-only provider parent-folder reference used by the list endpoint.
@@ -719,6 +1427,18 @@ pub struct CredentialMetadataView {
     pub name: String,
     #[serde(rename = "type")]
     pub credential_type: String,
+    #[serde(rename = "projectId", skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(rename = "onlySharedWithMe", skip_serializing_if = "Option::is_none")]
+    pub only_shared_with_me: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scopes: Option<Vec<String>>,
+    #[serde(rename = "isManaged", skip_serializing_if = "Option::is_none")]
+    pub is_managed: Option<bool>,
+    #[serde(rename = "isGlobal", skip_serializing_if = "Option::is_none")]
+    pub is_global: Option<bool>,
+    #[serde(rename = "homeProject", skip_serializing_if = "Option::is_none")]
+    pub home_project: Option<CredentialHomeProject>,
 }
 
 /// Deserialize-only provider tag DTO for the low-level tags endpoint.
@@ -1023,6 +1743,12 @@ impl CredentialMetadata {
             id: self.id,
             name: self.name,
             credential_type: self.credential_type,
+            project_id: self.project_id,
+            only_shared_with_me: self.only_shared_with_me,
+            scopes: self.scopes,
+            is_managed: self.is_managed,
+            is_global: self.is_global,
+            home_project: self.home_project,
         }
     }
 }
@@ -1078,6 +1804,101 @@ pub struct ApiErrorResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn official_sdk_inputs_and_invalid_results_are_typed_and_redacted() {
+        use super::{official_knowledge_arguments, project_official_sdk_validation};
+        use serde_json::json;
+        for section in [
+            "patterns",
+            "patterns_detailed",
+            "expressions",
+            "functions",
+            "rules",
+            "import",
+            "guidelines",
+            "design",
+            "all",
+        ] {
+            let (tool, arguments) =
+                official_knowledge_arguments(&json!({"action":"sdk_reference","section":section}))
+                    .unwrap();
+            assert_eq!(tool, "get_workflow_sdk_reference");
+            assert_eq!(arguments, json!({"section":section}));
+        }
+        for input in [
+            json!({"action":"sdk_reference","section":"groups"}),
+            json!({"action":"sdk_reference","section":"all","url":"https://hostile.invalid"}),
+            json!({"action":"workflow_best_practices","technique":null}),
+        ] {
+            assert!(official_knowledge_arguments(&input).is_err());
+        }
+        let invalid = json!({"valid":false,"errors":["SDK_PRIVATE_CANARY"],
+            "warnings":[{"code":"warning","message":"SDK_PRIVATE_CANARY","nodeName":"SDK_PRIVATE_CANARY"}],"hint":"SDK_PRIVATE_CANARY"});
+        let projected = project_official_sdk_validation(&invalid, true).unwrap();
+        assert_eq!(projected["valid"], false);
+        assert!(
+            !serde_json::to_string(&projected)
+                .unwrap()
+                .contains("SDK_PRIVATE_CANARY")
+        );
+        assert!(project_official_sdk_validation(&json!({"valid":true,"errors":[]}), true).is_err());
+        assert!(
+            project_official_sdk_validation(&json!({"valid":false,"errors":[]}), true).is_err()
+        );
+        assert!(
+            project_official_sdk_validation(&json!({"valid":false,"errors":[{}]}), true).is_err()
+        );
+        assert_eq!(
+            project_official_sdk_validation(
+                &json!({"valid":true,"errors":[],"nodeCount":0}),
+                false
+            )
+            .unwrap()["valid"],
+            true
+        );
+    }
+
+    #[test]
+    fn official_credentials_exact_public_list_preserves_native_partial_filter() {
+        let input = serde_json::json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":17}});
+        assert_eq!(
+            super::official_credentials_input(&input).unwrap(),
+            serde_json::json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":17})
+        );
+        for input in [
+            serde_json::json!({"page":{"cursor":"next"}}),
+            serde_json::json!({"page":{"limit":201}}),
+            serde_json::json!({"url":"https://hostile.invalid"}),
+            serde_json::json!({"type":null}),
+        ] {
+            assert!(super::official_credentials_input(&input).is_err());
+        }
+        assert!(
+            super::MetadataSearch::parse("n8n.credentials.search", &serde_json::json!({})).is_err()
+        );
+    }
+
+    #[test]
+    fn official_credentials_projection_requires_native_metadata_and_discards_canaries() {
+        let input = serde_json::json!({"data":[{"id":"c-1","name":"Synthetic","type":"httpHeaderAuth","scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,"description":"SECRET_CANARY","data":{"password":"SECRET_CANARY"}}],"count":1,"gatewayCredits":{"secret":"SECRET_CANARY"}});
+        let output = super::project_official_credentials(&input, "hetzner", 1).unwrap();
+        assert_eq!(output["credentials"][0]["type"], "httpHeaderAuth");
+        assert_eq!(output["page"]["continuation"], "unavailable");
+        assert!(!output.to_string().contains("SECRET_CANARY"));
+        let mut bad = input.clone();
+        bad["count"] = serde_json::json!(0);
+        assert!(super::project_official_credentials(&bad, "hetzner", 1).is_err());
+        let mut bad = input.clone();
+        bad["data"][0].as_object_mut().unwrap().remove("scopes");
+        assert!(super::project_official_credentials(&bad, "hetzner", 1).is_err());
+        let mut bad = input.clone();
+        bad["error"] = serde_json::json!("SECRET_CANARY");
+        assert_eq!(
+            super::project_official_credentials(&bad, "hetzner", 1).unwrap_err(),
+            "official_credential_provider_failed"
+        );
+        assert!(super::project_official_credentials(&input, "legacy", 1).is_err());
+    }
     use super::*;
     use serde_json::{Value, json};
 

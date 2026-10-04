@@ -24,6 +24,174 @@ use serde_json::{Value, json};
 const CLIENT_NAME: &str = "fcp-local-provider";
 const CLIENT_VERSION: &str = "0.1.0";
 
+/// Closed server binding in the existing signed n8n release receipt.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum N8nReceiptServer {
+    Eec,
+    Hetzner,
+}
+
+impl N8nReceiptServer {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eec => "eec",
+            Self::Hetzner => "hetzner",
+        }
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct N8nReceiptBinding {
+    pub server: N8nReceiptServer,
+    pub archive_input_schema_digest: String,
+    pub archive_output_schema_digest: String,
+    pub execute_input_schema_digest: String,
+    pub execute_output_schema_digest: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct N8nReceiptArtifact {
+    pub path: String,
+    pub digest: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct N8nReleaseSignature {
+    pub algorithm: String,
+    pub key_id: String,
+    pub signature: String,
+}
+
+impl std::fmt::Debug for N8nReceiptBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("N8nReceiptBinding")
+            .field("server", &self.server)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for N8nReleaseSignature {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("N8nReleaseSignature")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct N8nSignedReleaseReceipt {
+    pub schema: String,
+    pub release_id: String,
+    pub git_revision: String,
+    pub bindings: Vec<N8nReceiptBinding>,
+    pub artifacts: Vec<N8nReceiptArtifact>,
+    pub signature: N8nReleaseSignature,
+}
+
+/// Canonical existing receipt bytes, shared by signer and read-only verifier.
+/// This serialization does not validate or authorize the receipt.
+///
+/// # Errors
+/// Rejects serialization failure.
+pub fn n8n_unsigned_receipt_bytes(
+    receipt: &N8nSignedReleaseReceipt,
+) -> Result<Vec<u8>, LocalMcpError> {
+    #[derive(Serialize)]
+    struct UnsignedReceipt {
+        schema: String,
+        release_id: String,
+        git_revision: String,
+        bindings: Vec<N8nReceiptBinding>,
+        artifacts: Vec<N8nReceiptArtifact>,
+    }
+    let mut bindings = receipt.bindings.clone();
+    bindings.sort_by_key(|binding| binding.server);
+    let mut artifacts = receipt.artifacts.clone();
+    artifacts.sort_by(|left, right| left.path.cmp(&right.path));
+    serde_json::to_vec(&UnsignedReceipt {
+        schema: receipt.schema.clone(),
+        release_id: receipt.release_id.clone(),
+        git_revision: receipt.git_revision.clone(),
+        bindings,
+        artifacts,
+    })
+    .map_err(|_| LocalMcpError::InvalidPolicy)
+}
+
+/// Existing domain-separated signing payload. Binding validation belongs to
+/// the caller; this primitive grants no current/predecessor policy exception.
+#[must_use]
+pub fn n8n_release_signing_payload(
+    receipt: &N8nSignedReleaseReceipt,
+    receipt_digest: &str,
+    provision_digest: &str,
+) -> Vec<u8> {
+    fn append(payload: &mut Vec<u8>, field: &[u8]) {
+        payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        payload.extend_from_slice(field);
+    }
+    let mut bindings = receipt.bindings.clone();
+    bindings.sort_by_key(|binding| binding.server);
+    let mut payload = Vec::from(b"FCP-N8N-RELEASE-SIGNING-V1\0".as_slice());
+    for field in [
+        receipt.release_id.as_bytes(),
+        receipt.git_revision.as_bytes(),
+        receipt_digest.as_bytes(),
+        provision_digest.as_bytes(),
+    ] {
+        append(&mut payload, field);
+    }
+    for binding in bindings {
+        for field in [
+            binding.server.as_str().as_bytes(),
+            binding.archive_input_schema_digest.as_bytes(),
+            binding.archive_output_schema_digest.as_bytes(),
+            binding.execute_input_schema_digest.as_bytes(),
+            binding.execute_output_schema_digest.as_bytes(),
+        ] {
+            append(&mut payload, field);
+        }
+    }
+    payload
+}
+
+/// Verify the existing immutable n8n receipt signature.
+///
+/// This primitive accepts
+/// public material only; its caller must first validate the closed receipt and
+/// construct the canonical signing payload. It grants no provider policy or
+/// filesystem authority by itself.
+///
+/// # Errors
+/// Rejects a malformed key, a different key identity, or an invalid signature.
+pub fn verify_n8n_release_signature_bytes(
+    public_key: &[u8; fcp_crypto::ed25519::PUBLIC_KEY_SIZE],
+    expected_key_id: &str,
+    signature: &[u8; fcp_crypto::ed25519::SIGNATURE_SIZE],
+    payload: &[u8],
+) -> Result<(), LocalMcpError> {
+    use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey};
+
+    let key =
+        Ed25519VerifyingKey::from_bytes(public_key).map_err(|_| LocalMcpError::InvalidPolicy)?;
+    if key.key_id().to_string() != expected_key_id {
+        return Err(LocalMcpError::InvalidPolicy);
+    }
+    key.verify_with_context(
+        b"fwc-n8n immutable release v1",
+        payload,
+        &Ed25519Signature::from_bytes(signature),
+    )
+    .map_err(|_| LocalMcpError::InvalidPolicy)
+}
+
 /// One fixed local MCP tool call. The tool name is checked against policy.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LocalMcpCall {
@@ -185,6 +353,7 @@ impl LocalMcpError {
 #[derive(Debug, Clone)]
 pub struct LocalMcpProvider {
     policy: LocalMcpPolicy,
+    signed_current: Option<crate::n8n_release_read::VerifiedSignedLocalProvider>,
 }
 
 impl LocalMcpProvider {
@@ -196,7 +365,39 @@ impl LocalMcpProvider {
         policy
             .validate()
             .map_err(|_| LocalMcpError::InvalidPolicy)?;
-        Ok(Self { policy })
+        Ok(Self {
+            policy,
+            signed_current: None,
+        })
+    }
+
+    /// Production factory with no caller-supplied policy, key, or release path.
+    /// Only the ordinary signed installed current can authorize this provider.
+    ///
+    /// # Errors
+    /// Rejects unsigned/predecessor releases and changed policy/artifact trees.
+    pub fn from_signed_current() -> Result<Self, LocalMcpError> {
+        let proof = crate::n8n_release_read::verify_signed_local_provider_current()
+            .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        Self::from_verified_signed_current(proof)
+    }
+
+    /// Consume only a sealed verifier-produced proof, preserving a caller's
+    /// distinction between bundle verification and provider policy failures.
+    ///
+    /// # Errors
+    /// Rejects an invalid policy before launching any process.
+    pub fn from_verified_signed_current(
+        proof: crate::n8n_release_read::VerifiedSignedLocalProvider,
+    ) -> Result<Self, LocalMcpError> {
+        proof
+            .policy()
+            .validate()
+            .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        Ok(Self {
+            policy: proof.policy().clone(),
+            signed_current: Some(proof),
+        })
     }
 
     /// Return the fixed policy for host-side inspection.
@@ -224,6 +425,20 @@ impl LocalMcpProvider {
         &self,
         request: LocalMcpRequest,
         cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<LocalMcpResult, LocalMcpError> {
+        self.run_once_until(request, cancelled, None)
+    }
+
+    /// Run under an invocation-owned total deadline, which can only tighten
+    /// the signed provider time limits. Teardown remains mandatory.
+    ///
+    /// # Errors
+    /// Rejects expired deadlines and the same invalid bindings as `run_once`.
+    pub fn run_once_until(
+        &self,
+        request: LocalMcpRequest,
+        cancelled: &std::sync::atomic::AtomicBool,
+        deadline: Option<Instant>,
     ) -> Result<LocalMcpResult, LocalMcpError> {
         if !cfg!(target_os = "linux") {
             return Err(LocalMcpError::UnsupportedPlatform);
@@ -253,6 +468,14 @@ impl LocalMcpProvider {
         };
 
         let total_started = Instant::now();
+        if let Some(proof) = &self.signed_current {
+            proof
+                .revalidate()
+                .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        }
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(LocalMcpError::RequestTimeout);
+        }
         let process = OwnedProcess::spawn(&spec)
             .map_err(|error| map_process_error(&error, ProcessPhase::Spawn))?;
         let identity = process.identity().clone();
@@ -274,7 +497,7 @@ impl LocalMcpProvider {
         let mut session = LocalMcpSession::new(process, self.policy.max_frame_bytes as usize);
         session.memory_during = memory_during;
         let provider_started = Instant::now();
-        let outcome = session.execute(&self.policy, &request, cancelled);
+        let outcome = session.execute(&self.policy, &request, cancelled, deadline);
         let provider_latency_ms = elapsed_ms(provider_started.elapsed());
         let reason = match &outcome {
             Ok(_) => LocalMcpShutdownReason::Completed,
@@ -539,13 +762,17 @@ impl LocalMcpSession {
         policy: &LocalMcpPolicy,
         request: &LocalMcpRequest,
         cancelled: &std::sync::atomic::AtomicBool,
+        total_deadline: Option<Instant>,
     ) -> Result<Vec<Value>, LocalMcpError> {
         let startup_started = Instant::now();
         if cancelled.load(Ordering::Acquire) {
             self.startup_latency_ms = elapsed_ms(startup_started.elapsed());
             return Err(LocalMcpError::Cancelled);
         }
-        let startup_deadline = Instant::now() + millis(policy.startup_timeout_ms);
+        let startup_deadline = bounded_provider_deadline(
+            Instant::now() + millis(policy.startup_timeout_ms),
+            total_deadline,
+        );
         let startup_result = (|| {
             let initialize = self.request(
                 policy,
@@ -587,7 +814,10 @@ impl LocalMcpSession {
                 policy,
                 "tools/call",
                 &json!({"name": call.tool, "arguments": call.arguments}),
-                Instant::now() + millis(policy.request_timeout_ms),
+                bounded_provider_deadline(
+                    Instant::now() + millis(policy.request_timeout_ms),
+                    total_deadline,
+                ),
                 cancelled,
                 LocalMcpPhase::Call,
             )?;
@@ -830,6 +1060,10 @@ impl LocalMcpSession {
             let _ = thread.join();
         }
     }
+}
+
+fn bounded_provider_deadline(policy_deadline: Instant, total_deadline: Option<Instant>) -> Instant {
+    total_deadline.map_or(policy_deadline, |deadline| deadline.min(policy_deadline))
 }
 
 impl Drop for LocalMcpSession {
@@ -1084,6 +1318,66 @@ fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invocation_deadline_only_tightens_native_time_bounds() {
+        let now = Instant::now();
+        let policy = now + Duration::from_secs(10);
+        assert_eq!(bounded_provider_deadline(policy, None), policy);
+        assert_eq!(
+            bounded_provider_deadline(policy, Some(now + Duration::from_secs(20))),
+            policy
+        );
+        assert_eq!(
+            bounded_provider_deadline(policy, Some(now + Duration::from_secs(1))),
+            now + Duration::from_secs(1)
+        );
+        assert_eq!(bounded_provider_deadline(policy, Some(now)), now);
+    }
+
+    #[test]
+    fn shared_release_signature_verifier_binds_key_payload_and_context() {
+        use super::*;
+        let key = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[7_u8; 32])
+            .expect("synthetic signing key");
+        let verifying = key.verifying_key();
+        let payload = b"synthetic canonical receipt";
+        let signature = key.sign_with_context(b"fwc-n8n immutable release v1", payload);
+        let public = verifying.to_bytes();
+        let key_id = verifying.key_id().to_string();
+        assert!(
+            verify_n8n_release_signature_bytes(&public, &key_id, &signature.to_bytes(), payload,)
+                .is_ok()
+        );
+        assert!(
+            verify_n8n_release_signature_bytes(
+                &public,
+                "wrong-key",
+                &signature.to_bytes(),
+                payload,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_n8n_release_signature_bytes(
+                &public,
+                &key_id,
+                &signature.to_bytes(),
+                b"changed receipt",
+            )
+            .is_err()
+        );
+        let wrong_context = key.sign_with_context(b"different context", payload);
+        assert!(
+            verify_n8n_release_signature_bytes(
+                &public,
+                &key_id,
+                &wrong_context.to_bytes(),
+                payload,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn shutdown_receipt_preserves_all_independent_flat_wire_facts() {
         use super::*;

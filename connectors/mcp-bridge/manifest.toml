@@ -49,6 +49,7 @@ optional = [
     "mcp.resources.read",
     "mcp.tools.write",
     "mcp.tools.read",
+    "mcp.n8n.read",
     "mcp.sampling.handle",
     "mcp.server.metrics",
 ]
@@ -338,6 +339,57 @@ related = [
     "mcp.sampling.handle",
 ]
 
+[provides.operations."mcp.n8n.read"]
+description = "Closed typed n8n catalog, SDK validation and credential metadata reads with exact fresh native schema admission"
+capability = "mcp.n8n.read"
+risk_level = "low"
+safety_tier = "safe"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."mcp.n8n.read".input_schema]
+oneOf = [
+    { type = "object", additionalProperties = false, required = ["action", "section"], properties = { action = { const = "sdk_reference" }, section = { type = "string", enum = ["patterns", "patterns_detailed", "expressions", "functions", "rules", "import", "guidelines", "design", "all"] } } },
+    { type = "object", additionalProperties = false, required = ["action", "technique"], properties = { action = { const = "workflow_best_practices" }, technique = { type = "string", enum = ["list", "scheduling", "chatbot", "form_input", "scraping_and_research", "monitoring", "enrichment", "triage", "content_generation", "document_processing", "data_extraction", "data_analysis", "data_transformation", "data_persistence", "notification", "knowledge_base", "human_in_the_loop", "web_app"] } } },
+    { type = "object", additionalProperties = false, required = ["action", "code"], properties = { action = { const = "workflow_code" }, code = { type = "string", minLength = 1, maxLength = 300000 } } },
+    { type = "object", additionalProperties = false, required = ["action", "nodes"], properties = { action = { const = "nodes" }, nodes = { type = "array", minItems = 1, maxItems = 50, items = { type = "object", additionalProperties = false, required = ["type"], properties = { name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, typeVersion = { type = "number", exclusiveMinimum = 0, maximum = 1000 }, parameters = { type = "object" }, subnodes = { type = "object", additionalProperties = false, properties = { model = { type = "object" }, memory = { type = "object" }, tools = { type = "array", maxItems = 20, items = { type = "object" } } } }, isToolNode = { type = "boolean" } } } } } },
+    { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "credentials" }, query = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, onlySharedWithMe = { type = "boolean" }, limit = { type = "integer", minimum = 1, maximum = 200 } } },
+    { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "projects" }, query = { type = "string", minLength = 1, maxLength = 256 }, limit = { type = "integer", minimum = 1, maximum = 100 } } },
+    { type = "object", additionalProperties = false, required = ["action", "projectId", "limit"], properties = { action = { const = "folders" }, projectId = { type = "string", minLength = 1, maxLength = 256 }, query = { type = "string", minLength = 1, maxLength = 256 }, limit = { type = "integer", minimum = 1, maximum = 100 } } },
+    { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "tags" }, limit = { type = "integer", minimum = 1, maximum = 500 } } },
+    { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "workflows" }, query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, folderId = { type = "string", minLength = 1, maxLength = 256, pattern = "^[A-Za-z0-9-]+$" }, tags = { type = "array", minItems = 1, maxItems = 10, items = { type = "string", minLength = 1, maxLength = 256 } }, sortBy = { type = "string", enum = ["name:asc", "name:desc", "createdAt:asc", "createdAt:desc", "updatedAt:asc", "updatedAt:desc"] }, includeSubfolders = { type = "boolean" }, limit = { type = "integer", minimum = 1, maximum = 200 } } },
+]
+
+[provides.operations."mcp.n8n.read".output_schema]
+type = "object"
+additionalProperties = false
+required = ["serverId", "action", "data"]
+properties = { serverId = { type = "string", enum = ["eec", "hetzner"] }, action = { type = "string", enum = ["sdk_reference", "workflow_best_practices", "workflow_code", "nodes", "credentials", "projects", "folders", "tags", "workflows"] }, data = { type = "object" } }
+
+[provides.operations."mcp.n8n.read".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."mcp.n8n.read".ai_hints]
+when_to_use = "Read only an explicitly admitted fixed n8n SDK or metadata action."
+common_mistakes = ["Generic tool names, arguments, URLs and write actions are rejected.", "Observed schemas do not enroll a tool; exact native admission is required before every call.", "Credential continuation is unavailable; never infer completeness from one bounded result."]
+examples = ['{"action":"sdk_reference","section":"rules"}']
+related = ["mcp.tools.list"]
+
 [provides.operations."mcp.tools.call"]
 description = "Call an MCP tool after fresh capability discovery, exact snapshot approval, capability-token, and execution-approval gates"
 capability = "mcp.tools.write"
@@ -468,6 +520,13 @@ burst = 20
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "mcp.n8n.read"
+requests = 60
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "mcp.tools.write"
 requests = 100
 window_ms = 60000
@@ -509,6 +568,7 @@ scope = "instance"
 "mcp.resources.read" = ["mcp.resources.read"]
 "mcp.server.metrics" = ["mcp.server.metrics"]
 "mcp.tools.list" = ["mcp.tools.read"]
+"mcp.n8n.read" = ["mcp.n8n.read"]
 "mcp.resources.list" = ["mcp.resources.read"]
 
 [security]

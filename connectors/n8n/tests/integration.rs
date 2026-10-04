@@ -363,9 +363,13 @@ fn test_signing_key() -> Ed25519SigningKey {
 fn resource_uri(operation: &str, input: &Value) -> String {
     match operation {
         "n8n.workflows.list"
+        | "n8n.workflows.search"
+        | "n8n.executions.search"
+        | "n8n.structure.search"
         | "n8n.executions.list"
         | "n8n.projects.list"
         | "n8n.credentials.list"
+        | "n8n.audit.inspect"
         | "n8n.tags.list"
         | "n8n.mcp_access.reconcile" => {
             format!("fwc-n8n://{TEST_SERVER_ID}")
@@ -381,6 +385,7 @@ fn resource_uri(operation: &str, input: &Value) -> String {
             format!("fwc-n8n://{TEST_SERVER_ID}/folders/{folder_id}")
         }
         "n8n.workflows.get"
+        | "n8n.workflows.compare"
         | "n8n.workflows.activate"
         | "n8n.workflows.lifecycle"
         | "n8n.workflows.unarchive"
@@ -454,12 +459,18 @@ fn capability_token_with_options(
         | "n8n.workflows.delete_disposable" => "n8n.workflows.write",
         "n8n.workflows.lifecycle" | "n8n.workflows.unarchive" => "n8n.workflows.lifecycle",
         "n8n.mcp_access.reconcile" => "n8n.mcp_access.write",
-        "n8n.workflows.list" | "n8n.workflows.get" => "n8n.workflows.read",
+        "n8n.workflows.list"
+        | "n8n.workflows.get"
+        | "n8n.workflows.search"
+        | "n8n.workflows.compare" => "n8n.workflows.read",
+        "n8n.executions.search" => "n8n.executions.read",
+        "n8n.structure.search" => "n8n.structure.read",
         "n8n.executions.list" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
             "n8n.executions.read"
         }
         "n8n.projects.list" => "n8n.projects.read",
         "n8n.credentials.list" => "n8n.credentials.metadata.read",
+        "n8n.audit.inspect" => "n8n.audit.read",
         "n8n.tags.list" => "n8n.tags.read",
         "n8n.folders.list" | "n8n.folders.get" => "n8n.folders.read",
         _ => panic!("unknown operation in test token: {operation}"),
@@ -754,7 +765,9 @@ async fn setup_connector_with_runtime_config(
             "n8n.workflows.write",
             "n8n.executions.read",
             "n8n.projects.read",
+            "n8n.structure.read",
             "n8n.credentials.metadata.read",
+            "n8n.audit.read",
             "n8n.tags.read",
             "n8n.folders.read",
             "n8n.mcp_access.write",
@@ -1528,7 +1541,272 @@ async fn projects_list_rejects_bad_json() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn credentials_list_uses_upstream_route_and_discards_secret_fields() {
+async fn audit_inspect_fixed_body_redacts_locations_and_denies_external_effect_before_http() {
+    let server = MockServer::start().await;
+    let categories = json!(["credentials", "database", "filesystem", "nodes"]);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/audit"))
+        .and(body_json(json!({"additionalOptions":{"categories":categories}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Credentials Risk Report": {"risk":"credentials","sections":[{
+                "title":"Credentials not used in any workflow",
+                "description":"AUDIT_SECRET_CANARY", "recommendation":"AUDIT_SECRET_CANARY",
+                "location":[{"id":"private-id","name":"AUDIT_SECRET_CANARY","data":{"password":"AUDIT_SECRET_CANARY"}}]
+            }]}
+        })))
+        .expect(1).mount(&server).await;
+    let connector = setup_connector(&server.uri()).await;
+    for input in [
+        json!({}),
+        json!({"categories":[]}),
+        json!({"categories":["instance"]}),
+        json!({"categories":["nodes","nodes"]}),
+        json!({"categories":["nodes"],"daysAbandonedWorkflow":1}),
+    ] {
+        assert!(
+            invoke(&connector, "n8n.audit.inspect", input)
+                .await
+                .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let result = invoke(
+        &connector,
+        "n8n.audit.inspect",
+        json!({"categories":categories}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["summary"]["fullAudit"], false);
+    assert_eq!(result["findings"][0]["code"], "credentials_unused");
+    assert_eq!(result["findings"][0]["affectedCount"], 1);
+    let serialized = serde_json::to_string(&result).unwrap();
+    assert!(!serialized.contains("AUDIT_SECRET_CANARY"));
+    assert!(!serialized.contains("private-id"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_workflow_search_filters_after_complete_native_pagination() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "200"))
+        .and(query_param("active", "false"))
+        .and(query_param("cursor", "second"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"b","name":"Selected","active":false,"isArchived":false,
+            "updatedAt":"2026-10-02T00:00:00Z","settings":{"apiKey":"META_SECRET_CANARY"}
+        }],"nextCursor":null})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("limit", "200"))
+        .and(query_param("active", "false"))
+        .and(wiremock::matchers::query_param_is_missing("cursor"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"a","name":"Other","active":false,"isArchived":false,
+            "updatedAt":"2026-10-01T00:00:00Z","pinData":{"password":"META_SECRET_CANARY"}
+        }],"nextCursor":"second"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &connector,
+        "n8n.workflows.search",
+        json!({"active":false,"sort":"updatedAt:desc","page":{"limit":1}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["workflows"][0]["id"], "b");
+    assert_eq!(result["page"]["total"], 2);
+    assert!(!result.to_string().contains("META_SECRET_CANARY"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_workflow_native_project_filter_without_top_level_project_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows"))
+        .and(query_param("projectId", "p1"))
+        .and(query_param("limit", "200"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"one","name":"Synthetic","active":false,"isArchived":false,
+            "shared":[{"projectId":"p1","role":"workflow:owner"}],
+            "settings":{"availableInMCP":false,"apiKey":"PROJECT_CANARY"},
+            "staticData":{"secret":"PROJECT_CANARY"},"pinData":{"secret":"PROJECT_CANARY"}
+        }],"nextCursor":null})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    for input in [
+        json!({"folderId":"f1"}),
+        json!({"query":"description text"}),
+    ] {
+        assert!(
+            invoke(&connector, "n8n.workflows.search", input)
+                .await
+                .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let result = invoke(
+        &connector,
+        "n8n.workflows.search",
+        json!({"projectId":"p1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["workflows"][0]["id"], "one");
+    assert_eq!(result["workflows"][0]["projectId"], "p1");
+    assert!(!result.to_string().contains("PROJECT_CANARY"));
+    assert_eq!(result["page"]["total"], 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_execution_search_pushes_native_running_and_time_filters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(query_param("status", "running"))
+        .and(query_param("workflowId", "synthetic"))
+        .and(query_param("startedAfter", "2026-10-01T00:00:00Z"))
+        .and(query_param("limit", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"e1","workflowId":"synthetic","status":"running","mode":"manual",
+            "startedAt":"2026-10-02T00:00:00Z","data":{"password":"META_SECRET_CANARY"}
+        }],"nextCursor":"next-native"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    let result=invoke(&connector,"n8n.executions.search",json!({"workflowId":"synthetic","status":["running"],"startedAfter":"2026-10-01T00:00:00Z","page":{"limit":1}})).await.unwrap();
+    assert_eq!(result["executions"][0]["id"], "e1");
+    assert_eq!(result["page"]["scope"], "native_page");
+    assert!(result["page"]["nextCursor"].is_string());
+    assert!(!result.to_string().contains("META_SECRET_CANARY"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_credentials_list_rest_does_not_invent_official_sharing_metadata() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/credentials"))
+        .and(query_param("limit", "200"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{
+            "id":"c1","name":"Synthetic","type":"test",
+            "createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z",
+            "shared":[{"projectId":"p1","role":"credential:owner"}],
+            "data":{"password":"META_SECRET_CANARY"},"apiKey":"META_SECRET_CANARY"
+        }],"nextCursor":null})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    for input in [
+        json!({}),
+        json!({"projectId":"p1"}),
+        json!({"onlySharedWithMe":true}),
+        json!({"query":"Synthetic","type":"test","page":{"limit":10}}),
+        json!({"limit":10,"cursor":"legacy"}),
+    ] {
+        assert!(
+            invoke(&connector, "n8n.credentials.list", input)
+                .await
+                .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    for input in [
+        json!({"query":"x","url":"http://hostile.invalid"}),
+        json!({"page":{"limit":201}}),
+        json!({"type":null}),
+    ] {
+        assert!(
+            invoke(&connector, "n8n.credentials.list", input)
+                .await
+                .is_err()
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_execution_all_statuses_explicitly_includes_running_subset() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/v1/executions"))
+        .and(wiremock::matchers::query_param_is_missing("status"))
+        .and(query_param("workflowId","synthetic"))
+        .and(query_param("limit","2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"done","workflowId":"synthetic","status":"success","mode":"manual"}],"nextCursor":null})))
+        .expect(1).mount(&server).await;
+    Mock::given(method("GET")).and(path("/api/v1/executions"))
+        .and(query_param("status","running"))
+        .and(query_param("workflowId","synthetic"))
+        .and(query_param("limit","1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"live","workflowId":"synthetic","status":"running","mode":"manual"}],"nextCursor":null})))
+        .expect(1).mount(&server).await;
+    let connector = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &connector,
+        "n8n.executions.search",
+        json!({"workflowId":"synthetic","page":{"limit":2}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["executions"].as_array().unwrap().len(), 2);
+    assert!(
+        result["executions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["status"] == "running")
+    );
+    assert!(result["page"]["nextCursor"].is_null());
+}
+
+#[fcp_async_core::runtime::test]
+async fn metadata_execution_native_wrong_workflow_is_refused_not_filtered_empty() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/executions"))
+        .and(query_param("workflowId", "synthetic"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"data":[{"id":"e1","workflowId":"wrong","status":"running"}],"nextCursor":null}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    assert!(
+        invoke(
+            &connector,
+            "n8n.executions.search",
+            json!({"workflowId":"synthetic","status":["running"]})
+        )
+        .await
+        .is_err()
+    );
+    for input in [
+        json!({"status":["running","running"]}),
+        json!({"status":["unrecognized"]}),
+        json!({"startedAfter":"2026-10-04T00:00:00Z","startedBefore":"2026-10-03T00:00:00Z"}),
+    ] {
+        assert!(
+            invoke(&connector, "n8n.executions.search", input)
+                .await
+                .is_err()
+        );
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn credentials_list_legacy_rest_query_refuses_before_secret_provider_reply() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/credentials"))
@@ -1557,20 +1835,10 @@ async fn credentials_list_uses_upstream_route_and_discards_secret_fields() {
         json!({"limit": 200, "cursor": "opaque cursor/%"}),
     )
     .await
-    .unwrap();
-    assert_eq!(
-        result,
-        json!({
-            "data": [{
-                "resourceUri": "fwc-n8n://eec/credentials/cred%2D1",
-                "id": "cred-1",
-                "name": "GitHub",
-                "type": "githubApi"
-            }],
-            "nextCursor": "opaque-next"
-        })
-    );
-    let serialized = serde_json::to_string(&result).unwrap();
+    .expect_err("direct REST is not an admitted official metadata route");
+    assert!(matches!(result, FcpError::InvalidRequest { .. }));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let serialized = result.to_string();
     for marker in [
         "marker.credential.secret",
         "marker.credential.header",
@@ -1582,7 +1850,7 @@ async fn credentials_list_uses_upstream_route_and_discards_secret_fields() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn credentials_list_omits_missing_or_null_cursor_and_rejects_bad_provider_shape() {
+async fn credentials_list_empty_input_refuses_before_any_rest_response_shape() {
     for response in [json!({"data": []}), json!({"data": [], "nextCursor": null})] {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1591,8 +1859,8 @@ async fn credentials_list_omits_missing_or_null_cursor_and_rejects_bad_provider_
             .mount(&server)
             .await;
         let c = setup_connector(&server.uri()).await;
-        let result = invoke(&c, "n8n.credentials.list", json!({})).await.unwrap();
-        assert!(result.get("nextCursor").is_none());
+        assert!(invoke(&c, "n8n.credentials.list", json!({})).await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     for malformed in [
@@ -1609,11 +1877,12 @@ async fn credentials_list_omits_missing_or_null_cursor_and_rejects_bad_provider_
             .await;
         let c = setup_connector(&server.uri()).await;
         assert!(invoke(&c, "n8n.credentials.list", json!({})).await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
 
 #[fcp_async_core::runtime::test]
-async fn credentials_list_classifies_invalid_provider_ids_as_malformed_without_echo() {
+async fn credentials_list_refuses_before_invalid_provider_ids_without_echo() {
     for invalid_id in [
         "",
         " marker-id",
@@ -1643,15 +1912,11 @@ async fn credentials_list_classifies_invalid_provider_ids_as_malformed_without_e
             .expect_err("invalid provider credential ID must fail closed");
         assert!(matches!(
             &error,
-            fcp_prelude::FcpError::External {
-                service,
-                status_code: None,
-                retryable: false,
-                ..
-            } if service == "n8n"
+            fcp_prelude::FcpError::InvalidRequest { .. }
         ));
         let rendered = error.to_string();
-        assert!(rendered.contains("Malformed provider response"));
+        assert!(rendered.contains("credentials_require_admitted_official_mcp"));
+        assert!(server.received_requests().await.unwrap().is_empty());
         if !invalid_id.is_empty() {
             assert!(!rendered.contains(invalid_id));
         }
@@ -1659,7 +1924,7 @@ async fn credentials_list_classifies_invalid_provider_ids_as_malformed_without_e
 }
 
 #[fcp_async_core::runtime::test]
-async fn credentials_list_maps_statuses_and_bad_json_without_body_leaks() {
+async fn credentials_list_refuses_before_statuses_and_bad_json_without_body_leaks() {
     for status in [401, 403, 404, 429, 500, 503] {
         let server = MockServer::start().await;
         let mut response = ResponseTemplate::new(status).set_body_json(json!({
@@ -1682,6 +1947,7 @@ async fn credentials_list_maps_statuses_and_bad_json_without_body_leaks() {
                 .to_string()
                 .contains("marker.credential.provider-error")
         );
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     let server = MockServer::start().await;
@@ -1692,10 +1958,11 @@ async fn credentials_list_maps_statuses_and_bad_json_without_body_leaks() {
         .await;
     let c = setup_connector(&server.uri()).await;
     assert!(invoke(&c, "n8n.credentials.list", json!({})).await.is_err());
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
-async fn credentials_list_timeout_uses_shared_transport_error_mapping() {
+async fn credentials_list_refuses_before_slow_provider_without_transport_attempt() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/credentials"))
@@ -1721,6 +1988,7 @@ async fn credentials_list_timeout_uses_shared_transport_error_mapping() {
         .await
         .expect_err("credential timeout must fail closed");
     assert!(!error.to_string().contains("data"));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -1948,7 +2216,7 @@ async fn mediated_projects_list_proxy_fixture_proves_wire_contract_and_safe_proj
 }
 
 #[fcp_async_core::runtime::test]
-async fn mediated_credential_reads_share_operation_resource_and_safe_get_contract() {
+async fn mediated_metadata_reads_preserve_bindings_and_credentials_refuse_before_egress() {
     let cases = vec![
         (
             "n8n.workflows.list",
@@ -1987,7 +2255,7 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
         (
             "n8n.executions.get",
             json!({"workflow_id": "w1", "id": "e1"}),
-            json!({"id": "e1", "finished": true, "data": "marker.execution"}),
+            json!({"id": "e1", "workflowId":"w1", "finished": true, "data": "marker.execution"}),
             "https://n8n.example.com/api/v1/executions/e1",
             "fwc-n8n://eec/workflows/w1/executions/e1",
         ),
@@ -2068,7 +2336,21 @@ async fn mediated_credential_reads_share_operation_resource_and_safe_get_contrac
             .await;
 
         let c = setup_mediated_connector(&proxy.uri()).await;
-        let result = invoke(&c, operation, input).await.unwrap();
+        if operation == "n8n.credentials.list" {
+            let error = invoke(&c, operation, input)
+                .await
+                .expect_err("unproved direct mediation must not become a new grant");
+            assert!(
+                error
+                    .to_string()
+                    .contains("credentials_require_admitted_official_mcp")
+            );
+            assert!(proxy.received_requests().await.unwrap().is_empty());
+            continue;
+        }
+        let result = invoke(&c, operation, input)
+            .await
+            .unwrap_or_else(|_| panic!("metadata fixture refused for {operation}"));
         let output = serde_json::to_string(&result).unwrap();
         assert!(
             !output.contains("marker."),
@@ -3893,6 +4175,69 @@ async fn workflows_get() {
             .is_some_and(|digest| digest.starts_with("blake3-256:"))
     );
     assert_no_untrusted_output(&result);
+}
+
+#[fcp_async_core::runtime::test]
+async fn current_workflow_read_native_active_version_redacts_both_graphs() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path("/api/v1/workflows/1001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"1001","name":"Synthetic","versionId":"draft-one","active":true,
+            "activeVersionId":"published-one","isArchived":false,
+            "nodes":[{"id":"one","name":"Code","type":"n8n-nodes-base.code","position":[10,20],
+                "parameters":{"jsCode":"READ_PRIVATE_CANARY"},"credentials":{"api":{"id":"READ_PRIVATE_CANARY"}}}],
+            "connections":{},"pinData":{"Code":"READ_PRIVATE_CANARY"},"staticData":{"token":"READ_PRIVATE_CANARY"},
+            "activeVersion":{"versionId":"published-one","nodes":[{"id":"one","name":"Code",
+                "type":"n8n-nodes-base.code","position":[0,0],"parameters":{"jsCode":"READ_PRIVATE_CANARY"},
+                "credentials":{"api":{"id":"READ_PRIVATE_CANARY"}}}],"connections":{}}
+        }))).mount(&server).await;
+    let connector = setup_connector(&server.uri()).await;
+    let result = invoke(
+        &connector,
+        "n8n.workflows.get",
+        json!({"id":"1001","version":"both",
+        "detail":"full","includeCode":true}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["graph"]["draft"]["versionId"], "draft-one");
+    assert_eq!(result["graph"]["published"]["versionId"], "published-one");
+    assert_eq!(result["codeNodes"].as_array().unwrap().len(), 2);
+    assert!(
+        !serde_json::to_string(&result)
+            .unwrap()
+            .contains("READ_PRIVATE_CANARY")
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.query(), None);
+    let compared = invoke(
+        &connector,
+        "n8n.workflows.compare",
+        json!({"id":"1001",
+        "leftVersion":"draft","rightVersion":"published"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(compared["leftVersionId"], "draft-one");
+    assert_eq!(compared["rightVersionId"], "published-one");
+    assert_eq!(compared["semanticDiff"]["changed"], false);
+    assert_eq!(compared["layoutDiff"]["changed"], true);
+    assert!(
+        !serde_json::to_string(&compared)
+            .unwrap()
+            .contains("READ_PRIVATE_CANARY")
+    );
+    assert!(
+        invoke(
+            &connector,
+            "n8n.workflows.get",
+            json!({"id":"1001","version":"historical-id"})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[fcp_async_core::runtime::test]

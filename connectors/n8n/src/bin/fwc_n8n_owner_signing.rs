@@ -66,7 +66,7 @@ pub fn sign_staged_provision_receipt(
             git_revision: git_revision.to_owned(),
             bindings,
             artifacts: provision::staged_provision_artifacts(&stage_root)?,
-            signature: provision::ReleaseSignature {
+            signature: fcp_host::N8nReleaseSignature {
                 algorithm: "ed25519".to_owned(),
                 key_id: signing_key.key_id().to_string(),
                 signature: "00".repeat(SIGNATURE_SIZE),

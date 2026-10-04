@@ -371,6 +371,7 @@ const N8N_SUPERVISED_OPERATION_ENV: &str = "FCP_HOST_N8N_SUPERVISED_OPERATION";
 const N8N_CAPABILITIES_INSPECT_OPERATION: &str = "n8n.capabilities.inspect";
 const N8N_OFFICIAL_MCP_PROVIDER_OPERATION: &str = "mcp.tools.list";
 const N8N_OFFICIAL_MCP_CALL_OPERATION: &str = "mcp.tools.call";
+const N8N_OFFICIAL_MCP_READ_OPERATION: &str = "mcp.n8n.read";
 const N8N_APPROVAL_WRAPPER_OPERATION: &str = "n8n.mcp.call";
 const N8N_TYPED_APPROVAL_PARENT_BINDING_TAG: &str = "fcp.n8n.parent_binding_sha256";
 const N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG: &str = "fcp.n8n.typed_plan_sha256";
@@ -449,7 +450,13 @@ const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
 #[cfg(target_os = "linux")]
 static FIXED_READ_ONLY_LANDLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
-const N8N_READ_ONLY_OPERATIONS: [&str; 10] = [
+const N8N_READ_ONLY_OPERATIONS: [&str; 16] = [
+    "n8n.validation.run",
+    "n8n.workflows.compare",
+    "n8n.workflows.search",
+    "n8n.executions.search",
+    "n8n.structure.search",
+    "n8n.audit.inspect",
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -472,7 +479,13 @@ const N8N_WRITE_OPERATIONS: [&str; 9] = [
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 19] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 25] = [
+    "n8n.validation.run",
+    "n8n.workflows.compare",
+    "n8n.workflows.search",
+    "n8n.executions.search",
+    "n8n.structure.search",
+    "n8n.audit.inspect",
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -670,6 +683,14 @@ impl TrustedResourceBinding {
                     "fwc-mcp-bridge://{}/tools/{}",
                     self.server_id.as_str(),
                     encode_n8n_resource_segment(name)
+                )
+            }
+            "fcp.mcp-bridge" if request.operation.as_str() == N8N_OFFICIAL_MCP_READ_OPERATION => {
+                let tool = official_n8n_typed_read_tool(&request.input)?;
+                format!(
+                    "fwc-mcp-bridge://{}/tools/{}",
+                    self.server_id.as_str(),
+                    encode_n8n_resource_segment(tool)
                 )
             }
             _ => {
@@ -4104,6 +4125,87 @@ struct OwnedPerInvocationBinding {
     correlation_id: Option<String>,
     capability_token_cbor_b64: String,
     network_constraints: NetworkConstraints,
+    comparison_capture: Option<Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>>,
+}
+
+// Invocation-private: deliberately neither Debug nor Serialize. Raw provider
+// graph values must never be included in diagnostic or public receipts.
+#[cfg(target_os = "linux")]
+struct OwnedWorkflowComparisonCapture {
+    workflow_id: String,
+    resource_uri: String,
+    expected_url: String,
+    attempted: bool,
+    response: Option<Value>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedWorkflowComparisonCapture {
+    fn admit_request(&mut self, request: &HostEgressHttpRequest) -> HostResult<()> {
+        if self.attempted
+            || request.method != "GET"
+            || request.url != self.expected_url
+            || request.body.is_some()
+            || request.context.resource_uri != self.resource_uri
+        {
+            return Err(HostError::PreflightFailed(
+                "comparison one-shot request binding invalid".into(),
+            ));
+        }
+        self.attempted = true;
+        Ok(())
+    }
+
+    fn retain_response(&mut self, response: &HostEgressHttpResponse) -> HostResult<()> {
+        self.retain_response_body(response.status, response.body.as_bytes())
+    }
+
+    fn retain_response_body(&mut self, status: u16, body: &[u8]) -> HostResult<()> {
+        if !self.attempted
+            || self.response.is_some()
+            || status != 200
+            || body.len() > 10 * 1024 * 1024
+        {
+            return Err(HostError::PreflightFailed(
+                "comparison response unavailable".into(),
+            ));
+        }
+        let native: Value = serde_json::from_slice(body)
+            .map_err(|_| HostError::PreflightFailed("comparison response malformed".into()))?;
+        let graph_valid = |graph: &Value| {
+            graph
+                .get("nodes")
+                .and_then(Value::as_array)
+                .is_some_and(|nodes| nodes.len() <= 1000 && nodes.iter().all(Value::is_object))
+                && graph.get("connections").is_some_and(Value::is_object)
+        };
+        if native.get("id").and_then(Value::as_str) != Some(self.workflow_id.as_str())
+            || native
+                .get("versionId")
+                .and_then(Value::as_str)
+                .is_none_or(|id| id.is_empty() || id.len() > 256)
+            || !graph_valid(&native)
+        {
+            return Err(HostError::PreflightFailed(
+                "comparison response binding invalid".into(),
+            ));
+        }
+        match (native.get("activeVersionId"), native.get("activeVersion")) {
+            (Some(Value::Null), Some(Value::Null)) => {}
+            (Some(Value::String(id)), Some(version))
+                if !id.is_empty()
+                    && id.len() <= 256
+                    && version.get("versionId").and_then(Value::as_str) == Some(id.as_str())
+                    && graph_valid(version) => {}
+            _ => {
+                return Err(HostError::PreflightFailed(
+                    "comparison published binding invalid".into(),
+                ));
+            }
+        }
+        self.response = Some(native);
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -4119,6 +4221,70 @@ impl OwnedPerInvocationBinding {
                 "owned per-invocation plan does not match request identity".to_string(),
             ));
         }
+        let comparison_capture = if plan.connector_id.as_str() == "fcp.n8n"
+            && matches!(
+                plan.operation.as_str(),
+                "n8n.workflows.compare" | "n8n.validation.run"
+            ) {
+            let workflow_id = n8n_read_only_input_id(&request.input, "id")?.to_owned();
+            let config = plan.configure_payload.as_ref().ok_or_else(|| {
+                HostError::PreflightFailed("comparison configuration unavailable".into())
+            })?;
+            let server = config
+                .get("server_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    HostError::PreflightFailed("comparison server binding unavailable".into())
+                })?;
+            let server = match server {
+                "eec" => N8nReadOnlyServerId::Eec,
+                "hetzner" => N8nReadOnlyServerId::Hetzner,
+                _ => {
+                    return Err(HostError::PreflightFailed(
+                        "comparison server binding invalid".into(),
+                    ));
+                }
+            };
+            let resource_uri = expected_n8n_read_only_resource_uri(
+                server,
+                plan.operation.as_str(),
+                &request.input,
+            )?;
+            let base = config
+                .get("base_url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    HostError::PreflightFailed("comparison URL binding unavailable".into())
+                })?;
+            let mut url = url::Url::parse(base)
+                .map_err(|_| HostError::PreflightFailed("comparison URL binding invalid".into()))?;
+            if url.query().is_some()
+                || url.fragment().is_some()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.path().trim_end_matches('/') != "/api/v1"
+            {
+                return Err(HostError::PreflightFailed(
+                    "comparison URL binding invalid".into(),
+                ));
+            }
+            url.path_segments_mut()
+                .map_err(|_| HostError::PreflightFailed("comparison URL binding invalid".into()))?
+                .pop_if_empty()
+                .push("workflows")
+                .push(&workflow_id);
+            Some(Arc::new(std::sync::Mutex::new(
+                OwnedWorkflowComparisonCapture {
+                    workflow_id,
+                    resource_uri,
+                    expected_url: url.to_string(),
+                    attempted: false,
+                    response: None,
+                },
+            )))
+        } else {
+            None
+        };
         Ok(Self {
             connector_id: plan.connector_id.to_string(),
             operation_id: plan.operation.to_string(),
@@ -4130,6 +4296,7 @@ impl OwnedPerInvocationBinding {
                 .map(std::string::ToString::to_string),
             capability_token_cbor_b64,
             network_constraints: plan.network_constraints.clone(),
+            comparison_capture,
         })
     }
 
@@ -4392,6 +4559,12 @@ async fn owned_perform_egress(
 ) -> HostResult<HostEgressWireResponseBody> {
     match payload {
         HostEgressWireRequestPayload::Http(request) => {
+            if let Some(capture) = &binding.comparison_capture {
+                capture
+                    .lock()
+                    .map_err(|_| HostError::Internal("comparison capture lock unavailable".into()))?
+                    .admit_request(&request)?;
+            }
             let started_at = Instant::now();
             let authorized = authorize_host_egress_context(
                 state,
@@ -4440,7 +4613,14 @@ async fn owned_perform_egress(
             if let Some(lease) = lease {
                 release_host_egress_credential_lease(state, lease).await;
             }
-            result.map(HostEgressWireResponseBody::Http)
+            let response = result?;
+            if let Some(capture) = &binding.comparison_capture {
+                capture
+                    .lock()
+                    .map_err(|_| HostError::Internal("comparison capture lock unavailable".into()))?
+                    .retain_response(&response)?;
+            }
+            Ok(HostEgressWireResponseBody::Http(response))
         }
         HostEgressWireRequestPayload::Tcp(request) => {
             let started_at = Instant::now();
@@ -4679,7 +4859,9 @@ fn owned_handshake_zone_dir(
             || (connector_id.as_str() == "fcp.mcp-bridge"
                 && matches!(
                     operation.as_str(),
-                    N8N_OFFICIAL_MCP_PROVIDER_OPERATION | N8N_OFFICIAL_MCP_CALL_OPERATION
+                    N8N_OFFICIAL_MCP_PROVIDER_OPERATION
+                        | N8N_OFFICIAL_MCP_CALL_OPERATION
+                        | N8N_OFFICIAL_MCP_READ_OPERATION
                 ));
         if !approved {
             return Err(HostError::PreflightFailed(
@@ -4743,7 +4925,10 @@ async fn invoke_owned_per_invocation(
     plan: PerInvocationExecutionPlan,
     request: InvokeRequest,
 ) -> HostResult<InvokeResponse> {
+    let comparison_deadline =
+        Instant::now() + Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000));
     let binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
+    let comparison_capture = binding.comparison_capture.clone();
     let auth_token = owned_launch_auth_token();
     let spec = owned_process_spec(&plan, &auth_token)?;
     let (host_endpoint, child_endpoint) = StdUnixStream::pair().map_err(|_| {
@@ -4784,14 +4969,347 @@ async fn invoke_owned_per_invocation(
         }
     };
     let operation_result = owned_run_protocol(&mut handle, &plan, &request, &activated).await;
-    owned_finalize(
+    let response = owned_finalize(
         handle,
         host_shutdown,
         shutting_down,
         egress_task,
         operation_result,
     )
-    .await
+    .await?;
+    if let Some(capture) = comparison_capture {
+        if request.operation.as_str() == "n8n.validation.run" {
+            complete_owned_remote_validation(capture, &request, response, comparison_deadline).await
+        } else {
+            complete_owned_workflow_comparison(capture, &request, response, comparison_deadline)
+                .await
+        }
+    } else {
+        Ok(response)
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedLocalValidationCancelGuard(Arc<AtomicBool>);
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedLocalValidationCancelGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn captured_comparison_graphs(
+    native: &Value,
+    resource: &str,
+    input: &Value,
+    projected: &Value,
+) -> HostResult<[Value; 2]> {
+    let refused = || HostError::PreflightFailed("comparison projection binding invalid".into());
+    if projected["leftUri"] != resource || projected["rightUri"] != resource {
+        return Err(refused());
+    }
+    let mut graphs = Vec::with_capacity(2);
+    for (selector, version_field, digest_side) in [
+        (
+            input
+                .get("leftVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("draft"),
+            "leftVersionId",
+            "leftDigest",
+        ),
+        (
+            input
+                .get("rightVersion")
+                .and_then(Value::as_str)
+                .unwrap_or("published"),
+            "rightVersionId",
+            "rightDigest",
+        ),
+    ] {
+        let graph = match selector {
+            "draft" => native,
+            "published" if native["activeVersion"].is_object() => &native["activeVersion"],
+            "published" => {
+                return Err(HostError::PreflightFailed(
+                    "published_version_unavailable".into(),
+                ));
+            }
+            _ => return Err(refused()),
+        };
+        let version = graph["versionId"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .ok_or_else(refused)?;
+        if projected[version_field] != version {
+            return Err(refused());
+        }
+        let nodes = graph["nodes"].as_array().ok_or_else(refused)?;
+        let connections = &graph["connections"];
+        let (semantic, layout) =
+            fcp_host::n8n_comparison_graph_digests(nodes, connections).map_err(|_| refused())?;
+        if projected["semanticDiff"][digest_side] != semantic
+            || projected["layoutDiff"][digest_side] != layout
+        {
+            return Err(refused());
+        }
+        graphs.push(json!({"nodes":nodes,"connections":connections}));
+    }
+    if projected["semanticDiff"]["changed"].as_bool()
+        != Some(projected["semanticDiff"]["leftDigest"] != projected["semanticDiff"]["rightDigest"])
+        || projected["layoutDiff"]["changed"].as_bool()
+            != Some(projected["layoutDiff"]["leftDigest"] != projected["layoutDiff"]["rightDigest"])
+    {
+        return Err(refused());
+    }
+    graphs.try_into().map_err(|_| refused())
+}
+
+#[cfg(target_os = "linux")]
+fn project_comparison_validation(result: &fcp_host::LocalN8nDispatchResponse) -> HostResult<Value> {
+    let refused = || HostError::PreflightFailed("comparison validation unavailable".into());
+    if result.operation != fcp_host::LocalN8nOperationKind::ValidationRun
+        || result.result.status != fcp_host::LocalMcpResultStatus::Completed
+        || result.result.teardown_error_code.is_some()
+        || !result.result.startup.network_disabled
+        || !result.result.shutdown.completion.reaped
+        || !result.result.shutdown.completion.group_absent
+        || result.result.responses.len() != 2
+    {
+        return Err(refused());
+    }
+    let left = fcp_host::project_local_n8n_validation_call(&result.result.responses[0])
+        .map_err(|_| refused())?;
+    let right = fcp_host::project_local_n8n_validation_call(&result.result.responses[1])
+        .map_err(|_| refused())?;
+    Ok(
+        json!({"status":"collected","changed":left != right,"left":left,"right":right,
+        "observationScope":"current_selected_graphs","networkDisabled":result.result.startup.network_disabled,
+        "ownedStopped":true}),
+    )
+}
+
+fn validate_remote_workflow_input(input: &Value) -> HostResult<(&str, &str)> {
+    let refused = || HostError::InvalidFilter("invalid_remote_validation_input".into());
+    let object = input.as_object().ok_or_else(refused)?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "subject" | "id" | "version" | "profile"))
+        || input["subject"] != "remote_workflow"
+    {
+        return Err(refused());
+    }
+    n8n_read_only_input_id(input, "id")?;
+    let version = match input.get("version") {
+        None => "draft",
+        Some(value) => value.as_str().ok_or_else(refused)?,
+    };
+    let profile = match input.get("profile") {
+        None => "runtime",
+        Some(value) => value.as_str().ok_or_else(refused)?,
+    };
+    if !matches!(version, "draft" | "published")
+        || !matches!(profile, "minimal" | "runtime" | "ai_friendly" | "strict")
+    {
+        return Err(refused());
+    }
+    Ok((version, profile))
+}
+
+#[cfg(target_os = "linux")]
+fn captured_remote_validation_graph(
+    native: &Value,
+    input: &Value,
+    projected: &Value,
+) -> HostResult<Value> {
+    let refused =
+        || HostError::PreflightFailed("remote_validation_projection_binding_invalid".into());
+    let (version, profile) = validate_remote_workflow_input(input)?;
+    let graph = if version == "draft" {
+        native
+    } else {
+        native
+            .get("activeVersion")
+            .filter(|graph| graph.is_object())
+            .ok_or_else(|| HostError::PreflightFailed("published_version_unavailable".into()))?
+    };
+    let nodes = graph["nodes"].as_array().ok_or_else(refused)?;
+    let connections = &graph["connections"];
+    let (digest, _) =
+        fcp_host::n8n_comparison_graph_digests(nodes, connections).map_err(|_| refused())?;
+    if native.get("id") != input.get("id")
+        || projected.as_object().is_none_or(|object| object.len() != 6)
+        || projected["status"] != "validation_required"
+        || projected.get("id") != input.get("id")
+        || projected["version"] != version
+        || projected["profile"] != profile
+        || projected["versionId"] != graph["versionId"]
+        || projected["graphDigest"] != digest
+        || graph["versionId"]
+            .as_str()
+            .is_none_or(|id| id.is_empty() || id.len() > 256)
+        || (version == "published" && native["activeVersionId"] != graph["versionId"])
+    {
+        return Err(refused());
+    }
+    Ok(json!({"nodes":nodes,"connections":connections}))
+}
+
+#[cfg(target_os = "linux")]
+async fn complete_owned_remote_validation(
+    capture: Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>,
+    request: &InvokeRequest,
+    mut response: InvokeResponse,
+    deadline: Instant,
+) -> HostResult<InvokeResponse> {
+    if response.status != InvokeStatus::Ok || response.error.is_some() {
+        return Ok(response);
+    }
+    let native = capture
+        .lock()
+        .map_err(|_| HostError::Internal("remote_validation_capture_unavailable".into()))?
+        .response
+        .take()
+        .ok_or_else(|| {
+            HostError::PreflightFailed("remote_validation_response_not_captured".into())
+        })?;
+    let graph = captured_remote_validation_graph(
+        &native,
+        &request.input,
+        response
+            .result
+            .as_ref()
+            .ok_or_else(|| HostError::PreflightFailed("remote_validation_result_missing".into()))?,
+    )?;
+    let (_, profile) = validate_remote_workflow_input(&request.input)?;
+    let profile = match profile {
+        "minimal" => fcp_host::LocalN8nValidationProfile::Minimal,
+        "runtime" => fcp_host::LocalN8nValidationProfile::Runtime,
+        "ai_friendly" => fcp_host::LocalN8nValidationProfile::AiFriendly,
+        "strict" => fcp_host::LocalN8nValidationProfile::Strict,
+        _ => {
+            return Err(HostError::InvalidFilter(
+                "invalid_remote_validation_input".into(),
+            ));
+        }
+    };
+    let correlation = request
+        .correlation_id
+        .as_ref()
+        .map_or_else(|| request.id.to_string(), ToString::to_string);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = OwnedLocalValidationCancelGuard(Arc::clone(&cancelled));
+    let (sender, receiver) = oneshot::channel();
+    let worker = std::thread::Builder::new()
+        .name("n8n-current-graph-validation".into())
+        .spawn(move || {
+            let result = (|| {
+                let provider = fcp_host::LocalMcpProvider::from_signed_current().map_err(|_| {
+                    HostError::PreflightFailed("remote_validation_signed_policy_unavailable".into())
+                })?;
+                let bound = provider.policy().max_request_bytes as usize;
+                let dispatcher =
+                    fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
+                let result = dispatcher
+                    .validate_current_graph(correlation, graph, profile, &cancelled, deadline)
+                    .map_err(|_| {
+                        HostError::PreflightFailed("remote_validation_local_provider_failed".into())
+                    })?;
+                if result.result.status != fcp_host::LocalMcpResultStatus::Completed
+                    || !result.result.startup.network_disabled
+                    || result.result.responses.len() != 1
+                    || result.result.teardown_error_code.is_some()
+                    || !result.result.shutdown.completion.reaped
+                    || !result.result.shutdown.completion.group_absent
+                {
+                    return Err(HostError::PreflightFailed(
+                        "remote_validation_teardown_incomplete".into(),
+                    ));
+                }
+                fcp_host::project_local_n8n_validation_call(&result.result.responses[0]).map_err(
+                    |_| HostError::PreflightFailed("remote_validation_result_invalid".into()),
+                )
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|_| HostError::Internal("remote_validation_worker_unavailable".into()))?;
+    let result = receiver
+        .await
+        .map_err(|_| HostError::Internal("remote_validation_worker_result_unavailable".into()))?;
+    worker
+        .join()
+        .map_err(|_| HostError::Internal("remote_validation_worker_failed".into()))?;
+    drop(guard);
+    response.result = Some(result?);
+    Ok(response)
+}
+
+#[cfg(target_os = "linux")]
+async fn complete_owned_workflow_comparison(
+    capture: Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>,
+    request: &InvokeRequest,
+    mut response: InvokeResponse,
+    deadline: Instant,
+) -> HostResult<InvokeResponse> {
+    if response.status != InvokeStatus::Ok || response.error.is_some() {
+        return Ok(response);
+    }
+    let (native, resource) = {
+        let mut capture = capture
+            .lock()
+            .map_err(|_| HostError::Internal("comparison capture unavailable".into()))?;
+        let native = capture
+            .response
+            .take()
+            .ok_or_else(|| HostError::PreflightFailed("comparison response not captured".into()))?;
+        (native, capture.resource_uri.clone())
+    };
+    let projected = response
+        .result
+        .as_mut()
+        .ok_or_else(|| HostError::PreflightFailed("comparison result missing".into()))?;
+    let graphs = captured_comparison_graphs(&native, &resource, &request.input, projected)?;
+    let correlation = request
+        .correlation_id
+        .as_ref()
+        .map_or_else(|| request.id.to_string(), ToString::to_string);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let guard = OwnedLocalValidationCancelGuard(Arc::clone(&cancelled));
+    let (sender, receiver) = oneshot::channel();
+    // The owned blocking provider runs off the async executor. Cancellation
+    // of this invocation signals its supervised session; teardown stays in
+    // that session, even when the receiver is dropped.
+    let worker = std::thread::Builder::new()
+        .name("n8n-current-pair-validation".into())
+        .spawn(move || {
+            let result = (|| {
+                let provider = fcp_host::LocalMcpProvider::from_signed_current().map_err(|_| {
+                    HostError::PreflightFailed("comparison signed local policy unavailable".into())
+                })?;
+                let bound = provider.policy().max_request_bytes as usize;
+                let dispatcher =
+                    fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
+                let result = dispatcher
+                    .validate_current_pair(correlation, graphs, &cancelled, deadline)
+                    .map_err(|_| {
+                        HostError::PreflightFailed("comparison local validation failed".into())
+                    })?;
+                project_comparison_validation(&result)
+            })();
+            let _ = sender.send(result);
+        })
+        .map_err(|_| HostError::Internal("comparison validation worker unavailable".into()))?;
+    let result = receiver
+        .await
+        .map_err(|_| HostError::Internal("comparison validation result unavailable".into()))?;
+    worker
+        .join()
+        .map_err(|_| HostError::Internal("comparison validation worker failed".into()))?;
+    drop(guard);
+    projected["validationDelta"] = result?;
+    Ok(response)
 }
 
 #[cfg(target_os = "linux")]
@@ -4803,7 +5321,9 @@ fn owned_invocation_config(
     if connector_id.as_str() == "fcp.mcp-bridge"
         && matches!(
             operation.as_str(),
-            N8N_OFFICIAL_MCP_PROVIDER_OPERATION | N8N_OFFICIAL_MCP_CALL_OPERATION
+            N8N_OFFICIAL_MCP_PROVIDER_OPERATION
+                | N8N_OFFICIAL_MCP_CALL_OPERATION
+                | N8N_OFFICIAL_MCP_READ_OPERATION
         )
     {
         // Official n8n emits its tools catalog as one buffered SSE response.
@@ -4844,6 +5364,173 @@ fn owned_invocation_config(
 #[cfg(all(test, target_os = "linux"))]
 mod owned_per_invocation_unit_tests {
     use super::*;
+
+    #[test]
+    fn remote_validation_capture_selects_exact_current_graph_and_denies_binding_drift() {
+        let native = json!({"id":"one","versionId":"draft-one","nodes":[],"connections":{},
+            "settings":{"secret":"REMOTE_PRIVATE_CANARY"},"activeVersionId":"published-one",
+            "activeVersion":{"versionId":"published-one","nodes":[],"connections":{}}});
+        let (digest, _) = fcp_host::n8n_comparison_graph_digests(&[], &json!({})).unwrap();
+        for version in ["draft", "published"] {
+            for profile in ["minimal", "runtime", "ai_friendly", "strict"] {
+                let input = json!({"subject":"remote_workflow","id":"one","version":version,"profile":profile});
+                let projected = json!({"status":"validation_required","id":"one","version":version,
+                    "profile":profile,"versionId":format!("{version}-one"),"graphDigest":digest});
+                let graph = captured_remote_validation_graph(&native, &input, &projected).unwrap();
+                assert_eq!(graph, json!({"nodes":[],"connections":{}}));
+                assert!(!graph.to_string().contains("REMOTE_PRIVATE_CANARY"));
+                for (field, value) in [
+                    ("id", json!("other")),
+                    ("versionId", json!("stale")),
+                    ("profile", json!("unknown")),
+                    ("graphDigest", json!("sha256:unknown")),
+                ] {
+                    let mut wrong = projected.clone();
+                    wrong[field] = value;
+                    assert!(captured_remote_validation_graph(&native, &input, &wrong).is_err());
+                }
+            }
+        }
+        let mut absent = native.clone();
+        absent["activeVersionId"] = Value::Null;
+        absent["activeVersion"] = Value::Null;
+        let input = json!({"subject":"remote_workflow","id":"one","version":"published"});
+        assert!(captured_remote_validation_graph(&absent, &input, &json!({})).is_err());
+        for input in [
+            json!({"subject":"remote_workflow","id":"one","version":"history"}),
+            json!({"subject":"remote_workflow","id":"one","url":"https://hostile.invalid"}),
+            json!({"subject":"remote_workflow","id":"one","profile":null}),
+        ] {
+            assert!(validate_remote_workflow_input(&input).is_err());
+        }
+        let mut capture = OwnedWorkflowComparisonCapture {
+            workflow_id: "one".into(),
+            resource_uri: "fwc-n8n://eec/workflows/one".into(),
+            expected_url: "https://n8n.invalid/api/v1/workflows/one".into(),
+            attempted: true,
+            response: None,
+        };
+        capture
+            .retain_response_body(200, &serde_json::to_vec(&native).unwrap())
+            .unwrap();
+        assert!(
+            capture
+                .retain_response_body(200, &serde_json::to_vec(&native).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owned_comparison_capture_binds_current_versions_once_without_public_rows() {
+        let capture = || OwnedWorkflowComparisonCapture {
+            workflow_id: "one".into(),
+            resource_uri: "fwc-n8n://eec/workflows/one".into(),
+            expected_url: "https://example.test/api/v1/workflows/one".into(),
+            attempted: true,
+            response: None,
+        };
+        let baseline = json!({"id":"one","versionId":"draft-one","nodes":[],"connections":{},
+            "activeVersionId":"published-one","activeVersion":{"versionId":"published-one","nodes":[],"connections":{}},
+            "pinData":{"private":"PRIVATE_CAPTURE_CANARY"}});
+        let mut owned = capture();
+        owned
+            .retain_response_body(200, &serde_json::to_vec(&baseline).unwrap())
+            .unwrap();
+        assert!(owned.response.is_some());
+        assert!(
+            owned
+                .retain_response_body(200, &serde_json::to_vec(&baseline).unwrap())
+                .is_err()
+        );
+        for invalid in [
+            json!({"id":"other", "versionId":"draft-one","nodes":[],"connections":{},"activeVersionId":null,"activeVersion":null}),
+            json!({"id":"one", "versionId":"draft-one","nodes":[],"connections":{},"activeVersionId":"published-one","activeVersion":{"versionId":"other","nodes":[],"connections":{}}}),
+            json!({"id":"one", "versionId":"draft-one","nodes":[],"connections":{}}),
+        ] {
+            let error = capture()
+                .retain_response_body(200, &serde_json::to_vec(&invalid).unwrap())
+                .unwrap_err();
+            assert!(!error.to_string().contains("PRIVATE_CAPTURE_CANARY"));
+        }
+        assert!(
+            capture()
+                .retain_response_body(500, b"PRIVATE_CAPTURE_CANARY")
+                .is_err()
+        );
+        assert!(
+            capture()
+                .retain_response_body(200, b"PRIVATE_CAPTURE_CANARY")
+                .is_err()
+        );
+        let mut not_attempted = capture();
+        not_attempted.attempted = false;
+        assert!(
+            not_attempted
+                .retain_response_body(200, &serde_json::to_vec(&baseline).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn captured_comparison_crossbinds_graph_digests_versions_and_redacted_native_validation() {
+        let native = json!({"id":"one","versionId":"draft-one",
+            "nodes":[{"id":"n","name":"PRIVATE_COMPARE_CANARY","type":"nodes-base.noOp","position":[0,0],"parameters":{"private":"PRIVATE_COMPARE_CANARY"}}],"connections":{},
+            "activeVersionId":"published-one","activeVersion":{"versionId":"published-one",
+                "nodes":[{"id":"n","name":"PRIVATE_COMPARE_CANARY","type":"nodes-base.noOp","position":[1,0],"parameters":{"private":"PRIVATE_COMPARE_CANARY"}}],"connections":{}}});
+        let (left_semantic, left_layout) = fcp_host::n8n_comparison_graph_digests(
+            native["nodes"].as_array().unwrap(),
+            &native["connections"],
+        )
+        .unwrap();
+        let (right_semantic, right_layout) = fcp_host::n8n_comparison_graph_digests(
+            native["activeVersion"]["nodes"].as_array().unwrap(),
+            &native["activeVersion"]["connections"],
+        )
+        .unwrap();
+        let projected = json!({"leftUri":"fwc-n8n://eec/workflows/one","rightUri":"fwc-n8n://eec/workflows/one",
+            "leftVersionId":"draft-one","rightVersionId":"published-one",
+            "semanticDiff":{"changed":false,"leftDigest":left_semantic,"rightDigest":right_semantic},
+            "layoutDiff":{"changed":true,"leftDigest":left_layout,"rightDigest":right_layout}});
+        let input = json!({"id":"one","leftVersion":"draft","rightVersion":"published"});
+        let graphs =
+            captured_comparison_graphs(&native, "fwc-n8n://eec/workflows/one", &input, &projected)
+                .unwrap();
+        assert_eq!(graphs[0]["nodes"], native["nodes"]);
+        for (pointer, value) in [
+            ("/leftVersionId", json!("wrong")),
+            ("/semanticDiff/leftDigest", json!("wrong")),
+            ("/layoutDiff/changed", json!(false)),
+            ("/rightUri", json!("fwc-n8n://hetzner/workflows/one")),
+        ] {
+            let mut invalid = projected.clone();
+            *invalid.pointer_mut(pointer).unwrap() = value;
+            let error = captured_comparison_graphs(
+                &native,
+                "fwc-n8n://eec/workflows/one",
+                &input,
+                &invalid,
+            )
+            .unwrap_err();
+            assert!(!error.to_string().contains("PRIVATE_COMPARE_CANARY"));
+        }
+        assert!(
+            captured_comparison_graphs(
+                &native,
+                "fwc-n8n://eec/workflows/one",
+                &json!({"leftVersion":"history"}),
+                &projected
+            )
+            .is_err()
+        );
+        let invalid_native = json!({"valid":false,"errors":[{"node":"PRIVATE_COMPARE_CANARY","message":"PRIVATE_COMPARE_CANARY"}],"warnings":[]});
+        let native_response = json!({"isError":true,"content":[{"type":"text","text":serde_json::to_string(&invalid_native).unwrap()}],"structuredContent":invalid_native});
+        let safe = fcp_host::project_local_n8n_validation_call(&native_response).unwrap();
+        assert_eq!(safe["valid"], false);
+        assert!(!safe.to_string().contains("PRIVATE_COMPARE_CANARY"));
+        let mut contradiction = native_response;
+        contradiction["structuredContent"]["valid"] = json!(true);
+        assert!(fcp_host::project_local_n8n_validation_call(&contradiction).is_err());
+    }
 
     #[test]
     fn fixed_read_only_n8n_handshake_omits_state_dir_without_filesystem_mutation() {
@@ -5062,6 +5749,7 @@ mod owned_per_invocation_unit_tests {
             correlation_id: Some("corr-1".to_string()),
             capability_token_cbor_b64: "secret-token".to_string(),
             network_constraints: constraints,
+            comparison_capture: None,
         };
         let mut context = HostEgressContext {
             connector_id: "fcp.test".to_string(),
@@ -9423,6 +10111,22 @@ fn n8n_official_mcp_policy_request(
             )?,
         ));
     }
+    if request.connector_id.as_str() == "fcp.mcp-bridge"
+        && request.operation.as_str() == N8N_OFFICIAL_MCP_READ_OPERATION
+    {
+        let binding = trusted_resource.ok_or_else(|| {
+            HostError::PreflightFailed("typed read trusted binding missing".into())
+        })?;
+        if binding.parent_binding_hash.is_some()
+            || binding.typed_plan_digest.is_some()
+            || resource_uri != Some(binding.resource_uri_for(request)?)
+        {
+            return Err(HostError::PreflightFailed(
+                "typed read trusted binding denied".into(),
+            ));
+        }
+        return Ok((request.clone(), request_input_hash(&request.input)?));
+    }
     if request.connector_id.as_str() != "fcp.mcp-bridge"
         || request.operation.as_str() != N8N_OFFICIAL_MCP_CALL_OPERATION
     {
@@ -11387,11 +12091,15 @@ fn expected_n8n_read_only_resource_uri(
     let root = format!("fwc-n8n://{}", server_id.as_str());
     match operation {
         "n8n.credentials.list"
+        | "n8n.workflows.search"
+        | "n8n.executions.search"
+        | "n8n.structure.search"
+        | "n8n.audit.inspect"
         | "n8n.executions.list"
         | "n8n.projects.list"
         | "n8n.tags.list"
         | "n8n.workflows.list" => Ok(root),
-        "n8n.workflows.get" => Ok(format!(
+        "n8n.workflows.get" | "n8n.workflows.compare" | "n8n.validation.run" => Ok(format!(
             "{root}/workflows/{}",
             encode_n8n_resource_segment(n8n_read_only_input_id(input, "id")?)
         )),
@@ -11472,7 +12180,38 @@ fn build_n8n_read_only_run_once_plan(
             "n8n approval token is only valid for a typed write".to_string(),
         ));
     }
-    if input.operation == "n8n.mcp_access.reconcile" {
+    if input.operation == "n8n.validation.run" {
+        validate_remote_workflow_input(&input.input)?;
+    } else if input.operation == "n8n.audit.inspect" {
+        let object = input
+            .input
+            .as_object()
+            .ok_or_else(|| HostError::InvalidFilter("invalid audit input".into()))?;
+        if object.len() != 1 {
+            return Err(HostError::InvalidFilter("invalid audit input".into()));
+        }
+        let categories = object
+            .get("categories")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty() && items.len() <= 4)
+            .ok_or_else(|| {
+                HostError::InvalidFilter("audit_instance_external_effect_not_admitted".into())
+            })?;
+        let mut seen = BTreeSet::new();
+        for category in categories {
+            let category = category
+                .as_str()
+                .filter(|value| {
+                    matches!(*value, "credentials" | "database" | "filesystem" | "nodes")
+                })
+                .ok_or_else(|| {
+                    HostError::InvalidFilter("audit_instance_external_effect_not_admitted".into())
+                })?;
+            if !seen.insert(category) {
+                return Err(HostError::InvalidFilter("invalid audit input".into()));
+            }
+        }
+    } else if input.operation == "n8n.mcp_access.reconcile" {
         validate_n8n_mcp_access_input(&input.input)?;
     } else if input.operation == "n8n.workflows.activate" {
         validate_n8n_workflow_activation_input(&input.input)?;
@@ -11572,6 +12311,41 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
     let server_id = config.get("server_id").and_then(Value::as_str);
     if !matches!(server_id, Some("eec") | Some("hetzner")) {
         return false;
+    }
+    if let Some((input_pin, output_pin)) = fcp_host::official_n8n_sdk_schema_pins(tool_name) {
+        return policy
+            .get("approved_tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| {
+                tools
+                    .iter()
+                    .filter(|tool| tool["name"].as_str() == Some(tool_name))
+                    .count()
+                    == 1
+                    && tools.iter().any(|tool| {
+                        tool.as_object().is_some_and(|tool| {
+                            fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
+                                && tool.get("name").and_then(Value::as_str) == Some(tool_name)
+                                && tool.get("class").and_then(Value::as_str) == Some("read")
+                                && tool.get("input_schema_digest").and_then(Value::as_str)
+                                    == Some(input_pin)
+                                && tool.get("output_schema_digest").and_then(Value::as_str)
+                                    == Some(output_pin)
+                        })
+                    })
+            });
+    }
+    if tool_name == "list_credentials" {
+        return policy.get("approved_tools").and_then(Value::as_array).is_some_and(|tools| {
+            tools.iter().filter(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name)).count() == 1
+                && tools.iter().any(|tool| tool.as_object().is_some_and(|tool| {
+                    fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
+                        && tool.get("name").and_then(Value::as_str) == Some(tool_name)
+                        && tool.get("class").and_then(Value::as_str) == Some("read")
+                        && tool.get("input_schema_digest").and_then(Value::as_str) == Some("sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821")
+                        && tool.get("output_schema_digest").and_then(Value::as_str) == Some("sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac")
+                }))
+        });
     }
     if tool_name == N8N_OFFICIAL_MCP_EXECUTE_TOOL {
         let (expected_input, expected_output) = match server_id {
@@ -11733,6 +12507,101 @@ fn official_mcp_policy_allows_tool(config: &ManagedConnectorConfig, tool_name: &
         })
 }
 
+fn official_n8n_typed_read_tool(input: &Value) -> HostResult<&'static str> {
+    match input["action"].as_str() {
+        Some("sdk_reference") => Ok("get_workflow_sdk_reference"),
+        Some("workflow_best_practices") => Ok("get_workflow_best_practices"),
+        Some("workflow_code") => Ok("validate_workflow"),
+        Some("nodes") => Ok("validate_node_config"),
+        Some("credentials") => Ok("list_credentials"),
+        Some("projects") => Ok("search_projects"),
+        Some("folders") => Ok("search_folders"),
+        Some("tags") => Ok("list_workflow_tags"),
+        Some("workflows") => Ok("search_workflows"),
+        _ => Err(HostError::InvalidFilter(
+            "typed native read action denied".into(),
+        )),
+    }
+}
+
+fn official_n8n_typed_read_input(tool: &str, arguments: Value) -> HostResult<Value> {
+    let action = match tool {
+        "get_workflow_sdk_reference" => "sdk_reference",
+        "get_workflow_best_practices" => "workflow_best_practices",
+        "validate_workflow" => "workflow_code",
+        "validate_node_config" => "nodes",
+        "list_credentials" => "credentials",
+        "search_projects" => "projects",
+        "search_folders" => "folders",
+        "list_workflow_tags" => "tags",
+        "search_workflows" => "workflows",
+        _ => {
+            return Err(HostError::InvalidFilter(
+                "typed native read action denied".into(),
+            ));
+        }
+    };
+    let mut input = arguments
+        .as_object()
+        .cloned()
+        .ok_or_else(|| HostError::InvalidFilter("typed native read arguments invalid".into()))?;
+    if input.contains_key("action") {
+        return Err(HostError::InvalidFilter(
+            "typed native read action substitution denied".into(),
+        ));
+    }
+    input.insert("action".into(), json!(action));
+    Ok(Value::Object(input))
+}
+
+fn official_credentials_read_arguments(input: &Value) -> HostResult<Value> {
+    let invalid = || HostError::InvalidFilter("invalid official credential metadata input".into());
+    let object = input.as_object().ok_or_else(invalid)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "query" | "type" | "projectId" | "onlySharedWithMe" | "page"
+        )
+    }) {
+        return Err(invalid());
+    }
+    let mut arguments = serde_json::Map::new();
+    for key in ["query", "type", "projectId"] {
+        if let Some(value) = object.get(key) {
+            let value = value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+                })
+                .ok_or_else(invalid)?;
+            arguments.insert(key.into(), json!(value));
+        }
+    }
+    if let Some(value) = object.get("onlySharedWithMe") {
+        arguments.insert(
+            "onlySharedWithMe".into(),
+            json!(value.as_bool().ok_or_else(invalid)?),
+        );
+    }
+    let limit = if let Some(page) = object.get("page") {
+        let page = page.as_object().ok_or_else(invalid)?;
+        if page.keys().any(|key| key != "limit") {
+            return Err(invalid());
+        }
+        match page.get("limit") {
+            Some(value) => value
+                .as_u64()
+                .filter(|limit| (1..=200).contains(limit))
+                .ok_or_else(invalid)?,
+            None => 200,
+        }
+    } else {
+        200
+    };
+    arguments.insert("limit".into(), json!(limit));
+    Ok(Value::Object(arguments))
+}
+
 fn build_n8n_official_mcp_run_once_plan(
     input: N8nReadOnlyRunOnceInput,
     config: &ManagedConnectorConfig,
@@ -11802,6 +12671,82 @@ fn build_n8n_official_mcp_run_once_plan(
             })?,
             format!("fwc-mcp-bridge://{}", input.server_id.as_str()),
             json!({}),
+        )
+    } else if matches!(
+        input.operation.as_str(),
+        "n8n.knowledge.query" | "n8n.validation.run"
+    ) {
+        let (tool, arguments) =
+            fcp_host::official_n8n_sdk_arguments(&input.operation, &input.input)
+                .map_err(|_| HostError::InvalidFilter("invalid official SDK read input".into()))?;
+        if !official_mcp_policy_allows_tool(config, tool) {
+            return Err(HostError::PreflightFailed(
+                "official SDK schema is not admitted".into(),
+            ));
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_READ_OPERATION)
+                .map_err(|_| HostError::InvalidFilter("invalid SDK operation".into()))?,
+            format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                input.server_id.as_str(),
+                encode_n8n_resource_segment(tool)
+            ),
+            official_n8n_typed_read_input(tool, arguments)?,
+        )
+    } else if input.operation == "n8n.workflows.search" {
+        let arguments =
+            fcp_host::official_n8n_workflow_search_arguments(&input.input).map_err(|_| {
+                HostError::InvalidFilter("invalid official workflow search input".into())
+            })?;
+        if !official_mcp_policy_allows_tool(config, "search_workflows") {
+            return Err(HostError::PreflightFailed(
+                "official workflow search schema is not admitted".into(),
+            ));
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_READ_OPERATION)
+                .map_err(|_| HostError::InvalidFilter("invalid official read operation".into()))?,
+            format!(
+                "fwc-mcp-bridge://{}/tools/search%5Fworkflows",
+                input.server_id.as_str()
+            ),
+            official_n8n_typed_read_input("search_workflows", arguments)?,
+        )
+    } else if input.operation == "n8n.structure.search" {
+        let (tool, arguments) = fcp_host::official_n8n_structure_arguments(&input.input)
+            .map_err(|_| HostError::InvalidFilter("invalid official structure input".into()))?;
+        if !official_mcp_policy_allows_tool(config, tool) {
+            return Err(HostError::PreflightFailed(
+                "official structure schema is not admitted".into(),
+            ));
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_READ_OPERATION)
+                .map_err(|_| HostError::InvalidFilter("invalid official read operation".into()))?,
+            format!(
+                "fwc-mcp-bridge://{}/tools/{}",
+                input.server_id.as_str(),
+                encode_n8n_resource_segment(tool)
+            ),
+            official_n8n_typed_read_input(tool, arguments)?,
+        )
+    } else if input.operation == "n8n.credentials.list" {
+        let arguments = official_credentials_read_arguments(&input.input)?;
+        if !official_mcp_policy_allows_tool(config, "list_credentials") {
+            return Err(HostError::PreflightFailed(
+                "official credential schema is not admitted".into(),
+            ));
+        }
+        (
+            OperationId::new(N8N_OFFICIAL_MCP_READ_OPERATION).map_err(|_| {
+                HostError::InvalidFilter("official credential operation invalid".into())
+            })?,
+            format!(
+                "fwc-mcp-bridge://{}/tools/list%5Fcredentials",
+                input.server_id.as_str()
+            ),
+            official_n8n_typed_read_input("list_credentials", arguments)?,
         )
     } else if matches!(
         input.operation.as_str(),
@@ -35566,6 +36511,222 @@ done"#;
             approval_token: None,
             deadline_ms: None,
             correlation_id: Some("11111111-2222-4333-8444-555555555555".to_string()),
+        }
+    }
+
+    #[test]
+    fn official_sdk_read_plan_requires_admission_and_exact_native_bindings() {
+        for (operation, input) in [
+            (
+                "n8n.knowledge.query",
+                json!({"action":"sdk_reference","section":"rules"}),
+            ),
+            (
+                "n8n.knowledge.query",
+                json!({"action":"workflow_best_practices","technique":"list"}),
+            ),
+            (
+                "n8n.validation.run",
+                json!({"subject":"workflow_code","code":"synthetic"}),
+            ),
+            (
+                "n8n.validation.run",
+                json!({"subject":"nodes","nodes":[{"type":"n8n-nodes-base.set","typeVersion":3.4,"parameters":{},"isToolNode":false}]}),
+            ),
+        ] {
+            let (tool, arguments) =
+                fcp_host::official_n8n_sdk_arguments(operation, &input).unwrap();
+            let (input_pin, output_pin) = fcp_host::official_n8n_sdk_schema_pins(tool).unwrap();
+            let mut config = run_once_n8n_official_mcp_test_config();
+            config
+                .allowed_operations
+                .push(N8N_OFFICIAL_MCP_READ_OPERATION.into());
+            config.config.as_mut().unwrap()["capability_policy"] = json!({"approved_tools":[{"name":tool,"class":"read","input_schema_digest":input_pin,"output_schema_digest":output_pin}]});
+            let mut request = n8n_official_mcp_test_input();
+            request.operation = operation.into();
+            request.input = input;
+            request.resource_uri = format!(
+                "fwc-mcp-bridge://eec/tools/{}",
+                encode_n8n_resource_segment(tool)
+            );
+            let plan = build_n8n_official_mcp_run_once_plan(request.clone(), &config).unwrap();
+            assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_READ_OPERATION);
+            let mut expected = arguments.as_object().unwrap().clone();
+            expected.insert(
+                "action".into(),
+                json!(match tool {
+                    "get_workflow_sdk_reference" => "sdk_reference",
+                    "get_workflow_best_practices" => "workflow_best_practices",
+                    "validate_workflow" => "workflow_code",
+                    "validate_node_config" => "nodes",
+                    _ => panic!("fixed test tool"),
+                }),
+            );
+            assert_eq!(plan.input, Value::Object(expected));
+            assert!(plan.input.get("name").is_none() && plan.input.get("arguments").is_none());
+            assert!(plan.parent_binding_hash.is_none());
+            let (invoke, binding) = build_n8n_official_mcp_invoke_request(
+                plan,
+                fcp_core::CapabilityToken::test_token(),
+                None,
+            );
+            let resource = binding.resource_uri_for(&invoke).unwrap();
+            assert_eq!(resource, request.resource_uri);
+            assert_eq!(
+                n8n_official_mcp_policy_request(&invoke, Some(&binding), Some(resource))
+                    .unwrap()
+                    .0
+                    .input,
+                invoke.input
+            );
+            for field in ["input_schema_digest", "output_schema_digest", "class"] {
+                let mut changed = config.clone();
+                changed.config.as_mut().unwrap()["capability_policy"]["approved_tools"][0][field] =
+                    json!("unknown");
+                assert!(build_n8n_official_mcp_run_once_plan(request.clone(), &changed).is_err());
+            }
+            request.resource_uri = "fwc-mcp-bridge://hetzner/tools/validate%5Fworkflow".into();
+            assert!(build_n8n_official_mcp_run_once_plan(request, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn official_workflow_search_plan_uses_native_filters_and_exact_read_authority() {
+        let input = json!({"query":"Synthetic description","projectId":"p","folderId":"folder-1","tags":["fixture"],"active":false,"sort":"name:asc","page":{"limit":1}});
+        let (input_pin, output_pin) =
+            fcp_host::official_n8n_sdk_schema_pins("search_workflows").unwrap();
+        let mut config = run_once_n8n_official_mcp_test_config();
+        config
+            .allowed_operations
+            .push(N8N_OFFICIAL_MCP_READ_OPERATION.into());
+        config.config.as_mut().unwrap()["capability_policy"] = json!({"approved_tools":[{"name":"search_workflows","class":"read","input_schema_digest":input_pin,"output_schema_digest":output_pin}]});
+        let mut request = n8n_official_mcp_test_input();
+        request.operation = "n8n.workflows.search".into();
+        request.input = input;
+        request.resource_uri = "fwc-mcp-bridge://eec/tools/search%5Fworkflows".into();
+        let plan = build_n8n_official_mcp_run_once_plan(request.clone(), &config).unwrap();
+        assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_READ_OPERATION);
+        assert_eq!(plan.input["action"], "workflows");
+        assert_eq!(plan.input["query"], "Synthetic description");
+        assert_eq!(plan.input["sortBy"], "name:asc");
+        assert_eq!(plan.input["limit"], 200);
+        assert!(plan.input.get("active").is_none() && plan.input.get("page").is_none());
+        let (invoke, binding) = build_n8n_official_mcp_invoke_request(
+            plan,
+            fcp_core::CapabilityToken::test_token(),
+            None,
+        );
+        assert_eq!(
+            binding.resource_uri_for(&invoke).unwrap(),
+            request.resource_uri
+        );
+        for bad in [
+            json!({"isArchived":true}),
+            json!({"folderId":"unsafe/path"}),
+            json!({"name":"execute_workflow"}),
+            json!({"sort":"unsupported"}),
+            json!({"page":{"cursor":null}}),
+        ] {
+            request.input = bad;
+            assert!(build_n8n_official_mcp_run_once_plan(request.clone(), &config).is_err());
+        }
+    }
+
+    #[test]
+    fn official_structure_read_plan_binds_native_tools_and_rejects_resource_drift() {
+        for input in [
+            json!({"kind":"projects","query":"Synthetic"}),
+            json!({"kind":"folders","projectId":"p","parentFolderId":"f"}),
+            json!({"kind":"tags"}),
+        ] {
+            let (tool, arguments) = fcp_host::official_n8n_structure_arguments(&input).unwrap();
+            let (input_pin, output_pin) = fcp_host::official_n8n_sdk_schema_pins(tool).unwrap();
+            let mut config = run_once_n8n_official_mcp_test_config();
+            config
+                .allowed_operations
+                .push(N8N_OFFICIAL_MCP_READ_OPERATION.into());
+            config.config.as_mut().unwrap()["capability_policy"] = json!({"approved_tools":[{"name":tool,"class":"read","input_schema_digest":input_pin,"output_schema_digest":output_pin}]});
+            let mut request = n8n_official_mcp_test_input();
+            request.operation = "n8n.structure.search".into();
+            request.input = input;
+            request.resource_uri = format!(
+                "fwc-mcp-bridge://eec/tools/{}",
+                encode_n8n_resource_segment(tool)
+            );
+            let plan = build_n8n_official_mcp_run_once_plan(request.clone(), &config).unwrap();
+            assert_eq!(plan.operation.as_str(), N8N_OFFICIAL_MCP_READ_OPERATION);
+            assert_eq!(plan.input["limit"], arguments["limit"]);
+            assert!(plan.input.get("parentFolderId").is_none());
+            let (invoke, binding) = build_n8n_official_mcp_invoke_request(
+                plan,
+                fcp_core::CapabilityToken::test_token(),
+                None,
+            );
+            assert_eq!(
+                binding.resource_uri_for(&invoke).unwrap(),
+                request.resource_uri
+            );
+            request.resource_uri = "fwc-mcp-bridge://hetzner/tools/search%5Fprojects".into();
+            assert!(build_n8n_official_mcp_run_once_plan(request, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn official_credentials_read_plan_binds_exact_native_schema_and_public_filters() {
+        let mut config = run_once_n8n_official_mcp_test_config();
+        config
+            .allowed_operations
+            .push(N8N_OFFICIAL_MCP_READ_OPERATION.into());
+        config.config.as_mut().unwrap()["capability_policy"] = json!({"approved_tools":[{
+            "name":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"}]});
+        let mut input = n8n_official_mcp_test_input();
+        input.operation = "n8n.credentials.list".into();
+        input.resource_uri = "fwc-mcp-bridge://eec/tools/list%5Fcredentials".into();
+        input.input = json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":17}});
+        let plan = build_n8n_official_mcp_run_once_plan(input.clone(), &config).unwrap();
+        assert_eq!(
+            plan.input,
+            json!({"action":"credentials","query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":17})
+        );
+        assert!(plan.approval_token.is_none());
+        let (request, binding) = build_n8n_official_mcp_invoke_request(
+            plan,
+            fcp_core::CapabilityToken::test_token(),
+            None,
+        );
+        let resource = binding.resource_uri_for(&request).unwrap();
+        assert_eq!(resource, "fwc-mcp-bridge://eec/tools/list%5Fcredentials");
+        let (policy_request, _) =
+            n8n_official_mcp_policy_request(&request, Some(&binding), Some(resource)).unwrap();
+        assert_eq!(policy_request.input, request.input);
+        assert!(
+            n8n_official_mcp_policy_request(
+                &request,
+                Some(&binding),
+                Some("fwc-mcp-bridge://hetzner/tools/list%5Fcredentials")
+            )
+            .is_err()
+        );
+        for field in ["input_schema_digest", "output_schema_digest"] {
+            let mut wrong = config.clone();
+            wrong.config.as_mut().unwrap()["capability_policy"]["approved_tools"][0][field] =
+                json!("sha256:unknown");
+            assert!(build_n8n_official_mcp_run_once_plan(input.clone(), &wrong).is_err());
+        }
+        let mut wrong = input.clone();
+        wrong.resource_uri = "fwc-mcp-bridge://hetzner/tools/list%5Fcredentials".into();
+        assert!(build_n8n_official_mcp_run_once_plan(wrong, &config).is_err());
+        for invalid in [
+            json!({"page":{"cursor":"next"}}),
+            json!({"limit":17}),
+            json!({"onlySharedWithMe":null}),
+            json!({"url":"https://hostile.invalid"}),
+        ] {
+            let mut wrong = input.clone();
+            wrong.input = invalid;
+            assert!(build_n8n_official_mcp_run_once_plan(wrong, &config).is_err());
         }
     }
 

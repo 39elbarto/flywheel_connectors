@@ -15,6 +15,7 @@ unsafe_code = "deny"
 default = []
 otlp = ["fcp-telemetry/otlp"]
 n8n-approval-issuer = []
+n8n-test-support = []
 
 [[bin]]
 name = "fcp-n8n-approval-issue"

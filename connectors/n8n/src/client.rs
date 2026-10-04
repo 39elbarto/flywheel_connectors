@@ -784,6 +784,62 @@ impl N8nClient {
         decode_list_typed(self.list_workflows(query, context).await?)
     }
 
+    /// Native project membership and active filters are applied by the public
+    /// controller. Folder and description search are not REST query options.
+    pub(crate) async fn search_workflows_typed(
+        &self,
+        query: &ListQuery,
+        search: &crate::types::MetadataSearch,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<WorkflowListResponse> {
+        let mut url = self.resolve_path("/workflows")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = &query.cursor {
+                pairs.append_pair("cursor", cursor);
+            }
+            if let Some(project) = &search.project_id {
+                pairs.append_pair("projectId", project);
+            }
+            if let Some(active) = search.active {
+                pairs.append_pair("active", if active { "true" } else { "false" });
+            }
+            pairs.append_pair("excludePinnedData", "true");
+        }
+        decode_list_typed(self.get_url_with_context(url, context).await?)
+    }
+
+    /// Native execution filters are pushed down: an unfiltered native list
+    /// excludes running executions and cannot be filtered locally to recover them.
+    pub(crate) async fn search_executions_typed(
+        &self,
+        query: &ListQuery,
+        search: &crate::types::MetadataSearch,
+        status: Option<&str>,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<ExecutionListResponse> {
+        let mut url = self.resolve_path("/executions")?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("limit", &query.limit.to_string());
+            if let Some(cursor) = &query.cursor {
+                pairs.append_pair("cursor", cursor);
+            }
+            for (key, value) in [
+                ("workflowId", search.workflow_id.as_deref()),
+                ("status", status),
+                ("startedAfter", search.started_after.as_deref()),
+                ("startedBefore", search.started_before.as_deref()),
+            ] {
+                if let Some(value) = value {
+                    pairs.append_pair(key, value);
+                }
+            }
+        }
+        decode_list_typed(self.get_url_with_context(url, context).await?)
+    }
+
     /// Get a workflow using the typed provider DTO layer.
     pub(crate) async fn get_workflow_typed(
         &self,
@@ -965,6 +1021,73 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<ProjectListResponse> {
         decode_list_typed(self.list_projects(query, context).await?)
+    }
+
+    /// List credential metadata using the typed provider DTO layer.
+    /// Generate only explicitly selected local-read audit categories. The
+    /// instance reporter contacts a third party, so it is never sent here.
+    pub(crate) async fn inspect_audit(
+        &self,
+        categories: &[String],
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<serde_json::Value> {
+        if categories.is_empty()
+            || categories.len() > 4
+            || categories.iter().any(|category| {
+                !matches!(
+                    category.as_str(),
+                    "credentials" | "database" | "filesystem" | "nodes"
+                )
+            })
+            || categories
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != categories.len()
+        {
+            return Err(N8nError::InvalidInput(
+                "audit_instance_external_effect_not_admitted".into(),
+            ));
+        }
+        let url = self.resolve_path("/audit")?;
+        let body = serde_json::json!({"additionalOptions":{"categories":categories}});
+        if matches!(self.auth, N8nAuth::CredentialId(_)) {
+            let context = context.ok_or_else(|| {
+                N8nError::InvalidInput("credential_id requires verified request attribution".into())
+            })?;
+            let body = serde_json::to_vec(&body)?;
+            let response = self
+                .host_egress_http(
+                    &url,
+                    Method::POST,
+                    vec![
+                        HostEgressHttpHeader {
+                            name: "Accept".into(),
+                            value: "application/json".into(),
+                        },
+                        HostEgressHttpHeader {
+                            name: "Content-Type".into(),
+                            value: "application/json".into(),
+                        },
+                    ],
+                    Some(Base64Bytes::from_vec(body)),
+                    context,
+                    false,
+                )
+                .await?;
+            return decode_mediated_response(&response);
+        }
+        self.ensure_provider_egress_allowed()?;
+        let response = self
+            .add_auth(self.client.post(url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| N8nError::Api {
+                status_code: 502,
+                message: "n8n provider transport failed".into(),
+            })?;
+        self.handle_response(response).await
     }
 
     /// List credential metadata using the typed provider DTO layer.

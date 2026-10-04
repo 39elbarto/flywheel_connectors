@@ -21,6 +21,550 @@ const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_LIST_ITEMS: usize = 20;
 
+/// Closed official SDK reads. These arguments never select authoring tools.
+///
+/// # Errors
+/// Rejects unknown fields, unsupported sections and oversized SDK source.
+pub fn official_n8n_sdk_arguments(
+    operation: &str,
+    input: &Value,
+) -> Result<(&'static str, Value), &'static str> {
+    match operation {
+        "n8n.knowledge.query" => official_knowledge_arguments(input),
+        "n8n.validation.run" => official_validation_arguments(input),
+        _ => Err("invalid_operation_input"),
+    }
+}
+
+fn official_knowledge_arguments(input: &Value) -> Result<(&'static str, Value), &'static str> {
+    let object = input.as_object().ok_or("invalid_operation_input")?;
+    match input["action"].as_str() {
+        Some("sdk_reference") => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "action" | "section"))
+            {
+                return Err("invalid_operation_input");
+            }
+            let section = input["section"].as_str().ok_or("invalid_operation_input")?;
+            if !matches!(
+                section,
+                "patterns"
+                    | "patterns_detailed"
+                    | "expressions"
+                    | "functions"
+                    | "rules"
+                    | "import"
+                    | "guidelines"
+                    | "design"
+                    | "all"
+            ) {
+                return Err("invalid_operation_input");
+            }
+            Ok(("get_workflow_sdk_reference", json!({"section":section})))
+        }
+        Some("workflow_best_practices") => {
+            if object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "action" | "technique"))
+            {
+                return Err("invalid_operation_input");
+            }
+            let technique = input["technique"]
+                .as_str()
+                .ok_or("invalid_operation_input")?;
+            if !matches!(
+                technique,
+                "list"
+                    | "scheduling"
+                    | "chatbot"
+                    | "form_input"
+                    | "scraping_and_research"
+                    | "monitoring"
+                    | "enrichment"
+                    | "triage"
+                    | "content_generation"
+                    | "document_processing"
+                    | "data_extraction"
+                    | "data_analysis"
+                    | "data_transformation"
+                    | "data_persistence"
+                    | "notification"
+                    | "knowledge_base"
+                    | "human_in_the_loop"
+                    | "web_app"
+            ) {
+                return Err("invalid_operation_input");
+            }
+            Ok((
+                "get_workflow_best_practices",
+                json!({"technique":technique}),
+            ))
+        }
+        _ => Err("invalid_operation_input"),
+    }
+}
+
+fn official_validation_arguments(input: &Value) -> Result<(&'static str, Value), &'static str> {
+    let object = input.as_object().ok_or("invalid_operation_input")?;
+    if input["subject"] == "nodes" {
+        return official_node_validation_arguments(input);
+    }
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "subject" | "code" | "profile"))
+        || input["subject"] != "workflow_code"
+    {
+        return Err("invalid_operation_input");
+    }
+    if object.contains_key("profile") {
+        return Err("sdk_validation_profile_unsupported");
+    }
+    let code = input["code"]
+        .as_str()
+        .filter(|code| !code.is_empty() && code.len() <= 300_000)
+        .ok_or("invalid_operation_input")?;
+    Ok(("validate_workflow", json!({"code":code})))
+}
+
+fn official_node_validation_arguments(
+    input: &Value,
+) -> Result<(&'static str, Value), &'static str> {
+    let object = input.as_object().ok_or("invalid_operation_input")?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "subject" | "nodes" | "profile"))
+    {
+        return Err("invalid_operation_input");
+    }
+    if object.contains_key("profile") {
+        return Err("sdk_validation_profile_unsupported");
+    }
+    let nodes = input["nodes"]
+        .as_array()
+        .filter(|nodes| !nodes.is_empty() && nodes.len() <= 50)
+        .ok_or("invalid_operation_input")?;
+    for node in nodes {
+        let node = node.as_object().ok_or("invalid_operation_input")?;
+        if node.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "name" | "type" | "typeVersion" | "parameters" | "subnodes" | "isToolNode"
+            )
+        }) || node
+            .get("type")
+            .and_then(Value::as_str)
+            .is_none_or(|value| {
+                value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+            })
+            || node.get("name").is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|value| value.len() > 256 || value.chars().any(char::is_control))
+            })
+            || node.get("typeVersion").is_some_and(|value| {
+                value
+                    .as_f64()
+                    .is_none_or(|value| !value.is_finite() || value <= 0.0 || value > 1000.0)
+            })
+            || node
+                .get("parameters")
+                .is_some_and(|value| !value.is_object())
+            || node
+                .get("isToolNode")
+                .is_some_and(|value| !value.is_boolean())
+        {
+            return Err("invalid_operation_input");
+        }
+        if let Some(subnodes) = node.get("subnodes") {
+            validate_sdk_subnodes(subnodes)?;
+        }
+    }
+    if serde_json::to_vec(nodes)
+        .map_err(|_| "invalid_operation_input")?
+        .len()
+        > 128 * 1024
+    {
+        return Err("invalid_operation_input");
+    }
+    Ok(("validate_node_config", json!({"nodes":nodes})))
+}
+
+fn validate_sdk_subnodes(subnodes: &Value) -> Result<(), &'static str> {
+    let subnodes = subnodes.as_object().ok_or("invalid_operation_input")?;
+    if subnodes
+        .keys()
+        .any(|key| !matches!(key.as_str(), "model" | "memory" | "tools"))
+    {
+        return Err("invalid_operation_input");
+    }
+    let mut references = Vec::new();
+    for key in ["model", "memory"] {
+        if let Some(value) = subnodes.get(key) {
+            references.push(value);
+        }
+    }
+    if let Some(tools) = subnodes.get("tools") {
+        let tools = tools
+            .as_array()
+            .filter(|tools| tools.len() <= 20)
+            .ok_or("invalid_operation_input")?;
+        references.extend(tools);
+    }
+    for reference in references {
+        let reference = reference.as_object().ok_or("invalid_operation_input")?;
+        if reference
+            .keys()
+            .any(|key| !matches!(key.as_str(), "type" | "version"))
+            || reference
+                .get("type")
+                .and_then(Value::as_str)
+                .is_none_or(|value| {
+                    value.is_empty() || value.len() > 256 || value.chars().any(char::is_control)
+                })
+            || reference.get("version").is_some_and(|value| {
+                value
+                    .as_f64()
+                    .is_none_or(|value| !value.is_finite() || value <= 0.0 || value > 1000.0)
+            })
+        {
+            return Err("invalid_operation_input");
+        }
+    }
+    Ok(())
+}
+
+/// Exact installed source/schema observations; matching is not admission.
+#[must_use]
+pub fn official_n8n_sdk_schema_pins(tool: &str) -> Option<(&'static str, &'static str)> {
+    match tool {
+        "get_workflow_sdk_reference" => Some((
+            "sha256:c0c69d975afd16845bee57cbd37e0cf0a50b7d5741810625963dedf60279fda2",
+            "sha256:555b1d6f84918d5b03adfd55c3f652d2b0ac0457f80e9e811963fbbbc61426dc",
+        )),
+        "get_workflow_best_practices" => Some((
+            "sha256:d95120da8063c53d7dc379b938043cfdc81da869c40a33ce608fe76ddda31423",
+            "sha256:9530d1f518b2640320f8ffbfd971d662b3f00558be8b3ff9418fe0d916a1728c",
+        )),
+        "validate_workflow" => Some((
+            "sha256:34160cafc3bf8971e214a3b35195b12d5e33a22f3738d49d68c1e2aeb736e9f0",
+            "sha256:a56a4e3038b4b2732ab9fffbfcf038b4d4824c48481123ede01f3a444358fae9",
+        )),
+        "validate_node_config" => Some((
+            "sha256:37231a38664a9375573c84d8484fc30cef2e99efbca5f6172f1a4cd308c34f8d",
+            "sha256:11fa90ee8936aa8946e5a1556d3c03ad3640dc837731c0302f4b0dc40e5920a0",
+        )),
+        "search_projects" => Some((
+            "sha256:d37453c28e110141c606ef901d7651367544f8d272f183bd181978e086712200",
+            "sha256:28c5f100b2daae7bff8225376c4bed8000f67b785f174a6ae1636ff90fc5126e",
+        )),
+        "search_folders" => Some((
+            "sha256:20a822576c3a6e883e942dfc695ccc7114ffc18e2e3a7bf555af8b07da314269",
+            "sha256:d0af92b84b63148c231ee85778e7af9b765cf6edc4e8d638eec067220b496487",
+        )),
+        "list_workflow_tags" => Some((
+            "sha256:c0602bd0434d0c2aeafb763bc12512b63443448c9331dc0cb1ebf02973603e8e",
+            "sha256:5481cbd6dedd4134020f44bdcc900e40eb9802e70d5ccedf8dda6252d55b720b",
+        )),
+        "search_workflows" => Some((
+            "sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714",
+            "sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206",
+        )),
+        _ => None,
+    }
+}
+
+/// Map the public structure query to fixed native arguments. Parent filtering
+/// and pagination require a complete bounded native result, never page-local
+/// claims about a truncated result.
+///
+/// # Errors
+/// Rejects unknown fields, unrelated selectors and malformed public bounds.
+pub fn official_n8n_structure_arguments(
+    input: &Value,
+) -> Result<(&'static str, Value), &'static str> {
+    let invalid = "invalid_structure_search";
+    let object = input.as_object().ok_or(invalid)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "kind" | "query" | "projectId" | "parentFolderId" | "page"
+        )
+    }) {
+        return Err(invalid);
+    }
+    let kind = input["kind"].as_str().ok_or(invalid)?;
+    let (tool, limit) = match kind {
+        "projects" => ("search_projects", 100),
+        "folders" => ("search_folders", 100),
+        "tags" => ("list_workflow_tags", 500),
+        _ => return Err(invalid),
+    };
+    let mut arguments = json!({"limit":limit});
+    for key in ["query", "projectId", "parentFolderId"] {
+        if let Some(value) = object.get(key) {
+            let value = value
+                .as_str()
+                .filter(|text| {
+                    !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)
+                })
+                .ok_or(invalid)?;
+            if key != "query" && kind != "folders" {
+                return Err(invalid);
+            }
+            if key == "projectId" || key == "query" && kind != "tags" {
+                arguments[key] = json!(value);
+            }
+        }
+    }
+    if kind == "folders" && arguments.get("projectId").is_none() {
+        return Err(invalid);
+    }
+    if let Some(page) = object.get("page") {
+        let page = page.as_object().ok_or(invalid)?;
+        if page
+            .keys()
+            .any(|key| !matches!(key.as_str(), "limit" | "cursor"))
+        {
+            return Err(invalid);
+        }
+        if page.get("limit").is_some_and(|limit| {
+            limit
+                .as_u64()
+                .is_none_or(|limit| !(1..=200).contains(&limit))
+        }) {
+            return Err(invalid);
+        }
+        if page.get("cursor").is_some_and(|cursor| {
+            cursor.as_str().is_none_or(|cursor| {
+                cursor.is_empty()
+                    || cursor.len() > 8192
+                    || !cursor.is_ascii()
+                    || cursor.chars().any(char::is_control)
+            })
+        }) {
+            return Err(invalid);
+        }
+    }
+    Ok((tool, arguments))
+}
+
+/// Source-bound official workflow search. Native search excludes archives and
+/// has no cursor; public paging/filtering requires a complete bounded result.
+///
+/// # Errors
+/// Rejects unsupported archives and fields or malformed filter bounds.
+pub fn official_n8n_workflow_search_arguments(input: &Value) -> Result<Value, &'static str> {
+    let invalid = "invalid_workflow_search";
+    let object = input.as_object().ok_or(invalid)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "query" | "projectId" | "folderId" | "tags" | "active" | "isArchived" | "page" | "sort"
+        )
+    }) {
+        return Err(invalid);
+    }
+    if input
+        .get("isArchived")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return Err("official_archived_workflow_search_unsupported");
+    }
+    if input.get("active").is_some_and(|value| !value.is_boolean()) {
+        return Err(invalid);
+    }
+    let mut arguments = json!({"limit":200});
+    for key in ["query", "projectId", "folderId", "sort"] {
+        if let Some(value) = input.get(key) {
+            let value = value
+                .as_str()
+                .filter(|text| {
+                    !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control)
+                })
+                .ok_or(invalid)?;
+            if key == "sort"
+                && !matches!(
+                    value,
+                    "name:asc"
+                        | "name:desc"
+                        | "createdAt:asc"
+                        | "createdAt:desc"
+                        | "updatedAt:asc"
+                        | "updatedAt:desc"
+                )
+            {
+                return Err(invalid);
+            }
+            if key == "folderId"
+                && !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(invalid);
+            }
+            arguments[if key == "sort" { "sortBy" } else { key }] = json!(value);
+        }
+    }
+    if let Some(tags) = input.get("tags") {
+        let tags = tags
+            .as_array()
+            .filter(|tags| !tags.is_empty() && tags.len() <= 10)
+            .ok_or(invalid)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for tag in tags {
+            let tag = tag
+                .as_str()
+                .filter(|tag| {
+                    !tag.is_empty() && tag.len() <= 256 && !tag.chars().any(char::is_control)
+                })
+                .ok_or(invalid)?;
+            if !seen.insert(tag) {
+                return Err(invalid);
+            }
+        }
+        arguments["tags"] = json!(tags);
+    }
+    if let Some(page) = input.get("page") {
+        let page = page.as_object().ok_or(invalid)?;
+        if page
+            .keys()
+            .any(|key| !matches!(key.as_str(), "limit" | "cursor"))
+            || page.get("limit").is_some_and(|limit| {
+                limit
+                    .as_u64()
+                    .is_none_or(|limit| !(1..=200).contains(&limit))
+            })
+            || page.get("cursor").is_some_and(|cursor| {
+                cursor.as_str().is_none_or(|cursor| {
+                    cursor.is_empty()
+                        || cursor.len() > 8192
+                        || !cursor.is_ascii()
+                        || cursor.chars().any(char::is_control)
+                })
+            })
+        {
+            return Err(invalid);
+        }
+    }
+    Ok(arguments)
+}
+
+/// Digest the current graph's semantics and layout without emitting graph
+/// fields. The same implementation binds connector projection and host capture.
+///
+/// # Errors
+/// Rejects malformed or oversized native graphs.
+pub fn n8n_comparison_graph_digests(
+    nodes: &[Value],
+    connections: &Value,
+) -> Result<(String, String), LocalN8nDispatchError> {
+    fn canonical(value: &Value) -> Value {
+        match value {
+            Value::Object(object) => {
+                let mut entries = object.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by_key(|(key, _)| *key);
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key.clone(), canonical(value)))
+                        .collect(),
+                )
+            }
+            Value::Array(array) => Value::Array(array.iter().map(canonical).collect()),
+            scalar => scalar.clone(),
+        }
+    }
+    let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+    let digest = |domain: &[u8], value: Value| {
+        let bytes = serde_json::to_vec(&canonical(&value)).map_err(|_| malformed())?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain);
+        hasher.update(&[0]);
+        hasher.update(&bytes);
+        Ok::<_, LocalN8nDispatchError>(format!("blake3-256:{}", hasher.finalize().to_hex()))
+    };
+    if nodes.len() > 1000 || !connections.is_object() {
+        return Err(malformed());
+    }
+    let mut semantic = Vec::with_capacity(nodes.len());
+    let mut layout = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        let mut object = node.as_object().ok_or_else(malformed)?.clone();
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(malformed)?;
+        if id.is_empty() || id.len() > 256 || id.chars().any(char::is_control) {
+            return Err(malformed());
+        }
+        layout.push(json!({"id":id,"position":object.get("position")}));
+        object.remove("position");
+        semantic.push(Value::Object(object));
+    }
+    Ok((
+        digest(
+            b"FCP/n8n/compare-semantic/v1\0",
+            json!({"nodes":semantic,"connections":connections}),
+        )?,
+        digest(b"FCP/n8n/compare-layout/v1\0", json!(layout))?,
+    ))
+}
+
+/// Project one native local validator result without native messages, node
+/// names, suggestions, or provider transport fields.
+///
+/// # Errors
+/// Rejects malformed envelopes and contradictory validation outcomes.
+pub fn project_local_n8n_validation_call(native: &Value) -> Result<Value, LocalN8nDispatchError> {
+    let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+    let is_error = match native.get("isError") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(malformed()),
+    };
+    let content = native["content"].as_array().ok_or_else(malformed)?;
+    if content.len() != 1 || content[0]["type"] != "text" {
+        return Err(malformed());
+    }
+    let text = content[0]["text"].as_str().ok_or_else(malformed)?;
+    if text.len() > 256 * 1024 {
+        return Err(malformed());
+    }
+    let typed: Value = serde_json::from_str(text).map_err(|_| malformed())?;
+    if native
+        .get("structuredContent")
+        .is_some_and(|structured| structured != &typed)
+    {
+        return Err(malformed());
+    }
+    let valid = typed["valid"].as_bool().ok_or_else(malformed)?;
+    let errors = typed["errors"].as_array().ok_or_else(malformed)?;
+    let warnings = typed["warnings"].as_array().ok_or_else(malformed)?;
+    if errors.len() > 256
+        || warnings.len() > 256
+        || valid && (!errors.is_empty() || is_error)
+        || !valid && errors.is_empty()
+        || errors.iter().chain(warnings).any(|item| {
+            !item.is_object()
+                || item["message"]
+                    .as_str()
+                    .is_none_or(|message| message.len() > 8192)
+        })
+    {
+        return Err(malformed());
+    }
+    let project = |items: &[Value], code, message| {
+        items
+            .iter()
+            .map(|_| json!({"path":"graph","code":code,"message":message}))
+            .collect::<Vec<_>>()
+    };
+    Ok(json!({"valid":valid,
+        "errors":project(errors,"validation_error","Native validator reported an error"),
+        "warnings":project(warnings,"validation_warning","Native validator reported a warning")}))
+}
+
 /// One of the host-internal local n8n operation families.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +616,8 @@ pub enum LocalN8nKnowledgeAction {
     ToolDocumentation(LocalN8nToolDocumentationInput),
     #[serde(rename = "search_nodes")]
     SearchNodes(LocalN8nSearchNodesInput),
+    #[serde(rename = "search_nodes_batch")]
+    SearchNodesBatch(Vec<LocalN8nSearchNodesInput>),
     #[serde(rename = "get_node")]
     GetNode(LocalN8nGetNodeInput),
     #[serde(rename = "search_templates")]
@@ -301,6 +847,8 @@ pub struct LocalN8nValidationRun {
 pub enum LocalN8nValidationSubject {
     #[serde(rename = "node")]
     Node(LocalN8nNodeValidationInput),
+    #[serde(rename = "nodes")]
+    Nodes(Vec<LocalN8nNodeValidationInput>),
     #[serde(rename = "workflow")]
     Workflow(LocalN8nWorkflowValidationInput),
 }
@@ -431,13 +979,16 @@ impl LocalN8nDispatchRequest {
         match self {
             Self::KnowledgeQuery(input) => match &input.action {
                 LocalN8nKnowledgeAction::ToolDocumentation(_) => LocalN8nTool::ToolsDocumentation,
-                LocalN8nKnowledgeAction::SearchNodes(_) => LocalN8nTool::SearchNodes,
+                LocalN8nKnowledgeAction::SearchNodes(_)
+                | LocalN8nKnowledgeAction::SearchNodesBatch(_) => LocalN8nTool::SearchNodes,
                 LocalN8nKnowledgeAction::GetNode(_) => LocalN8nTool::GetNode,
                 LocalN8nKnowledgeAction::SearchTemplates(_) => LocalN8nTool::SearchTemplates,
                 LocalN8nKnowledgeAction::GetTemplate(_) => LocalN8nTool::GetTemplate,
             },
             Self::ValidationRun(input) => match &input.subject {
-                LocalN8nValidationSubject::Node(_) => LocalN8nTool::ValidateNode,
+                LocalN8nValidationSubject::Node(_) | LocalN8nValidationSubject::Nodes(_) => {
+                    LocalN8nTool::ValidateNode
+                }
                 LocalN8nValidationSubject::Workflow(_) => LocalN8nTool::ValidateWorkflow,
             },
         }
@@ -447,6 +998,24 @@ impl LocalN8nDispatchRequest {
         match self {
             Self::KnowledgeQuery(input) => {
                 validate_correlation_id(&input.correlation_id)?;
+                if let LocalN8nKnowledgeAction::SearchNodesBatch(queries) = input.action {
+                    if !(1..=20).contains(&queries.len()) {
+                        return Err(invalid_request());
+                    }
+                    let mut calls = Vec::with_capacity(queries.len());
+                    for query in queries {
+                        let (tool, arguments) =
+                            LocalN8nKnowledgeAction::SearchNodes(query).into_call()?;
+                        calls.push(LocalMcpCall {
+                            tool: tool.as_str().to_owned(),
+                            arguments,
+                        });
+                    }
+                    return Ok(LocalMcpRequest {
+                        correlation_id: input.correlation_id,
+                        calls,
+                    });
+                }
                 let (tool, arguments) = input.action.into_call()?;
                 Ok(LocalMcpRequest {
                     correlation_id: input.correlation_id,
@@ -459,6 +1028,27 @@ impl LocalN8nDispatchRequest {
             Self::ValidationRun(input) => {
                 validate_correlation_id(&input.correlation_id)?;
                 let correlation_id = input.correlation_id.clone();
+                if let LocalN8nValidationSubject::Nodes(nodes) = input.subject {
+                    if !(1..=50).contains(&nodes.len()) {
+                        return Err(invalid_request());
+                    }
+                    let mut calls = Vec::with_capacity(nodes.len());
+                    for node in nodes {
+                        let (tool, arguments) = LocalN8nValidationRun {
+                            correlation_id: correlation_id.clone(),
+                            subject: LocalN8nValidationSubject::Node(node),
+                        }
+                        .into_call()?;
+                        calls.push(LocalMcpCall {
+                            tool: tool.as_str().to_string(),
+                            arguments,
+                        });
+                    }
+                    return Ok(LocalMcpRequest {
+                        correlation_id,
+                        calls,
+                    });
+                }
                 let (tool, arguments) = input.into_call()?;
                 Ok(LocalMcpRequest {
                     correlation_id,
@@ -478,6 +1068,7 @@ impl LocalN8nKnowledgeAction {
     #[allow(clippy::too_many_lines)]
     fn into_call(self) -> Result<(LocalN8nTool, Value), LocalN8nDispatchError> {
         match self {
+            Self::SearchNodesBatch(_) => Err(invalid_request()),
             Self::ToolDocumentation(input) => {
                 if let Some(topic) = &input.topic {
                     validate_text(topic, MAX_TEXT_BYTES)?;
@@ -662,6 +1253,7 @@ impl LocalN8nKnowledgeAction {
 impl LocalN8nValidationRun {
     fn into_call(self) -> Result<(LocalN8nTool, Value), LocalN8nDispatchError> {
         match self.subject {
+            LocalN8nValidationSubject::Nodes(_) => Err(invalid_request()),
             LocalN8nValidationSubject::Node(input) => {
                 validate_text(&input.node_type, MAX_TEXT_BYTES)?;
                 if !input.config.is_object() {
@@ -819,6 +1411,115 @@ pub struct LocalN8nDispatcher {
 }
 
 impl LocalN8nDispatcher {
+    /// Validate one invocation-captured current graph with a shared deadline.
+    /// This does not introduce an unverified provider or a public raw graph route.
+    ///
+    /// # Errors
+    /// Rejects oversized graphs, cancellation, and native provider failure.
+    pub fn validate_current_graph(
+        &self,
+        correlation_id: String,
+        graph: Value,
+        profile: LocalN8nValidationProfile,
+        cancelled: &Arc<AtomicBool>,
+        deadline: std::time::Instant,
+    ) -> Result<LocalN8nDispatchResponse, LocalN8nDispatchError> {
+        validate_correlation_id(&correlation_id)?;
+        let (_, arguments) = LocalN8nValidationRun {
+            correlation_id: correlation_id.clone(),
+            subject: LocalN8nValidationSubject::Workflow(LocalN8nWorkflowValidationInput {
+                workflow: graph,
+                options: Some(LocalN8nWorkflowValidationOptions {
+                    validate_nodes: true,
+                    validate_connections: true,
+                    validate_expressions: true,
+                    profile: Some(profile),
+                }),
+            }),
+        }
+        .into_call()?;
+        let request = LocalMcpRequest {
+            correlation_id,
+            calls: vec![LocalMcpCall {
+                tool: "validate_workflow".into(),
+                arguments,
+            }],
+        };
+        if serde_json::to_vec(&request)
+            .map_err(|_| invalid_request())?
+            .len()
+            > self.max_input_bytes
+        {
+            return Err(LocalN8nDispatchError::new(
+                LocalN8nDispatchErrorCode::InputTooLarge,
+            ));
+        }
+        let result = self
+            .provider
+            .run_once_until(request, cancelled, Some(deadline))
+            .map_err(|error| map_provider_error(&error))?;
+        Ok(LocalN8nDispatchResponse {
+            operation: LocalN8nOperationKind::ValidationRun,
+            result,
+        })
+    }
+
+    /// Validate exactly the two current graphs captured by one admitted host
+    /// invocation. This is not a new model-facing dispatch operation.
+    ///
+    /// # Errors
+    /// Rejects oversized graphs, cancellation, and native provider failure.
+    pub fn validate_current_pair(
+        &self,
+        correlation_id: String,
+        graphs: [Value; 2],
+        cancelled: &Arc<AtomicBool>,
+        deadline: std::time::Instant,
+    ) -> Result<LocalN8nDispatchResponse, LocalN8nDispatchError> {
+        validate_correlation_id(&correlation_id)?;
+        let mut calls = Vec::with_capacity(2);
+        for workflow in graphs {
+            let (_, arguments) = LocalN8nValidationRun {
+                correlation_id: correlation_id.clone(),
+                subject: LocalN8nValidationSubject::Workflow(LocalN8nWorkflowValidationInput {
+                    workflow,
+                    options: Some(LocalN8nWorkflowValidationOptions {
+                        validate_nodes: true,
+                        validate_connections: true,
+                        validate_expressions: true,
+                        profile: Some(LocalN8nValidationProfile::Runtime),
+                    }),
+                }),
+            }
+            .into_call()?;
+            calls.push(LocalMcpCall {
+                tool: "validate_workflow".to_owned(),
+                arguments,
+            });
+        }
+        let request = LocalMcpRequest {
+            correlation_id,
+            calls,
+        };
+        if serde_json::to_vec(&request)
+            .map_err(|_| invalid_request())?
+            .len()
+            > self.max_input_bytes
+        {
+            return Err(LocalN8nDispatchError::new(
+                LocalN8nDispatchErrorCode::InputTooLarge,
+            ));
+        }
+        let result = self
+            .provider
+            .run_once_until(request, cancelled, Some(deadline))
+            .map_err(|error| map_provider_error(&error))?;
+        Ok(LocalN8nDispatchResponse {
+            operation: LocalN8nOperationKind::ValidationRun,
+            result,
+        })
+    }
+
     /// Construct a dispatcher with the default compact input bound.
     #[must_use]
     pub const fn new(provider: LocalMcpProvider) -> Self {
@@ -878,4 +1579,141 @@ const fn map_provider_error(error: &LocalMcpError) -> LocalN8nDispatchError {
         _ => LocalN8nDispatchErrorCode::ProviderError,
     };
     LocalN8nDispatchError::new(code)
+}
+
+#[cfg(test)]
+mod typed_batch_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires the existing fixed network-disabled local catalog; explicit synthetic current-graph process check"]
+    fn installed_local_current_graph_profiles_deadline_cancel_and_teardown() {
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+            &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json")
+                .expect("public installed policy"),
+        )
+        .unwrap();
+        assert!(policy.network_disabled);
+        let bound = policy.max_request_bytes as usize;
+        // This public-policy test factory is not candidate signed-current admission.
+        let dispatcher =
+            LocalN8nDispatcher::with_max_input_bytes(LocalMcpProvider::new(policy).unwrap(), bound);
+        for profile in [
+            LocalN8nValidationProfile::Minimal,
+            LocalN8nValidationProfile::Runtime,
+            LocalN8nValidationProfile::AiFriendly,
+            LocalN8nValidationProfile::Strict,
+        ] {
+            let result = dispatcher
+                .validate_current_graph(
+                    "synthetic-remote-current".into(),
+                    json!({"nodes":[],"connections":{}}),
+                    profile,
+                    &Arc::new(AtomicBool::new(false)),
+                    std::time::Instant::now() + std::time::Duration::from_secs(10),
+                )
+                .unwrap();
+            assert_eq!(result.result.status, crate::LocalMcpResultStatus::Completed);
+            assert!(result.result.startup.network_disabled);
+            assert!(
+                result.result.shutdown.completion.reaped
+                    && result.result.shutdown.completion.group_absent
+            );
+            assert!(result.result.teardown_error_code.is_none());
+            assert_eq!(result.result.responses.len(), 1);
+            let safe = project_local_n8n_validation_call(&result.result.responses[0]).unwrap();
+            assert_eq!(safe["valid"], true);
+        }
+        for (cancelled, deadline) in [
+            (
+                true,
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            ),
+            (false, std::time::Instant::now()),
+        ] {
+            let result = dispatcher.validate_current_graph(
+                "synthetic-remote-refusal".into(),
+                json!({"nodes":[],"connections":{}}),
+                LocalN8nValidationProfile::Runtime,
+                &Arc::new(AtomicBool::new(cancelled)),
+                deadline,
+            );
+            assert!(
+                result.is_err()
+                    || result.is_ok_and(
+                        |result| result.result.status != crate::LocalMcpResultStatus::Completed
+                    )
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the existing installed fixed network-disabled local catalog; run explicitly"]
+    fn installed_local_current_pair_native_validation_and_teardown() {
+        let bytes = std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json")
+            .expect("existing public installed policy");
+        let policy: fcp_manifest::LocalMcpPolicy =
+            serde_json::from_slice(&bytes).expect("closed installed policy");
+        assert!(policy.network_disabled);
+        assert!(policy.max_sequential_calls >= 2);
+        let bound = policy.max_request_bytes as usize;
+        // Test-only policy injection exercises the actual local process and
+        // dispatcher, not candidate installed trust or production broker admission.
+        let provider = LocalMcpProvider::new(policy).expect("native fixed policy");
+        let dispatcher = LocalN8nDispatcher::with_max_input_bytes(provider, bound);
+        let result = dispatcher
+            .validate_current_pair(
+                "synthetic-current-pair".to_owned(),
+                [
+                    json!({"nodes":[],"connections":{}}),
+                    json!({"nodes":[],"connections":{}}),
+                ],
+                &Arc::new(AtomicBool::new(false)),
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .expect("native local pair");
+        assert_eq!(result.result.status, crate::LocalMcpResultStatus::Completed);
+        assert!(result.result.startup.network_disabled);
+        assert!(
+            result.result.shutdown.completion.reaped
+                && result.result.shutdown.completion.group_absent
+        );
+        assert!(result.result.teardown_error_code.is_none());
+        assert_eq!(result.result.responses.len(), 2);
+        for native in &result.result.responses {
+            let safe =
+                project_local_n8n_validation_call(native).expect("native serialized validation");
+            assert_eq!(safe["valid"], true);
+            assert_eq!(safe["errors"], json!([]));
+            assert!(!safe["warnings"].as_array().unwrap().is_empty());
+        }
+        println!("native_calls=2 network_disabled=true owned_reaped=true group_absent=true");
+    }
+
+    #[test]
+    fn nodes_batch_serialization_preserves_profiles_and_denies_bounds_before_provider() {
+        for profile in ["minimal", "runtime", "ai-friendly", "strict"] {
+            let request: LocalN8nDispatchRequest = serde_json::from_value(json!({
+                "operation":"n8n.validation.run","input":{"correlation_id":"batch-one",
+                    "subject":{"nodes":[{"nodeType":"nodes-base.noOp","config":{},"profile":profile},
+                        {"nodeType":"nodes-base.set","config":{"mode":"manual"},"profile":profile}]}}})).unwrap();
+            let provider = request.into_provider_request().unwrap();
+            assert_eq!(provider.calls.len(), 2);
+            assert!(
+                provider.calls.iter().all(
+                    |call| call.tool == "validate_node" && call.arguments["profile"] == profile
+                )
+            );
+        }
+        for count in [0, 51] {
+            let request: LocalN8nDispatchRequest = serde_json::from_value(json!({"operation":"n8n.validation.run",
+                "input":{"correlation_id":"batch-one","subject":{"nodes":vec![json!({"nodeType":"nodes-base.noOp","config":{}});count]}}})).unwrap();
+            assert!(request.into_provider_request().is_err());
+        }
+        let request: LocalN8nDispatchRequest = serde_json::from_value(json!({"operation":"n8n.validation.run",
+            "input":{"correlation_id":"batch-one","subject":{"nodes":[{"nodeType":"nodes-base.noOp","config":"PRIVATE_CANARY"}]}}})).unwrap();
+        assert!(request.into_provider_request().is_err());
+        assert!(serde_json::from_value::<LocalN8nDispatchRequest>(json!({"operation":"n8n.validation.run",
+            "input":{"correlation_id":"batch-one","subject":{"nodes":[{"nodeType":"nodes-base.noOp","config":{},"executable":"PRIVATE_CANARY"}]}}})).is_err());
+    }
 }

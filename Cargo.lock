@@ -5914,6 +5914,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-host",
  "fcp-manifest",
+ "fcp-mcp-bridge",
  "fcp-n8n-broker-protocol",
  "fcp-prelude",
  "fcp-sandbox",

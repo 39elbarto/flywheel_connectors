@@ -52,6 +52,7 @@ mod migration_linux;
 mod migration_macos;
 mod n8n_approval;
 mod n8n_dispatch;
+pub mod n8n_release_read;
 mod network_policy;
 mod output_capture;
 mod owned_invocation;

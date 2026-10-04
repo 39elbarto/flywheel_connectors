@@ -37,6 +37,7 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_TOOLS_LIST: &str = "mcp.tools.list";
 const OP_TOOLS_CALL: &str = "mcp.tools.call";
+const OP_N8N_READ: &str = "mcp.n8n.read";
 const OP_RESOURCES_LIST: &str = "mcp.resources.list";
 const OP_RESOURCES_READ: &str = "mcp.resources.read";
 const OP_PROMPTS_LIST: &str = "mcp.prompts.list";
@@ -45,9 +46,10 @@ const OP_SERVER_METRICS: &str = "mcp.server.metrics";
 const N8N_APPROVAL_WRAPPER_OPERATION: &str = "n8n.mcp.call";
 const N8N_TYPED_APPROVAL_PARENT_BINDING_TAG: &str = "fcp.n8n.parent_binding_sha256";
 const N8N_TYPED_APPROVAL_PLAN_DIGEST_TAG: &str = "fcp.n8n.typed_plan_sha256";
-const OPERATION_ORDER: [&str; 7] = [
+const OPERATION_ORDER: [&str; 8] = [
     OP_TOOLS_LIST,
     OP_TOOLS_CALL,
+    OP_N8N_READ,
     OP_RESOURCES_LIST,
     OP_RESOURCES_READ,
     OP_PROMPTS_LIST,
@@ -934,6 +936,20 @@ impl McpBridgeConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        let typed_read = if operation == OP_N8N_READ {
+            let read: crate::types::TypedN8nRead =
+                serde_json::from_value(input.clone()).map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "typed n8n read input invalid".into(),
+                })?;
+            read.arguments().map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "typed n8n read input invalid".into(),
+            })?;
+            Some(read)
+        } else {
+            None
+        };
 
         let operation_id: OperationId =
             operation.parse().map_err(|_| FcpError::InvalidRequest {
@@ -980,7 +996,12 @@ impl McpBridgeConnector {
         let request_number = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
         let egress_context = if matches!(
             operation,
-            OP_TOOLS_CALL | OP_TOOLS_LIST | OP_RESOURCES_LIST | OP_RESOURCES_READ | OP_PROMPTS_LIST
+            OP_TOOLS_CALL
+                | OP_N8N_READ
+                | OP_TOOLS_LIST
+                | OP_RESOURCES_LIST
+                | OP_RESOURCES_READ
+                | OP_PROMPTS_LIST
         ) {
             let [canonical_resource] = resources.as_slice() else {
                 return Err(FcpError::Internal {
@@ -997,6 +1018,13 @@ impl McpBridgeConnector {
         } else {
             None
         };
+
+        if let Some(read) = typed_read {
+            let context = egress_context.ok_or_else(|| FcpError::Internal {
+                message: "typed read attribution unavailable".into(),
+            })?;
+            return self.invoke_typed_n8n_read(&read, context).await;
+        }
 
         if operation == OP_TOOLS_CALL {
             let context = egress_context.ok_or_else(|| FcpError::Internal {
@@ -1144,6 +1172,91 @@ impl McpBridgeConnector {
             .map_err(|error| error.with_provider_error_phase(McpErrorPhase::Discovery))?;
         let data = self.annotate_catalog(data, "tools", "tool", true)?;
         self.attach_capability_snapshot(data, client).await
+    }
+
+    async fn invoke_typed_n8n_read(
+        &self,
+        read: &crate::types::TypedN8nRead,
+        context: HostEgressContext,
+    ) -> FcpResult<serde_json::Value> {
+        read.ensure_effect_admission()
+            .map_err(|reason| FcpError::CapabilityDenied {
+                capability: "mcp.n8n.read".into(),
+                reason: reason.into(),
+            })?;
+        let denied = || FcpError::CapabilityDenied {
+            capability: "mcp.n8n.read".into(),
+            reason: "typed read native admission denied".into(),
+        };
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let policy = config.capability_policy.as_ref().ok_or_else(denied)?;
+        if !matches!(config.server_id.as_str(), "eec" | "hetzner")
+            || policy_server_id(&config.server_id).ok() != Some(policy.server_id)
+        {
+            return Err(denied());
+        }
+        let expected = tool_resource_uri(&config.server_id, read.tool()).map_err(|_| denied())?;
+        if context.operation_id != OP_N8N_READ || context.resource_uri != expected {
+            return Err(denied());
+        }
+        let (input_pin, output_pin) = read.schema_pins();
+        let admitted: Vec<_> = policy
+            .approved_tools
+            .iter()
+            .filter(|tool| tool.name == read.tool())
+            .collect();
+        if admitted.len() != 1
+            || admitted[0].class != ToolClass::Read
+            || admitted[0].input_schema_digest != input_pin
+            || admitted[0].output_schema_digest != output_pin
+        {
+            return Err(denied());
+        }
+        let client = self.client_ref()?;
+        let discovery = self
+            .invoke_tools_list(client, Some(context.clone()))
+            .await
+            .map_err(|_| denied())?;
+        let native_tool = discovery["tools"]
+            .as_array()
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find(|tool| tool["name"].as_str() == Some(read.tool()))
+            })
+            .ok_or_else(denied)?;
+        if !native_tool["inputSchema"].is_object() || !native_tool["outputSchema"].is_object() {
+            return Err(denied());
+        }
+        let snapshot: CapabilitySnapshot =
+            serde_json::from_value(discovery["capability_snapshot"].clone())
+                .map_err(|_| denied())?;
+        if snapshot.tool_call_is_blocked(read.tool()) || snapshot.server_id != policy.server_id {
+            return Err(denied());
+        }
+        let tool = snapshot
+            .tools
+            .iter()
+            .find(|tool| tool.name == read.tool())
+            .ok_or_else(denied)?;
+        if tool.input_schema_digest != input_pin || tool.output_schema_digest != output_pin {
+            return Err(denied());
+        }
+        let native = client
+            .typed_n8n_read_with_context(read, context)
+            .await
+            .map_err(|_| FcpError::External {
+                service: "n8n".into(),
+                message: "typed read provider failed".into(),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            })?;
+        read.project(&config.server_id, &native)
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "typed read provider response invalid".into(),
+            })
     }
 
     async fn invoke_tools_call(
@@ -1352,6 +1465,21 @@ impl McpBridgeConnector {
             OP_TOOLS_CALL => {
                 let name = require_str(input, "name").map_err(|error| error.to_fcp_error())?;
                 tool_resource_uri(server_id, name).map_err(|error| error.to_fcp_error())?
+            }
+            OP_N8N_READ => {
+                let read: crate::types::TypedN8nRead = serde_json::from_value(input.clone())
+                    .map_err(|_| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "typed read input invalid".into(),
+                    })?;
+                read.arguments().map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "typed read input invalid".into(),
+                })?;
+                tool_resource_uri(server_id, read.tool()).map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "typed read resource invalid".into(),
+                })?
             }
             OP_RESOURCES_READ => {
                 let uri = require_str(input, "uri").map_err(|error| error.to_fcp_error())?;

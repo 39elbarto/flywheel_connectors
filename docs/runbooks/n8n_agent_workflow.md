@@ -380,6 +380,123 @@ is historical input, never fresh approval or proof of current provider semantics
 No signer/issuer, production receipt or provision request belongs in the unsigned
 preparation set. Non-green Clippy/UBS evidence permits preparation, not release GO.
 
+### Reproduced protected release route (RC43c, 2026-10-04)
+
+This records the completed RC43c route, not permission to replay its occupied
+paths. Reproducibility means exact source, argv, toolchain, dependencies, public
+key/schema pins and actual artifact hashes. It does **not** promise identical
+binaries across build environments. Runtime source is
+`09cebc4aaa3c968f3704611325a005a3ced7a237`; helper-only commit
+`e8bd22bc0f43deffa56b7fb6cf0105d255e234b6` is separate. The frozen preparation
+packet `rc43c-new-source-admission-packet.json` has SHA-256
+`0e228bf62f1af378949489ceda39031650831168f9fd754bc3311caa212e7a5c`.
+Keep that observation unchanged and bind the owner's exact source/placement and
+bounded residual-analysis decision in a separate admission record. The decision
+applies only to this packet; UBS remains NON-GREEN, without a general waiver.
+
+Before a privileged launch, seed request or any required native DCG exception,
+complete **all available** checks and retain exact argv/exits/hash receipts:
+
+- Pin the reviewed commit, Git bundle/archive and assembler/controller hashes;
+  preserve the compile source separately from the integration snapshot. For
+  RC43c, source bundle SHA-256 is
+  `e29d4ae02a1a31783cd985b7a9c9c1427f9ae4ef15ea05afb177cc44df757f9a`,
+  archive SHA-256 is
+  `e5c61fb7159d16ddfcc5753f60baa3a264e476a991250cfc2961f0a557557a4c`,
+  and assembler SHA-256 is
+  `2442c35b32853f3d621ac2543dec24b5d4472ebfbf56fe342b015616f8685cb5`.
+- Exercise the existing producer/consumer metadata boundary: exactly `schema`,
+  `release_id`, `git_revision`, with unknown/duplicate fields rejected. Use
+  assembler `--emit-release-provenance` and `--check-release-metadata`; compare
+  admitted official input/output presence, raw native pins and reviewed profiles
+  through `--check-official-baselines` before Cargo. Reuse source-bound evidence
+  for the existing 20 producer cases and 38 serialized publication cases
+  (66 native parent calls); these are not live acceptance or signing tests.
+- Verify exact roots, required absence including virtual private destinations,
+  owner/group/modes, current signed release/receipt, mapped public key, toolchain,
+  all admitted cache/dependency inputs, outer/inner lock identities and scoped
+  mount namespace/ancestor/descendant/propagation identities. Keep full mountinfo
+  before/after tables. Unrelated mount changes are diagnostic; unknown or
+  overlapping controlled changes deny. Revalidate under the same outer lock
+  through the private child and mutations, not merely in an earlier probe.
+- Evaluate the **exact literal** final command with native DCG. An actual ALLOW
+  requires no invented allow-once. A DENY is a STOP: retain its native pending
+  identity/command/cwd/expiry and obtain the owner's actual exception if needed;
+  never transfer old grants, self-allow, disable the guard or rewrite the command
+  to evade it. Checks needing the actual root/private child cannot be claimed
+  completed offline or before that permitted operation.
+
+Place reviewed sources only at new absent paths: exclusive creation, root0:0,
+parent0700/file0600, no symlink or overwrite, file/directory fsync and SHA readback.
+Clone the pinned bundle with fixed Git argv into its new protected source; leave
+old protected sources and archives intact. Use an inspected **root-owned file**
+entrypoint, never executable code piped into a root interpreter. The existing
+ephemeral owner-seed **data** pipe/FD to the admitted signer stdin is separate:
+no controller seed read, secret variable/environment/file/log, new key or issuer
+replacement. Fixed public mapping/key8e7 and the approval key are distinct.
+
+The reviewed file hashes are assembly
+`746b079efa81044f79a765e3c26776af26c323623b5f98cb3adb175a20aacf6a`,
+sign/preflight `519d6f010ee8756403c889afc95970ffebc4a79e6741a83503d813b19e3bb33b`,
+and install `b347b5d7dffb86702115910bd8711f9eea659a614896cbcb57abb831242cd021`.
+
+These are the actual direct commands for the recorded release; their exact paths
+and O_EXCL receipts now exist, so they are evidence, **not retry commands**:
+
+```bash
+sudo -n env -i PATH=/usr/bin:/bin HOME=/root LANG=C LC_ALL=C PYTHONNOUSERSITE=1 /usr/bin/python3 /root/fwc-n8n-rc43c-09cebc4aa/assembly.py assemble
+sudo -n env -i PATH=/usr/bin:/bin HOME=/root LANG=C LC_ALL=C PYTHONNOUSERSITE=1 /usr/bin/python3 /root/fwc-n8n-rc43c-09cebc4aa/sign-preflight.py --precheck
+sudo -n env -i PATH=/usr/bin:/bin HOME=/root LANG=C LC_ALL=C PYTHONNOUSERSITE=1 /usr/bin/python3 /root/fwc-n8n-rc43c-09cebc4aa/sign-preflight.py
+sudo -n env -i PATH=/usr/bin:/bin HOME=/root LANG=C LC_ALL=C PYTHONNOUSERSITE=1 /usr/bin/python3 /root/fwc-n8n-rc43c-09cebc4aa/install-once.py
+```
+
+Assembly retains normal Cargo freshness and all package checks, one SSD build at
+a time, pinned FD/private MS_MOVE/readonly inputs and distinct locks. It produced
+14 unsigned root-owned files; signing added the 15th `provision-receipt.json`.
+Native official8/raw16 and local7 checks, owned static smoke and production
+manifest tests passed. Actual normal host SHA-256
+`b6ec76d4a22abc2aa46c252b179a208dbe3835b9d687f06d12f03b567fda9384`
+differs from the diagnostic host; bind actual normal hashes, never promote a
+diagnostic identity or old37936 provenance as new09ce evidence.
+
+Keep these primary public packets under `/srv/dev-ssd/fcp/nqm81-34/` (their
+protected originals and linked hashes remain authoritative):
+
+| Boundary | Packet | SHA-256 |
+|---|---|---|
+| Actual unsigned review before seed | `rc43c-actual-unsigned-review-packet.json` | `5fd626deeb4609bef0ce9cfa836e87d8d8c8901c460ebf1decd006db6642f40b` |
+| Root shared precheck0, signing and preflight | `rc43c-actual-signed-preflight-packet.json` | `95887247ae01bb12e7b370814c35592fd806e93111d7c1d0271193354d95b7a8` |
+| Reviewed one-apply installed result | `rc43c-actual-installed-review-packet.json` | `609d597d8d36fad70716771f97a0a9a224445c62f54c876968b7ff16355f7f36` |
+| Actual controlled publish/unpublish | `rc43c-controlled-publication-final-manifest.json` | `8243fc4b0eb88c32e1c889ae81fb587a590d6249b59d16c0d80f83fcb1f79eb5` |
+
+Unsigned artifact review precedes a source-bound **actual root `--precheck` exit0**
+with no helper/seed/childmount/sign/apply. Fresh validation then admits one signer
+call and normal provision preflight, `currentChanged=false`. Signed/preflight and
+exact install-operation review precede one native apply. The candidate wrapper
+verified retained RC42 as `signed_rc42_lifecycle`; installed RC43c verifies as
+`signed_current`, key8e7, signed receipt BLAKE3
+`7cdcde12184f3ab3a205cd15a51653c7ad5d7519df9f8ea2a304b4fd4861fdab`.
+Installed15, atomic stage promotion, retained RC42/41/40 and unchanged external
+issuer were checked. Recovery **preflight only** used the actual RC43c receipt
+against retained RC42/a3f1 with `currentChanged=false` and
+`claimsLedgerRewound=false`; this is not a real rollback or permission to apply
+recovery. Controlled publication used fresh per-write approvals and independent
+GETs; it does not authorize arbitrary workflows or automatic schema enrollment.
+Actual installed verification argv is
+`/usr/local/lib/fwc-n8n/current/bin/fwc-n8n verify-current`. Recovery argv is the
+same installed wrapper with `recovery --mode preflight`, reading only protected
+`/root/fwc-n8n-rc43c-09cebc4aa/recovery-preflight.json` on stdin (SHA-256
+`4c1ef4fbe37097f75443654dab23111645569f861379cfacd57bf53a13ef5af5`).
+
+On a preparation refusal, preserve the original STOP, source/command correlation,
+closed error code (unknown stays unknown), outputs and receipts. Localize the
+proven defect and test the **whole remaining path** before a reviewed corrected
+attempt or another required grant; never blind-retry mutations or rewrite FAIL
+as PASS. The c88 late assembly failure remains failed. RC43b's lost signer stderr
+remains unknown; later structural diagnosis does not reconstruct it. This route
+changes no general security, trust or permission policy; future changes to those
+require a separate owner decision.
+
 Offline commands, run from the task checkout (no provider access):
 
 ```bash

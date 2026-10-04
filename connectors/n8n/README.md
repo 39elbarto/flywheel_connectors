@@ -39,6 +39,55 @@ The [reproduced release route](../../docs/runbooks/n8n_agent_workflow.md#reprodu
 is documented guidance plus executed per-release scripts, not an implemented
 universal launcher or a general security-policy change.
 
+## .35 source candidate — not installed
+
+Task commit `537b845117d9144fbb3ebd8683fd9fa54834a4e2` adds typed read,
+knowledge and validation paths. It is not the installed RC43c runtime above;
+`.35` remains in progress. The single
+[read-parity matrix](../../docs/architecture/fwc-n8n-operation-contract.md#35-read-parity-implementation-matrix--source-checkpoint-2026-10-04)
+records each input, dispatch, safe projection, test and installed-admission gap.
+Source/local evidence is retained under `/srv/dev-ssd/fcp/nqm81-35/`, including
+`final-read-parity-review-20261004-1.md` and the `actual-cli-*-20261004-1`
+inputs/stdout/stderr. Unit helper tests are distinct from these real CLI runs.
+
+The compiled task CLI was exercised without a provider or credential read:
+
+The shared debug path is mutable. Before each example, use this read-only check
+and require its exact digest to match:
+
+```bash
+sha256sum /srv/dev-ssd/fcp/targets/n8n/debug/fwc-n8n
+# Expected: 1925d893b73996ecce889e0e2295c642e32851822859388fbf1e630de10829ac
+```
+
+On mismatch, STOP: the retained CLI evidence does not identify that executable.
+Do not automatically execute the examples, rebuild or substitute another binary.
+
+```bash
+# In the task checkout, using its compiled diagnostic binary:
+printf '%s\n' '{"input":{}}' |
+  bash scripts/fcp_ssd.sh -- /srv/dev-ssd/fcp/targets/n8n/debug/fwc-n8n run-once n8n.runtime.status
+printf '%s\n' '{"input":{"server":"hetzner","workflowId":"synthetic-read-parity"}}' |
+  bash scripts/fcp_ssd.sh -- /srv/dev-ssd/fcp/targets/n8n/debug/fwc-n8n run-once n8n.targets.resolve
+```
+
+The first returns unknown global activity (`idle:null`, `activeRuns:null`,
+`not_collected`); the second resolves a canonical URI, not provider existence.
+In the same chat, an operator can request: “Resolve this exact server/workflow
+identifier without querying the provider.” Draft/published reads, comparisons,
+metadata searches and official knowledge adapters have source/local tests, but
+new installed calls require reviewed runtime/schema/profile admission.
+
+OPEN criteria include direct-FCP credential mediation and credential
+continuation; global runtime observation; provider existence/project mapping;
+archived workflow search and continuation beyond the native bound; optional
+node-version selection or unavailable version-pair metadata; combined template
+selectors and the public node-query count versus installed policy. `includeCode`
+returns fingerprints only, not source text. Instance/default-all audit and
+native SDK-code validation refuse before provider calls pending their effect
+admission. These refusals and partial results do not close `.35`. Historical
+acceptance, FAIL/UNKNOWN and the exact RC43c UBS risk disposition remain unchanged.
+
 ## Historical delivery snapshot and remaining scope — 2026-09-30
 
 At this dated snapshot, the installed checkpoint was
@@ -290,9 +339,13 @@ Operator boundaries are deliberately narrow:
 The current crate exposes these operations:
 
 - `n8n.workflows.list`
+- `n8n.workflows.search` (candidate official complete bounded snapshot)
 - `n8n.workflows.get`
+- `n8n.workflows.compare` (candidate current draft/published composition)
+- `n8n.validation.run` (candidate current remote graph route; local/official validation uses the wrapper/host paths in the matrix)
 - `n8n.workflows.activate`
 - `n8n.executions.list`
+- `n8n.executions.search` (candidate typed native filter pushdown)
 - `n8n.executions.get`
 - `n8n.executions.diagnostics`
 - `n8n.projects.list`
@@ -300,6 +353,8 @@ The current crate exposes these operations:
 - `n8n.tags.list`
 - `n8n.folders.list`
 - `n8n.folders.get`
+- `n8n.structure.search` (candidate admitted official metadata route)
+- `n8n.audit.inspect` (candidate four explicit categories; instance denied)
 - `n8n.workflows.create_draft`
 - `n8n.workflows.update_draft`
 - `n8n.workflows.lifecycle` (typed `publish`/`unpublish`; one guarded provider attempt plus independent readback)
@@ -312,24 +367,24 @@ The current crate exposes these operations:
 The list above is the manifest/runtime declaration surface, not a promise that
 every provider path is enabled. The documentation separates the layers:
 
-- **Manifest operations:** the 19 operations listed above are declared by
+- **Manifest operations:** the 25 operations listed above are declared by
   `connectors/n8n/manifest.toml`; activation's typed REST provider path is
   implemented in source but remains live-unaccepted.
 - **Wrapper/host-only operations:** `n8n.capabilities.inspect` is not in the
   connector manifest. Its wrapper input is empty `{}`; the bounded host
   envelope supplies the fixed EEC/Hetzner server and the host maps it only to
   `mcp.tools.list`.
-- **Router intents:** the typed router can recognize selection intents such as
-  `n8n.knowledge.query`, `n8n.validation.run`, `n8n.workflows.search`,
-  `n8n.executions.search`, `n8n.structure.search`, `n8n.workflows.compare`,
-  `n8n.data_tables.search`, `n8n.data_tables.mutate`, `n8n.audit.inspect`,
-  and `n8n.workflows.versions`. A routing intent selects a strategy; it does
-  not provide a provider execution path.
-- **Future/unimplemented:** `n8n.runtime.status`,
-  `n8n.node_resources.explore`, `n8n.evaluations.manage`, and router intents
+- **Candidate wrapper/host paths:** `.35` adds typed `n8n.knowledge.query`,
+  validation, search and compare adapters as detailed in the matrix. Discovery
+  and routing alone still do not prove admitted installed provider execution.
+- **Router-only/future:** `n8n.data_tables.search`, `n8n.data_tables.mutate`,
+  `n8n.workflows.versions`, `n8n.node_resources.explore`,
+  `n8n.evaluations.manage`, and router intents
   without a corresponding host/connector dispatch remain future or
   unimplemented execution paths. Version restore, versions, credential
-  mutation, and permanent/general deletion remain fail-closed.
+  mutation, and permanent/general deletion remain fail-closed. Candidate
+  `n8n.runtime.status` has a real local CLI result, but its global-observer
+  criterion remains OPEN; it is not a global idle/active-run proof.
 
 Important runtime truths:
 

@@ -532,7 +532,14 @@ impl TypedN8nRead {
                     }
                     items.push(item);
                 }
-                json!({"items":items,"page":{"returnedCount":rows.len(),"total":total,"limit":limit,"continuation":"unavailable","completeness":if total==rows.len() as u64 {"complete"} else {"partial"}}})
+                // A native workflow count can describe only the returned rows.
+                // Reaching the requested limit therefore cannot establish EOF,
+                // even when count equals length. Never admit that cutoff as a
+                // complete globally sorted/filterable snapshot.
+                let complete = total == rows.len() as u64
+                    && (!matches!(self, Self::Workflows { .. })
+                        || rows.len() < usize::from(*limit));
+                json!({"items":items,"page":{"returnedCount":rows.len(),"total":total,"limit":limit,"continuation":"unavailable","completeness":if complete {"complete"} else {"partial"}}})
             }
             Self::SdkReference { section } => {
                 if is_error
@@ -831,6 +838,30 @@ pub struct ApiErrorResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workflow_search_limit_saturation_never_proves_complete_snapshot() {
+        let read: super::TypedN8nRead = serde_json::from_value(json!({
+            "action":"workflows","limit":2
+        }))
+        .unwrap();
+        let row = |id: &str| {
+            json!({"id":id,"name":"Synthetic","active":false,
+            "availableInMCP":false,"createdAt":"2026-10-04T00:00:00Z",
+            "updatedAt":"2026-10-04T00:00:00Z","parentFolderId":null,"tags":[]})
+        };
+        for (rows, count, expected) in [
+            (vec![row("one")], 1, "complete"),
+            (vec![row("one"), row("two")], 2, "partial"),
+            (vec![row("one")], 3, "partial"),
+        ] {
+            let data = json!({"data":rows,"count":count});
+            let response = json!({"structuredContent":data,
+                "content":[{"type":"text","text":data.to_string()}]});
+            let projected = read.project("eec", &response).unwrap();
+            assert_eq!(projected["data"]["page"]["completeness"], expected);
+        }
+    }
+
     #[test]
     fn workflow_code_effect_admission_refuses_before_native_call() {
         let code: super::TypedN8nRead = serde_json::from_value(

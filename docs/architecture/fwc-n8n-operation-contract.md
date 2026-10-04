@@ -1698,7 +1698,9 @@ Projection-only invalid-result fixtures do not authorize native evaluation.
 #### .35 read-parity implementation matrix — source checkpoint 2026-10-04
 
 This matrix is not installed acceptance or closure. Installed source remains
-RC43c `09cebc4`; candidate source is uncommitted on base `a8ea96c`. Native
+RC43c `09cebc4`; the first candidate source was committed as `537b8451`
+(README `3168d9c4`, coordinator snapshot `138057a5`). The following useful
+workflow-scenario delta is still under source review. Native
 catalog/source discovery proves availability and shapes, not a successful
 admitted invocation. Tests below are local source tests unless explicitly
 identified as retained installed evidence. All new official read actions need
@@ -1742,7 +1744,9 @@ exclusions:
   native default version, not a requested historical version.
 - Workflow `active` filtering requires a complete native snapshot first.
   `isArchived:true` is refused. Continuation beyond the native 200-workflow
-  bound is unsupported; no per-page sort/filter is claimed as global parity.
+  bound is unsupported; a saturated result of exactly 200 rows is refused
+  even when the native count equals the returned length. No per-page
+  sort/filter is claimed as global parity.
 - `workflows.get includeCode:true` returns Code fingerprints, not source text.
   Raw Code source is not exposed; callers requiring source have an OPEN
   capability gap. Draft/published/both graph selectors are separately tested.
@@ -1752,6 +1756,57 @@ exclusions:
   global runtime observation, instance audit effects and SDK-code effects
   remain OPEN as described above. No source-only test closes installed
   admission for these or other new routes.
+
+#### Useful workflow scenario — controlled evidence and installed boundary
+
+`controlled_workflow_scenario_native_validation_process` selects an exact
+EEC/Hetzner workflow from a native-shaped official search projection, reads
+draft/published through controlled HTTP, and detects semantic/layout changes.
+The draft contains an ordinary Set node with a dangling connection; the
+published graph is empty. The fixed installed network-disabled JSON validator
+reports different validation results and validates the selected draft again.
+Owned process reaping/group absence is asserted. Search/HTTP responses are
+synthetic; the validator process is real, using the existing dev/test factory.
+This is neither a signed candidate nor installed end-to-end CLI acceptance.
+The test is explicitly ignored by default and must be run with `--ignored`.
+
+The actual task CLI regression invokes all four remote operations for both
+servers and requires `bundle_unavailable`: the executing artifact is not the
+signed current executable. Graph validation has the same signed-artifact
+boundary. No caller executable/key/policy override is provided. Missing
+published is represented as null on get and refusal on compare; no empty
+validation delta is treated as success. Primary logs are in the existing
+`/srv/dev-ssd/fcp/nqm81-35` review packet.
+
+After exact source/artifact/schema admission, the four read-only commands are:
+
+```sh
+# Explicit server: use eec, then repeat with hetzner. Never infer a server.
+N8N_SERVER=eec
+jq -nc --arg server "$N8N_SERVER" '{server_id:$server,deadline_ms:30000,input:{query:"Synthetic",active:true,sort:"updatedAt:desc",page:{limit:20}}}' |
+  /usr/local/lib/fwc-n8n/current/bin/fwc-n8n run-once n8n.workflows.search
+# Select one exact id from this bound result; do not guess it or use a name as id.
+# Set N8N_WORKFLOW_ID and N8N_WORKFLOW_URI to that result's exact id/resourceUri.
+# Both must refer to N8N_SERVER; missing/ambiguous results stop this preparation.
+jq -nc --arg server "$N8N_SERVER" --arg id "$N8N_WORKFLOW_ID" '{server_id:$server,deadline_ms:30000,input:{id:$id,version:"both",detail:"full",includeCode:false}}' |
+  /usr/local/lib/fwc-n8n/current/bin/fwc-n8n run-once n8n.workflows.get
+jq -nc --arg server "$N8N_SERVER" --arg id "$N8N_WORKFLOW_ID" '{server_id:$server,deadline_ms:30000,input:{id:$id,leftVersion:"draft",rightVersion:"published"}}' |
+  /usr/local/lib/fwc-n8n/current/bin/fwc-n8n run-once n8n.workflows.compare
+jq -nc --arg server "$N8N_SERVER" --arg uri "$N8N_WORKFLOW_URI" '{server_id:$server,deadline_ms:30000,input:{subject:"remote_workflow",target:{resourceUri:$uri},version:"draft",profile:"runtime"}}' |
+  /usr/local/lib/fwc-n8n/current/bin/fwc-n8n run-once n8n.validation.run
+```
+
+These commands are preparation, not executed installed acceptance. Before
+one live decision, bind the reviewed candidate commit, all normal binary and
+package hashes, signed receipt/public key, native search schemas/output
+presence, broker server/resource permissions, and unchanged network-disabled
+local policy. Run normal root prechecks/preflight before installation; do not
+substitute the diagnostic CLI for current. Search saturation, unknown schema,
+missing published, version/ID drift, validator failure or incomplete teardown
+must stop the dependent scenario. Expected useful results are a bounded
+selected workflow, exact current version pair, semantic/layout differences,
+collected safe validation delta and selected-graph validation; none is claimed
+for the uninstalled full scenario yet.
 
 `knowledge.query.action` is one of:
 

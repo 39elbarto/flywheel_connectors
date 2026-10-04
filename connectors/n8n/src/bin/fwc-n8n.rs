@@ -4763,7 +4763,7 @@ fn decode_official_workflow_search_response(
         .and_then(Value::as_array)
         .ok_or_else(invalid)?;
     if data.len() != 2
-        || rows.len() > 200
+        || rows.len() >= 200
         || data["page"]["returnedCount"].as_u64() != Some(rows.len() as u64)
         || data["page"]["total"].as_u64() != Some(rows.len() as u64)
         || data["page"]["completeness"] != "complete"
@@ -7520,6 +7520,26 @@ mod tests {
         assert!(
             decode_official_workflow_search_response(HostRunOnceServerId::Eec, &input, partial)
                 .is_err()
+        );
+        let mut saturated = response.clone();
+        let row = saturated["result"]["data"]["items"][0].clone();
+        saturated["result"]["data"]["items"] = json!(
+            (0..200)
+                .map(|index| {
+                    let mut row = row.clone();
+                    row["id"] = json!(format!("w{index}"));
+                    row["resourceUri"] = json!(format!("fwc-n8n://eec/workflows/w{index}"));
+                    row
+                })
+                .collect::<Vec<_>>()
+        );
+        saturated["result"]["data"]["page"]["returnedCount"] = json!(200);
+        saturated["result"]["data"]["page"]["total"] = json!(200);
+        assert_eq!(
+            decode_official_workflow_search_response(HostRunOnceServerId::Eec, &input, saturated)
+                .unwrap_err()
+                .code,
+            "official_workflow_complete_snapshot_required"
         );
         assert!(
             decode_official_workflow_search_response(

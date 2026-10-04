@@ -371,6 +371,7 @@ impl VerifiedBundle {
     }
 
     #[cfg(any(test, feature = "n8n-test-support"))]
+    #[must_use]
     pub fn test_fixture() -> Self {
         Self {
             fcp_host_path: PathBuf::from("/release/bin/fcp-host"),
@@ -422,9 +423,9 @@ fn test_local_mcp_policy() -> LocalMcpPolicy {
             "tools_documentation", "search_nodes", "get_node", "validate_node",
             "get_template", "search_templates", "validate_workflow"
         ],
-        "max_frame_bytes": 262144,
+        "max_frame_bytes": 262_144,
         "max_request_bytes": 65536,
-        "max_result_bytes": 262144,
+        "max_result_bytes": 262_144,
         "max_sequential_calls": 7,
         "startup_timeout_ms": 30000,
         "request_timeout_ms": 30000,

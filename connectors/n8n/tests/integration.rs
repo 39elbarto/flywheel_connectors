@@ -157,6 +157,47 @@ fn run_source_command_once_bounded(
 }
 
 #[test]
+fn actual_cli_workflow_scenario_preserves_signed_artifact_admission() {
+    // Actual task CLI, not an injected host/provider. Successful production
+    // mediation remains unavailable to this uninstalled executable.
+    let launches = AtomicUsize::new(0);
+    for server in ["eec", "hetzner"] {
+        for (operation, input) in [
+            (
+                "n8n.workflows.search",
+                json!({"query":"Synthetic","page":{"limit":1}}),
+            ),
+            (
+                "n8n.workflows.get",
+                json!({"id":"synthetic-one","version":"both"}),
+            ),
+            (
+                "n8n.workflows.compare",
+                json!({"id":"synthetic-one","leftVersion":"draft","rightVersion":"published"}),
+            ),
+            (
+                "n8n.validation.run",
+                json!({"subject":"remote_workflow","target":{
+                "resourceUri":format!("fwc-n8n://{server}/workflows/synthetic%2Done")},"version":"draft","profile":"runtime"}),
+            ),
+        ] {
+            let input = serde_json::to_vec(&json!({"server_id":server,"input":input,
+                "deadline_ms":1000}))
+            .unwrap();
+            let (status, stdout) =
+                run_fwc_n8n_command_once_bounded(&input, &launches, &["run-once", operation])
+                    .unwrap();
+            assert!(!status.success());
+            let error: Value = serde_json::from_slice(&stdout).unwrap();
+            assert_eq!(error["schema"], "fwc.n8n.error.v1");
+            assert_eq!(error["code"], "bundle_unavailable");
+            assert!(uuid::Uuid::parse_str(error["correlationId"].as_str().unwrap()).is_ok());
+        }
+    }
+    assert_eq!(launches.load(Ordering::SeqCst), 8);
+}
+
+#[test]
 fn actual_cli_reviewed_schema_profile_producer_and_consumer() {
     let input = json!({"type":"object", "description":"reviewed baseline", "required":["id"], "properties":{"id":{"type":"string"}}});
     let baseline = json!({"integrity":"blake3", "input_schema":input, "output_schema":null,
@@ -463,11 +504,11 @@ fn capability_token_with_options(
         | "n8n.workflows.get"
         | "n8n.workflows.search"
         | "n8n.workflows.compare" => "n8n.workflows.read",
-        "n8n.executions.search" => "n8n.executions.read",
         "n8n.structure.search" => "n8n.structure.read",
-        "n8n.executions.list" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
-            "n8n.executions.read"
-        }
+        "n8n.executions.search"
+        | "n8n.executions.list"
+        | "n8n.executions.get"
+        | "n8n.executions.diagnostics" => "n8n.executions.read",
         "n8n.projects.list" => "n8n.projects.read",
         "n8n.credentials.list" => "n8n.credentials.metadata.read",
         "n8n.audit.inspect" => "n8n.audit.read",
@@ -4175,6 +4216,202 @@ async fn workflows_get() {
             .is_some_and(|digest| digest.starts_with("blake3-256:"))
     );
     assert_no_untrusted_output(&result);
+}
+
+#[fcp_async_core::runtime::test]
+#[ignore = "explicit controlled HTTP/current-graph composition with fixed installed network-disabled validator; not candidate signed admission"]
+async fn controlled_workflow_scenario_native_validation_process() {
+    use fcp_host::{LocalMcpProvider, LocalN8nDispatcher, LocalN8nValidationProfile};
+    use std::sync::atomic::AtomicBool;
+
+    let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+        &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json").unwrap(),
+    )
+    .unwrap();
+    assert!(policy.network_disabled);
+    // Existing dev/test factory only. No production verifier, key, caller
+    // executable, or broker binding is replaced by this controlled test.
+    let bound = policy.max_request_bytes as usize;
+    let dispatcher =
+        LocalN8nDispatcher::with_max_input_bytes(LocalMcpProvider::new(policy).unwrap(), bound);
+    for server_id in ["eec", "hetzner"] {
+        let search_native = json!({"data":[{"id":"synthetic-one","name":"Synthetic",
+            "active":true,"availableInMCP":false,"createdAt":"2026-10-04T00:00:00Z",
+            "updatedAt":"2026-10-04T00:00:00Z","parentFolderId":null,"tags":[],
+            "settings":{"secret":"SCENARIO_PRIVATE_CANARY"}}],"count":1});
+        let search = fcp_mcp_bridge::project_n8n_read_test_fixture(
+            json!({"action":"workflows","query":"Synthetic","sortBy":"updatedAt:desc","limit":200}),
+            server_id,
+            &json!({"structuredContent":search_native,
+                "content":[{"type":"text","text":search_native.to_string()}]}),
+        )
+        .unwrap();
+        assert_eq!(search["serverId"], server_id);
+        assert_eq!(search["data"]["page"]["completeness"], "complete");
+        let selected_id = search["data"]["items"][0]["id"].as_str().unwrap();
+        assert_eq!(selected_id, "synthetic-one");
+        assert_eq!(
+            search["data"]["items"][0]["resourceUri"],
+            format!("fwc-n8n://{server_id}/workflows/synthetic%2Done")
+        );
+        assert!(!search.to_string().contains("SCENARIO_PRIVATE_CANARY"));
+        let server = MockServer::start().await;
+        let graph = json!({"nodes":[{"id":"set-one","name":"Set",
+            "type":"n8n-nodes-base.set","typeVersion":3.4,"position":[100,200],"parameters":{}}],
+            "connections":{"Set":{"main":[[{"node":"Missing","type":"main","index":0}]]}}});
+        let published_graph = json!({"nodes":[],"connections":{}});
+        let native = json!({"id":"synthetic-one","name":"Synthetic", "versionId":"draft-one",
+            "active":true,"activeVersionId":"published-one","isArchived":false,
+            "nodes":graph["nodes"],"connections":graph["connections"],
+            "staticData":{"token":"SCENARIO_PRIVATE_CANARY"},"pinData":{"private":"SCENARIO_PRIVATE_CANARY"},
+            "activeVersion":{"versionId":"published-one","nodes":[],"connections":{}}});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows/synthetic-one"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(native))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let connector = setup_connector_with_config(json!({"api_key":"synthetic-test-key",
+            "server_id":server_id,"base_url":format!("{}/api/v1",server.uri())}))
+        .await;
+        let params = |operation: &str, input: Value| {
+            let now = chrono::Utc::now();
+            json!({"operation":operation,"input":input,
+                "capability_token":capability_token_with_options(operation,
+                    &test_signing_key(),TEST_INSTANCE_ID,
+                    format!("fwc-n8n://{server_id}/workflows/synthetic%2Done"),
+                    now-chrono::Duration::seconds(1),now+chrono::Duration::minutes(1))})
+        };
+        let current = connector
+            .handle_invoke(params(
+                "n8n.workflows.get",
+                json!({"id":selected_id,"version":"both","detail":"full","includeCode":false}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(current["graph"]["draft"]["versionId"], "draft-one");
+        assert_eq!(current["graph"]["published"]["versionId"], "published-one");
+        let compared = connector
+            .handle_invoke(params(
+                "n8n.workflows.compare",
+                json!({"id":selected_id,"leftVersion":"draft","rightVersion":"published"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(compared["leftVersionId"], "draft-one");
+        assert_eq!(compared["rightVersionId"], "published-one");
+        assert_eq!(
+            compared["leftUri"],
+            search["data"]["items"][0]["resourceUri"]
+        );
+        assert_eq!(compared["rightUri"], compared["leftUri"]);
+        assert_eq!(compared["semanticDiff"]["changed"], true);
+        assert_eq!(compared["layoutDiff"]["changed"], true);
+        assert!(!format!("{current}{compared}").contains("SCENARIO_PRIVATE_CANARY"));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let pair = dispatcher
+            .validate_current_pair(
+                format!("synthetic-pair-{server_id}"),
+                [graph.clone(), published_graph],
+                &cancelled,
+                deadline,
+            )
+            .unwrap();
+        assert_eq!(pair.result.responses.len(), 2);
+        assert!(pair.result.startup.network_disabled);
+        assert!(
+            pair.result.shutdown.completion.reaped && pair.result.shutdown.completion.group_absent
+        );
+        assert!(pair.result.teardown_error_code.is_none());
+        let left = fcp_host::project_local_n8n_validation_call(&pair.result.responses[0]).unwrap();
+        let right = fcp_host::project_local_n8n_validation_call(&pair.result.responses[1]).unwrap();
+        assert_ne!(left, right);
+        assert_eq!(left["valid"], false);
+        assert_eq!(right["valid"], true);
+        let selected = dispatcher
+            .validate_current_graph(
+                format!("synthetic-selected-{server_id}"),
+                graph,
+                LocalN8nValidationProfile::Runtime,
+                &cancelled,
+                deadline,
+            )
+            .unwrap();
+        assert!(
+            selected.result.shutdown.completion.reaped
+                && selected.result.shutdown.completion.group_absent
+        );
+        assert!(selected.result.teardown_error_code.is_none());
+        assert_eq!(
+            fcp_host::project_local_n8n_validation_call(&selected.result.responses[0]).unwrap(),
+            left
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn workflow_scenario_current_binding_and_missing_published_fail_closed() {
+    let baseline = json!({"id":"synthetic-one","name":"Synthetic","versionId":"draft-one",
+        "active":false,"activeVersionId":null,"activeVersion":null,"isArchived":false,
+        "nodes":[],"connections":{},"pinData":{"secret":"SCENARIO_NEGATIVE_CANARY"}});
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/workflows/synthetic-one"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(baseline.clone()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let connector = setup_connector(&server.uri()).await;
+    let current = invoke(
+        &connector,
+        "n8n.workflows.get",
+        json!({"id":"synthetic-one",
+        "version":"both","detail":"full"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(current["graph"]["draft"]["versionId"], "draft-one");
+    assert!(current["graph"]["published"].is_null());
+    assert!(!current.to_string().contains("SCENARIO_NEGATIVE_CANARY"));
+    assert!(
+        invoke(
+            &connector,
+            "n8n.workflows.compare",
+            json!({"id":"synthetic-one",
+        "leftVersion":"draft","rightVersion":"published"})
+        )
+        .await
+        .is_err()
+    );
+    for (field, value) in [
+        ("id", json!("another-workflow")),
+        ("activeVersionId", json!("published-without-graph")),
+        ("connections", json!("SCENARIO_NEGATIVE_CANARY")),
+    ] {
+        let server = MockServer::start().await;
+        let mut malformed = baseline.clone();
+        malformed[field] = value;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows/synthetic-one"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(malformed))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let connector = setup_connector(&server.uri()).await;
+        assert!(
+            invoke(
+                &connector,
+                "n8n.workflows.get",
+                json!({"id":"synthetic-one",
+            "version":"both","detail":"full"})
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
 }
 
 #[fcp_async_core::runtime::test]

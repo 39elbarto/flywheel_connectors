@@ -22,6 +22,31 @@ Boundaries:
   an n8n task;
 - do not explore, retry, or release outside the recorded task boundary.
 
+## Current closeout and operating boundary — 2026-10-04
+
+Canonical `.34` is closed at `2026-10-04T03:36:40.074779411Z`: separate Sol
+GO accepted final test source `efb3e22f11c5` and 19/19 update tests. Local
+integration is `202e5e3924eb183bc01724bf0f8939bee1eed66e`; installed RC43c
+runtime source is separately `09cebc4aaa3c968f3704611325a005a3ced7a237`.
+Both servers run 2.41.5. EEC uses internal JS (42), with no Python/external-runner
+claim; Hetzner uses configured external JS/Python (42/43). Controlled harmless
+Webhook publication/unpublication passed on both, with independent GETs and
+retained inactive fixtures, no direct webhook or business execution.
+
+Use the [operator summary](../../connectors/n8n/README.md#current-operator-state--2026-10-04)
+and [criterion/evidence matrix](../architecture/fwc-n8n-operation-contract.md#34-acceptance-update--2026-10-04)
+for primary filenames. The [actual protected route](#reproduced-protected-release-route-rc43c-2026-10-04)
+uses admitted, root-owned verified files and direct argv; only ephemeral secret
+data is piped. A universal release launcher is not implemented by this runbook.
+Metadata/native-pin/closed-diagnostic fixes are actual code; the sequence here
+documents the per-release executed mechanism, not new security policy.
+
+Local package upgrade remains UNVERIFIED; recovery is preflight only, no APPLY.
+Retired backup payloads cannot be used for rollback. Preserve historical
+FAIL/UNKNOWN, the exact `09cebc4`/`0e228bf6` bounded UBS acceptance (100/4115/2305,
+not green or transferable), and eight old test Clippy findings. Closure does not
+authorize fresh provider writes, cleanup, keys or automatic schema enrollment.
+
 ## Dated handoff — 2026-09-21
 
 `handoff_at: 2026-09-21`. The `.23` acceptance is closed at main closeout
@@ -40,21 +65,8 @@ any bounded, authorized implementation, then `.25`, then `.26`.
 The dated sequence above is historical: `.24` selected-version lifecycle and
 `.25` manual execution are accepted, while production `.26` and complete v1
 remain unfinished. The [operation contract](../architecture/fwc-n8n-operation-contract.md#current-delivery-plan-and-evidence-boundary-2026-09-30)
-maps remaining original scope to `.33`–`.43`. **Update — 2026-10-04:** `.34` has
-separate source/local-process, installed-read and live acceptance: EEC
-2.38.4 → 2.41.5, Hetzner 2.37.10 → 2.41.5, signed RC43c source `09cebc4`
-and controlled publish/unpublish on both servers. See the
-[dated criterion/evidence matrix](../architecture/fwc-n8n-operation-contract.md#34-acceptance-update--2026-10-04).
-Actual local MCP package upgrade remains unverified; recovery APPLY was not run.
-The final permission-only regression passed on 2026-10-04 in the existing update
-module (19 tests; `permission-only-update-tests-frozen-20261004.log`), including positive
-authorization and stale-review/decision refusal before ledger consumption.
-Separate Sol final GO accepted source
-`efb3e22f11c5a715a63a34296cd23eabf653aabc` and 19/19 tests; the coordinator
-closed canonical `.34` at `2026-10-04T03:36:40.074779411Z`.
-Installed RC43c source `09cebc4` is unchanged.
-The exact `09cebc4`/`0e228bf6` owner acceptance retains non-green UBS findings
-and historical FAIL/UNKNOWN; it is not a transferable waiver.
+maps remaining original scope to `.33`–`.43`. The later `.34` acceptance and
+closure supersede its pending status only; see the current closeout above.
 Compatible numeric-version changes must retain usable supported routes without
 relaxing signed artifacts, exact approvals, schema/protocol/permission or readback
 semantics. Isolate actual conflicts to affected operations where trust permits.

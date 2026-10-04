@@ -1,8 +1,48 @@
 # n8n Connector Security Contract
 
-## Current status and remaining scope — 2026-09-30
+## Current operator state — 2026-10-04
 
-The installed checkpoint is `release-20260929-42a574a62-started-result-rc40`.
+Both EEC and Hetzner run n8n **2.41.5**. The installed Ubuntu FWC release is
+`release-20261003-admitted-publish-reasons-rc43c`, built from runtime source
+`09cebc4aaa3c968f3704611325a005a3ced7a237`, not the later documentation tip.
+Its signed receipt BLAKE3 is
+`7cdcde12184f3ab3a205cd15a51653c7ad5d7519df9f8ea2a304b4fd4861fdab`.
+Canonical `.34` closed at `2026-10-04T03:36:40.074779411Z` after separate Sol
+GO and 19/19 update tests in source `efb3e22f11c5`; local integration is
+`202e5e3924eb183bc01724bf0f8939bee1eed66e`. These are distinct identities.
+
+| Installed acceptance | Observed result |
+|---|---|
+| EEC, upgraded from 2.38.4 | Internal JS runner returned 42; actual Poppler/custom-module checks passed. No external runner or Python execution is claimed or newly installed. |
+| Hetzner, upgraded from 2.37.10 | Configured external JS/Python runners returned 42/43; installed custom loader and synthetic media checks passed. |
+| Controlled publication, both servers | One harmless disconnected POST Webhook draft per server; one publish and one unpublish with fresh approvals and independent GETs. Fixtures remain inactive/unpublished; no webhook invocation, execution or business call occurred in this cycle. |
+
+Primary evidence is under `/srv/dev-ssd/fcp/nqm81-34/`:
+`rc43c-actual-installed-review-packet.json`,
+`rc43c-controlled-publication-final-manifest.json` (SHA-256
+`8243fc4b0eb88c32e1c889ae81fb587a590d6249b59d16c0d80f83fcb1f79eb5`),
+and each `installed-runner-live-20261003-{eec,hetzner}/readonly-reconciliation-flat1/public-proof.json`.
+The [acceptance matrix](../../docs/architecture/fwc-n8n-operation-contract.md#34-acceptance-update--2026-10-04)
+separates source, local-process, installed and live evidence.
+
+**Limits:** actual local MCP package upgrade remains UNVERIFIED; recovery was
+preflight only, never APPLY. Owner-retired backup payloads are no longer rollback
+inputs. UBS remains NON-GREEN (100 critical / 4115 warning / 2305 informational),
+with owner acceptance only for exact runtime `09cebc4` / packet `0e228bf6`;
+eight old test Clippy findings remain, with none in the new permission-only test.
+Historical FAIL/UNKNOWN stays historical. Schema/permission drift is never
+automatically enrolled; compatible numeric versions do not loosen approvals.
+
+The actual release used admitted source/script hashes, protected root-owned
+files and direct argv, with secret **data** only in the existing ephemeral pipe.
+The [reproduced release route](../../docs/runbooks/n8n_agent_workflow.md#reproduced-protected-release-route-rc43c-2026-10-04)
+is documented guidance plus executed per-release scripts, not an implemented
+universal launcher or a general security-policy change.
+
+## Historical delivery snapshot and remaining scope — 2026-09-30
+
+At this dated snapshot, the installed checkpoint was
+`release-20260929-42a574a62-started-result-rc40`.
 `.25` accepted manual execution on EEC (`414677`) and Hetzner (`379754`),
 with separate execution GET receipts proving terminal success, manual mode and
 the approved workflow versions. See the
@@ -22,20 +62,8 @@ deletion remain future-only. Final core acceptance is `.15`; update-service `.43
 and ClickUp/Telegram `.12` separately gate integrated rollout, with `.16`–`.18`
 remaining owner-gated future work.
 
-**`.34` acceptance update — 2026-10-04:** source regressions, local process checks,
-installed reads and owner-authorized live upgrades are evidenced separately:
-EEC 2.38.4 → 2.41.5 and Hetzner 2.37.10 → 2.41.5, followed by signed RC43c
-from source `09cebc4` and controlled publish/unpublish on both servers.
-An actual local MCP package upgrade and recovery APPLY were not performed.
-The final permission-only approval-binding regression passed on 2026-10-04
-(`permission-only-update-tests-frozen-20261004.log`, 19 module tests). Separate
-Sol final GO accepted source `efb3e22f11c5a715a63a34296cd23eabf653aabc`;
-the coordinator closed canonical `.34` at `2026-10-04T03:36:40.074779411Z`.
-This test does not change installed RC43c.
-Numeric versions remain diagnostic; exact signatures, approvals and reviewed
-schema/permission bindings remain mandatory. The dated acceptance matrix and
-primary evidence, including historical FAIL/UNKNOWN and bounded non-green UBS
-limitations, are in the
+The later `.34` closeout supersedes only its former pending status; it does not
+close the remaining v1 obligations listed above. See the
 [compatibility policy](../../docs/architecture/fwc-n8n-operation-contract.md#112-compatible-upstream-updates-owner-requirement-2026-09-30).
 
 ## Historical status and acceptance packets

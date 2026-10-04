@@ -16,10 +16,16 @@ profile change is authorized by this contract.
 
 ## Current delivery plan and evidence boundary (2026-09-30)
 
+The following delivery snapshot is dated history. For the current bounded
+`.34` closeout (2026-10-04), see the [criterion matrix](#34-acceptance-update--2026-10-04)
+and [operator state](../../connectors/n8n/README.md#current-operator-state--2026-10-04).
+Local integration `202e5e3924eb183bc01724bf0f8939bee1eed66e` includes the final
+test source `efb3e22f11c5`; installed RC43c runtime remains `09cebc4`, not that tip.
+
 Sections 5, 5.1 and 14 remain the complete v1 feature baseline. Unimplemented
 routes remain delivery obligations; Beads owns status and dependencies.
 
-- Installed checkpoint: `release-20260929-42a574a62-started-result-rc40`.
+- Historical installed checkpoint: `release-20260929-42a574a62-started-result-rc40`.
   `.25` manual execution passed on EEC (`414677`) and Hetzner (`379754`), with
   independent GET proving manual mode, terminal success and exact approved
   workflow versions. Retained evidence is under
@@ -31,7 +37,8 @@ routes remain delivery obligations; Beads owns status and dependencies.
   MCP archive was not accepted by `.10`; `.33` owns reversible archive/unarchive.
   `.26` production execution and `.41` test preparation/execution remain separate.
 - `.34` owns compatible updates under section 11.2. Source/offline verification
-  does not establish installed/live acceptance.
+  alone does not establish installed/live acceptance; the later separate live
+  results and actual closure are recorded there.
 - `.35` owns read/knowledge/validation/status/audit parity; `.36` versions and
   rollback; `.37` data tables; `.38` evaluations; `.39` credential-backed resource
   exploration; `.40` explicit execution detail; `.42` draft/template/autofix parity.
@@ -2146,6 +2153,9 @@ recovery APPLY was not run. Owner-retired backup payloads cannot be promised as
 available rollback inputs; images, small evidence and live configuration remain.
 
 UBS remains **NON-GREEN: 100 critical / 4115 warning / 2305 informational**.
+The final permission-only test passed; scoped Clippy exited 101 for eight old
+test findings (four in `connector.rs`, one in `update.rs`, three in
+`tests/integration.rs`), none in the added regression. This is not Clippy green.
 The owner accepted the bounded residual risk only for source `09cebc4` and
 `rc43c-new-source-admission-packet.json` SHA-256
 `0e228bf62f1af378949489ceda39031650831168f9fd754bc3311caa212e7a5c`;

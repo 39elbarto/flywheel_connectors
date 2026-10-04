@@ -84,7 +84,8 @@ uses the same producer as normal staging, with synthetic input and no discovery.
 Offline CLI, bundle,
 provision, update, supervisor and loopback/process runs validate separate
 boundaries. The bounded preflight script's `--compatibility-self-test` reports
-`acceptance:false`; installed-provider/live upgrade acceptance is unverified.
+`acceptance:false`; it is not live acceptance. The separate installed/live
+results and remaining boundaries are recorded in the dated matrix in section 11.2.
 
 ## Historical implementation and acceptance packets
 
@@ -2106,8 +2107,53 @@ existing reviewed update path; never edit signed inventory in place. Remote n8n
 is observed, not automatically upgraded or downgraded. Section 11.1 still binds
 immutable evidence. Reviewed source/offline tests cover version/protocol sets,
 harmless metadata, missing/changed tools, semantic/output drift, trust/expiry and
-operation isolation. Installed-provider and real before/after upgrade acceptance
-remain unverified; offline checks cannot claim live PASS.
+operation isolation. Offline checks cannot claim live PASS.
+
+#### `.34` acceptance update — 2026-10-04
+
+Primary filenames below resolve under `/srv/dev-ssd/fcp/nqm81-34/`. These
+separate source, local process, installed and live evidence; they do not rewrite
+the dated packets or their FAIL/UNKNOWN outcomes.
+
+| Canonical criterion | Evidence and bounded result |
+|---|---|
+| Same contract with different versions; different versions on both servers | `protocol-set-matrix.log`, `final-n8n.log`; actual EEC 2.38.4 → 2.41.5 and Hetzner 2.37.10 → 2.41.5. EEC server receipt: `/var/backups/n8n-cutover-2.41.5-quiesced-fresh2/switch-public-proof.json`; Hetzner: `hetz-installed-2.41.5-final-acceptance.json`. |
+| Harmless catalog metadata/order changes | `compatibility-self-test.log`, `bridge-lib.log`, `final-bridge-profile.log`: deterministic projection preserves significant fields; the self-test still reports `acceptance:false`. |
+| Removed operation; renamed/changed required field; incompatible output/readback | `final-n8n.log`, `bridge-boundaries-2.log`, `resume-host-process.log`: refusal and exact readback bindings. The two new publish failure reasons were significant, separately reviewed and admitted in `20261003-publish-reason-baseline-proposal.json`; no automatic enrollment. |
+| New risky tool / unknown authority | `host-official-consumer.log`: unknown profile/authority refusal is checked. This does not test permission-only drift. |
+| Changed permission | Source boundary: `connectors/n8n/src/update.rs:852/885`, `diff_snapshots` classifies `ToolChange::Permissions` as breaking. **MISSING:** a permission-only negative regression; the cited host/schema/process logs do not establish this criterion. |
+| Protocol negotiation failure; local binary tamper; expired evidence | `protocol-set-matrix.log`, `final-n8n.log`, `final-preflight-self-test.log`: source/CLI trust, protocol and expiry refusals, not live tamper experiments. |
+| One affected operation blocked while unrelated approved reads remain usable | `bridge-boundaries-2.log`, `final-host-local-lib.log`, `rc42-install-read-manifest.json`: operation isolation plus installed EEC/Hetzner catalogs and local knowledge read. |
+| Local process and installed custom/runner behavior | `final-n8n.log`, `resume-host-process.log`; `upgrade-eec-installed-renderer-proof.json`, `hetz-installed-2.41.5-final-acceptance.json`; `installed-runner-live-20261003-{eec,hetzner}/readonly-reconciliation-flat1/public-proof.json`: EEC internal JS42, Hetzner external JS42/Python43. EEC Python/external runner is not claimed. |
+| Signed package, approval canonicalization, independent readback and teardown | `rc43c-actual-unsigned-review-packet.json`, `rc43c-actual-signed-preflight-packet.json`, `rc43c-actual-installed-review-packet.json`; `rc43c-controlled-publication-final-manifest.json`: one controlled publish/unpublish per server, independent GETs, no workflow execution or webhook invocation in that cycle. |
+
+`.34` remains **in progress**; this matrix is not complete acceptance or closure
+GO. The minimum remaining step is one targeted deterministic `update.rs`
+permission-only regression with versions, input/output schemas and protocol
+otherwise equal: assert `ToolChange::Permissions` plus `Breaking`, and that a
+stale approval cannot authorize the altered permissions. It requires no provider
+grant, live execution or package upgrade and was not implemented in this audit.
+
+Installed RC43c runtime source is `09cebc4aaa3c968f3704611325a005a3ced7a237`;
+signed receipt BLAKE3 is
+`7cdcde12184f3ab3a205cd15a51653c7ad5d7519df9f8ea2a304b4fd4861fdab`.
+Publication manifest SHA-256 is
+`8243fc4b0eb88c32e1c889ae81fb587a590d6249b59d16c0d80f83fcb1f79eb5`.
+Actual local MCP package upgrade remains **UNVERIFIED** and is not a separate
+required real-upgrade claim in this acceptance. Recovery preflight passed;
+recovery APPLY was not run. Owner-retired backup payloads cannot be promised as
+available rollback inputs; images, small evidence and live configuration remain.
+
+UBS remains **NON-GREEN: 100 critical / 4115 warning / 2305 informational**.
+The owner accepted the bounded residual risk only for source `09cebc4` and
+`rc43c-new-source-admission-packet.json` SHA-256
+`0e228bf62f1af378949489ceda39031650831168f9fd754bc3311caa212e7a5c`;
+that decision is not transferable or a workspace-wide waiver. Scan timing,
+excluded coverage and historical failures remain in the existing evidence.
+Actual producer/consumer fixes cover closed metadata, native pins and safe
+diagnostics. The protected release used verified root-owned files and direct
+argv, with only secret **data** in the existing ephemeral pipe; runbook guidance
+does not establish a universal launcher or change security policy.
 
 ## 12. Process lifecycle and telemetry
 

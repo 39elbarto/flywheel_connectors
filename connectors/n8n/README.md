@@ -22,10 +22,15 @@ deletion remain future-only. Final core acceptance is `.15`; update-service `.43
 and ClickUp/Telegram `.12` separately gate integrated rollout, with `.16`–`.18`
 remaining owner-gated future work.
 
-`.34` implements compatible-update checks in source with offline regressions;
-installed/live upgrade acceptance remains unverified. Numeric upstream versions
-are diagnostic, while exact signed artifacts, package approvals and workflow
-approvals remain binding. See the
+**`.34` acceptance update — 2026-10-04:** source regressions, local process checks,
+installed reads and owner-authorized live upgrades are evidenced separately:
+EEC 2.38.4 → 2.41.5 and Hetzner 2.37.10 → 2.41.5, followed by signed RC43c
+from source `09cebc4` and controlled publish/unpublish on both servers.
+An actual local MCP package upgrade and recovery APPLY were not performed.
+Numeric versions remain diagnostic; exact signatures, approvals and reviewed
+schema/permission bindings remain mandatory. The dated acceptance matrix and
+primary evidence, including historical FAIL/UNKNOWN and bounded non-green UBS
+limitations, are in the
 [compatibility policy](../../docs/architecture/fwc-n8n-operation-contract.md#112-compatible-upstream-updates-owner-requirement-2026-09-30).
 
 ## Historical status and acceptance packets

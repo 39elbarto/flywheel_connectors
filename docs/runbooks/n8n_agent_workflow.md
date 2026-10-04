@@ -40,14 +40,20 @@ any bounded, authorized implementation, then `.25`, then `.26`.
 The dated sequence above is historical: `.24` selected-version lifecycle and
 `.25` manual execution are accepted, while production `.26` and complete v1
 remain unfinished. The [operation contract](../architecture/fwc-n8n-operation-contract.md#current-delivery-plan-and-evidence-boundary-2026-09-30)
-maps remaining original scope to `.33`–`.43`. `.34` now has reviewed source and
-offline compatibility tests; installed/live upgrade checks remain unverified.
+maps remaining original scope to `.33`–`.43`. **Update — 2026-10-04:** `.34` has
+separate source/local-process, installed-read and live acceptance: EEC
+2.38.4 → 2.41.5, Hetzner 2.37.10 → 2.41.5, signed RC43c source `09cebc4`
+and controlled publish/unpublish on both servers. See the
+[dated criterion/evidence matrix](../architecture/fwc-n8n-operation-contract.md#34-acceptance-update--2026-10-04).
+Actual local MCP package upgrade remains unverified; recovery APPLY was not run.
+The exact `09cebc4`/`0e228bf6` owner acceptance retains non-green UBS findings
+and historical FAIL/UNKNOWN; it is not a transferable waiver.
 Compatible numeric-version changes must retain usable supported routes without
 relaxing signed artifacts, exact approvals, schema/protocol/permission or readback
 semantics. Isolate actual conflicts to affected operations where trust permits.
 
-The current preparation stage produces an unsigned binary/public-input set for
-subsequent assembly. It grants no package update, signing, installation, release
+The **2026-09-30 preparation stage** produced an unsigned binary/public-input set
+for subsequent assembly. That stage granted no package update, signing, installation, release
 switch, provider mutation, secret change, cleanup or profile removal. Retain the
 role defaults below and reuse the established coordinator/reviewer sessions.
 

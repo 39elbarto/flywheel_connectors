@@ -49,8 +49,10 @@ Actual local MCP package upgrade remains unverified; recovery APPLY was not run.
 The final permission-only regression passed on 2026-10-04 in the existing update
 module (19 tests; `permission-only-update-tests-frozen-20261004.log`), including positive
 authorization and stale-review/decision refusal before ledger consumption.
-Independent final review and coordinator closure remain pending; installed
-RC43c source `09cebc4` is unchanged.
+Separate Sol final GO accepted source
+`efb3e22f11c5a715a63a34296cd23eabf653aabc` and 19/19 tests; the coordinator
+closed canonical `.34` at `2026-10-04T03:36:40.074779411Z`.
+Installed RC43c source `09cebc4` is unchanged.
 The exact `09cebc4`/`0e228bf6` owner acceptance retains non-green UBS findings
 and historical FAIL/UNKNOWN; it is not a transferable waiver.
 Compatible numeric-version changes must retain usable supported routes without

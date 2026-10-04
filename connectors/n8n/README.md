@@ -28,8 +28,10 @@ EEC 2.38.4 → 2.41.5 and Hetzner 2.37.10 → 2.41.5, followed by signed RC43c
 from source `09cebc4` and controlled publish/unpublish on both servers.
 An actual local MCP package upgrade and recovery APPLY were not performed.
 The final permission-only approval-binding regression passed on 2026-10-04
-(`permission-only-update-tests-frozen-20261004.log`, 19 module tests); final review and
-coordinator closure remain pending. This test does not change installed RC43c.
+(`permission-only-update-tests-frozen-20261004.log`, 19 module tests). Separate
+Sol final GO accepted source `efb3e22f11c5a715a63a34296cd23eabf653aabc`;
+the coordinator closed canonical `.34` at `2026-10-04T03:36:40.074779411Z`.
+This test does not change installed RC43c.
 Numeric versions remain diagnostic; exact signatures, approvals and reviewed
 schema/permission bindings remain mandatory. The dated acceptance matrix and
 primary evidence, including historical FAIL/UNKNOWN and bounded non-green UBS

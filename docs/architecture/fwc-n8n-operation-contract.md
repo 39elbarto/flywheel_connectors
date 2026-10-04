@@ -2130,8 +2130,10 @@ the dated packets or their FAIL/UNKNOWN outcomes.
 The final missing permission-only regression passed on 2026-10-04 through real
 `authorize_update` and `VerifiedOwnerDecision` bindings (19 update module tests
 passed). This is test-only evidence, not a new installed runtime or provider
-grant. `.34` remains **in progress pending independent final review and
-coordinator closure**; this document does not itself issue closure GO.
+grant. Separate Sol final GO accepted source
+`efb3e22f11c5a715a63a34296cd23eabf653aabc` and 19/19 tests; canonical `.34`
+was **closed by the coordinator at `2026-10-04T03:36:40.074779411Z`**.
+This records actual closure, not additional runtime or live-operation authority.
 
 Installed RC43c runtime source is `09cebc4aaa3c968f3704611325a005a3ced7a237`;
 signed receipt BLAKE3 is

@@ -950,8 +950,108 @@ print(json.dumps({"mode": "recovery-parser-self-test", "cases": 10, "verdict": "
 PY
 }
 
+run_search_read_policy_self_test() {
+  local binary="$1" evidence="$2" assembler
+  assembler="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/n8n_release_assembler.sh"
+  [[ -f "$binary" && -x "$binary" && -d "$evidence" && ! -L "$evidence" ]] || return 1
+  [[ "$(readlink -f -- "$evidence")" == /srv/dev-ssd/fcp/nqm81-35/* ]] || return 1
+  python3 - "$assembler" "$evidence" <<'PY'
+import copy
+import hashlib
+import json
+import pathlib
+import sys
+
+assembler, evidence = sys.argv[1:]
+source = pathlib.Path(assembler).read_text()
+assert source.index('search_read_policy check "$source_release"') < source.index('build_one build --release --package fcp-host --bin fcp-host')
+assert source.index('write_inventory_and_request "$stage_root" "$source_release"') < source.index('search_read_policy apply "$stage_root"')
+assert source.index('search_read_policy apply "$stage_root"') < source.index('write_metadata "$stage_root" "$git_revision"')
+body = source.split("search_read_policy() {", 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n}", 1)[0]
+# Execute the same pure producer definitions, never main/admitted_input/root I/O.
+namespace = {"__name__": "retained_search_policy_fixture"}
+exec(compile(body, assembler + ":search_read_policy", "exec"), namespace)
+from types import SimpleNamespace
+identity = namespace["input_identity"]
+fields = {"st_dev": 2097, "st_ino": 100, "st_uid": 0, "st_gid": 0,
+    "st_mode": 0o100600, "st_nlink": 1, "st_size": 512,
+    "st_mtime_ns": 1000, "st_ctime_ns": 2000}
+before = SimpleNamespace(**fields, st_atime_ns=3000)
+assert identity(before) == identity(SimpleNamespace(**fields, st_atime_ns=4000))
+for field in fields:
+    changed = dict(fields); changed[field] += 1
+    assert identity(before) != identity(SimpleNamespace(**changed, st_atime_ns=3000)), field
+validate = namespace["validate_read_policy"]
+apply = namespace["add_read_inventory"]
+tool = {"name": "search_workflows", "class": "read",
+    "input_schema_digest": namespace["INPUT_PIN"], "output_schema_digest": namespace["OUTPUT_PIN"],
+    "input_schema_present": True, "output_schema_present": True}
+value = {"schema": "fwc.n8n.search-read-policy.v1",
+    "servers": {server: dict(tool) for server in ("eec", "hetzner")}}
+raw = json.dumps(value).encode()
+policy = validate(raw)
+network = {"host_allow": ["synthetic.invalid"], "port_allow": [443], "max_redirects": 0}
+for server in ("eec", "hetzner"):
+    official = {"config": {"server_id": server, "capability_policy": {"approved_tools": []}},
+        "allowed_operations": ["mcp.tools.list"], "operation_network_constraints": {"mcp.tools.list": network}}
+    common = {"config": {"server_id": server}, "allowed_operations": ["n8n.workflows.get"],
+        "operation_network_constraints": {"n8n.workflows.get": network}}
+    before = copy.deepcopy((official, common))
+    result, read = apply(official, common, server, policy)
+    assert (official, common) == before
+    assert result["config"]["capability_policy"]["approved_tools"] == [{key: child for key, child in tool.items() if not key.endswith("_present")}]
+    assert result["operation_network_constraints"]["mcp.n8n.read"] == network
+    assert result["allowed_operations"] == ["mcp.tools.list", "mcp.n8n.read"]
+    assert read["allowed_operations"] == ["n8n.workflows.get", "n8n.workflows.compare", "n8n.validation.run"]
+    assert all(item == network for item in read["operation_network_constraints"].values())
+    for name, changed in (
+        ("duplicate-admitted-tool", copy.deepcopy(result)),
+        ("server-substitution", {**official, "config": {**official["config"], "server_id": "other"}}),
+        ("network-widening", {**official, "operation_network_constraints": {**official["operation_network_constraints"], "mcp.n8n.read": {"host_allow": ["HOSTILE_POLICY_CANARY"]}}}),
+    ):
+        try:
+            apply(changed, common, server, policy)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(name)
+cases = []
+for field, bad in (("name", "execute_workflow"), ("class", "write"),
+    ("input_schema_digest", "sha256:" + "0" * 64), ("output_schema_digest", "sha256:" + "0" * 64),
+    ("input_schema_present", False), ("output_schema_present", False), ("output_schema_present", 1)):
+    changed = copy.deepcopy(value); changed["servers"]["eec"][field] = bad
+    cases.append((field + "-denied", json.dumps(changed).encode()))
+changed = copy.deepcopy(value); del changed["servers"]["hetzner"]
+cases.append(("missing-server", json.dumps(changed).encode()))
+changed = copy.deepcopy(value); changed["servers"]["other"] = tool
+cases.append(("unknown-server", json.dumps(changed).encode()))
+changed = copy.deepcopy(value); changed["servers"]["eec"]["unknown"] = "HOSTILE_POLICY_CANARY"
+cases.append(("unknown-field", json.dumps(changed).encode()))
+cases.extend([("duplicate-json", raw[:-1] + b',"schema":"HOSTILE_POLICY_CANARY"}'),
+    ("malformed", b'HOSTILE_POLICY_CANARY'), ("oversize", b' ' * 8193)])
+for name, data in cases:
+    try:
+        validate(data)
+    except (ValueError, TypeError):
+        pass
+    else:
+        raise AssertionError(name)
+record = {"mode": "search-read-policy-pure-producer", "cases": 2 + 6 + len(cases) + 1 + len(fields),
+    "source_sha256": hashlib.sha256(source.encode()).hexdigest(), "acceptance": False,
+    "admitted_input_root_io_executed": False, "root_execution": False,
+    "prebuild_input_guard_source_bound": True, "verdict": "pass"}
+with (pathlib.Path(evidence) / "search-read-policy-self-test.json").open("x") as stream:
+    json.dump(record, stream, sort_keys=True)
+print(json.dumps(record, sort_keys=True))
+PY
+}
+
 run_producer_replay_self_test() {
   local binary="$1" evidence="$2" assembler
+  if [[ "${FCP_N8N_SEARCH_POLICY_TEST_ONLY:-}" == 1 ]]; then
+    run_search_read_policy_self_test "$binary" "$evidence"
+    return $?
+  fi
   assembler="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/n8n_release_assembler.sh"
   [[ -f "$binary" && -x "$binary" && -d "$evidence" && ! -L "$evidence" ]] || return 1
   [[ "$(readlink -f -- "$evidence")" == /srv/dev-ssd/fcp/nqm81-34/* ]] || return 1

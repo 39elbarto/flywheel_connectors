@@ -2157,12 +2157,14 @@ fn validate_unsigned_release_tree_with_schema_mode(
                 ServerId::Hetzner
             };
             let inventory = read_value(&path, MAX_INVENTORY_BYTES)?;
+            let search = inventory_search_read(root, server, lifecycle_schema_mode)?;
             validate_common_inventory(
                 &inventory,
                 server,
                 inventory_release_root,
                 root,
                 common_inventory_schema_mode,
+                search,
             )?;
         } else if relative_path.ends_with("official-mcp.json") {
             let server = if relative_path.starts_with("inventory/eec") {
@@ -2463,6 +2465,7 @@ fn validate_common_inventory(
     release_root: &Path,
     artifact_root: &Path,
     schema_mode: CommonInventorySchemaMode,
+    search: bool,
 ) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
     let entries: Vec<CommonInventoryEntry> = serde_json::from_value(value.clone())
@@ -2482,7 +2485,10 @@ fn validate_common_inventory(
         ServerId::Eec => (EEC_MCP_HOST, 443_u64),
         ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
     };
-    let expected_operations = common_inventory_operations(schema_mode);
+    let mut expected_operations = common_inventory_operations(schema_mode).to_vec();
+    if search {
+        expected_operations.extend(["n8n.workflows.compare", "n8n.validation.run"]);
+    }
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
         .allowed_operations
@@ -2826,7 +2832,18 @@ fn validate_inventory(
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     validate_official_inventory_policy(config, server, binding, lifecycle_schema_mode)?;
-    validate_official_inventory_permissions(entry, expected_host, expected_port, &expected_binary)
+    let search = config
+        .get("capability_policy")
+        .and_then(Value::as_object)
+        .and_then(fcp_host::n8n_release_read::exact_inventory_search_read)
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
+    validate_official_inventory_permissions(
+        entry,
+        expected_host,
+        expected_port,
+        &expected_binary,
+        search,
+    )
 }
 
 #[cfg(unix)]
@@ -2866,6 +2883,27 @@ fn validate_official_inventory_policy(
 }
 
 #[cfg(unix)]
+fn inventory_search_read(
+    root: &Path,
+    server: ServerId,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+) -> Result<bool, ProvisionError> {
+    let official = read_value(
+        &root.join(format!("inventory/{}-official-mcp.json", server.as_str())),
+        MAX_INVENTORY_BYTES,
+    )?;
+    let search = official
+        .pointer("/0/config/capability_policy")
+        .and_then(Value::as_object)
+        .and_then(fcp_host::n8n_release_read::exact_inventory_search_read)
+        .unwrap_or(false);
+    if search && !matches!(lifecycle_schema_mode, LifecycleSchemaMode::CurrentPerServer) {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
+    Ok(search)
+}
+
+#[cfg(unix)]
 fn validate_official_inventory_tools(
     policy: &serde_json::Map<String, Value>,
     server: ServerId,
@@ -2876,7 +2914,9 @@ fn validate_official_inventory_tools(
         .get("approved_tools")
         .and_then(Value::as_array)
         .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
-    if tools.len() != APPROVED_TOOLS.len() {
+    let search = fcp_host::n8n_release_read::exact_inventory_search_read(policy)
+        .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
+    if search && !matches!(lifecycle_schema_mode, LifecycleSchemaMode::CurrentPerServer) {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     let mut seen = BTreeMap::new();
@@ -2894,6 +2934,10 @@ fn validate_official_inventory_tools(
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
+        if name == "search_workflows" {
+            seen.insert(name, ("search", "read"));
+            continue;
+        }
         if !fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
             || !tool
                 .keys()
@@ -2938,7 +2982,7 @@ fn validate_official_inventory_tools(
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
     }
-    if seen.len() != APPROVED_TOOLS.len() {
+    if seen.len() != tools.len() {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     Ok(())
@@ -3040,6 +3084,7 @@ fn validate_official_inventory_permissions(
     expected_host: &str,
     expected_port: u64,
     expected_binary: &Path,
+    search: bool,
 ) -> Result<(), ProvisionError> {
     let zones = entry
         .get("allowed_zones")
@@ -3067,24 +3112,26 @@ fn validate_official_inventory_permissions(
         .iter()
         .filter_map(Value::as_str)
         .collect::<BTreeSet<_>>();
-    if operations.len() != 2
-        || operation_set != BTreeSet::from(["mcp.tools.list", "mcp.tools.call"])
-    {
+    let mut expected_operations = BTreeSet::from(["mcp.tools.list", "mcp.tools.call"]);
+    if search {
+        expected_operations.insert("mcp.n8n.read");
+    }
+    if operations.len() != expected_operations.len() || operation_set != expected_operations {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     let network = entry
         .get("operation_network_constraints")
         .and_then(Value::as_object)
         .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
-    if network.len() != 2
+    if network.len() != expected_operations.len()
         || !network
             .keys()
-            .all(|key| matches!(key.as_str(), "mcp.tools.list" | "mcp.tools.call"))
+            .all(|key| expected_operations.contains(key.as_str()))
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
-    for operation in ["mcp.tools.list", "mcp.tools.call"] {
+    for operation in expected_operations {
         if network.get(operation) != Some(&expected_network) {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
@@ -4656,6 +4703,46 @@ mod tests {
                 OfficialMcpBinding { server:ServerId::Hetzner, archive_input_schema_digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(), archive_output_schema_digest:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(), execute_input_schema_digest:HETZNER_EXECUTE_INPUT.to_owned(), execute_output_schema_digest:HETZNER_EXECUTE_OUTPUT.to_owned() },
             ], test_owner_verification(), self.owner, self.current.clone(), self.releases.clone())
         }
+
+        fn enable_search_read_from_pure_producer(&self) {
+            let script = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/n8n_release_assembler.sh"
+            );
+            let code = r#"
+import json, pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+body = source.split('search_read_policy() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+ns = {'__name__': 'retained_provision_fixture'}
+exec(compile(body, sys.argv[1], 'exec'), ns)
+tool = {'name':'search_workflows','class':'read','input_schema_digest':ns['INPUT_PIN'],
+    'output_schema_digest':ns['OUTPUT_PIN'],'input_schema_present':True,'output_schema_present':True}
+policy = ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.search-read-policy.v1',
+    'servers':{'eec':tool,'hetzner':tool}}).encode())
+root = pathlib.Path(sys.argv[2])
+for server in ('eec','hetzner'):
+    paths = [root/'inventory'/f'{server}-official-mcp.json',root/'inventory'/f'{server}.json']
+    values = [json.loads(path.read_bytes())[0] for path in paths]
+    outputs = ns['add_read_inventory'](*values, server, policy)
+    for path, output in zip(paths, outputs): path.write_text(json.dumps([output]))
+"#;
+            let output = std::process::Command::new("/usr/bin/python3")
+                .args(["-c", code, script])
+                .arg(&self.stage)
+                .output()
+                .expect("pure producer subprocess");
+            assert!(output.status.success(), "pure producer failed");
+            self.refresh_stage_receipts();
+        }
+
+        fn refresh_stage_receipts(&self) {
+            fs::write(self.stage.join(RECEIPT_FILE), self.receipt()).expect("retained receipt");
+            fs::write(
+                self.stage.join(PROVISION_RECEIPT_FILE),
+                self.provision_receipt(),
+            )
+            .expect("synthetic signed receipt");
+        }
     }
 
     impl Drop for Fixture {
@@ -4664,6 +4751,149 @@ mod tests {
                 let _ = fs::remove_dir_all(&self.root);
             }
         }
+    }
+
+    #[test]
+    fn retained_search_read_producer_unsigned_signer_and_signed_provision_agree() {
+        for search in [false, true] {
+            let fixture = Fixture::retained();
+            if search {
+                fixture.enable_search_read_from_pure_producer();
+            }
+            let request = fixture.request();
+            validate_unsigned_release_tree(
+                &fixture.stage,
+                &fixture.release_id,
+                &request.git_revision,
+                &request.bindings,
+                fixture.owner,
+                &fixture.releases.join(&fixture.release_id),
+            )
+            .expect("same native pre-seed signer validator");
+            request
+                .validate()
+                .expect("real synthetic signed provision control");
+            for server in ["eec", "hetzner"] {
+                let value = read_value(
+                    &fixture
+                        .stage
+                        .join(format!("inventory/{server}-official-mcp.json")),
+                    MAX_INVENTORY_BYTES,
+                )
+                .unwrap();
+                assert_eq!(
+                    fcp_host::n8n_release_read::exact_inventory_search_read(
+                        value[0]["config"]["capability_policy"].as_object().unwrap()
+                    ),
+                    Some(search)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_search_read_signed_policy_negatives_fail_closed() {
+        for server in ["eec", "hetzner"] {
+            for case in [
+                "duplicate",
+                "unknown",
+                "class",
+                "input",
+                "output",
+                "missing_output",
+                "extra_field",
+                "missing_capability",
+                "network",
+                "extra_operation",
+                "common_mismatch",
+            ] {
+                let fixture = Fixture::retained();
+                fixture.enable_search_read_from_pure_producer();
+                let path = fixture
+                    .stage
+                    .join(format!("inventory/{server}-official-mcp.json"));
+                let mut value = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+                match case {
+                    "duplicate" => {
+                        let copy =
+                            value[0]["config"]["capability_policy"]["approved_tools"][4].clone();
+                        value[0]["config"]["capability_policy"]["approved_tools"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(copy);
+                    }
+                    "unknown" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["name"] =
+                            json!("other")
+                    }
+                    "class" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["class"] =
+                            json!("write")
+                    }
+                    "input" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["input_schema_digest"] = json!(
+                            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        )
+                    }
+                    "output" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["output_schema_digest"] = json!(
+                            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        )
+                    }
+                    "missing_output" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("output_schema_digest");
+                    }
+                    "extra_field" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["extra"] =
+                            json!(true)
+                    }
+                    "missing_capability" => value[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|operation| operation != "mcp.n8n.read"),
+                    "network" => {
+                        value[0]["operation_network_constraints"]["mcp.n8n.read"]["max_redirects"] =
+                            json!(1)
+                    }
+                    "extra_operation" => value[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("mcp.other.read")),
+                    "common_mismatch" => {
+                        fixture.remove_common_operation(&fixture.stage, "n8n.validation.run")
+                    }
+                    _ => unreachable!(),
+                }
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+                fixture.refresh_stage_receipts();
+                assert_eq!(
+                    fixture
+                        .request()
+                        .validate()
+                        .expect_err("signed invalid policy denied")
+                        .code(),
+                    ProvisionErrorCode::Policy,
+                    "{server}/{case}"
+                );
+            }
+        }
+        let fixture = Fixture::retained();
+        fixture.enable_search_read_from_pure_producer();
+        let path = fixture.stage.join(PROVISION_RECEIPT_FILE);
+        let mut signed = read_value(&path, MAX_RECEIPT_BYTES).unwrap();
+        signed["signature"]["signature"] = json!("00".repeat(SIGNATURE_SIZE));
+        fs::write(path, serde_json::to_vec(&signed).unwrap()).unwrap();
+        assert_eq!(
+            fixture
+                .request()
+                .validate()
+                .expect_err("damaged signature")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
     }
 
     #[test]

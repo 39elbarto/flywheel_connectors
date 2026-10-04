@@ -7212,25 +7212,43 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_23_operations() {
+    fn operations_info_has_exact_current_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 23);
-        let operation_ids = ops
+        let mut operation_ids = ops
             .iter()
             .map(|operation| operation.id.as_ref())
             .collect::<Vec<_>>();
-        assert!(operation_ids.contains(&"n8n.folders.list"));
-        assert!(operation_ids.contains(&"n8n.folders.get"));
-        assert!(operation_ids.contains(&"n8n.credentials.list"));
-        assert!(operation_ids.contains(&"n8n.workflows.create_draft"));
-        assert!(operation_ids.contains(&"n8n.workflows.update_draft"));
-        assert!(operation_ids.contains(&"n8n.workflows.lifecycle"));
-        assert!(operation_ids.contains(&"n8n.workflows.archive"));
-        assert!(operation_ids.contains(&"n8n.workflows.unarchive"));
-        assert!(operation_ids.contains(&"n8n.workflows.delete_disposable"));
-        assert!(operation_ids.contains(&"n8n.workflows.execute"));
-        assert!(operation_ids.contains(&"n8n.executions.diagnostics"));
-        assert!(operation_ids.contains(&"n8n.mcp_access.reconcile"));
+        operation_ids.sort_unstable();
+        assert_eq!(
+            operation_ids,
+            [
+                "n8n.audit.inspect",
+                "n8n.credentials.list",
+                "n8n.executions.diagnostics",
+                "n8n.executions.get",
+                "n8n.executions.list",
+                "n8n.executions.search",
+                "n8n.folders.get",
+                "n8n.folders.list",
+                "n8n.mcp_access.reconcile",
+                "n8n.projects.list",
+                "n8n.structure.search",
+                "n8n.tags.list",
+                "n8n.validation.run",
+                "n8n.workflows.activate",
+                "n8n.workflows.archive",
+                "n8n.workflows.compare",
+                "n8n.workflows.create_draft",
+                "n8n.workflows.delete_disposable",
+                "n8n.workflows.execute",
+                "n8n.workflows.get",
+                "n8n.workflows.lifecycle",
+                "n8n.workflows.list",
+                "n8n.workflows.search",
+                "n8n.workflows.unarchive",
+                "n8n.workflows.update_draft",
+            ]
+        );
     }
 
     #[test]

@@ -59,18 +59,42 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
         "introspect returned an error"
     );
     assert_eq!(response["result"]["connector_id"], "fcp.n8n");
+    let mut operation_ids = response["result"]["operations"]
+        .as_array()
+        .expect("operation descriptors")
+        .iter()
+        .map(|operation| operation["id"].as_str().expect("operation id"))
+        .collect::<Vec<_>>();
+    operation_ids.sort_unstable();
     assert_eq!(
-        response["result"]["operations"].as_array().map(Vec::len),
-        Some(19)
-    );
-    assert!(
-        response["result"]["operations"]
-            .as_array()
-            .is_some_and(|operations| {
-                operations
-                    .iter()
-                    .any(|operation| operation["id"] == json!("n8n.workflows.unarchive"))
-            })
+        operation_ids,
+        [
+            "n8n.audit.inspect",
+            "n8n.credentials.list",
+            "n8n.executions.diagnostics",
+            "n8n.executions.get",
+            "n8n.executions.list",
+            "n8n.executions.search",
+            "n8n.folders.get",
+            "n8n.folders.list",
+            "n8n.mcp_access.reconcile",
+            "n8n.projects.list",
+            "n8n.structure.search",
+            "n8n.tags.list",
+            "n8n.validation.run",
+            "n8n.workflows.activate",
+            "n8n.workflows.archive",
+            "n8n.workflows.compare",
+            "n8n.workflows.create_draft",
+            "n8n.workflows.delete_disposable",
+            "n8n.workflows.execute",
+            "n8n.workflows.get",
+            "n8n.workflows.lifecycle",
+            "n8n.workflows.list",
+            "n8n.workflows.search",
+            "n8n.workflows.unarchive",
+            "n8n.workflows.update_draft",
+        ]
     );
 
     drop(host_endpoint);

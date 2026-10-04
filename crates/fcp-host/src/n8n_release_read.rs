@@ -1150,27 +1150,97 @@ fn verify_official_inventory_binding(
         .is_some_and(|policy| {
             inventory_policy_matches(policy, expected_server_id, allow_owner_bootstrap_policy)
         });
+    let search = entry
+        .pointer("/config/capability_policy")
+        .and_then(Value::as_object)
+        .and_then(exact_inventory_search_read)
+        .unwrap_or(false);
+    let mut expected_operations = BTreeSet::from(["mcp.tools.list", "mcp.tools.call"]);
+    if search {
+        expected_operations.insert("mcp.n8n.read");
+    }
+    let exact_operations = entry
+        .get("allowed_operations")
+        .and_then(Value::as_array)
+        .is_some_and(|operations| {
+            operations.len() == expected_operations.len()
+                && operations
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<BTreeSet<_>>()
+                    == expected_operations
+        });
+    let exact_read_network = entry
+        .get("operation_network_constraints")
+        .and_then(Value::as_object)
+        .is_some_and(|network| {
+            network.len() == expected_operations.len()
+                && network
+                    .keys()
+                    .all(|key| expected_operations.contains(key.as_str()))
+                && (!search
+                    || (exact_network("mcp.n8n.read")
+                        && network.get("mcp.n8n.read") == network.get("mcp.tools.list")))
+        });
     if !exact("/config/mcp_url", expected_url)
         || !exact("/config/security/description_scan", "block")
         || !exact_policy
         || !exact_network("mcp.tools.list")
         || !exact_network("mcp.tools.call")
-        || entry
-            .pointer("/allowed_operations")
-            .and_then(Value::as_array)
-            .is_none_or(|operations| {
-                operations.len() != 2
-                    || !operations
-                        .iter()
-                        .any(|value| value.as_str() == Some("mcp.tools.list"))
-                    || !operations
-                        .iter()
-                        .any(|value| value.as_str() == Some("mcp.tools.call"))
-            })
+        || !exact_operations
+        || !exact_read_network
     {
         return Err(BundleError::new(BundleErrorCode::InventoryBinding));
     }
     Ok(())
+}
+
+/// Recognize only lifecycle4 or lifecycle4 plus the exact raw-bound search read.
+/// This validates signed data shape, never grants a capability or admits drift.
+#[must_use]
+pub fn exact_inventory_search_read(policy: &serde_json::Map<String, Value>) -> Option<bool> {
+    let tools = policy.get("approved_tools")?.as_array()?;
+    if !matches!(tools.len(), 4 | 5) {
+        return None;
+    }
+    let mut names = BTreeSet::new();
+    for tool in tools {
+        let tool = tool.as_object()?;
+        let name = tool.get("name")?.as_str()?;
+        if !names.insert(name) {
+            return None;
+        }
+        if name == "search_workflows" {
+            if tool.len() != 4
+                || tool.get("class")?.as_str()? != "read"
+                || tool.get("input_schema_digest")?.as_str()?
+                    != "sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714"
+                || tool.get("output_schema_digest")?.as_str()?
+                    != "sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206"
+            {
+                return None;
+            }
+        } else if !matches!(
+            name,
+            "archive_workflow" | "publish_workflow" | "unpublish_workflow" | "execute_workflow"
+        ) || tool.get("class")?.as_str()? != "write"
+            || !fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
+        {
+            return None;
+        }
+    }
+    if ![
+        "archive_workflow",
+        "publish_workflow",
+        "unpublish_workflow",
+        "execute_workflow",
+    ]
+    .iter()
+    .all(|name| names.contains(name))
+    {
+        return None;
+    }
+    Some(names.contains("search_workflows"))
 }
 
 fn exact_approved_tool(
@@ -1410,19 +1480,8 @@ fn inventory_owner_tools(
     policy
         .get("approved_tools")
         .and_then(Value::as_array)
-        .is_some_and(|tools| {
-            tools.len() == 4
-                && tools.iter().all(|tool| {
-                    matches!(
-                        tool.get("name").and_then(Value::as_str),
-                        Some(
-                            "archive_workflow"
-                                | "publish_workflow"
-                                | "unpublish_workflow"
-                                | "execute_workflow"
-                        )
-                    )
-                })
+        .is_some_and(|_tools| {
+            exact_inventory_search_read(policy).is_some_and(|search| !previous || !search)
                 && exact_approved_tool(policy, "execute_workflow", digests.0, digests.1)
         })
 }
@@ -1701,12 +1760,133 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn retained_search_read_signed_bundle_compositions() {
+        assert!(
+            std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some(),
+            "retention required"
+        );
+        for search in [false, true] {
+            let fixture = ReleaseFixture::new_isolated();
+            if search {
+                for server in ["eec", "hetzner"] {
+                    let path = fixture
+                        .root
+                        .join(format!("inventory/{server}-official-mcp.json"));
+                    let mut value: Value =
+                        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                    value[0]["config"]["capability_policy"]["approved_tools"].as_array_mut().unwrap().push(serde_json::json!({
+                        "name":"search_workflows", "class":"read",
+                        "input_schema_digest":"sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714",
+                        "output_schema_digest":"sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206"}));
+                    value[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!("mcp.n8n.read"));
+                    value[0]["operation_network_constraints"]["mcp.n8n.read"] =
+                        value[0]["operation_network_constraints"]["mcp.tools.list"].clone();
+                    fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+                }
+                fixture.write_receipt(None);
+            }
+            let public_key = sign_retained_local_fixture(&fixture);
+            let control = fixture.root.parent().unwrap().join(format!(
+                "search-control-{}-{}",
+                std::process::id(),
+                FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&control).unwrap();
+            fs::set_permissions(&control, fs::Permissions::from_mode(0o700)).unwrap();
+            let current = control.join("current");
+            symlink(&fixture.root, &current).unwrap();
+            let observe = || {
+                verify_signed_local_provider_at(SignedLocalReadContext {
+                    current: &current,
+                    releases: fixture.root.parent().unwrap(),
+                    owner: fixture.owner,
+                    executable: &fixture.executable,
+                    active_key: Some(&public_key),
+                    previous_key: None,
+                })
+            };
+            observe().expect("ordinary synthetic signed bundle accepted");
+            if !search {
+                let path = fixture.root.join("inventory/eec-official-mcp.json");
+                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                value[0]["allowed_operations"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!("mcp.n8n.read"));
+                value[0]["operation_network_constraints"]["mcp.n8n.read"] =
+                    value[0]["operation_network_constraints"]["mcp.tools.list"].clone();
+                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+                fixture.write_receipt(None);
+                sign_retained_local_fixture(&fixture);
+                assert!(
+                    observe().is_err(),
+                    "four-tool mode cannot gain search authority"
+                );
+            }
+            if search {
+                let path = fixture.root.join("inventory/eec-official-mcp.json");
+                let baseline: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                for case in [
+                    "class",
+                    "duplicate",
+                    "pin",
+                    "missing_output",
+                    "network",
+                    "capability",
+                ] {
+                    let mut value = baseline.clone();
+                    match case {
+                        "class" => {
+                            value[0]["config"]["capability_policy"]["approved_tools"][4]["class"] =
+                                serde_json::json!("write")
+                        }
+                        "duplicate" => {
+                            let tool = value[0]["config"]["capability_policy"]["approved_tools"][4]
+                                .clone();
+                            value[0]["config"]["capability_policy"]["approved_tools"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(tool);
+                        }
+                        "pin" => {
+                            value[0]["config"]["capability_policy"]["approved_tools"][4]["input_schema_digest"] =
+                                serde_json::json!("unknown")
+                        }
+                        "missing_output" => {
+                            value[0]["config"]["capability_policy"]["approved_tools"][4]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("output_schema_digest");
+                        }
+                        "network" => {
+                            value[0]["operation_network_constraints"]["mcp.n8n.read"]["max_redirects"] =
+                                serde_json::json!(1)
+                        }
+                        "capability" => value[0]["allowed_operations"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|value| value != "mcp.n8n.read"),
+                        _ => unreachable!(),
+                    }
+                    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                    fixture.write_receipt(None);
+                    assert_eq!(sign_retained_local_fixture(&fixture), public_key);
+                    assert!(observe().is_err(), "{case}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn retained_signed_local_read_factory_binds_policy_artifact_signature_and_current() {
         assert!(
             std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some(),
             "retention required"
         );
-        let fixture = ReleaseFixture::new();
+        let fixture = ReleaseFixture::new_isolated();
         let public_key = sign_retained_local_fixture(&fixture);
         let control = fixture.root.parent().expect("parent").join(format!(
             "signed-local-control-{}-{}",
@@ -1748,7 +1928,7 @@ mod tests {
                 .code(),
             BundleErrorCode::Digest
         );
-        let unsigned_fixture = ReleaseFixture::new();
+        let unsigned_fixture = ReleaseFixture::new_isolated();
         let unsigned_pointer = control.join("unsigned-current");
         symlink(&unsigned_fixture.root, &unsigned_pointer).expect("unsigned pointer");
         assert!(
@@ -1763,7 +1943,7 @@ mod tests {
             .is_err(),
             "bootstrap/missing signature cannot authorize a provider"
         );
-        let artifact_fixture = ReleaseFixture::new();
+        let artifact_fixture = ReleaseFixture::new_isolated();
         let artifact_key = sign_retained_local_fixture(&artifact_fixture);
         let artifact_pointer = control.join("artifact-current");
         symlink(&artifact_fixture.root, &artifact_pointer).expect("artifact pointer");
@@ -1796,6 +1976,24 @@ mod tests {
     impl ReleaseFixture {
         fn new() -> Self {
             let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
+            Self::new_in(parent)
+        }
+
+        fn new_isolated() -> Self {
+            assert!(std::env::var_os("FWC_N8N_RETAIN_TEST_FIXTURES").is_some());
+            let shared = fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
+            let parent = shared.join(format!(
+                "retained-release-parent-{}-{}",
+                std::process::id(),
+                FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&parent).expect("exclusive retained releases parent");
+            fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
+                .expect("restrict retained releases parent");
+            Self::new_in(parent)
+        }
+
+        fn new_in(parent: PathBuf) -> Self {
             let root = loop {
                 let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
                 let release_id = format!("fwc-n8n-test-{}-{sequence}", std::process::id());

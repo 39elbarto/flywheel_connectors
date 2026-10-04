@@ -701,6 +701,144 @@ copy_templates() {
   install -o root -g root -m 0644 "$source_release/policy/local-mcp.json" "$stage_root/policy/local-mcp.json"
 }
 
+search_read_policy() {
+  # Opt-in data is admitted separately by the protected caller. A valid proposal
+  # or this pure check is not owner approval. There is no caller-selected path.
+  local admission="${FWC_N8N_SEARCH_READ_POLICY_SHA256:-}"
+  [[ -n "$admission" ]] || return 0
+  [[ "$admission" =~ ^[0-9a-f]{64}$ ]] || die "search read policy admission digest is invalid"
+  python3 - "$1" "$admission" "${2:-}" <<'PY'
+import copy
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+INPUT = "/srv/dev-ssd/rc41-inputs/search-read-policy.json"
+INPUT_PIN = "sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714"
+OUTPUT_PIN = "sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206"
+
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("search read policy denied")
+        result[key] = value
+    return result
+
+def validate_read_policy(raw):
+    if len(raw) > 8192:
+        raise ValueError("search read policy denied")
+    value = json.loads(raw, object_pairs_hook=closed_object)
+    expected = {"name": "search_workflows", "class": "read",
+        "input_schema_digest": INPUT_PIN, "output_schema_digest": OUTPUT_PIN,
+        "input_schema_present": True, "output_schema_present": True}
+    if (not isinstance(value, dict) or set(value) != {"schema", "servers"}
+        or value["schema"] != "fwc.n8n.search-read-policy.v1"
+        or not isinstance(value["servers"], dict)
+        or set(value["servers"]) != {"eec", "hetzner"}):
+        raise ValueError("search read policy denied")
+    for server in ("eec", "hetzner"):
+        observed = value["servers"][server]
+        if (not isinstance(observed, dict) or observed != expected
+            or observed["input_schema_present"] is not True
+            or observed["output_schema_present"] is not True):
+            raise ValueError("search read policy denied")
+    return value
+
+def add_read_inventory(official, common, server, policy):
+    official, common = copy.deepcopy(official), copy.deepcopy(common)
+    if (official["config"]["server_id"] != server
+        or common["config"]["server_id"] != server):
+        raise ValueError("search read policy denied")
+    tools = official["config"]["capability_policy"]["approved_tools"]
+    if any(tool["name"] == "search_workflows" for tool in tools):
+        raise ValueError("search read policy denied")
+    tool = dict(policy["servers"][server])
+    del tool["input_schema_present"], tool["output_schema_present"]
+    tools.append(tool)
+    for inventory, operation, source in (
+        (official, "mcp.n8n.read", "mcp.tools.list"),
+        (common, "n8n.workflows.compare", "n8n.workflows.get"),
+        (common, "n8n.validation.run", "n8n.workflows.get"),
+    ):
+        network = inventory["operation_network_constraints"]
+        if source not in inventory["allowed_operations"] or not isinstance(network.get(source), dict):
+            raise ValueError("search read policy denied")
+        if operation in network and network[operation] != network[source]:
+            raise ValueError("search read policy denied")
+        if operation not in inventory["allowed_operations"]:
+            inventory["allowed_operations"].append(operation)
+        network[operation] = copy.deepcopy(network[source])
+    return official, common
+
+def input_identity(meta):
+    return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+        meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+
+def admitted_input(digest):
+    # All ancestors and the data file remain root-controlled and non-symlinked.
+    for name in ("/srv", "/srv/dev-ssd", "/srv/dev-ssd/rc41-inputs"):
+        meta = os.lstat(name)
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError("search read policy denied")
+    fd = os.open(INPUT, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
+            or before.st_gid != 0 or stat.S_IMODE(before.st_mode) != 0o600):
+            raise ValueError("search read policy denied")
+        raw = stream.read(8193)
+        after = os.fstat(stream.fileno())
+    if (input_identity(before) != input_identity(after) or input_identity(os.lstat(INPUT)) != input_identity(after)
+        or hashlib.sha256(raw).hexdigest() != digest):
+        raise ValueError("search read policy denied")
+    return validate_read_policy(raw)
+
+def main():
+    mode, digest, stage = sys.argv[1:]
+    policy = admitted_input(digest)
+    prefix = {"check": "/usr/local/lib/fwc-n8n/releases/",
+        "apply": "/var/lib/fwc-n8n/staging/"}.get(mode)
+    if (prefix is None or not stage.startswith(prefix)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", stage[len(prefix):])):
+        raise ValueError("search read policy denied")
+    root = pathlib.Path(stage)
+    for directory in (root, root / "inventory"):
+        meta = directory.lstat()
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError("search read policy denied")
+    updates = []
+    for server in ("eec", "hetzner"):
+        paths = [root / "inventory" / f"{server}-official-mcp.json",
+            root / "inventory" / f"{server}.json"]
+        values = []
+        for path in paths:
+            meta = path.lstat()
+            if not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+                raise ValueError("search read policy denied")
+            parsed = json.loads(path.read_bytes(), object_pairs_hook=closed_object)
+            if not isinstance(parsed, list) or len(parsed) != 1 or not isinstance(parsed[0], dict):
+                raise ValueError("search read policy denied")
+            values.append(parsed[0])
+        outputs = add_read_inventory(*values, server, policy)
+        for path, output in zip(paths, outputs):
+            updates.append((path, output))
+    if mode == "apply":
+        for path, output in updates:
+            path.write_text(json.dumps([output], indent=2) + "\n")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        raise SystemExit("search read policy denied") from None
+PY
+}
+
 write_inventory_and_request() {
   local stage_root="$1"
   local source_release="$2"
@@ -1056,6 +1194,7 @@ main() {
   require_immutable_template_release "$source_release"
   # Refuse inconsistent admitted inputs before any Cargo/build or stage writes.
   validate_official_schema_baselines "$source_release/bin/fwc-n8n"
+  search_read_policy check "$source_release"
   RELEASE_ID="$release_id"
   stage_root="${STAGING_ROOT}/${release_id}"
   [[ ! -e "$stage_root" ]] || die "staging target already exists; refusing to overwrite"
@@ -1085,6 +1224,7 @@ main() {
   write_local_mcp_policy "$stage_root" "$hash_helper"
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"
+  search_read_policy apply "$stage_root"
   write_metadata "$stage_root" "$git_revision" "$hash_helper"
   echo "assembled_release=${release_id}"
   echo "git_revision=${git_revision}"

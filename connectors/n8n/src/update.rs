@@ -1263,6 +1263,84 @@ mod tests {
     }
 
     #[test]
+    fn permission_only_change_requires_exact_review_and_owner_decision() {
+        let current = snapshot("2.69.0", vec![tool("search_nodes", ToolImpact::Read)])
+            .normalize_and_validate()
+            .unwrap();
+        let mut candidate = current.clone();
+        candidate.tools[0]
+            .permissions
+            .insert("permission-reviewed".into());
+        let DetectionOutcome::ReviewRequired { review } =
+            detect_update(current.clone(), candidate.clone()).unwrap()
+        else {
+            panic!("expected permission review");
+        };
+        assert_eq!(
+            review.diff.changed_tools,
+            vec![ChangedTool {
+                name: "search_nodes".into(),
+                changes: BTreeSet::from([ToolChange::Permissions]),
+            }]
+        );
+        assert!(review.diff.flags.contains(&UpdateFlag::Breaking));
+        let decision = owner_decision(&review, ReviewDecision::Approved);
+        let mut control_ledger = FakeLedger::default();
+        authorize_update(
+            current.clone(),
+            verified_candidate(candidate.clone()),
+            &review,
+            &decision,
+            &mut control_ledger,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(control_ledger.consumed.len(), 1);
+
+        let mut altered = candidate.clone();
+        altered.tools[0]
+            .permissions
+            .insert("permission-altered".into());
+        let mut permissions_restored = altered.clone();
+        permissions_restored.tools[0].permissions = current.tools[0].permissions.clone();
+        assert_eq!(permissions_restored, current);
+        let mut stale_review_ledger = FakeLedger::default();
+        assert_eq!(
+            authorize_update(
+                current.clone(),
+                verified_candidate(altered.clone()),
+                &review,
+                &decision,
+                &mut stale_review_ledger,
+                1_000,
+            ),
+            Err(UpdateError::ApprovalMismatch)
+        );
+        assert!(stale_review_ledger.consumed.is_empty());
+
+        let DetectionOutcome::ReviewRequired {
+            review: altered_review,
+        } = detect_update(current.clone(), altered.clone()).unwrap()
+        else {
+            panic!("expected altered permission review");
+        };
+        assert_eq!(altered_review.diff, review.diff);
+        let mut stale_decision_ledger = FakeLedger::default();
+        assert_eq!(
+            authorize_update(
+                current,
+                verified_candidate(altered),
+                &altered_review,
+                &decision,
+                &mut stale_decision_ledger,
+                1_000,
+            ),
+            Err(UpdateError::ApprovalMismatch)
+        );
+        assert!(stale_decision_ledger.consumed.is_empty());
+    }
+
+    #[test]
     fn approval_for_other_version_is_rejected() {
         let (current, candidate, review) = review_pair();
         let mut decision = owner_decision(&review, ReviewDecision::Approved);

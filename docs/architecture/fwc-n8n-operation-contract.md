@@ -2121,18 +2121,17 @@ the dated packets or their FAIL/UNKNOWN outcomes.
 | Harmless catalog metadata/order changes | `compatibility-self-test.log`, `bridge-lib.log`, `final-bridge-profile.log`: deterministic projection preserves significant fields; the self-test still reports `acceptance:false`. |
 | Removed operation; renamed/changed required field; incompatible output/readback | `final-n8n.log`, `bridge-boundaries-2.log`, `resume-host-process.log`: refusal and exact readback bindings. The two new publish failure reasons were significant, separately reviewed and admitted in `20261003-publish-reason-baseline-proposal.json`; no automatic enrollment. |
 | New risky tool / unknown authority | `host-official-consumer.log`: unknown profile/authority refusal is checked. This does not test permission-only drift. |
-| Changed permission | Source boundary: `connectors/n8n/src/update.rs:852/885`, `diff_snapshots` classifies `ToolChange::Permissions` as breaking. **MISSING:** a permission-only negative regression; the cited host/schema/process logs do not establish this criterion. |
+| Changed permission | `permission-only-update-tests-frozen-20261004.log`: `permission_only_change_requires_exact_review_and_owner_decision` holds all non-permission fields constant, asserts exact `ToolChange::Permissions` and `Breaking`, authorizes the positive control, and rejects both stale review and stale owner decision with `ApprovalMismatch` before ledger consumption. The earlier host/schema/process logs were not evidence for this criterion. |
 | Protocol negotiation failure; local binary tamper; expired evidence | `protocol-set-matrix.log`, `final-n8n.log`, `final-preflight-self-test.log`: source/CLI trust, protocol and expiry refusals, not live tamper experiments. |
 | One affected operation blocked while unrelated approved reads remain usable | `bridge-boundaries-2.log`, `final-host-local-lib.log`, `rc42-install-read-manifest.json`: operation isolation plus installed EEC/Hetzner catalogs and local knowledge read. |
 | Local process and installed custom/runner behavior | `final-n8n.log`, `resume-host-process.log`; `upgrade-eec-installed-renderer-proof.json`, `hetz-installed-2.41.5-final-acceptance.json`; `installed-runner-live-20261003-{eec,hetzner}/readonly-reconciliation-flat1/public-proof.json`: EEC internal JS42, Hetzner external JS42/Python43. EEC Python/external runner is not claimed. |
 | Signed package, approval canonicalization, independent readback and teardown | `rc43c-actual-unsigned-review-packet.json`, `rc43c-actual-signed-preflight-packet.json`, `rc43c-actual-installed-review-packet.json`; `rc43c-controlled-publication-final-manifest.json`: one controlled publish/unpublish per server, independent GETs, no workflow execution or webhook invocation in that cycle. |
 
-`.34` remains **in progress**; this matrix is not complete acceptance or closure
-GO. The minimum remaining step is one targeted deterministic `update.rs`
-permission-only regression with versions, input/output schemas and protocol
-otherwise equal: assert `ToolChange::Permissions` plus `Breaking`, and that a
-stale approval cannot authorize the altered permissions. It requires no provider
-grant, live execution or package upgrade and was not implemented in this audit.
+The final missing permission-only regression passed on 2026-10-04 through real
+`authorize_update` and `VerifiedOwnerDecision` bindings (19 update module tests
+passed). This is test-only evidence, not a new installed runtime or provider
+grant. `.34` remains **in progress pending independent final review and
+coordinator closure**; this document does not itself issue closure GO.
 
 Installed RC43c runtime source is `09cebc4aaa3c968f3704611325a005a3ced7a237`;
 signed receipt BLAKE3 is

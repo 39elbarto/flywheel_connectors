@@ -46,6 +46,11 @@ separate source/local-process, installed-read and live acceptance: EEC
 and controlled publish/unpublish on both servers. See the
 [dated criterion/evidence matrix](../architecture/fwc-n8n-operation-contract.md#34-acceptance-update--2026-10-04).
 Actual local MCP package upgrade remains unverified; recovery APPLY was not run.
+The final permission-only regression passed on 2026-10-04 in the existing update
+module (19 tests; `permission-only-update-tests-frozen-20261004.log`), including positive
+authorization and stale-review/decision refusal before ledger consumption.
+Independent final review and coordinator closure remain pending; installed
+RC43c source `09cebc4` is unchanged.
 The exact `09cebc4`/`0e228bf6` owner acceptance retains non-green UBS findings
 and historical FAIL/UNKNOWN; it is not a transferable waiver.
 Compatible numeric-version changes must retain usable supported routes without

@@ -2959,6 +2959,93 @@ struct RuntimeObserverAuthority {
     boot_id: String,
     release: String,
     seen_revision: std::sync::atomic::AtomicU64,
+    launch_policy: RuntimeObserverLaunchPolicy,
+}
+
+// An integrity contract, not an OS privilege or production constructor.
+// Only the existing private fixture supplies it until the fixed isolated
+// launch channel and original host authorization have been admitted.
+#[derive(Clone)]
+struct ObserverSupervisorIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Clone)]
+struct ObserverProviderIdentity {
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ObserverLaunchRoute {
+    RestConnector,
+    McpBridge,
+    LocalValidation,
+    LocalKnowledge,
+}
+
+struct RuntimeObserverLaunchPolicy {
+    supervisor: ObserverSupervisorIdentity,
+    provider: ObserverProviderIdentity,
+    launcher_digest: [u8; 32],
+    routes: BTreeMap<ObserverLaunchRoute, ObserverEntrypointBinding>,
+    inherited_fds: BTreeMap<i32, ObserverInheritedFdRole>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObserverInheritedFdRole {
+    Stdin,
+    Stdout,
+    Stderr,
+    ProviderInvocation,
+    ObserverWriter,
+}
+
+struct ObserverEntrypointBinding {
+    // Digests of the exact immutable executable, argv and environment.
+    artifact: [u8; 32],
+    arguments: [u8; 32],
+    environment: [u8; 32],
+}
+
+impl RuntimeObserverLaunchPolicy {
+    fn validate(&self) -> Result<(), LifecycleError> {
+        let all_routes = BTreeSet::from([
+            ObserverLaunchRoute::RestConnector,
+            ObserverLaunchRoute::McpBridge,
+            ObserverLaunchRoute::LocalValidation,
+            ObserverLaunchRoute::LocalKnowledge,
+        ]);
+        if self.supervisor.uid == 0
+            || self.supervisor.gid == 0
+            || self.provider.uid == 0
+            || self.provider.gid == 0
+            || self.supervisor.uid == self.provider.uid
+            || self.supervisor.gid == self.provider.gid
+            || self.launcher_digest == [0; 32]
+            || self.routes.keys().copied().collect::<BTreeSet<_>>() != all_routes
+            || self.routes.values().any(|binding| {
+                binding.artifact == [0; 32]
+                    || binding.arguments == [0; 32]
+                    || binding.environment == [0; 32]
+            })
+            || self.inherited_fds.get(&0) != Some(&ObserverInheritedFdRole::Stdin)
+            || self.inherited_fds.get(&1) != Some(&ObserverInheritedFdRole::Stdout)
+            || self.inherited_fds.get(&2) != Some(&ObserverInheritedFdRole::Stderr)
+            || self.inherited_fds.len() > 4
+            || self.inherited_fds.iter().any(|(fd, role)| {
+                *fd < 0
+                    || *fd > 255
+                    || (*fd >= 3 && *role != ObserverInheritedFdRole::ProviderInvocation)
+                    || *role == ObserverInheritedFdRole::ObserverWriter
+            })
+        {
+            return Err(observer_refused());
+        }
+        Ok(())
+    }
 }
 
 fn observer_refused() -> LifecycleError {
@@ -2971,6 +3058,7 @@ impl RuntimeObserverAuthority {
     #[cfg(unix)]
     fn validate_namespace(&self) -> Result<(), LifecycleError> {
         use std::os::unix::fs::MetadataExt;
+        self.launch_policy.validate()?;
         let parent = std::fs::symlink_metadata(self.path.parent().ok_or_else(observer_refused)?)
             .map_err(|_| observer_refused())?;
         let lock = std::fs::symlink_metadata(&self.lock_path).map_err(|_| observer_refused())?;
@@ -3175,6 +3263,34 @@ impl HostAdminStateStore {
                 boot_id: "fixture-boot".to_owned(),
                 release: "fixture-release".to_owned(),
                 seen_revision: std::sync::atomic::AtomicU64::new(0),
+                launch_policy: RuntimeObserverLaunchPolicy {
+                    supervisor: ObserverSupervisorIdentity { uid: 971, gid: 971 },
+                    provider: ObserverProviderIdentity { uid: 972, gid: 972 },
+                    launcher_digest: [1; 32],
+                    routes: [
+                        ObserverLaunchRoute::RestConnector,
+                        ObserverLaunchRoute::McpBridge,
+                        ObserverLaunchRoute::LocalValidation,
+                        ObserverLaunchRoute::LocalKnowledge,
+                    ]
+                    .into_iter()
+                    .map(|route| {
+                        (
+                            route,
+                            ObserverEntrypointBinding {
+                                artifact: [2; 32],
+                                arguments: [3; 32],
+                                environment: [4; 32],
+                            },
+                        )
+                    })
+                    .collect(),
+                    inherited_fds: BTreeMap::from([
+                        (0, ObserverInheritedFdRole::Stdin),
+                        (1, ObserverInheritedFdRole::Stdout),
+                        (2, ObserverInheritedFdRole::Stderr),
+                    ]),
+                },
             })),
         }
     }
@@ -3248,6 +3364,109 @@ impl HostAdminStateStore {
             })
             .unwrap();
     }
+
+    fn observer_fixture_scoped_query(
+        &self,
+        token: CapabilityToken,
+        key: [u8; 32],
+        binding: &ObserverFixtureQueryBinding,
+    ) -> Result<usize, LifecycleError> {
+        if !matches!(binding.server.as_str(), "eec" | "hetzner")
+            || binding.principal.is_empty()
+            || binding
+                .correlation
+                .as_ref()
+                .is_some_and(|id| id.is_empty() || id.len() > 256)
+        {
+            return Err(observer_refused());
+        }
+        let resource = format!("fwc-n8n://{}", binding.server);
+        let verified =
+            fcp_core::CapabilityVerifier::new(key, binding.zone.clone(), binding.instance.clone())
+                .verify_bound(
+                    token,
+                    &CapabilityId::new("n8n.runtime.read").map_err(|_| observer_refused())?,
+                    &OperationId::new("n8n.runtime.status").map_err(|_| observer_refused())?,
+                    &[resource],
+                )
+                .map_err(|_| observer_refused())?;
+        if verified
+            .claims()
+            .get_expiration()
+            .is_none_or(|expiry| expiry <= Utc::now().timestamp())
+            || verified.claims().get_principal_id() != Some(binding.principal.as_str())
+        {
+            return Err(observer_refused());
+        }
+        // This private fixture supports only the resource caveat handled by the
+        // real core verifier. It does not erase unimplemented mandatory caveats.
+        if let Some(constraints) = verified
+            .claims()
+            .get(fcp_crypto::cose::fcp2_claims::CONSTRAINTS)
+        {
+            let fields = constraints.as_map().ok_or_else(observer_refused)?;
+            if fields
+                .iter()
+                .any(|(key, _)| key.as_text() != Some("resource_allow"))
+            {
+                return Err(observer_refused());
+            }
+        }
+        let authority = self
+            .observer_authority
+            .as_ref()
+            .ok_or_else(observer_refused)?;
+        let ((), snapshot) = authority.locked_snapshot(|_| Ok(()), false)?;
+        let observer = snapshot.runtime_observer.ok_or_else(observer_refused)?;
+        if binding.accepted_session.epoch != observer.epoch
+            || binding.accepted_session.instance != binding.instance
+            || !observer.sessions.values().any(|record| {
+                record.session == binding.accepted_session.session
+                    && record.instance == binding.instance.as_str()
+                    && record.principal == binding.principal
+                    && record.zone == binding.zone.as_str()
+                    && record.server == binding.server
+            })
+        {
+            return Err(observer_refused());
+        }
+        Ok(observer
+            .sessions
+            .values()
+            .filter(|record| {
+                record.principal == binding.principal
+                    && record.zone == binding.zone.as_str()
+                    && record.server == binding.server
+                    && record.instance == binding.instance.as_str()
+                    && record.session == binding.accepted_session.session
+                    && binding
+                        .correlation
+                        .as_ref()
+                        .is_none_or(|id| &record.correlation == id)
+                    && !matches!(record.phase, RuntimeObservedPhase::Retired)
+            })
+            .count())
+    }
+}
+
+#[cfg(all(test, unix))]
+struct ObserverFixtureQueryBinding {
+    instance: InstanceId,
+    zone: fcp_core::ZoneId,
+    principal: String,
+    server: String,
+    correlation: Option<String>,
+    accepted_session: ObserverFixtureAcceptedSession,
+}
+
+// No production constructor or peer-controlled session field. This is only a
+// sealed synthetic accepted-handshake stand-in, not proof of a real handshake.
+#[cfg(all(test, unix))]
+#[derive(Clone)]
+struct ObserverFixtureAcceptedSession {
+    instance: InstanceId,
+    session: String,
+    epoch: String,
 }
 
 /// A sealed pending launch, never constructible from invocation JSON or an
@@ -5993,6 +6212,272 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("fixture-principal")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_fixture_immutable_launch_policy_requires_isolated_roles_and_all_routes() {
+        for case in [
+            "valid",
+            "same_uid",
+            "same_gid",
+            "root_provider",
+            "missing_launcher",
+            "missing_route",
+            "missing_artifact",
+            "missing_argv",
+            "missing_environment",
+            "writer_fd",
+            "invocation_fd",
+        ] {
+            let root = observer_retained_root();
+            let mut store = HostAdminStateStore::observer_fixture(root.join("state.json"));
+            let authority =
+                std::sync::Arc::get_mut(store.observer_authority.as_mut().unwrap()).unwrap();
+            match case {
+                "same_uid" => {
+                    authority.launch_policy.provider.uid = authority.launch_policy.supervisor.uid;
+                }
+                "same_gid" => {
+                    authority.launch_policy.provider.gid = authority.launch_policy.supervisor.gid;
+                }
+                "root_provider" => authority.launch_policy.provider.uid = 0,
+                "missing_launcher" => authority.launch_policy.launcher_digest = [0; 32],
+                "missing_route" => {
+                    authority
+                        .launch_policy
+                        .routes
+                        .remove(&ObserverLaunchRoute::McpBridge);
+                }
+                "writer_fd" => {
+                    authority
+                        .launch_policy
+                        .inherited_fds
+                        .insert(17, ObserverInheritedFdRole::ObserverWriter);
+                }
+                "invocation_fd" => {
+                    authority
+                        .launch_policy
+                        .inherited_fds
+                        .insert(3, ObserverInheritedFdRole::ProviderInvocation);
+                }
+                "missing_artifact" => {
+                    authority
+                        .launch_policy
+                        .routes
+                        .get_mut(&ObserverLaunchRoute::LocalKnowledge)
+                        .unwrap()
+                        .artifact = [0; 32];
+                }
+                "missing_argv" => {
+                    authority
+                        .launch_policy
+                        .routes
+                        .get_mut(&ObserverLaunchRoute::LocalKnowledge)
+                        .unwrap()
+                        .arguments = [0; 32];
+                }
+                "missing_environment" => {
+                    authority
+                        .launch_policy
+                        .routes
+                        .get_mut(&ObserverLaunchRoute::LocalKnowledge)
+                        .unwrap()
+                        .environment = [0; 32];
+                }
+                _ => (),
+            }
+            assert_eq!(
+                authority.validate_namespace().is_ok(),
+                matches!(case, "valid" | "invocation_fd"),
+                "{case}"
+            );
+        }
+        assert!(serde_json::from_str::<ObserverLaunchRoute>("\"generic_run_as\"").is_err());
+        assert!(serde_json::from_str::<ObserverLaunchRoute>("null").is_err());
+    }
+
+    fn observer_query_fixture_token(
+        instance: &InstanceId,
+        key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        expired: bool,
+        unsupported_caveat: bool,
+    ) -> CapabilityToken {
+        let mut fields = vec![(
+            ciborium::Value::Text("resource_allow".into()),
+            ciborium::Value::Array(vec![ciborium::Value::Text("fwc-n8n://eec".into())]),
+        )];
+        if unsupported_caveat {
+            fields.push((
+                ciborium::Value::Text("max_calls".into()),
+                ciborium::Value::Integer(1.into()),
+            ));
+        }
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(fields), &mut bytes).unwrap();
+        let now = Utc::now();
+        CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id("n8n.runtime.read")
+                .zone_id("z:fixture")
+                .target_instance(instance.as_str())
+                .principal("fixture-principal")
+                .operations(&["n8n.runtime.status"])
+                .issuer("node:fixture")
+                .validity(
+                    now - chrono::Duration::minutes(2),
+                    now + chrono::Duration::seconds(if expired { -1 } else { 60 }),
+                )
+                .try_constraints_cbor(&bytes)
+                .unwrap()
+                .sign(key)
+                .unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_fixture_bound_query_and_crashed_launch_remain_scope_limited() {
+        let root = observer_retained_root();
+        let path = root.join("state.json");
+        let store = HostAdminStateStore::observer_fixture(path);
+        let instance = InstanceId::new();
+        let binding = ObserverFixtureQueryBinding {
+            instance: instance.clone(),
+            zone: "z:fixture".parse().unwrap(),
+            principal: "fixture-principal".into(),
+            server: "eec".into(),
+            correlation: Some("owned-call".into()),
+            accepted_session: ObserverFixtureAcceptedSession {
+                instance: instance.clone(),
+                session: "fixture-session".into(),
+                epoch: "private-fixture-epoch".into(),
+            },
+        };
+        let pending = store
+            .observer_fixture_pending("owned-call", "fixture-artifact")
+            .unwrap();
+        store
+            .observer_authority
+            .as_ref()
+            .unwrap()
+            .transaction(|snapshot| {
+                snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .unwrap()
+                    .sessions
+                    .get_mut("owned-call")
+                    .unwrap()
+                    .instance = instance.as_str().into();
+                Ok(())
+            })
+            .unwrap();
+        let key = test_signing_key();
+        let token =
+            |expired, caveat| observer_query_fixture_token(&instance, &key, expired, caveat);
+        let public = key.verifying_key().to_bytes();
+        assert_eq!(
+            store
+                .observer_fixture_scoped_query(token(false, false), public, &binding)
+                .unwrap(),
+            1
+        );
+        for case in [
+            "principal",
+            "zone",
+            "server",
+            "instance",
+            "signature",
+            "expiry",
+            "caveat",
+            "session",
+            "owner_epoch",
+        ] {
+            let mut altered = ObserverFixtureQueryBinding {
+                instance: binding.instance.clone(),
+                zone: binding.zone.clone(),
+                principal: binding.principal.clone(),
+                server: binding.server.clone(),
+                correlation: binding.correlation.clone(),
+                accepted_session: binding.accepted_session.clone(),
+            };
+            let mut verification_key = public;
+            match case {
+                "principal" => altered.principal = "caller-other".into(),
+                "zone" => altered.zone = "z:owner".parse().unwrap(),
+                "server" => altered.server = "hetzner".into(),
+                "instance" => altered.instance = InstanceId::new(),
+                "signature" => verification_key[0] ^= 1,
+                "session" => altered.accepted_session.session = "caller-supplied-session".into(),
+                "owner_epoch" => {
+                    altered.accepted_session.epoch = "different-owner-incarnation".into();
+                }
+                _ => (),
+            }
+            assert!(
+                store
+                    .observer_fixture_scoped_query(
+                        token(case == "expiry", case == "caveat"),
+                        verification_key,
+                        &altered
+                    )
+                    .is_err(),
+                "{case}"
+            );
+        }
+        let mut other_call = binding;
+        other_call.correlation = Some("unobserved-call".into());
+        assert_eq!(
+            store
+                .observer_fixture_scoped_query(token(false, false), public, &other_call)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store.observer_fixture_status().unwrap(),
+            (None, 1),
+            "empty scoped result does not establish global idle"
+        );
+        drop(pending);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_fixture_crash_and_owner_epoch_never_retire_pending() {
+        let root = observer_retained_root();
+        let path = root.join("state.json");
+        let store = HostAdminStateStore::observer_fixture(path.clone());
+        let pending = store
+            .observer_fixture_pending("owned-call", "fixture-artifact")
+            .unwrap();
+        pending.claim("fixture-artifact").unwrap();
+        drop(pending);
+        let restarted = HostAdminStateStore::observer_fixture(path.clone());
+        assert_eq!(
+            restarted.observer_fixture_status().unwrap(),
+            (None, 1),
+            "crashed launch is not retired by Drop or reopening"
+        );
+        let authority = restarted.observer_authority.as_ref().unwrap();
+        authority
+            .transaction(|snapshot| {
+                snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .unwrap()
+                    .coverage_complete = false;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(restarted.observer_fixture_status().unwrap(), (None, 1));
+        let mut changed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        changed["runtime_observer"]["epoch"] = Value::from("other-owner-incarnation");
+        std::fs::write(&path, changed.to_string()).unwrap();
+        assert!(
+            restarted.observer_fixture_status().is_err(),
+            "another writer incarnation cannot be read as complete"
         );
     }
 

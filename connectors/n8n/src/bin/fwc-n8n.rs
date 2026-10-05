@@ -1329,7 +1329,9 @@ struct PublicTarget {
     server: Option<String>,
     resource_uri: Option<String>,
     project_id: Option<String>,
+    project_name: Option<String>,
     workflow_id: Option<String>,
+    workflow_name: Option<String>,
     execution_id: Option<String>,
     #[serde(default)]
     candidate_servers: Vec<String>,
@@ -1401,6 +1403,9 @@ fn public_targets_resolve(bytes: &[u8]) -> Result<Value, AppError> {
 
 fn resolve_exact_public_target(input: PublicTarget) -> Result<Value, AppError> {
     use fcp_n8n::router::{CanonicalResourceUri, ServerId};
+    if input.workflow_name.is_some() || input.project_name.is_some() {
+        return Err(AppError::new("target_provider_read_required"));
+    }
     let server = input
         .server
         .as_deref()
@@ -1494,6 +1499,14 @@ fn public_targets_resolve_with_reads<F>(
 where
     F: FnMut(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
 {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    let parsed: LocalRunOnceInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    if parsed.input.get("workflowName").is_some() || parsed.input.get("projectName").is_some() {
+        return resolve_workflow_name_with_reads(bytes, started, dispatch);
+    }
     let resolved = public_targets_resolve(bytes)?;
     let envelope: LocalRunOnceInput =
         serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
@@ -1524,6 +1537,229 @@ where
         1 => json!({"resolution":"resolved","target":verified.remove(0)}),
         _ => json!({"resolution":"ambiguous","candidates":verified}),
     })
+}
+
+fn resolve_workflow_name_with_reads<F>(
+    bytes: &[u8],
+    started: Instant,
+    mut dispatch: F,
+) -> Result<Value, AppError>
+where
+    F: FnMut(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
+{
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(AppError::new("input_too_large"));
+    }
+    let envelope: LocalRunOnceInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let target: PublicTarget = serde_json::from_value(envelope.input.clone())
+        .map_err(|_| AppError::new("invalid_operation_input"))?;
+    validate_named_target(&target)?;
+    let mut authority = envelope.input.clone();
+    authority
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?
+        .remove("workflowName");
+    authority
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?
+        .remove("projectId");
+    authority
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?
+        .remove("projectName");
+    let authority = public_targets_resolve(
+        &serde_json::to_vec(&json!({"input":authority}))
+            .map_err(|_| AppError::new("invalid_input"))?,
+    )?;
+    let servers = if authority["resolution"] == "ambiguous" {
+        authority["candidates"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| AppError::new("target_response_invalid"))?
+    } else {
+        vec![authority["target"].clone()]
+    };
+    let correlation = envelope
+        .correlation_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut matches = Vec::new();
+    for server in servers {
+        let project_id = if let Some(project_name) = &target.project_name {
+            let projects = resolve_named_projects(
+                &server,
+                project_name,
+                target.project_id.as_deref(),
+                &correlation,
+                started,
+                &mut dispatch,
+            )?;
+            if projects.is_empty() {
+                continue;
+            }
+            if target.workflow_name.is_none() {
+                for project in projects {
+                    matches.push(json!({"server":server["server"],"projectId":project["id"],"resourceUri":project["resourceUri"]}));
+                }
+                continue;
+            }
+            if projects.len() != 1 {
+                return Err(AppError::new("target_exact_project_required"));
+            }
+            Some(
+                projects[0]["id"]
+                    .as_str()
+                    .ok_or_else(|| AppError::new("target_response_invalid"))?
+                    .to_owned(),
+            )
+        } else {
+            target.project_id.clone()
+        };
+        let name = target
+            .workflow_name
+            .as_deref()
+            .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+        let mut input = json!({"query":name,"page":{"limit":200}});
+        if let Some(project) = &project_id {
+            input["projectId"] = json!(project);
+        }
+        let request = serde_json::to_vec(&json!({"server_id":server["server"],"input":input,
+            "deadline_ms":30000,"correlation_id":correlation}))
+        .map_err(|_| AppError::new("invalid_input"))?;
+        let response =
+            run_once_from_bytes_at("n8n.workflows.search", &request, started, &mut dispatch)?;
+        for found in resolve_named_workflow_rows(&server, name, project_id.as_deref(), &response)? {
+            if matches.iter().any(|existing| existing == &found) {
+                return Err(AppError::new("target_response_invalid"));
+            }
+            matches.push(found);
+        }
+    }
+    Ok(match matches.len() {
+        0 => json!({"resolution":"not_found"}),
+        1 => json!({"resolution":"resolved","target":matches.remove(0)}),
+        _ => json!({"resolution":"ambiguous","candidates":matches}),
+    })
+}
+
+fn validate_named_target(target: &PublicTarget) -> Result<(), AppError> {
+    for name in [&target.workflow_name, &target.project_name]
+        .into_iter()
+        .flatten()
+    {
+        if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+    }
+    if target.workflow_id.is_some()
+        || target.execution_id.is_some()
+        || target.resource_uri.is_some()
+    {
+        return Err(AppError::new("conflicting_evidence"));
+    }
+    Ok(())
+}
+
+fn resolve_named_workflow_rows(
+    server: &Value,
+    name: &str,
+    project_id: Option<&str>,
+    response: &Value,
+) -> Result<Vec<Value>, AppError> {
+    let mut matches = Vec::new();
+    let rows = response["result"]["workflows"]
+        .as_array()
+        .ok_or_else(|| AppError::new("target_response_invalid"))?;
+    if response["status"] != "ok"
+        || rows.len() >= 200
+        || response["result"]["page"]["total"].as_u64() != Some(rows.len() as u64)
+        || !response["result"]["page"]
+            .get("nextCursor")
+            .is_some_and(Value::is_null)
+    {
+        return Err(AppError::new("target_complete_snapshot_required"));
+    }
+    for row in rows.iter().filter(|row| row["name"] == name) {
+        let id = row["id"]
+            .as_str()
+            .ok_or_else(|| AppError::new("target_response_invalid"))?;
+        let expected = format!(
+            "fwc-n8n://{}/workflows/{}",
+            server["server"]
+                .as_str()
+                .ok_or_else(|| AppError::new("target_response_invalid"))?,
+            encode_host_resource_segment(id)
+        );
+        if id.is_empty()
+            || id.len() > 256
+            || id.chars().any(char::is_control)
+            || row["resourceUri"] != expected
+            || project_id.is_some_and(|project| row["projectId"] != project)
+        {
+            return Err(AppError::new("target_provider_binding_mismatch"));
+        }
+        let mut found = json!({"server":server["server"],"workflowId":id,"resourceUri":expected});
+        if let Some(project) = project_id {
+            found["projectId"] = json!(project);
+        }
+        if matches.iter().any(|existing| existing == &found) {
+            return Err(AppError::new("target_response_invalid"));
+        }
+        matches.push(found);
+    }
+    Ok(matches)
+}
+
+fn resolve_named_projects<F>(
+    server: &Value,
+    name: &str,
+    project_id: Option<&str>,
+    correlation: &str,
+    started: Instant,
+    dispatch: &mut F,
+) -> Result<Vec<Value>, AppError>
+where
+    F: FnMut(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
+{
+    let request = serde_json::to_vec(&json!({"server_id":server["server"],"input":{"kind":"projects","query":name,"page":{"limit":100}},"deadline_ms":30000,"correlation_id":correlation})).map_err(|_| AppError::new("invalid_input"))?;
+    let response = run_once_from_bytes_at("n8n.structure.search", &request, started, dispatch)?;
+    let rows = response["result"]["items"]
+        .as_array()
+        .ok_or_else(|| AppError::new("target_response_invalid"))?;
+    if response["status"] != "ok"
+        || rows.len() >= 100
+        || response["result"]["page"]["total"].as_u64() != Some(rows.len() as u64)
+        || !response["result"]["page"]
+            .get("nextCursor")
+            .is_some_and(Value::is_null)
+    {
+        return Err(AppError::new("target_complete_snapshot_required"));
+    }
+    let projects = rows
+        .iter()
+        .filter(|row| row["name"] == name && project_id.is_none_or(|id| row["id"] == id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut ids = BTreeSet::new();
+    for project in &projects {
+        let id = project["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+            .ok_or_else(|| AppError::new("target_response_invalid"))?;
+        if !ids.insert(id)
+            || project["resourceUri"]
+                != format!(
+                    "fwc-n8n://{}/projects/{}",
+                    server["server"]
+                        .as_str()
+                        .ok_or_else(|| AppError::new("target_response_invalid"))?,
+                    encode_host_resource_segment(id)
+                )
+        {
+            return Err(AppError::new("target_provider_binding_mismatch"));
+        }
+    }
+    Ok(projects)
 }
 
 fn target_existence_read(target: &Value) -> Result<(&'static str, Value), AppError> {
@@ -1800,8 +2036,30 @@ fn public_template_search_input(input: &Value) -> Result<serde_json::Map<String,
         .into_iter()
         .filter(|key| object.contains_key(*key))
         .collect::<Vec<_>>();
-    if selectors.len() != 1 {
+    if selectors.is_empty() {
         return Err(malformed());
+    }
+    if selectors.len() > 1 {
+        let first = selectors[0];
+        let mut calls = Vec::with_capacity(selectors.len());
+        for selector in selectors {
+            let single = json!({"action":"search_templates",selector:input[selector],"page":{"limit":100,"offset":0}});
+            let normalized = public_template_search_input(&single)?;
+            calls.push(normalized["action"]["search_templates"].clone());
+        }
+        // Validate public pagination even though each native subset is fetched
+        // completely before intersection and final paging.
+        let mut single = input.clone();
+        for key in ["nodeTypes", "task", "metadata", "query"] {
+            if key != first {
+                single.as_object_mut().ok_or_else(malformed)?.remove(key);
+            }
+        }
+        public_template_search_input(&single)?;
+        return json!({"action":{"search_templates_batch":calls}})
+            .as_object()
+            .cloned()
+            .ok_or_else(malformed);
     }
     let mut arguments = serde_json::Map::new();
     let mode = match selectors[0] {
@@ -2017,6 +2275,78 @@ fn project_local_knowledge_result(input: &Value, response: &Value) -> Result<Val
 }
 
 fn project_local_template_search(input: &Value, responses: &[Value]) -> Result<Value, AppError> {
+    let selectors = ["query", "nodeTypes", "task", "metadata"]
+        .into_iter()
+        .filter(|key| input.get(*key).is_some())
+        .collect::<Vec<_>>();
+    if selectors.len() > 1 {
+        return intersect_local_template_search(input, responses, &selectors);
+    }
+    project_single_local_template_search(input, responses)
+}
+
+fn intersect_local_template_search(
+    input: &Value,
+    responses: &[Value],
+    selectors: &[&str],
+) -> Result<Value, AppError> {
+    let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if responses.len() != selectors.len() {
+        return Err(malformed());
+    }
+    let mut intersection: Option<BTreeMap<u64, Value>> = None;
+    for (selector, response) in selectors.iter().copied().zip(responses) {
+        let single = json!({"action":"search_templates",selector:input[selector],"page":{"limit":100,"offset":0}});
+        let projected = project_local_template_search(&single, std::slice::from_ref(response))?;
+        let rows = projected["templates"].as_array().ok_or_else(malformed)?;
+        if projected["page"]["total"].as_u64() != Some(rows.len() as u64) {
+            return Err(AppError::new("template_complete_snapshot_required"));
+        }
+        let mut current = BTreeMap::new();
+        for row in rows {
+            let id = row["id"].as_u64().ok_or_else(malformed)?;
+            if current.insert(id, row.clone()).is_some() {
+                return Err(malformed());
+            }
+        }
+        if let Some(previous) = &mut intersection {
+            for (id, row) in &current {
+                if previous.get(id).is_some_and(|old| old != row) {
+                    return Err(malformed());
+                }
+            }
+            previous.retain(|id, _| current.contains_key(id));
+        } else {
+            intersection = Some(current);
+        }
+    }
+    let rows = intersection
+        .ok_or_else(malformed)?
+        .into_values()
+        .collect::<Vec<_>>();
+    let limit = input
+        .pointer("/page/limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(20);
+    let offset = input
+        .pointer("/page/offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = rows.len();
+    let selected = rows
+        .into_iter()
+        .skip(usize::try_from(offset).map_err(|_| malformed())?)
+        .take(usize::try_from(limit).map_err(|_| malformed())?)
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"templates":selected,"page":{"limit":limit,"offset":offset,"returnedCount":selected.len(),"total":total,"hasMore":offset + (selected.len() as u64) < total as u64}}),
+    )
+}
+
+fn project_single_local_template_search(
+    input: &Value,
+    responses: &[Value],
+) -> Result<Value, AppError> {
     let malformed = || AppError::new("knowledge_provider_response_invalid");
     if responses.len() != 1 {
         return Err(malformed());
@@ -2039,7 +2369,7 @@ fn project_local_template_search(input: &Value, responses: &[Value]) -> Result<V
             .ok_or_else(malformed)?;
         let mut template =
             json!({"resourceUri":format!("fwc-n8n://local/templates/{id}"),"id":id,"name":name});
-        if let Some(description) = row.get("description") {
+        if let Some(description) = row.get("description").filter(|value| !value.is_null()) {
             template["description"] = description
                 .as_str()
                 .filter(|description| description.len() <= 8192)
@@ -2168,6 +2498,7 @@ fn public_local_get_node_input(input: &Value) -> Result<serde_json::Map<String, 
                 | "mode"
                 | "detail"
                 | "propertyQuery"
+                | "version"
                 | "fromVersion"
                 | "toVersion"
         )
@@ -2185,6 +2516,27 @@ fn public_local_get_node_input(input: &Value) -> Result<serde_json::Map<String, 
     let mode = arguments["mode"]
         .as_str()
         .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if let Some(version) = arguments.get("version") {
+        if version.as_str().is_none_or(|version| {
+            version.is_empty()
+                || version.len() > 32
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                || version
+                    .parse::<f64>()
+                    .ok()
+                    .is_none_or(|number| !number.is_finite() || number <= 0.0)
+        }) {
+            return Err(AppError::new("invalid_operation_input"));
+        }
+        // The native tool exposes current definitions, not a historical
+        // definition selector. Only info with its native version summary can
+        // bind the requested current version without inventing a provider arg.
+        if mode != "info" || arguments["detail"] == "minimal" {
+            return Err(AppError::new("node_version_definition_unavailable"));
+        }
+    }
     let has_from = arguments.contains_key("fromVersion");
     let has_to = arguments.contains_key("toVersion");
     let has_query = arguments.contains_key("propertyQuery");
@@ -2199,6 +2551,7 @@ fn public_local_get_node_input(input: &Value) -> Result<serde_json::Map<String, 
     {
         return Err(AppError::new("invalid_operation_input"));
     }
+    arguments.remove("version");
     json!({"action":{"get_node":arguments}})
         .as_object()
         .cloned()
@@ -2268,6 +2621,23 @@ fn project_local_get_node_result(input: &Value, response: &Value) -> Result<Valu
 
 fn validate_local_node_versions(input: &Value, native: &Value, mode: &str) -> Result<(), AppError> {
     let malformed = || AppError::new("knowledge_provider_response_invalid");
+    if let Some(requested) = input.get("version") {
+        let number = |value: &Value| {
+            value
+                .as_str()
+                .and_then(|text| text.parse::<f64>().ok())
+                .or_else(|| value.as_f64())
+                .filter(|number| number.is_finite() && *number > 0.0)
+        };
+        if mode != "info"
+            || number(requested).is_none()
+            || native["metadata"].get("versionCoerced").is_some()
+            || number(requested) != number(&native["version"])
+            || number(requested) != number(&native["versionInfo"]["currentVersion"])
+        {
+            return Err(AppError::new("node_version_definition_unavailable"));
+        }
+    }
     if matches!(mode, "versions" | "compare" | "breaking" | "migrations") {
         if !native["available"].is_boolean() {
             return Err(malformed());
@@ -7169,6 +7539,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn public_node_requested_current_version_is_bound_without_unsupported_native_argument() {
+        let input =
+            json!({"action":"get_node","nodeType":"nodes-base.set","mode":"info","version":"3.4"});
+        let native_input = public_local_get_node_input(&input).unwrap();
+        assert!(native_input["action"]["get_node"].get("version").is_none());
+        assert_eq!(native_input["action"]["get_node"]["detail"], "standard");
+        assert!(
+            validate_local_node_versions(
+                &input,
+                &json!({"version":3.4,"versionInfo":{"currentVersion":3.4}}),
+                "info"
+            )
+            .is_ok()
+        );
+        for native in [
+            json!({}),
+            json!({"versionInfo":{"currentVersion":"unknown"}}),
+            json!({"versionInfo":{"currentVersion":3}}),
+            json!({"version":3,"versionInfo":{"currentVersion":3.4}}),
+            json!({"version":3.4,"versionInfo":{"currentVersion":3.4},"metadata":{"versionCoerced":{}}}),
+        ] {
+            assert_eq!(
+                validate_local_node_versions(&input, &native, "info")
+                    .unwrap_err()
+                    .code,
+                "node_version_definition_unavailable"
+            );
+        }
+        for bad in [
+            json!({"action":"get_node","nodeType":"x","version":"0"}),
+            json!({"action":"get_node","nodeType":"x","version":"NaN"}),
+            json!({"action":"get_node","nodeType":"x","version":"3","mode":"docs"}),
+            json!({"action":"get_node","nodeType":"x","version":"3","detail":"minimal"}),
+        ] {
+            assert!(public_local_get_node_input(&bad).is_err());
+        }
+    }
+
+    #[test]
+    fn combined_template_selectors_intersect_complete_native_subsets_before_paging() {
+        let input = json!({"action":"search_templates","query":"synthetic","nodeTypes":["nodes-base.noOp"],"page":{"limit":1,"offset":0}});
+        let normalized = public_local_knowledge_input(&input).unwrap();
+        assert_eq!(
+            normalized["action"]["search_templates_batch"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let native = |items: Value, total: u64| json!({"content":[{"type":"text","text":json!({"items":items,"total":total}).to_string()}]});
+        let first = native(json!([{"id":1,"name":"First"},{"id":2,"name":"Shared"}]), 2);
+        let second = native(json!([{"id":2,"name":"Shared"},{"id":3,"name":"Third"}]), 2);
+        let result =
+            project_local_template_search(&input, &[first.clone(), second.clone()]).unwrap();
+        let linked = run_local_once_from_bytes("n8n.knowledge.query", &serde_json::to_vec(&json!({"input":input})).unwrap(), |request| {
+            assert_eq!(request.internal_tool(), fcp_host::LocalN8nTool::SearchTemplates);
+            let serialized = serde_json::to_value(request).unwrap();
+            let calls = serialized["input"]["action"]["search_templates_batch"].as_array().unwrap();
+            assert_eq!(calls[0]["searchMode"], "keyword");
+            assert_eq!(calls[0]["query"], "synthetic");
+            assert_eq!(calls[1]["searchMode"], "by_nodes");
+            assert_eq!(calls[1]["nodeTypes"], json!(["nodes-base.noOp"]));
+            Ok(json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp","response":{
+                "operation":"knowledge_query","result":{"status":"Completed","teardown_error_code":null,
+                "responses":[first,second]}}}))
+        }).unwrap();
+        assert_eq!(linked["data"], result);
+        assert_eq!(result["templates"][0]["id"], 2);
+        assert_eq!(result["page"]["total"], 1);
+        assert_eq!(result["page"]["hasMore"], false);
+        let nullable = native(json!([{"id":2,"name":"Shared","description":null}]), 1);
+        assert!(project_local_template_search(&input, &[nullable.clone(), nullable]).is_ok());
+        let incomplete = native(json!([{"id":2,"name":"Shared"}]), 101);
+        assert_eq!(
+            project_local_template_search(&input, &[first.clone(), incomplete])
+                .unwrap_err()
+                .code,
+            "template_complete_snapshot_required"
+        );
+        let drift = native(json!([{"id":2,"name":"Different"}]), 1);
+        assert!(project_local_template_search(&input, &[first.clone(), drift]).is_err());
+        let duplicate = native(
+            json!([{"id":2,"name":"Shared"},{"id":2,"name":"Shared"}]),
+            2,
+        );
+        assert!(project_local_template_search(&input, &[first, duplicate]).is_err());
+        assert!(public_local_knowledge_input(&json!({"action":"search_templates","query":"synthetic","nodeTypes":[],"page":{"limit":101}})).is_err());
+    }
+
+    #[test]
     fn public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values() {
         for mode in [
             "info",
@@ -7398,6 +7858,103 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "fixed installed network-disabled package; proposed max20 policy exists only in private test memory"]
+    fn local_twenty_node_queries_qualify_proposed_policy_without_activation() {
+        let bytes = std::fs::read("/var/lib/fwc-n8n/staging/release-20261005-read-parity-manifestfix-rc2/policy/local-mcp.json").unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "ba765f06241844b9f12358fbf225e1ed11da2bbe36699dfcb36c1089644ed80a"
+        );
+        let original: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(original.max_sequential_calls, 7);
+        let input = json!({"action":"search_nodes","queries":(0..20).map(|id| format!("syntheticNoMatchingNode61779{id}")).collect::<Vec<_>>(),"limit":1});
+        let original_dispatcher =
+            LocalN8nDispatcher::new(LocalMcpProvider::new(original.clone()).unwrap());
+        let denied = run_local_once_from_bytes(
+            "n8n.knowledge.query",
+            &serde_json::to_vec(&json!({"input":input})).unwrap(),
+            |request| {
+                original_dispatcher
+                    .dispatch(request, Arc::new(AtomicBool::new(false)))
+                    .map_err(map_local_dispatch_error)?;
+                panic!("seven-call policy must not accept twenty calls")
+            },
+        );
+        assert!(
+            denied.is_err(),
+            "unchanged seven-call policy must refuse before launch"
+        );
+        let mut proposed = original.clone();
+        proposed.max_sequential_calls = 20;
+        let dispatcher = LocalN8nDispatcher::new(LocalMcpProvider::new(proposed.clone()).unwrap());
+        let mut calls = 0;
+        let result = run_local_once_from_bytes("n8n.knowledge.query", &serde_json::to_vec(&json!({"input":input})).unwrap(), |request| {
+            let response = dispatcher.dispatch(request, Arc::new(AtomicBool::new(false))).map_err(map_local_dispatch_error)?;
+            calls = response.result.responses.len();
+            let value = serde_json::to_value(&response).unwrap();
+            assert_eq!(value["result"]["status"], "Completed");
+            assert!(value["result"]["teardown_error_code"].is_null());
+            assert_eq!(value["result"]["shutdown"]["reaped"], true);
+            assert_eq!(value["result"]["shutdown"]["group_absent"], true);
+            Ok(json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp","response":response}))
+        }).unwrap();
+        assert_eq!(calls, 20);
+        assert_eq!(result["action"], "search_nodes");
+        let mut restored = proposed;
+        restored.max_sequential_calls = 7;
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        println!(
+            "native_queries=20 seven_call_policy_denied=true proposed_policy_memory_only=true unchanged_network_timeout_size=true reaped=true group_absent=true candidate_admission=false"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires immutable public pending7592 policy and installed network-disabled package2.91; test factory only"]
+    fn local_remaining_selectors_use_real_owned_process_without_sdk_evaluation() {
+        let bytes = std::fs::read("/var/lib/fwc-n8n/staging/release-20261005-read-parity-manifestfix-rc2/policy/local-mcp.json").unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "ba765f06241844b9f12358fbf225e1ed11da2bbe36699dfcb36c1089644ed80a"
+        );
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(&bytes).unwrap();
+        assert!(policy.network_disabled && policy.max_sequential_calls >= 2);
+        let dispatcher = LocalN8nDispatcher::with_max_input_bytes(
+            LocalMcpProvider::new(policy.clone()).unwrap(),
+            usize::try_from(policy.max_request_bytes).unwrap(),
+        );
+        for input in [
+            json!({"action":"get_node","nodeType":"nodes-base.set","mode":"info","detail":"standard","version":"3.5"}),
+            json!({"action":"search_templates","query":"synthetic-no-matching-template-61779","nodeTypes":["n8n-nodes-base.syntheticNoMatchingNode61779"],"page":{"limit":1}}),
+        ] {
+            let mut native_calls = 0;
+            let result = run_local_once_from_bytes("n8n.knowledge.query", &serde_json::to_vec(&json!({"input":input})).unwrap(), |request| {
+                let response = dispatcher.dispatch(request, Arc::new(AtomicBool::new(false))).map_err(map_local_dispatch_error)?;
+                native_calls = response.result.responses.len();
+                let value = serde_json::to_value(&response).unwrap();
+                assert_eq!(value["result"]["result_code"], "ok");
+                assert!(value["result"]["teardown_error_code"].is_null());
+                assert_eq!(value["result"]["shutdown"]["reaped"], true);
+                assert_eq!(value["result"]["shutdown"]["group_absent"], true);
+                Ok(json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp","response":response}))
+            }).unwrap_or_else(|error| panic!("selector {} refused with {}", input["action"].as_str().unwrap(), error.code));
+            if input["action"] == "get_node" {
+                assert_eq!(native_calls, 1);
+                assert_eq!(result["data"]["node"]["definition"]["version"], 3.5);
+            } else {
+                assert_eq!(native_calls, 2);
+                assert_eq!(result["data"]["templates"], json!([]));
+                assert_eq!(result["data"]["page"]["total"], 0);
+            }
+        }
+        println!(
+            "native_json_knowledge_calls=3 network_disabled=true owned_reaped=true group_absent=true SDK_evaluation=false installed_candidate_trust=false"
+        );
+    }
+
+    #[test]
     #[ignore = "explicit fixed installed network-disabled knowledge process; not signed candidate CLI admission"]
     fn public_get_node_seven_modes_use_real_owned_local_process() {
         let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
@@ -7577,6 +8134,115 @@ mod tests {
         }).unwrap();
         assert_eq!(result["resolution"], "resolved");
         assert_eq!(result["target"]["server"], "eec");
+    }
+
+    #[test]
+    fn public_project_name_lookup_binds_workflow_and_shared_deadline() {
+        for server in ["eec", "hetzner"] {
+            let input = serde_json::to_vec(&json!({"input":{"server":server,"projectName":"Synthetic project","workflowName":"Synthetic workflow"}})).unwrap();
+            let started = Instant::now();
+            let mut calls = Vec::new();
+            let result = public_targets_resolve_with_reads(&input, started, |request, observed_start| {
+                assert_eq!(observed_start, started + Duration::from_secs(30));
+                assert_eq!(request.server_id.as_str(), server);
+                calls.push(request.operation.as_str());
+                match request.operation.as_str() {
+                    "n8n.structure.search" => {
+                        assert_eq!(request.input, json!({"kind":"projects","query":"Synthetic project","page":{"limit":100}}));
+                        Ok(json!({"status":"ok","result":{"items":[{"id":"project-one","name":"Synthetic project","resourceUri":format!("fwc-n8n://{server}/projects/project%2Done")}],"page":{"total":1,"nextCursor":null}}}))
+                    }
+                    "n8n.workflows.search" => {
+                        assert_eq!(request.input, json!({"query":"Synthetic workflow","projectId":"project-one","page":{"limit":200}}));
+                        Ok(json!({"status":"ok","result":{"workflows":[{"id":"wf-one","name":"Synthetic workflow","projectId":"project-one","resourceUri":format!("fwc-n8n://{server}/workflows/wf%2Done")}],"page":{"total":1,"nextCursor":null}}}))
+                    }
+                    _ => panic!("only fixed read operations are permitted"),
+                }
+            }).unwrap();
+            assert_eq!(calls, ["n8n.structure.search", "n8n.workflows.search"]);
+            assert_eq!(result["target"]["projectId"], "project-one");
+            assert_eq!(result["target"]["workflowId"], "wf-one");
+            for result in [
+                json!({"items":[],"page":{"total":1,"nextCursor":null}}),
+                json!({"items":[],"page":{"total":0,"nextCursor":"more"}}),
+                json!({"items":[{"id":"project-one","name":"Synthetic project","resourceUri":"fwc-n8n://legacy/projects/project%2Done"}],"page":{"total":1,"nextCursor":null}}),
+            ] {
+                assert!(
+                    public_targets_resolve_with_reads(&input, started, |_, _| Ok(
+                        json!({"status":"ok","result":result})
+                    ))
+                    .is_err()
+                );
+            }
+            let missing = public_targets_resolve_with_reads(&input, started, |_, _| Ok(json!({"status":"ok","result":{"items":[],"page":{"total":0,"nextCursor":null}}}))).unwrap();
+            assert_eq!(missing["resolution"], "not_found");
+            assert!(
+                public_targets_resolve_with_reads(
+                    &input,
+                    started - Duration::from_secs(31),
+                    |_, _| panic!("expired target must not dispatch")
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn public_target_name_lookup_uses_complete_native_search_and_exact_project_binding() {
+        for server in ["eec", "hetzner"] {
+            let input = serde_json::to_vec(&json!({"input":{"server":server,"workflowName":"Synthetic","projectId":"project-one"}})).unwrap();
+            let output = json!({"data":[{"id":"wf-one","name":"Synthetic","active":false,"availableInMCP":false,"createdAt":"2026-10-04T00:00:00Z","updatedAt":"2026-10-04T00:00:00Z","parentFolderId":null,"tags":[]}],"count":1});
+            let projected = fcp_mcp_bridge::project_n8n_read_test_fixture(
+                json!({"action":"workflows","query":"Synthetic","projectId":"project-one","limit":200}), server,
+                &json!({"structuredContent":output,"content":[{"type":"text","text":output.to_string()}]})).unwrap();
+            let mut calls = 0;
+            let result = public_targets_resolve_with_reads(&input, Instant::now(), |request, _| {
+                calls += 1;
+                assert_eq!(request.operation.as_str(), "n8n.workflows.search");
+                assert_eq!(request.server_id.as_str(), server);
+                assert_eq!(
+                    request.input,
+                    json!({"query":"Synthetic","projectId":"project-one","page":{"limit":200}})
+                );
+                decode_host_read_response(
+                    request.operation,
+                    request.server_id,
+                    &request.input,
+                    json!({"status":"ok","result":projected}),
+                )
+            })
+            .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(result["target"]["workflowId"], "wf-one");
+            assert_eq!(result["target"]["projectId"], "project-one");
+            assert!(result.get("name").is_none());
+            for bad in [
+                json!({"input":{"server":server,"workflowName":"Synthetic","workflowId":"other"}}),
+                json!({"input":{"server":server,"workflowName":""}}),
+                json!({"input":{"workflowName":"Synthetic"}}),
+            ] {
+                assert!(
+                    public_targets_resolve_with_reads(
+                        &serde_json::to_vec(&bad).unwrap(),
+                        Instant::now(),
+                        |_, _| panic!("invalid target must not dispatch")
+                    )
+                    .is_err()
+                );
+            }
+            let mut incomplete = projected.clone();
+            incomplete["data"]["page"]["total"] = json!(201);
+            assert!(
+                public_targets_resolve_with_reads(&input, Instant::now(), |request, _| {
+                    decode_host_read_response(
+                        request.operation,
+                        request.server_id,
+                        &request.input,
+                        json!({"status":"ok","result":incomplete}),
+                    )
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

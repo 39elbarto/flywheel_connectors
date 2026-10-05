@@ -1583,7 +1583,7 @@ The table specifies the exact operation-specific `data` shape.
 
 | Operation | Required input | Optional input | `data` output |
 |---|---|---|---|
-| `targets.resolve` | one of `resourceUri`, `server`, `projectId`, `workflowId`, `executionId` | `candidateServers[1..3]`, `legacyOptIn` | `{resolution: resolved|ambiguous|not_found, target?: TargetRef, candidates?: [{resourceUri,id,name,server}]}` |
+| `targets.resolve` | exact URI/ID or explicit server/candidate authority for name reads | `projectId`, `projectName`, `workflowName`, `candidateServers[1..3]`, `legacyOptIn` | `{resolution: resolved\|ambiguous\|not_found, target?: TargetRef, candidates?: [TargetRef]}`; names are lookup inputs, not public output fields |
 | `capabilities.inspect` | empty `{}` operation input; fixed server comes from the host envelope | none | `{capabilities:{schema:"fwc.n8n.capabilities.v1",serverId,provider:"official_mcp",toolCount,tools:[{name,inputSchemaDigest,outputSchemaDigest,class:"unknown",status:"unreviewed"}]}}` |
 | `runtime.status` | none | `correlationId` | `{idle,activeRuns,providers:[{provider,pid?,pgid?,rssBytes?,pssBytes?,privateBytes?,stopped?}]}` |
 | `knowledge.query` | `action`, action fields | `detail`, `limit` | discriminated result matching the action |
@@ -1720,6 +1720,72 @@ complete entrypoint coverage, timestamped global memory observations, reboot/
 owner-incarnation and independent crash/descendant/PID-reuse acceptance remain
 open. Pending or unfinished records never become idle through Drop or a TTL.
 
+The recommended deployment boundary is the existing host as the sole supervisor,
+with every provider child and descendant in a different unprivileged UID/domain.
+Proposed supervisor/provider UID/GID 971/972 were absent from the coordinator's
+2026-10-05 passwd/group lookup; they are not allocated identities or authority.
+A non-root host cannot perform this transition itself. A separately admitted,
+immutable fixed launcher must restrict executable, argv, environment and FD
+allowlist, drop supplementary groups/capabilities and privilege regain, and
+prevent descendant escape. No generic run-as API or same-UID fallback is allowed.
+The host must verify the original bound capability, instance/session, principal,
+zone, resource, operation, request, caveats, revocation and deadline before a
+pending launch or scoped status query. Peer UID and correlation ID alone are not
+authorization. Provider children must not inherit writer state/channel FDs or
+credentials, access supervisor memory, or mutate the existing snapshot/epoch.
+REST connector, MCP bridge, owned local validator and knowledge-process launches
+all require registration before spawn and retirement after full reap, group
+absence and IO joins. Mixed old epochs, crashed owners and incomplete coverage
+remain unknown. The fixed privileged launch channel, scoped query authorization,
+cross-UID isolation and complete timestamped global memory coverage are not
+implemented or activated; private transaction/process fixtures cannot prove them.
+The local launch-policy fixture now binds distinct typed identities, a launcher
+digest, all four route artifact/argv/environment digests and a closed FD set.
+Missing identity/pins/routes, equal roles and an inherited writer FD refuse.
+The synthetic FD contract distinguishes stdio and a single closed provider
+invocation-channel FD from observer writer/state/query channels; it does not
+prove physical FD isolation or coverage merely by enumerating four routes.
+Private query fixtures use the real instance-bound capability verifier and
+principal/zone/server/resource/strict expiry checks; unsupported caveats refuse.
+Their private synthetic accepted-session proof is bound to the instance and
+owner epoch, and unknown sessions/incarnations refuse. No caller session string
+can construct that proof in production. Revocation and request-bound production
+query admission remain unimplemented, not inferred from the fixture signature.
+They do not constitute an accepted-handshake/request-bound production query
+channel or cross-UID isolation. Crash/reopening and owner-epoch drift remain
+unknown/refused; an empty scoped query never proves global idle. Tests are
+`observer_fixture_immutable_launch_policy_requires_isolated_roles_and_all_routes`
+and `observer_fixture_bound_query_and_crashed_launch_remain_scope_limited`.
+Current broker kernel-peer UID must match the existing database filesystem
+owner; proposed supervisor971 cannot reuse the current1000-owned store through
+a socket group. A future explicit broker admission must address that boundary
+without copying or changing ownership of secrets.
+
+A1 is the selected local lifecycle contract: the host parents one fixed monitor,
+and that monitor parents one provider. The private fixture endpoint binds a launch
+nonce, invocation, instance/session, artifact and epoch; it is never a provider
+endpoint and carries no credentials or store FD. `ready`, bounded `sample`, host
+`terminate` and monitor `completed` have a single bounded sequence. Wrong sender,
+binding, order, replay or oversized input makes the observation unknown. Provider
+reap, descendant absence, completed IO joins and permission success must all be
+reported before a separately observed monitor reap can retire the fixture.
+Monitor wait alone, disconnect/crash, incomplete cancellation or any missing
+completion condition stays unknown. Completion additionally requires confirmed
+child exec/identity and closed egress. Host IO joins and actor join are separate
+from provider IO and monitor reap; monitor wait alone cannot retire even after
+provider completion. Numeric sample fixtures qualify only message bounds and
+ordering, not timestamped current/global memory or availability. These are
+`a1_monitor_fixture_*` protocol
+tests, not a production constructor, authenticated OS channel or cross-UID proof.
+Activation still requires an admitted fixed launcher/lifecycle monitor, retained
+signal/inspection authority after privilege drop and LSM checks, and enforced
+cross-invocation containment. The existing network-disabled process filter denies
+`setsid`/`setpgid` after the initial session setup; this is a partial existing
+boundary, not containment for every launch route. Cgroup integration additionally
+requires the supervisor gate, appropriate Landlock exclusions and closing cgroup
+FDs before target exec; those integrations remain deferred. A process group or
+shared provider UID972 alone does not establish containment.
+
 Current local package identity is a separate observed boundary: the signed
 RC43c policy admits `n8n-mcp@2.90.0`, while the public installed package metadata
 now reports `2.91.0` (SHA-256
@@ -1765,9 +1831,9 @@ separate signed schema/profile and runtime admission before installed use.
 | Required row / submodes | Installed baseline | Candidate route and bounded result | Evidence / remaining boundary |
 |---|---|---|---|
 | `capabilities.inspect` | Retained EEC/Hetzner catalogs contain 53 tools | Fixed official `tools/list`, bounded name/schema-digest projection; every discovery entry remains unreviewed | `initial-installed-eec-catalog-20261004.json` and Hetzner counterpart; `official_mcp_catalog_*` and schema-export tests cover presence/drift/redaction, not admission or successful invocation of discovered tools |
-| `targets.resolve`: exact URI/server and ambiguity | Needs public-path validation | Canonical URI plus exact typed provider read; ID/workflow/server binding and complete unsaturated project snapshot; zero/one/multiple results distinguished | Four `public_targets_*` tests cover errors/deadline/redaction/incomplete snapshots; installed existence, name lookup and project-to-workflow mapping remain open |
+| `targets.resolve`: exact URI/server, names and ambiguity | Needs installed public-path validation | Canonical URI plus typed existence reads; exact project/workflow name matching over complete unsaturated native snapshots; one shared deadline and exact server/project/resource bindings | `public_targets_*`, `public_target_name_lookup_*`, `public_project_name_lookup_*`; name search native-shaped bridge projection passes the actual wrapper decoder. Installed new-source acceptance remains open |
 | `runtime.status` | No proved global observer | Public nullable `not_collected`; local engine and physical lifecycle hooks tested with private fixture authority only | Mixed separate-process writers, real actor/local IO teardown and unknown epoch tests; trusted writer, scoped authenticated query and complete global coverage remain open |
-| Knowledge: tool documentation, node search, templates search/get | Local catalog exists; public projection needs validation | Fixed local tools, bounded action-specific projection, source/default digests and no raw transport | `public_local_knowledge_actions_project_real_serialized_native_shapes`; template modes nodes-only/structure/full covered; combined search selectors and installed call-count policy remain separate limits |
+| Knowledge: tool documentation, node search, templates search/get | Local catalog exists; new public projection uninstalled | Fixed local tools, bounded action-specific projection, source/default digests; combined template selectors intersect complete native subsets before paging | `combined_template_*` controlled nonempty intersection and fixed-call tests; retained real network-disabled process tests current node 3.5 and two complete empty template subsets. Oversized native subset refused; no candidate CLI or installed trust claim |
 | `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | Local tool available; public modes need validation | Closed mode-to-native arguments and bounded catalog projection; display-condition property bindings retained | `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`; native optional version semantics still require mode-specific proof |
 | SDK reference: all nine public sections; best practices | Official tools discovered on both servers | Closed typed bridge read action → exact server/action decoder → bounded reference result/digest | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`; discovery is not schema admission; native extra `groups` section is not auto-enrolled |
 | Validation: graph, four profiles | Actual installed synthetic empty graph valid with warning | Fixed network-disabled local validator; public valid/errors/warnings projection | Pinned installed receipt `517ce0bf…`; `public_validation_projects_primary_installed_process_receipt` explicitly run with `--ignored` and receipt environment; malformed/contradictory responses denied |
@@ -1791,14 +1857,17 @@ Required submode boundaries remain **OPEN**, rather than implicit capability
 exclusions:
 
 - `targets.resolve` now performs bounded exact provider-existence reads in
-  candidate source. Installed acceptance, name lookup and project-to-workflow
-  mapping are not established. A saturated 100-project result cannot prove
+  candidate source, including exact project/workflow names and project-to-workflow
+  mapping. Installed acceptance is not established. A saturated 100-project or
+  200-workflow result cannot prove
   completeness and refuses rather than returning a false missing result.
 - `get_node` compare/breaking/migrations bind native numeric `fromVersion` and
   `toVersion` and expose `available:false` honestly. Missing native version
-  metadata leaves that pair unverified. Optional `version` selection for
-  info/docs/search_properties is not implemented; those calls describe the
-  native default version, not a requested historical version.
+  metadata leaves that pair unverified. Optional `version` for standard/full
+  info binds both the returned native definition and current-version summary;
+  coercion, unknown or mismatched versions refuse. The native tool has no info
+  version selector: historical requested versions, docs/search_properties and
+  minimal info remain OPEN rather than forwarding unsupported arguments.
 - Workflow `active` filtering requires a complete native snapshot first.
   `isArchived:true` is refused. Continuation beyond the native 200-workflow
   bound is unsupported; a saturated result of exactly 200 rows is refused
@@ -1807,8 +1876,18 @@ exclusions:
 - `workflows.get includeCode:true` returns Code fingerprints, not source text.
   Raw Code source is not exposed; callers requiring source have an OPEN
   capability gap. Draft/published/both graph selectors are separately tested.
-- Combined template-search selectors and the 20-query public node-search
-  maximum are not qualified against the installed seven-call policy.
+- Combined template-search selectors use 2–4 fixed sequential calls under the
+  existing policy and intersect only complete subsets, each bounded at 100.
+  Native frame overflow and incomplete subsets refuse; no limit is raised.
+  `local_twenty_node_queries_qualify_proposed_policy_without_activation` runs
+  20 bounded synthetic queries through the real network-disabled process using
+  an explicitly proposed in-memory max20 policy; network/timeout/size fields
+  stay identical. The unchanged seven-call policy refuses before launch.
+  This proposed call-limit change is not signed-policy admission or activation.
+  The normal producer still emits seven calls at
+  `scripts/n8n_release_assembler.sh` (`max_sequential_calls`); a future reviewed
+  producer/source and signed-policy update must explicitly admit 20. No existing
+  policy file was changed to qualify the test.
 - Credential continuation completeness, direct-FCP credential mediation,
   global runtime observation, instance audit effects and SDK-code effects
   remain OPEN as described above. No source-only test closes installed

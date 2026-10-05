@@ -1204,6 +1204,8 @@ pub enum LocalN8nKnowledgeAction {
     GetNode(LocalN8nGetNodeInput),
     #[serde(rename = "search_templates")]
     SearchTemplates(LocalN8nSearchTemplatesInput),
+    #[serde(rename = "search_templates_batch")]
+    SearchTemplatesBatch(Vec<LocalN8nSearchTemplatesInput>),
     #[serde(rename = "get_template")]
     GetTemplate(LocalN8nGetTemplateInput),
 }
@@ -1564,7 +1566,8 @@ impl LocalN8nDispatchRequest {
                 LocalN8nKnowledgeAction::SearchNodes(_)
                 | LocalN8nKnowledgeAction::SearchNodesBatch(_) => LocalN8nTool::SearchNodes,
                 LocalN8nKnowledgeAction::GetNode(_) => LocalN8nTool::GetNode,
-                LocalN8nKnowledgeAction::SearchTemplates(_) => LocalN8nTool::SearchTemplates,
+                LocalN8nKnowledgeAction::SearchTemplates(_)
+                | LocalN8nKnowledgeAction::SearchTemplatesBatch(_) => LocalN8nTool::SearchTemplates,
                 LocalN8nKnowledgeAction::GetTemplate(_) => LocalN8nTool::GetTemplate,
             },
             Self::ValidationRun(input) => match &input.subject {
@@ -1580,6 +1583,24 @@ impl LocalN8nDispatchRequest {
         match self {
             Self::KnowledgeQuery(input) => {
                 validate_correlation_id(&input.correlation_id)?;
+                if let LocalN8nKnowledgeAction::SearchTemplatesBatch(queries) = input.action {
+                    if !(2..=4).contains(&queries.len()) {
+                        return Err(invalid_request());
+                    }
+                    let mut calls = Vec::with_capacity(queries.len());
+                    for query in queries {
+                        let (tool, arguments) =
+                            LocalN8nKnowledgeAction::SearchTemplates(query).into_call()?;
+                        calls.push(LocalMcpCall {
+                            tool: tool.as_str().to_owned(),
+                            arguments,
+                        });
+                    }
+                    return Ok(LocalMcpRequest {
+                        correlation_id: input.correlation_id,
+                        calls,
+                    });
+                }
                 if let LocalN8nKnowledgeAction::SearchNodesBatch(queries) = input.action {
                     if !(1..=20).contains(&queries.len()) {
                         return Err(invalid_request());
@@ -1650,7 +1671,7 @@ impl LocalN8nKnowledgeAction {
     #[allow(clippy::too_many_lines)]
     fn into_call(self) -> Result<(LocalN8nTool, Value), LocalN8nDispatchError> {
         match self {
-            Self::SearchNodesBatch(_) => Err(invalid_request()),
+            Self::SearchNodesBatch(_) | Self::SearchTemplatesBatch(_) => Err(invalid_request()),
             Self::ToolDocumentation(input) => {
                 if let Some(topic) = &input.topic {
                     validate_text(topic, MAX_TEXT_BYTES)?;
@@ -2604,6 +2625,39 @@ mod typed_batch_tests {
             assert!(!safe["warnings"].as_array().unwrap().is_empty());
         }
         println!("native_calls=2 network_disabled=true owned_reaped=true group_absent=true");
+    }
+
+    #[test]
+    fn combined_template_batch_is_fixed_bounded_and_uses_normal_native_inputs() {
+        let request: LocalN8nDispatchRequest = serde_json::from_value(json!({
+        "operation":"n8n.knowledge.query","input":{"correlation_id":"templates-one",
+            "action":{"search_templates_batch":[
+                {"searchMode":"keyword","query":"synthetic","limit":100,"offset":0},
+                {"searchMode":"by_nodes","nodeTypes":["nodes-base.noOp"],"limit":100,"offset":0}
+            ]}}}))
+        .unwrap();
+        assert_eq!(request.internal_tool(), LocalN8nTool::SearchTemplates);
+        let provider = request.into_provider_request().unwrap();
+        assert_eq!(provider.calls.len(), 2);
+        assert!(
+            provider
+                .calls
+                .iter()
+                .all(|call| call.tool == "search_templates")
+        );
+        assert_eq!(provider.calls[0].arguments["query"], "synthetic");
+        assert_eq!(
+            provider.calls[1].arguments["nodeTypes"],
+            json!(["nodes-base.noOp"])
+        );
+        for queries in [
+            json!([]),
+            json!([{"query":"synthetic"}]),
+            json!(vec![json!({"query":"synthetic"}); 5]),
+        ] {
+            let request: LocalN8nDispatchRequest = serde_json::from_value(json!({"operation":"n8n.knowledge.query","input":{"correlation_id":"templates-one","action":{"search_templates_batch":queries}}})).unwrap();
+            assert!(request.into_provider_request().is_err());
+        }
     }
 
     #[test]

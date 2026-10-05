@@ -863,6 +863,389 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    // A1 protocol qualification only. These private types have no production
+    // constructor, credentials, store FD, privilege transition or process API.
+    #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MonitorBinding {
+        nonce: [u8; 32],
+        invocation: String,
+        instance: String,
+        session: String,
+        artifact: [u8; 32],
+        epoch: String,
+    }
+
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(tag = "event", deny_unknown_fields)]
+    enum MonitorEvent {
+        Ready,
+        Sample {
+            resident_bytes: u64,
+        },
+        Terminate,
+        Completed {
+            exec_identity_confirmed: bool,
+            egress_closed: bool,
+            provider_reaped: bool,
+            descendants_absent: bool,
+            io_joined: bool,
+            permission_ok: bool,
+        },
+    }
+
+    #[derive(Clone, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct MonitorFrame {
+        binding: MonitorBinding,
+        sequence: u32,
+        message: MonitorEvent,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MonitorPhase {
+        AwaitReady,
+        Running,
+        Terminating,
+        ProviderCompleted,
+        Retired,
+        Unknown,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FixtureSender {
+        Host,
+        Monitor,
+        Provider,
+    }
+
+    // The endpoint seal is obtained only from the fixed fixture pair factory;
+    // sender labels in a frame cannot manufacture endpoint provenance.
+    struct FixtureEndpoint {
+        seal: Arc<()>,
+        sender: FixtureSender,
+    }
+
+    struct MonitorProtocol {
+        binding: MonitorBinding,
+        seal: Arc<()>,
+        next_sequence: u32,
+        phase: MonitorPhase,
+        monitor_reaped: bool,
+        host_io_joined: bool,
+        actor_joined: bool,
+    }
+
+    impl MonitorProtocol {
+        fn fixture() -> (Self, FixtureEndpoint, FixtureEndpoint) {
+            let seal = Arc::new(());
+            let binding = MonitorBinding {
+                nonce: [1; 32],
+                invocation: "invocation-a".into(),
+                instance: "instance-a".into(),
+                session: "session-a".into(),
+                artifact: [2; 32],
+                epoch: "epoch-a".into(),
+            };
+            (
+                Self {
+                    binding,
+                    seal: Arc::clone(&seal),
+                    next_sequence: 0,
+                    phase: MonitorPhase::AwaitReady,
+                    monitor_reaped: false,
+                    host_io_joined: false,
+                    actor_joined: false,
+                },
+                FixtureEndpoint {
+                    seal: Arc::clone(&seal),
+                    sender: FixtureSender::Host,
+                },
+                FixtureEndpoint {
+                    seal,
+                    sender: FixtureSender::Monitor,
+                },
+            )
+        }
+
+        fn frame(&self, message: MonitorEvent) -> Vec<u8> {
+            serde_json::to_vec(&MonitorFrame {
+                binding: self.binding.clone(),
+                sequence: self.next_sequence,
+                message,
+            })
+            .unwrap()
+        }
+
+        fn accept(&mut self, endpoint: &FixtureEndpoint, bytes: &[u8]) -> Result<(), ()> {
+            let result = self.accept_checked(endpoint, bytes);
+            if result.is_err() {
+                self.phase = MonitorPhase::Unknown;
+            }
+            result
+        }
+
+        fn accept_checked(&mut self, endpoint: &FixtureEndpoint, bytes: &[u8]) -> Result<(), ()> {
+            if bytes.len() > 2048
+                || self.next_sequence >= 32
+                || !Arc::ptr_eq(&self.seal, &endpoint.seal)
+            {
+                return Err(());
+            }
+            let frame: MonitorFrame = serde_json::from_slice(bytes).map_err(|_| ())?;
+            if frame.binding != self.binding {
+                return Err(());
+            }
+            if frame.sequence != self.next_sequence {
+                return Err(());
+            }
+            self.phase = match (self.phase, endpoint.sender, frame.message) {
+                (MonitorPhase::AwaitReady, FixtureSender::Monitor, MonitorEvent::Ready) => {
+                    MonitorPhase::Running
+                }
+                (
+                    MonitorPhase::Running,
+                    FixtureSender::Monitor,
+                    MonitorEvent::Sample { resident_bytes },
+                ) if resident_bytes <= 1024 * 1024 * 1024 => MonitorPhase::Running,
+                (MonitorPhase::Running, FixtureSender::Host, MonitorEvent::Terminate) => {
+                    MonitorPhase::Terminating
+                }
+                (
+                    MonitorPhase::Terminating,
+                    FixtureSender::Monitor,
+                    MonitorEvent::Completed {
+                        exec_identity_confirmed: true,
+                        egress_closed: true,
+                        provider_reaped: true,
+                        descendants_absent: true,
+                        io_joined: true,
+                        permission_ok: true,
+                    },
+                ) => MonitorPhase::ProviderCompleted,
+                _ => return Err(()),
+            };
+            self.next_sequence += 1;
+            Ok(())
+        }
+
+        fn monitor_wait(&mut self, reaped: bool) {
+            self.monitor_reaped = reaped;
+            if !reaped || self.phase != MonitorPhase::ProviderCompleted {
+                self.phase = MonitorPhase::Unknown;
+            }
+            self.finish_if_complete();
+        }
+
+        fn host_joins(&mut self, io_joined: bool, actor_joined: bool) {
+            self.host_io_joined = io_joined;
+            self.actor_joined = actor_joined;
+            if !io_joined || !actor_joined || self.phase != MonitorPhase::ProviderCompleted {
+                self.phase = MonitorPhase::Unknown;
+            }
+            self.finish_if_complete();
+        }
+
+        fn finish_if_complete(&mut self) {
+            if self.phase == MonitorPhase::ProviderCompleted
+                && self.monitor_reaped
+                && self.host_io_joined
+                && self.actor_joined
+            {
+                self.phase = MonitorPhase::Retired;
+            }
+        }
+
+        fn disconnected(&mut self) {
+            self.phase = MonitorPhase::Unknown;
+        }
+    }
+
+    fn monitor_ready(protocol: &mut MonitorProtocol, monitor: &FixtureEndpoint) {
+        let frame = protocol.frame(MonitorEvent::Ready);
+        assert!(protocol.accept(monitor, &frame).is_ok());
+    }
+
+    #[test]
+    fn a1_monitor_fixture_sequenced_completion_separates_both_reaps() {
+        let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+        monitor_ready(&mut protocol, &monitor);
+        let sample = protocol.frame(MonitorEvent::Sample {
+            resident_bytes: 4096,
+        });
+        assert!(protocol.accept(&monitor, &sample).is_ok());
+        let cancel = protocol.frame(MonitorEvent::Terminate);
+        assert!(protocol.accept(&host, &cancel).is_ok());
+        let completed = protocol.frame(MonitorEvent::Completed {
+            exec_identity_confirmed: true,
+            egress_closed: true,
+            provider_reaped: true,
+            descendants_absent: true,
+            io_joined: true,
+            permission_ok: true,
+        });
+        assert!(protocol.accept(&monitor, &completed).is_ok());
+        assert!(protocol.phase == MonitorPhase::ProviderCompleted);
+        assert!(!protocol.monitor_reaped);
+        protocol.monitor_wait(true);
+        assert!(protocol.phase == MonitorPhase::ProviderCompleted);
+        protocol.host_joins(true, true);
+        assert!(protocol.phase == MonitorPhase::Retired);
+        let (mut incomplete, _, monitor) = MonitorProtocol::fixture();
+        monitor_ready(&mut incomplete, &monitor);
+        incomplete.monitor_wait(true);
+        assert!(incomplete.phase == MonitorPhase::Unknown);
+    }
+
+    #[test]
+    fn a1_monitor_fixture_rejects_binding_sender_order_replay_and_bounds() {
+        for field in 0..6 {
+            let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+            let mut frame: MonitorFrame =
+                serde_json::from_slice(&protocol.frame(MonitorEvent::Ready)).unwrap();
+            match field {
+                0 => frame.binding.nonce[0] ^= 1,
+                1 => frame.binding.invocation.push('x'),
+                2 => frame.binding.instance.push('x'),
+                3 => frame.binding.session.push('x'),
+                4 => frame.binding.artifact[0] ^= 1,
+                _ => frame.binding.epoch.push('x'),
+            }
+            assert!(
+                protocol
+                    .accept(&monitor, &serde_json::to_vec(&frame).unwrap())
+                    .is_err()
+            );
+            assert!(protocol.phase == MonitorPhase::Unknown);
+        }
+        let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+        let ready = protocol.frame(MonitorEvent::Ready);
+        assert!(protocol.accept(&host, &ready).is_err());
+        let (mut protocol, _, _) = MonitorProtocol::fixture();
+        assert!(protocol.accept(&monitor, &ready).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        let provider = FixtureEndpoint {
+            seal: Arc::clone(&monitor.seal),
+            sender: FixtureSender::Provider,
+        };
+        assert!(protocol.accept(&provider, &ready).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        monitor_ready(&mut protocol, &monitor);
+        assert!(protocol.accept(&monitor, &ready).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        let sample = protocol.frame(MonitorEvent::Sample { resident_bytes: 1 });
+        assert!(protocol.accept(&monitor, &sample).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        assert!(protocol.accept(&monitor, &[b' '; 2049]).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        monitor_ready(&mut protocol, &monitor);
+        let sample = protocol.frame(MonitorEvent::Sample {
+            resident_bytes: u64::MAX,
+        });
+        assert!(protocol.accept(&monitor, &sample).is_err());
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        monitor_ready(&mut protocol, &monitor);
+        for _ in 1..32 {
+            let sample = protocol.frame(MonitorEvent::Sample { resident_bytes: 0 });
+            assert!(protocol.accept(&monitor, &sample).is_ok());
+        }
+        let sample = protocol.frame(MonitorEvent::Sample { resident_bytes: 0 });
+        assert!(protocol.accept(&monitor, &sample).is_err());
+    }
+
+    #[test]
+    fn a1_monitor_fixture_incomplete_cancel_crash_and_permission_stay_unknown() {
+        for missing in 0..6 {
+            let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+            monitor_ready(&mut protocol, &monitor);
+            let terminate = protocol.frame(MonitorEvent::Terminate);
+            assert!(protocol.accept(&host, &terminate).is_ok());
+            let completed = protocol.frame(MonitorEvent::Completed {
+                exec_identity_confirmed: missing != 4,
+                egress_closed: missing != 5,
+                provider_reaped: missing != 0,
+                descendants_absent: missing != 1,
+                io_joined: missing != 2,
+                permission_ok: missing != 3,
+            });
+            assert!(protocol.accept(&monitor, &completed).is_err());
+            protocol.monitor_wait(true);
+            assert!(protocol.phase == MonitorPhase::Unknown);
+        }
+        for (reaped, io, actor) in [
+            (true, false, true),
+            (true, true, false),
+            (false, true, true),
+        ] {
+            let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+            monitor_ready(&mut protocol, &monitor);
+            let terminate = protocol.frame(MonitorEvent::Terminate);
+            assert!(protocol.accept(&host, &terminate).is_ok());
+            let completed = protocol.frame(MonitorEvent::Completed {
+                exec_identity_confirmed: true,
+                egress_closed: true,
+                provider_reaped: true,
+                descendants_absent: true,
+                io_joined: true,
+                permission_ok: true,
+            });
+            assert!(protocol.accept(&monitor, &completed).is_ok());
+            protocol.monitor_wait(reaped);
+            protocol.host_joins(io, actor);
+            assert!(protocol.phase == MonitorPhase::Unknown);
+        }
+        for cancel in [false, true] {
+            let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+            monitor_ready(&mut protocol, &monitor);
+            if cancel {
+                let frame = protocol.frame(MonitorEvent::Terminate);
+                assert!(protocol.accept(&host, &frame).is_ok());
+            }
+            protocol.disconnected();
+            protocol.monitor_wait(false);
+            assert!(protocol.phase == MonitorPhase::Unknown);
+        }
+    }
+
+    #[test]
+    fn a1_monitor_fixture_closed_frames_and_failure_do_not_retire_store() {
+        for bytes in [b"null".as_slice(), b"{}".as_slice(), b"not-json".as_slice()] {
+            let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+            assert!(protocol.accept(&monitor, bytes).is_err());
+            let ready = protocol.frame(MonitorEvent::Ready);
+            assert!(protocol.accept(&monitor, &ready).is_err());
+        }
+        let (mut protocol, _, monitor) = MonitorProtocol::fixture();
+        let mut frame: Value =
+            serde_json::from_slice(&protocol.frame(MonitorEvent::Ready)).unwrap();
+        frame["credentials"] = json!("hostile-canary");
+        assert!(
+            protocol
+                .accept(&monitor, &serde_json::to_vec(&frame).unwrap())
+                .is_err()
+        );
+        let root = tempfile::Builder::new()
+            .prefix("a1-monitor-store-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let store =
+            crate::admin_state::HostAdminStateStore::observer_fixture(root.join("state.json"));
+        let launch = store
+            .observer_fixture_pending("a1-invocation", "fixture-artifact")
+            .unwrap();
+        store.observer_fixture_complete_coverage();
+        protocol.monitor_wait(true);
+        drop(launch);
+        assert!(protocol.phase == MonitorPhase::Unknown);
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 1));
+    }
+
     fn memory_test_handle(command_tx: Option<SyncSender<ActorCommand>>) -> OwnedInvocationHandle {
         OwnedInvocationHandle {
             observer: None,

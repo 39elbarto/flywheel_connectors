@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:998cb3c78a121ae0be35836e0e9caf71e9c0a7e437a08c99a621a8db73e36755"
+interface_hash = "blake3-256:fcp.interface.v2:b690752aa55d1e15db0946c4561aec25e88dd8bf6ef2b856cc3d230fd390df19"
 
 [connector]
 id = "fcp.n8n"
@@ -70,7 +70,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-input_schema = { type = "object", additionalProperties = false, required = [], properties = { query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, folderId = { type = "string", minLength = 1, maxLength = 256 }, tags = { type = "array", minItems = 1, maxItems = 10, items = { type = "string", minLength = 1, maxLength = 256 } }, active = { type = "boolean" }, isArchived = { type = "boolean" }, sort = { type = "string", enum = ["updatedAt:asc", "updatedAt:desc", "createdAt:asc", "createdAt:desc", "name:asc", "name:desc"] }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 256 } } } } }
+input_schema = { type = "object", additionalProperties = false, required = [], properties = { query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, folderId = { type = "string", minLength = 1, maxLength = 256 }, tags = { type = "array", minItems = 1, maxItems = 10, items = { type = "string", minLength = 1, maxLength = 256 } }, active = { type = "boolean" }, isArchived = { type = "boolean" }, sort = { type = "string", enum = ["updatedAt:asc", "updatedAt:desc", "createdAt:asc", "createdAt:desc", "name:asc", "name:desc"] }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 8192 } } } } }
 output_schema = { type = "object" }
 [provides.operations."n8n.workflows.search".network_constraints]
 host_allow = ["operator-configured"]
@@ -96,7 +96,7 @@ examples = ["{}"]
 related = []
 
 [provides.operations."n8n.validation.run"]
-description = "Validate one selected current workflow through host-owned signed local composition"
+description = "Read one selected current graph for host-owned signed local validation"
 capability = "n8n.workflows.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -136,7 +136,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-input_schema = { type = "object", additionalProperties = false, required = [], properties = { workflowId = { type = "string", minLength = 1, maxLength = 256 }, status = { type = "array", minItems = 1, maxItems = 8, uniqueItems = true, items = { type = "string", enum = ["new", "running", "success", "error", "waiting", "canceled", "crashed", "unknown"] } }, startedAfter = { type = "string", minLength = 1, maxLength = 256 }, startedBefore = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 8192 } } } } }
+input_schema = { type = "object", additionalProperties = false, required = [], properties = { workflowId = { type = "string", minLength = 1, maxLength = 256 }, status = { type = "array", minItems = 1, maxItems = 8, items = { type = "string", enum = ["new", "running", "success", "error", "waiting", "canceled", "crashed", "unknown"] } }, startedAfter = { type = "string", minLength = 1, maxLength = 256 }, startedBefore = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 8192 } } } } }
 output_schema = { type = "object" }
 [provides.operations."n8n.executions.search".network_constraints]
 host_allow = ["operator-configured"]
@@ -169,7 +169,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-input_schema = { type = "object", additionalProperties = false, required = ["kind"], properties = { kind = { type = "string", enum = ["projects", "folders", "tags"] }, query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, parentFolderId = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 256 } } } } }
+input_schema = { type = "object", additionalProperties = false, required = ["kind"], properties = { kind = { type = "string", enum = ["projects", "folders", "tags"] }, query = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, parentFolderId = { type = "string", minLength = 1, maxLength = 256 }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 }, cursor = { type = "string", minLength = 1, maxLength = 8192 } } } } }
 output_schema = { type = "object" }
 [provides.operations."n8n.structure.search".network_constraints]
 host_allow = ["operator-configured"]
@@ -3270,6 +3270,13 @@ window_ms = 60000
 burst = 20
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "n8n.structure.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
 [rate_limits.operation_pools]
 "n8n.audit.inspect" = ["n8n.audit.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
@@ -3277,6 +3284,11 @@ scope = "instance"
 "n8n.executions.get" = ["n8n.executions.read"]
 "n8n.executions.diagnostics" = ["n8n.executions.read"]
 "n8n.executions.list" = ["n8n.executions.read"]
+"n8n.executions.search" = ["n8n.executions.read"]
+"n8n.structure.search" = ["n8n.structure.read"]
+"n8n.validation.run" = ["n8n.workflows.read"]
+"n8n.workflows.compare" = ["n8n.workflows.read"]
+"n8n.workflows.search" = ["n8n.workflows.read"]
 "n8n.workflows.activate" = ["n8n.workflows.write"]
 "n8n.workflows.lifecycle" = ["n8n.workflows.lifecycle"]
 "n8n.workflows.archive" = ["n8n.workflows.lifecycle"]

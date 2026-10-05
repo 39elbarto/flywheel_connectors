@@ -2970,8 +2970,8 @@ fn validate_official_inventory_tools(
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| ProvisionError::new(ProvisionErrorCode::Policy))?;
-        if name == "search_workflows" {
-            seen.insert(name, ("search", "read"));
+        if fcp_host::n8n_release_read::safe_inventory_read_pins(name).is_some() {
+            seen.insert(name, ("safe_read", "read"));
             continue;
         }
         if !fcp_manifest::valid_reviewed_mcp_tool_fields(tool)
@@ -4741,6 +4741,10 @@ mod tests {
         }
 
         fn enable_search_read_from_pure_producer(&self) {
+            self.enable_read_from_pure_producer(false);
+        }
+
+        fn enable_read_from_pure_producer(&self, safe: bool) {
             let script = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../scripts/n8n_release_assembler.sh"
@@ -4753,8 +4757,27 @@ ns = {'__name__': 'retained_provision_fixture'}
 exec(compile(body, sys.argv[1], 'exec'), ns)
 tool = {'name':'search_workflows','class':'read','input_schema_digest':ns['INPUT_PIN'],
     'output_schema_digest':ns['OUTPUT_PIN'],'input_schema_present':True,'output_schema_present':True}
-policy = ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.search-read-policy.v1',
-    'servers':{'eec':tool,'hetzner':tool}}).encode())
+if sys.argv[3] == 'safe':
+    selected = [dict(tool, name=name, input_schema_digest=pins[0], output_schema_digest=pins[1])
+        for name, pins in ns['SAFE_PINS'].items()]
+    policy = ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.safe-read-policy.v1',
+        'servers':{'eec':selected,'hetzner':selected}}).encode())
+    for case in ('class','input','output','duplicate','unknown','extra','presence'):
+        changed = json.loads(json.dumps(policy))
+        entry = changed['servers']['hetzner'][0]
+        if case == 'class': entry['class'] = 'write'
+        elif case == 'input': entry['input_schema_digest'] = 'sha256:' + '0'*64
+        elif case == 'output': del entry['output_schema_digest']
+        elif case == 'duplicate': changed['servers']['hetzner'].append(dict(entry))
+        elif case == 'unknown': entry['name'] = 'validate_workflow'
+        elif case == 'extra': entry['caller_url'] = 'HOSTILE_CANARY'
+        elif case == 'presence': entry['output_schema_present'] = False
+        try: ns['validate_read_policy'](json.dumps(changed).encode())
+        except ValueError: pass
+        else: raise AssertionError('safe read producer accepted drift')
+else:
+    policy = ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.search-read-policy.v1',
+        'servers':{'eec':tool,'hetzner':tool}}).encode())
 root = pathlib.Path(sys.argv[2])
 for server in ('eec','hetzner'):
     paths = [root/'inventory'/f'{server}-official-mcp.json',root/'inventory'/f'{server}.json']
@@ -4765,6 +4788,7 @@ for server in ('eec','hetzner'):
             let output = std::process::Command::new("/usr/bin/python3")
                 .args(["-c", code, script])
                 .arg(&self.stage)
+                .arg(if safe { "safe" } else { "search" })
                 .output()
                 .expect("pure producer subprocess");
             assert!(output.status.success(), "pure producer failed");
@@ -4830,6 +4854,84 @@ for server in ('eec','hetzner'):
         fn drop(&mut self) {
             if !self.retain {
                 let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_safe_reads_producer_preseed_signed_provision_and_runtime_agree() {
+        let fixture = Fixture::retained();
+        fixture.enable_read_from_pure_producer(true);
+        let request = fixture.request();
+        validate_unsigned_release_tree(
+            &fixture.stage,
+            &fixture.release_id,
+            &request.git_revision,
+            &request.bindings,
+            fixture.owner,
+            &fixture.releases.join(&fixture.release_id),
+        )
+        .expect("native pre-seed validation of explicit safe reads");
+        request.validate().expect("synthetic signed safe reads");
+        for server in ["eec", "hetzner"] {
+            let path = fixture
+                .stage
+                .join(format!("inventory/{server}-official-mcp.json"));
+            let original = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+            let policy = original[0]["config"]["capability_policy"]
+                .as_object()
+                .unwrap();
+            assert_eq!(
+                fcp_host::n8n_release_read::exact_inventory_search_read(policy),
+                Some(true)
+            );
+            assert_eq!(policy["approved_tools"].as_array().unwrap().len(), 11);
+            for case in [
+                "class",
+                "input",
+                "output",
+                "duplicate",
+                "unknown",
+                "extra",
+                "network",
+                "capability",
+            ] {
+                let mut altered = original.clone();
+                let tools = &mut altered[0]["config"]["capability_policy"]["approved_tools"];
+                match case {
+                    "class" => tools[5]["class"] = json!("write"),
+                    "input" => {
+                        tools[5]["input_schema_digest"] = json!(
+                            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        )
+                    }
+                    "output" => {
+                        tools[5]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("output_schema_digest");
+                    }
+                    "duplicate" => {
+                        let duplicate = tools[5].clone();
+                        tools.as_array_mut().unwrap().push(duplicate);
+                    }
+                    "unknown" => tools[5]["name"] = json!("validate_workflow"),
+                    "extra" => tools[5]["unreviewed"] = json!(true),
+                    "network" => {
+                        altered[0]["operation_network_constraints"]["mcp.n8n.read"]["port_allow"] =
+                            json!([9443])
+                    }
+                    "capability" => {
+                        altered[0]["allowed_operations"] =
+                            json!(["mcp.tools.list", "mcp.tools.call"])
+                    }
+                    _ => unreachable!(),
+                }
+                fs::write(&path, altered.to_string()).unwrap();
+                fixture.refresh_stage_receipts();
+                assert!(fixture.request().validate().is_err(), "{server}:{case}");
+                fs::write(&path, original.to_string()).unwrap();
+                fixture.refresh_stage_receipts();
             }
         }
     }

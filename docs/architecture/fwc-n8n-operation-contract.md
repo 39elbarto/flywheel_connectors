@@ -1683,6 +1683,51 @@ sessions and memory as `not_collected`; an empty provider array does not mean
 that other invocations are idle or absent. This nullable/unavailable projection
 requires contract review and does not prove the later zero-idle criterion.
 
+Local continuation on base `031c6a17` (2026-10-05, not committed or installed):
+the original credentials CLI route now separates broker secret purpose from
+connector authority. It selects the normal `fcp.n8n` inventory/driver and
+`fwc-n8n://server` resource, retains the original operation and accepts only the
+closed separately admitted mapping. Other REST operations keep the API-key
+credential and port 443. The wrapper validates the original projected metadata,
+not a bridge envelope. Normal-builder, driver and projection tests are local
+evidence; they do not establish an installed CLI invocation.
+The sealed bundle verifier records the separately signed mapping for each
+server; the wrapper requires it before requesting the broker secret. Missing,
+null, extra-field or drifted mappings refuse before that acquisition. This
+early check does not replace original-token, network, purpose or session checks.
+
+An optional safe-read producer accepts only a nonempty subset of seven exact
+tools: search workflows/projects/folders, list workflow tags, SDK reference,
+best practices and node-config validation. Both server entries require the
+fixed raw input/output pins and presence, class `read`, unique names and closed
+fields. It is separate from the credentials mapping; `list_credentials`, SDK
+code evaluation and instance audit are not enrolled by this input. Absent input
+preserves the existing lifecycle/search mode. Producer, pre-seed validation,
+synthetic signed provision and runtime-policy fixtures agree. This is not owner
+admission or activation of that policy.
+
+The local observer engine uses the existing admin snapshot with a stable lock,
+reload-under-lock for ordinary and observer writers, revisions and epoch/boot/
+release checks. Actual owned process identity is attached after a one-shot
+launch claim; completion requires reap, group absence and successful IO/actor
+joins. Retained separate-process tests mix an ordinary lifecycle writer and a
+private observer writer. The physical local-session test checks owned process
+and IO teardown, not a native MCP invocation. Only a private test factory can
+construct observer authority or assert complete epoch coverage. No trusted
+installed writer/launch authority exists, so no public global idle claim is
+enabled. Principal/zone/server/correlation authorization for observer queries,
+complete entrypoint coverage, timestamped global memory observations, reboot/
+owner-incarnation and independent crash/descendant/PID-reuse acceptance remain
+open. Pending or unfinished records never become idle through Drop or a TTL.
+
+Current local package identity is a separate observed boundary: the signed
+RC43c policy admits `n8n-mcp@2.90.0`, while the public installed package metadata
+now reports `2.91.0` (SHA-256
+`2b84df1d7f0f043c37a5d7488d163f04798eafcafbce5b19e0f9738d6bbb5f47`).
+The normal package identity guard refused the attempted seven-mode process test
+before launch. No package/policy update, native SDK call or hash override was
+made; the failed logs remain evidence rather than acceptance.
+
 Native SDK-code validation effect boundary (2026-10-04): the installed parser
 uses a restricted synchronous AST interpreter that invokes supplied SDK graph
 builders. This is not static-only parsing or business workflow execution.
@@ -1720,8 +1765,8 @@ separate signed schema/profile and runtime admission before installed use.
 | Required row / submodes | Installed baseline | Candidate route and bounded result | Evidence / remaining boundary |
 |---|---|---|---|
 | `capabilities.inspect` | Retained EEC/Hetzner catalogs contain 53 tools | Fixed official `tools/list`, bounded name/schema-digest projection; every discovery entry remains unreviewed | `initial-installed-eec-catalog-20261004.json` and Hetzner counterpart; `official_mcp_catalog_*` and schema-export tests cover presence/drift/redaction, not admission or successful invocation of discovered tools |
-| `targets.resolve`: exact URI/server and ambiguity | Needs public-path validation | Wrapper canonical URI/server binding; 1–3 explicit server candidates, duplicate/unknown/conflicting candidates denied | `public_targets_resolve_*`; candidate resolution is identity syntax, not a provider existence/name search |
-| `runtime.status` | No proved global observer | Nullable global state and explicit `not_collected`; local owned calls already collect PID/group/memory/teardown | `runtime_status_never_infers_global_idle_from_invocation_or_bundle`; global observation and correlation lookup remain open |
+| `targets.resolve`: exact URI/server and ambiguity | Needs public-path validation | Canonical URI plus exact typed provider read; ID/workflow/server binding and complete unsaturated project snapshot; zero/one/multiple results distinguished | Four `public_targets_*` tests cover errors/deadline/redaction/incomplete snapshots; installed existence, name lookup and project-to-workflow mapping remain open |
+| `runtime.status` | No proved global observer | Public nullable `not_collected`; local engine and physical lifecycle hooks tested with private fixture authority only | Mixed separate-process writers, real actor/local IO teardown and unknown epoch tests; trusted writer, scoped authenticated query and complete global coverage remain open |
 | Knowledge: tool documentation, node search, templates search/get | Local catalog exists; public projection needs validation | Fixed local tools, bounded action-specific projection, source/default digests and no raw transport | `public_local_knowledge_actions_project_real_serialized_native_shapes`; template modes nodes-only/structure/full covered; combined search selectors and installed call-count policy remain separate limits |
 | `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | Local tool available; public modes need validation | Closed mode-to-native arguments and bounded catalog projection; display-condition property bindings retained | `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`; native optional version semantics still require mode-specific proof |
 | SDK reference: all nine public sections; best practices | Official tools discovered on both servers | Closed typed bridge read action → exact server/action decoder → bounded reference result/digest | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`; discovery is not schema admission; native extra `groups` section is not auto-enrolled |
@@ -1745,9 +1790,10 @@ proof that this candidate is installed. Open rows prevent whole-.35 closure.
 Required submode boundaries remain **OPEN**, rather than implicit capability
 exclusions:
 
-- `targets.resolve` has no provider-existence verification, name lookup or
-  project-to-workflow mapping; canonical URI resolution alone does not prove
-  that the resource exists.
+- `targets.resolve` now performs bounded exact provider-existence reads in
+  candidate source. Installed acceptance, name lookup and project-to-workflow
+  mapping are not established. A saturated 100-project result cannot prove
+  completeness and refuses rather than returning a false missing result.
 - `get_node` compare/breaking/migrations bind native numeric `fromVersion` and
   `toVersion` and expose `available:false` honestly. Missing native version
   metadata leaves that pair unverified. Optional `version` selection for

@@ -341,10 +341,7 @@ fn process_spec(
     use std::path::Path;
 
     let (host_path, host_digest) = bundle.fcp_host();
-    let official_mcp = envelope
-        .operation
-        .effective_credential_purpose(&envelope.input)
-        == super::BrokerCredentialPurpose::OfficialMcp;
+    let official_mcp = uses_official_mcp_driver(envelope.operation, &envelope.input);
     let mcp_access_dry_run = matches!(
         envelope.operation,
         super::HostRunOnceOperation::McpAccessReconcile
@@ -434,6 +431,40 @@ fn process_spec(
         fixed_env,
         network_disabled: false,
     })
+}
+
+fn uses_official_mcp_driver(operation: super::HostRunOnceOperation, input: &Value) -> bool {
+    operation != super::HostRunOnceOperation::CredentialsList
+        && operation.effective_credential_purpose(input)
+            == super::BrokerCredentialPurpose::OfficialMcp
+}
+
+#[cfg(test)]
+mod original_credentials_route_tests {
+    use super::*;
+
+    #[test]
+    fn broker_secret_kind_does_not_select_bridge_authority_for_credentials() {
+        let input =
+            serde_json::json!({"projectId":"p1","onlySharedWithMe":true,"page":{"limit":2}});
+        assert_eq!(
+            super::super::HostRunOnceOperation::CredentialsList
+                .effective_credential_purpose(&input),
+            super::super::BrokerCredentialPurpose::OfficialMcp
+        );
+        assert!(!uses_official_mcp_driver(
+            super::super::HostRunOnceOperation::CredentialsList,
+            &input
+        ));
+        assert!(uses_official_mcp_driver(
+            super::super::HostRunOnceOperation::WorkflowsSearch,
+            &serde_json::json!({"query":"synthetic"})
+        ));
+        assert!(!uses_official_mcp_driver(
+            super::super::HostRunOnceOperation::WorkflowsGet,
+            &serde_json::json!({"id":"w1"})
+        ));
+    }
 }
 
 #[cfg(target_os = "linux")]

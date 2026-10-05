@@ -316,6 +316,7 @@ pub struct VerifiedBundle {
     zone_policy_path: PathBuf,
     zone_policy_digest: String,
     local_mcp_policy: LocalMcpPolicy,
+    credential_metadata_read_servers: [bool; 2],
 }
 
 impl fmt::Debug for VerifiedBundle {
@@ -329,6 +330,22 @@ impl fmt::Debug for VerifiedBundle {
 }
 
 impl VerifiedBundle {
+    /// Requires the optional signed original-connector mapping before secret acquisition.
+    /// This does not grant a capability or replace the host's bound-request checks.
+    /// # Errors
+    /// Refuses absent mappings and unknown servers.
+    pub fn require_credential_metadata_read(&self, server: &str) -> Result<(), BundleError> {
+        let admitted = match server {
+            "eec" => self.credential_metadata_read_servers[0],
+            "hetzner" => self.credential_metadata_read_servers[1],
+            _ => false,
+        };
+        if admitted {
+            Ok(())
+        } else {
+            Err(BundleError::new(BundleErrorCode::InventoryBinding))
+        }
+    }
     #[must_use]
     pub fn fcp_host(&self) -> (&Path, &str) {
         (&self.fcp_host_path, &self.fcp_host_digest)
@@ -371,6 +388,24 @@ impl VerifiedBundle {
     }
 
     #[cfg(any(test, feature = "n8n-test-support"))]
+    /// Synthetic proof seam for producer/consumer tests, never an installed authority.
+    /// # Errors
+    /// Applies the same closed metadata configuration check as the signed loader.
+    pub fn test_fixture_from_metadata_config(
+        config: &Value,
+        server: &str,
+    ) -> Result<Self, BundleError> {
+        let admitted = metadata_read_config_admitted(config, server)?;
+        let mut bundle = Self::test_fixture();
+        match server {
+            "eec" => bundle.credential_metadata_read_servers[0] = admitted,
+            "hetzner" => bundle.credential_metadata_read_servers[1] = admitted,
+            _ => return Err(BundleError::new(BundleErrorCode::InventoryBinding)),
+        }
+        Ok(bundle)
+    }
+
+    #[cfg(any(test, feature = "n8n-test-support"))]
     #[must_use]
     pub fn test_fixture() -> Self {
         Self {
@@ -391,6 +426,7 @@ impl VerifiedBundle {
             zone_policy_path: PathBuf::from("/release/policy/zone-policies.json"),
             zone_policy_digest: "d".repeat(64),
             local_mcp_policy: test_local_mcp_policy(),
+            credential_metadata_read_servers: [false; 2],
         }
     }
 }
@@ -931,6 +967,10 @@ fn verify_release_bundle(
         &mcp_manifest_path,
         allow_owner_bootstrap_policy,
     )?;
+    let credential_metadata_read_servers = [
+        inventory_metadata_read_admitted(&inventory_eec_path, "eec")?,
+        inventory_metadata_read_admitted(&inventory_hetzner_path, "hetzner")?,
+    ];
     Ok(VerifiedBundle {
         fcp_host_path,
         fcp_host_digest,
@@ -945,7 +985,41 @@ fn verify_release_bundle(
         zone_policy_path,
         zone_policy_digest,
         local_mcp_policy,
+        credential_metadata_read_servers,
     })
+}
+
+fn inventory_metadata_read_admitted(path: &Path, server: &str) -> Result<bool, BundleError> {
+    let value = read_bounded_json(path, MAX_INVENTORY_BYTES)
+        .map_err(|_| BundleError::new(BundleErrorCode::InventoryBinding))?;
+    metadata_read_config_admitted(&value[0]["config"], server)
+}
+
+fn metadata_read_config_admitted(config: &Value, server: &str) -> Result<bool, BundleError> {
+    let denied = || BundleError::new(BundleErrorCode::InventoryBinding);
+    let Some(mapping) = config.get("credential_metadata_read") else {
+        return Ok(false);
+    };
+    let config = config.as_object().ok_or_else(denied)?;
+    if config.len() != 4
+        || config.get("server_id").and_then(Value::as_str) != Some(server)
+        || config.get("base_url").and_then(Value::as_str)
+            != Some(match server {
+                "eec" => "https://n8n.europeaneyecenter.com/api/v1",
+                "hetzner" => "https://n8nhet.levilaser.com/api/v1",
+                _ => return Err(denied()),
+            })
+        || config
+            .get("credential_id")
+            .and_then(Value::as_str)
+            .is_none_or(|id| fcp_core::CredentialId::parse(id).is_err())
+    {
+        return Err(denied());
+    }
+    let mapping: crate::CredentialMetadataReadMapping =
+        serde_json::from_value(mapping.clone()).map_err(|_| denied())?;
+    mapping.validate().map_err(|_| denied())?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -1195,12 +1269,12 @@ fn verify_official_inventory_binding(
     Ok(())
 }
 
-/// Recognize only lifecycle4 or lifecycle4 plus the exact raw-bound search read.
+/// Recognize lifecycle4 with an explicitly raw-bound subset of safe reads.
 /// This validates signed data shape, never grants a capability or admits drift.
 #[must_use]
 pub fn exact_inventory_search_read(policy: &serde_json::Map<String, Value>) -> Option<bool> {
     let tools = policy.get("approved_tools")?.as_array()?;
-    if !matches!(tools.len(), 4 | 5) {
+    if !(4..=11).contains(&tools.len()) {
         return None;
     }
     let mut names = BTreeSet::new();
@@ -1210,13 +1284,11 @@ pub fn exact_inventory_search_read(policy: &serde_json::Map<String, Value>) -> O
         if !names.insert(name) {
             return None;
         }
-        if name == "search_workflows" {
+        if let Some((input, output)) = safe_inventory_read_pins(name) {
             if tool.len() != 4
                 || tool.get("class")?.as_str()? != "read"
-                || tool.get("input_schema_digest")?.as_str()?
-                    != "sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714"
-                || tool.get("output_schema_digest")?.as_str()?
-                    != "sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206"
+                || tool.get("input_schema_digest")?.as_str()? != input
+                || tool.get("output_schema_digest")?.as_str()? != output
             {
                 return None;
             }
@@ -1240,7 +1312,27 @@ pub fn exact_inventory_search_read(policy: &serde_json::Map<String, Value>) -> O
     {
         return None;
     }
-    Some(names.contains("search_workflows"))
+    Some(
+        names
+            .iter()
+            .any(|name| safe_inventory_read_pins(name).is_some()),
+    )
+}
+
+/// Closed safe-read enrollment. SDK code evaluation is intentionally absent.
+/// These observed raw pins are compatibility checks, never owner admission.
+#[must_use]
+pub fn safe_inventory_read_pins(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "search_workflows"
+        | "search_projects"
+        | "search_folders"
+        | "list_workflow_tags"
+        | "get_workflow_sdk_reference"
+        | "get_workflow_best_practices"
+        | "validate_node_config" => crate::n8n_dispatch::official_n8n_sdk_schema_pins(name),
+        _ => None,
+    }
 }
 
 fn exact_approved_tool(
@@ -1670,6 +1762,52 @@ fn hash_file(path: &Path) -> Result<String, BundleError> {
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn metadata_read_mapping_is_required_before_secret_acquisition() {
+        let mut bundle = VerifiedBundle::test_fixture();
+        for server in ["eec", "hetzner"] {
+            assert!(bundle.require_credential_metadata_read(server).is_err());
+            let mut config = serde_json::json!({
+                "server_id": server,
+                "base_url": format!("{}/api/v1", crate::CredentialMetadataReadMapping::api_origin(server).unwrap()),
+                "credential_id": "00000000-0000-0000-0000-000000000001"
+            });
+            assert!(!metadata_read_config_admitted(&config, server).unwrap());
+            config["credential_metadata_read"] = serde_json::json!({
+                "credential_id": "00000000-0000-0000-0000-000000000002",
+                "purpose": "n8n.credentials.metadata.read", "tool": "list_credentials", "class": "read",
+                "input_schema_digest": "sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+                "output_schema_digest": "sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+            });
+            assert!(metadata_read_config_admitted(&config, server).unwrap());
+            for (key, value) in [
+                ("server_id", serde_json::json!("legacy")),
+                ("base_url", serde_json::json!("https://untrusted.invalid")),
+                ("credential_metadata_read", Value::Null),
+                ("extra", serde_json::json!(true)),
+            ] {
+                let mut invalid = config.clone();
+                invalid[key] = value;
+                assert!(metadata_read_config_admitted(&invalid, server).is_err());
+            }
+            for key in [
+                "purpose",
+                "class",
+                "input_schema_digest",
+                "output_schema_digest",
+                "extra",
+            ] {
+                let mut invalid = config.clone();
+                invalid["credential_metadata_read"][key] = serde_json::json!("hostile-canary");
+                assert!(metadata_read_config_admitted(&invalid, server).is_err());
+            }
+        }
+        bundle.credential_metadata_read_servers = [true; 2];
+        assert!(bundle.require_credential_metadata_read("eec").is_ok());
+        assert!(bundle.require_credential_metadata_read("hetzner").is_ok());
+        assert!(bundle.require_credential_metadata_read("legacy").is_err());
+    }
 
     #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};

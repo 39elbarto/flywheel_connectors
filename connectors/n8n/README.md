@@ -50,6 +50,16 @@ Source/local evidence is retained under `/srv/dev-ssd/fcp/nqm81-35/`, including
 `final-read-parity-review-20261004-1.md` and the `actual-cli-*-20261004-1`
 inputs/stdout/stderr. Unit helper tests are distinct from these real CLI runs.
 
+The current local continuation is based on `031c6a17` and includes original
+credential-authority source `92b397f4`. Uncommitted additions cover typed
+target-existence reads, optional exact safe-read policy production and a
+private-fixture observer engine. They are under review, not installed.
+Credential mapping activation, full original child/CLI acceptance and global
+observer authority remain open. The retained signed `7592c01` stage lacks A
+and is not the proposed next installation path. The matrix also records the
+observed local-package `2.90.0` policy versus `2.91.0` metadata refusal; no local
+package upgrade or policy change is claimed.
+
 The compiled task CLI was exercised without a provider or credential read:
 
 The shared debug path is mutable. Before each example, use this read-only check

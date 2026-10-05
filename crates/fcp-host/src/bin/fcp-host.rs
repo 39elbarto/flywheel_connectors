@@ -12808,7 +12808,12 @@ fn build_n8n_read_only_run_once_plan(
         })
         .transpose()?;
     validate_n8n_read_only_resource_uri(input.server_id, &input.resource_uri)?;
-    let credential_binding = run_once_n8n_credential_binding_for_zone(config, &zone_id)?;
+    let credential_binding = run_once_n8n_credential_binding_for_operation(
+        config,
+        &zone_id,
+        &input.operation,
+        &input.input,
+    )?;
     if credential_binding.server_id != input.server_id.as_str() {
         return Err(HostError::PreflightFailed(
             "n8n read-only run-once server binding was denied".to_string(),
@@ -15867,7 +15872,52 @@ fn run_once_n8n_credential_binding(
     config: &ManagedConnectorConfig,
     request: &InvokeRequest,
 ) -> HostResult<RunOnceCredentialBinding> {
-    run_once_n8n_credential_binding_for_zone(config, &request.zone_id)
+    run_once_n8n_credential_binding_for_operation(
+        config,
+        &request.zone_id,
+        request.operation.as_str(),
+        &request.input,
+    )
+}
+
+fn run_once_n8n_credential_binding_for_operation(
+    config: &ManagedConnectorConfig,
+    zone: &ZoneId,
+    operation: &str,
+    input: &Value,
+) -> HostResult<RunOnceCredentialBinding> {
+    let mut binding = run_once_n8n_credential_binding_for_zone(config, zone)?;
+    if operation != "n8n.credentials.list" {
+        return Ok(binding);
+    }
+    official_credentials_read_arguments(input)?;
+    let mapping = config
+        .config
+        .as_ref()
+        .and_then(|value| value.get("credential_metadata_read"))
+        .cloned()
+        .ok_or_else(|| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    let mapping: fcp_host::CredentialMetadataReadMapping = serde_json::from_value(mapping)
+        .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    mapping
+        .validate()
+        .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    let endpoint = url::Url::parse(
+        fcp_host::CredentialMetadataReadMapping::endpoint(&binding.server_id)
+            .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?,
+    )
+    .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    binding.credential_id = CredentialId::parse(mapping.credential_id())
+        .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    binding.host_allow = endpoint
+        .host_str()
+        .ok_or_else(|| HostError::PreflightFailed("credential metadata mapping denied".into()))?
+        .to_owned();
+    binding.port_allow = endpoint
+        .port_or_known_default()
+        .ok_or_else(|| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+    binding.kind = RunOnceCredentialKind::OfficialMcpAccessToken;
+    Ok(binding)
 }
 
 fn run_once_n8n_credential_binding_for_zone(
@@ -15894,10 +15944,13 @@ fn run_once_n8n_credential_binding_for_zone(
             "run-once fcp.n8n credential config is invalid".to_string(),
         ));
     };
-    if config.len() != 3
-        || config
-            .keys()
-            .any(|key| !matches!(key.as_str(), "credential_id" | "base_url" | "server_id"))
+    if !(config.len() == 3 || config.len() == 4 && config.contains_key("credential_metadata_read"))
+        || config.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "credential_id" | "base_url" | "server_id" | "credential_metadata_read"
+            )
+        })
     {
         return Err(HostError::InvalidFilter(
             "run-once fcp.n8n credential config is invalid".to_string(),
@@ -15949,6 +16002,30 @@ fn run_once_n8n_credential_binding_for_zone(
         return Err(HostError::InvalidFilter(
             "run-once fcp.n8n credential config is invalid".to_string(),
         ));
+    }
+    if let Some(value) = config.get("credential_metadata_read") {
+        let mapping: fcp_host::CredentialMetadataReadMapping =
+            serde_json::from_value(value.clone()).map_err(|_| {
+                HostError::InvalidFilter("credential metadata mapping denied".into())
+            })?;
+        mapping
+            .validate()
+            .map_err(|_| HostError::InvalidFilter("credential metadata mapping denied".into()))?;
+        if base_url
+            != match server_id {
+                "eec" => "https://n8n.europeaneyecenter.com/api/v1",
+                "hetzner" => "https://n8nhet.levilaser.com/api/v1",
+                _ => {
+                    return Err(HostError::InvalidFilter(
+                        "credential metadata mapping denied".into(),
+                    ));
+                }
+            }
+        {
+            return Err(HostError::InvalidFilter(
+                "credential metadata mapping denied".into(),
+            ));
+        }
     }
     Ok(RunOnceCredentialBinding {
         credential_id,
@@ -41757,6 +41834,227 @@ done"#;
             .expect("object")
             .insert("server_id".to_string(), json!("legacy"));
         assert!(run_once_n8n_credential_binding(&legacy_server, &request).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "n8n-test-support")]
+    fn retained_metadata_producer_config_passes_sealed_check_and_original_builder() {
+        let root = tempfile::Builder::new()
+            .prefix("metadata-base-parity-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/n8n_release_assembler.sh"
+        );
+        let code = r#"
+import json,pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+body=source.split('credential_metadata_mapping() {',1)[1].split("<<'PY'\n",1)[1].split('\nPY\n}',1)[0]
+ns={'__name__':'retained_metadata_fixture'}
+exec(compile(body,sys.argv[1],'exec'),ns)
+entry={'credential_id':'22222222-2222-4222-8222-222222222222','purpose':'n8n.credentials.metadata.read','tool':'list_credentials','class':'read','input_schema_digest':ns['INPUT_PIN'],'output_schema_digest':ns['OUTPUT_PIN']}
+mapping=ns['validate_mapping'](json.dumps({'schema':'fwc.n8n.credential-metadata-mapping.v1','servers':{'eec':entry,'hetzner':entry}}).encode())
+for server,host in [('eec','n8n.europeaneyecenter.com'),('hetzner','n8nhet.levilaser.com')]:
+    common={'config':{'server_id':server,'base_url':'https://'+host+'/api/v1','credential_id':'11111111-1111-1111-1111-111111111111'},'allowed_operations':['n8n.credentials.list'],'operation_network_constraints':{'n8n.credentials.list':{'host_allow':[host],'port_allow':[443]}}}
+    output=ns['add_metadata_inventory'](common,server,mapping)
+    with (pathlib.Path(sys.argv[2])/(server+'.json')).open('x') as f: json.dump(output,f)
+"#;
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", code, script])
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "normal offline metadata producer refused"
+        );
+        for server in [N8nReadOnlyServerId::Eec, N8nReadOnlyServerId::Hetzner] {
+            let produced: Value = serde_json::from_slice(
+                &std::fs::read(root.join(format!("{}.json", server.as_str()))).unwrap(),
+            )
+            .unwrap();
+            let original_config = produced["config"].clone();
+            let bundle =
+                fcp_host::n8n_release_read::VerifiedBundle::test_fixture_from_metadata_config(
+                    &original_config,
+                    server.as_str(),
+                )
+                .unwrap();
+            bundle
+                .require_credential_metadata_read(server.as_str())
+                .unwrap();
+            let mut config = run_once_n8n_test_config();
+            config.config = Some(original_config.clone());
+            let mut input = n8n_read_only_test_input("n8n.credentials.list");
+            input.server_id = server;
+            input.resource_uri = format!("fwc-n8n://{}", server.as_str());
+            input.input = json!({"query":"synthetic","page":{"limit":2}});
+            let plan = build_n8n_read_only_run_once_plan(input.clone(), &config).unwrap();
+            assert_eq!(
+                plan.credential_binding.port_allow,
+                if server == N8nReadOnlyServerId::Eec {
+                    443
+                } else {
+                    8443
+                }
+            );
+            for field in [
+                "base_url",
+                "server_id",
+                "unknown",
+                "credential_metadata_read",
+            ] {
+                let mut bad = original_config.clone();
+                bad[field] = if field == "credential_metadata_read" {
+                    Value::Null
+                } else {
+                    json!("unknown")
+                };
+                assert!(
+                    fcp_host::n8n_release_read::VerifiedBundle::test_fixture_from_metadata_config(
+                        &bad,
+                        server.as_str()
+                    )
+                    .is_err()
+                );
+                config.config = Some(bad);
+                assert!(build_n8n_read_only_run_once_plan(input.clone(), &config).is_err());
+            }
+            for field in ["purpose", "input_schema_digest", "output_schema_digest"] {
+                let mut bad = original_config.clone();
+                bad["credential_metadata_read"][field] = json!("unknown");
+                assert!(
+                    fcp_host::n8n_release_read::VerifiedBundle::test_fixture_from_metadata_config(
+                        &bad,
+                        server.as_str()
+                    )
+                    .is_err()
+                );
+                config.config = Some(bad);
+                assert!(build_n8n_read_only_run_once_plan(input.clone(), &config).is_err());
+            }
+            for path in ["", "/api/v1/", "/api/v2"] {
+                let mut bad = original_config.clone();
+                bad["base_url"] = json!(format!(
+                    "{}{}",
+                    fcp_host::CredentialMetadataReadMapping::api_origin(server.as_str()).unwrap(),
+                    path
+                ));
+                assert!(
+                    fcp_host::n8n_release_read::VerifiedBundle::test_fixture_from_metadata_config(
+                        &bad,
+                        server.as_str()
+                    )
+                    .is_err()
+                );
+                config.config = Some(bad);
+                assert!(build_n8n_read_only_run_once_plan(input.clone(), &config).is_err());
+            }
+            let mut absent = original_config;
+            absent
+                .as_object_mut()
+                .unwrap()
+                .remove("credential_metadata_read");
+            let absent_bundle =
+                fcp_host::n8n_release_read::VerifiedBundle::test_fixture_from_metadata_config(
+                    &absent,
+                    server.as_str(),
+                )
+                .unwrap();
+            assert!(
+                absent_bundle
+                    .require_credential_metadata_read(server.as_str())
+                    .is_err()
+            );
+            config.config = Some(absent);
+            assert!(build_n8n_read_only_run_once_plan(input, &config).is_err());
+        }
+    }
+
+    #[test]
+    fn original_credentials_builder_uses_mapping_without_changing_rest_binding() {
+        let mapping = json!({
+            "credential_id":"22222222-2222-4222-8222-222222222222",
+            "purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        });
+        for server in [N8nReadOnlyServerId::Eec, N8nReadOnlyServerId::Hetzner] {
+            let mut config = run_once_n8n_test_config();
+            config.config.as_mut().unwrap()["server_id"] = json!(server.as_str());
+            config.config.as_mut().unwrap()["base_url"] = json!(format!(
+                "{}/api/v1",
+                fcp_host::CredentialMetadataReadMapping::api_origin(server.as_str()).unwrap()
+            ));
+            let mut input = n8n_read_only_test_input("n8n.credentials.list");
+            input.server_id = server;
+            input.resource_uri = format!("fwc-n8n://{}", server.as_str());
+            input.input = json!({"query":"synthetic","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":2}});
+            assert!(build_n8n_read_only_run_once_plan(input.clone(), &config).is_err());
+            config.config.as_mut().unwrap()["credential_metadata_read"] = mapping.clone();
+            let plan = build_n8n_read_only_run_once_plan(input.clone(), &config).unwrap();
+            assert_eq!(plan.operation.as_str(), "n8n.credentials.list");
+            assert_eq!(plan.resource_uri, input.resource_uri);
+            assert_eq!(plan.input, input.input);
+            assert_eq!(
+                plan.credential_binding.kind,
+                RunOnceCredentialKind::OfficialMcpAccessToken
+            );
+            assert_eq!(
+                plan.credential_binding.port_allow,
+                if server == N8nReadOnlyServerId::Eec {
+                    443
+                } else {
+                    8443
+                }
+            );
+            assert_eq!(
+                plan.credential_binding.credential_id.to_string(),
+                "22222222-2222-4222-8222-222222222222"
+            );
+            let rest =
+                run_once_n8n_credential_binding_for_zone(&config, &ZoneId::private()).unwrap();
+            assert_eq!(rest.kind, RunOnceCredentialKind::RestApiKey);
+            assert_eq!(rest.port_allow, 443);
+            assert_eq!(
+                rest.credential_id.to_string(),
+                "11111111-1111-1111-1111-111111111111"
+            );
+            let mut wrong_resource = input.clone();
+            wrong_resource.resource_uri = format!(
+                "fwc-mcp-bridge://{}/tools/list%5Fcredentials",
+                server.as_str()
+            );
+            assert!(build_n8n_read_only_run_once_plan(wrong_resource, &config).is_err());
+            let mut wrong_server = input.clone();
+            wrong_server.server_id = if server == N8nReadOnlyServerId::Eec {
+                N8nReadOnlyServerId::Hetzner
+            } else {
+                N8nReadOnlyServerId::Eec
+            };
+            wrong_server.resource_uri = format!("fwc-n8n://{}", wrong_server.server_id.as_str());
+            assert!(build_n8n_read_only_run_once_plan(wrong_server, &config).is_err());
+            for bad_input in [
+                json!({"url":"https://denied.invalid"}),
+                json!({"page":{"limit":201}}),
+                json!({"page":{"cursor":"unknown"}}),
+            ] {
+                let mut altered = input.clone();
+                altered.input = bad_input;
+                assert!(build_n8n_read_only_run_once_plan(altered, &config).is_err());
+            }
+            for bad in [Value::Null, json!({}), json!({"extra":"CANARY"})] {
+                config.config.as_mut().unwrap()["credential_metadata_read"] = bad;
+                assert!(
+                    run_once_n8n_credential_binding_for_zone(&config, &ZoneId::private()).is_err()
+                );
+            }
+            config.config.as_mut().unwrap()["credential_metadata_read"] = mapping.clone();
+            config.config.as_mut().unwrap()["credential_metadata_read"]["purpose"] = json!("other");
+            assert!(build_n8n_read_only_run_once_plan(input, &config).is_err());
+        }
     }
 
     #[test]

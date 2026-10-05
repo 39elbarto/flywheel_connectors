@@ -705,9 +705,16 @@ search_read_policy() {
   # Opt-in data is admitted separately by the protected caller. A valid proposal
   # or this pure check is not owner approval. There is no caller-selected path.
   local admission="${FWC_N8N_SEARCH_READ_POLICY_SHA256:-}"
+  local safe_admission="${FWC_N8N_SAFE_READ_POLICY_SHA256:-}"
+  [[ -z "$admission" || -z "$safe_admission" ]] || die "read policy inputs are mutually exclusive"
+  local kind="search"
+  if [[ -n "$safe_admission" ]]; then
+    admission="$safe_admission"
+    kind="safe"
+  fi
   [[ -n "$admission" ]] || return 0
   [[ "$admission" =~ ^[0-9a-f]{64}$ ]] || die "search read policy admission digest is invalid"
-  python3 - "$1" "$admission" "${2:-}" <<'PY'
+  python3 - "$1" "$admission" "${2:-}" "$kind" <<'PY'
 import copy
 import hashlib
 import json
@@ -718,8 +725,19 @@ import stat
 import sys
 
 INPUT = "/srv/dev-ssd/rc41-inputs/search-read-policy.json"
+if len(sys.argv) > 4 and sys.argv[4] == "safe":
+    INPUT = "/srv/dev-ssd/rc41-inputs/safe-read-policy.json"
 INPUT_PIN = "sha256:179069c19267545edc43d943befdcff9743bbf4557e6a10efe7fa0cb7b91e714"
 OUTPUT_PIN = "sha256:1b9737c076b6f72be4f1521911b589fce8f9954bdc7487ea12933f2bd0586206"
+SAFE_PINS = {
+    "search_workflows": (INPUT_PIN, OUTPUT_PIN),
+    "search_projects": ("sha256:d37453c28e110141c606ef901d7651367544f8d272f183bd181978e086712200", "sha256:28c5f100b2daae7bff8225376c4bed8000f67b785f174a6ae1636ff90fc5126e"),
+    "search_folders": ("sha256:20a822576c3a6e883e942dfc695ccc7114ffc18e2e3a7bf555af8b07da314269", "sha256:d0af92b84b63148c231ee85778e7af9b765cf6edc4e8d638eec067220b496487"),
+    "list_workflow_tags": ("sha256:c0602bd0434d0c2aeafb763bc12512b63443448c9331dc0cb1ebf02973603e8e", "sha256:5481cbd6dedd4134020f44bdcc900e40eb9802e70d5ccedf8dda6252d55b720b"),
+    "get_workflow_sdk_reference": ("sha256:c0c69d975afd16845bee57cbd37e0cf0a50b7d5741810625963dedf60279fda2", "sha256:555b1d6f84918d5b03adfd55c3f652d2b0ac0457f80e9e811963fbbbc61426dc"),
+    "get_workflow_best_practices": ("sha256:d95120da8063c53d7dc379b938043cfdc81da869c40a33ce608fe76ddda31423", "sha256:9530d1f518b2640320f8ffbfd971d662b3f00558be8b3ff9418fe0d916a1728c"),
+    "validate_node_config": ("sha256:37231a38664a9375573c84d8484fc30cef2e99efbca5f6172f1a4cd308c34f8d", "sha256:11fa90ee8936aa8946e5a1556d3c03ad3640dc837731c0302f4b0dc40e5920a0"),
+}
 
 def closed_object(pairs):
     result = {}
@@ -730,19 +748,37 @@ def closed_object(pairs):
     return result
 
 def validate_read_policy(raw):
-    if len(raw) > 8192:
+    if len(raw) > 16384:
         raise ValueError("search read policy denied")
     value = json.loads(raw, object_pairs_hook=closed_object)
     expected = {"name": "search_workflows", "class": "read",
         "input_schema_digest": INPUT_PIN, "output_schema_digest": OUTPUT_PIN,
         "input_schema_present": True, "output_schema_present": True}
     if (not isinstance(value, dict) or set(value) != {"schema", "servers"}
-        or value["schema"] != "fwc.n8n.search-read-policy.v1"
+        or value["schema"] not in ("fwc.n8n.search-read-policy.v1", "fwc.n8n.safe-read-policy.v1")
         or not isinstance(value["servers"], dict)
         or set(value["servers"]) != {"eec", "hetzner"}):
         raise ValueError("search read policy denied")
     for server in ("eec", "hetzner"):
         observed = value["servers"][server]
+        if value["schema"] == "fwc.n8n.safe-read-policy.v1":
+            if not isinstance(observed, list) or not 1 <= len(observed) <= len(SAFE_PINS):
+                raise ValueError("search read policy denied")
+            seen = set()
+            for tool in observed:
+                if not isinstance(tool, dict) or set(tool) != set(expected):
+                    raise ValueError("search read policy denied")
+                name = tool["name"]
+                if not isinstance(name, str) or name not in SAFE_PINS or name in seen:
+                    raise ValueError("search read policy denied")
+                seen.add(name)
+                pins = SAFE_PINS[name]
+                if (tool["class"] != "read" or tool["input_schema_digest"] != pins[0]
+                    or tool["output_schema_digest"] != pins[1]
+                    or tool["input_schema_present"] is not True
+                    or tool["output_schema_present"] is not True):
+                    raise ValueError("search read policy denied")
+            continue
         if (not isinstance(observed, dict) or observed != expected
             or observed["input_schema_present"] is not True
             or observed["output_schema_present"] is not True):
@@ -755,11 +791,15 @@ def add_read_inventory(official, common, server, policy):
         or common["config"]["server_id"] != server):
         raise ValueError("search read policy denied")
     tools = official["config"]["capability_policy"]["approved_tools"]
-    if any(tool["name"] == "search_workflows" for tool in tools):
-        raise ValueError("search read policy denied")
-    tool = dict(policy["servers"][server])
-    del tool["input_schema_present"], tool["output_schema_present"]
-    tools.append(tool)
+    selected = policy["servers"][server]
+    if not isinstance(selected, list):
+        selected = [selected]
+    for selected_tool in selected:
+        if any(tool["name"] == selected_tool["name"] for tool in tools):
+            raise ValueError("search read policy denied")
+        tool = dict(selected_tool)
+        del tool["input_schema_present"], tool["output_schema_present"]
+        tools.append(tool)
     for inventory, operation, source in (
         (official, "mcp.n8n.read", "mcp.tools.list"),
         (common, "n8n.workflows.compare", "n8n.workflows.get"),
@@ -791,7 +831,7 @@ def admitted_input(digest):
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0
             or before.st_gid != 0 or stat.S_IMODE(before.st_mode) != 0o600):
             raise ValueError("search read policy denied")
-        raw = stream.read(8193)
+        raw = stream.read(16385)
         after = os.fstat(stream.fileno())
     if (input_identity(before) != input_identity(after) or input_identity(os.lstat(INPUT)) != input_identity(after)
         or hashlib.sha256(raw).hexdigest() != digest):
@@ -799,8 +839,11 @@ def admitted_input(digest):
     return validate_read_policy(raw)
 
 def main():
-    mode, digest, stage = sys.argv[1:]
+    mode, digest, stage, kind = sys.argv[1:]
     policy = admitted_input(digest)
+    expected_schema = "fwc.n8n.safe-read-policy.v1" if kind == "safe" else "fwc.n8n.search-read-policy.v1"
+    if policy["schema"] != expected_schema:
+        raise ValueError("search read policy denied")
     prefix = {"check": "/usr/local/lib/fwc-n8n/releases/",
         "apply": "/var/lib/fwc-n8n/staging/"}.get(mode)
     if (prefix is None or not stage.startswith(prefix)

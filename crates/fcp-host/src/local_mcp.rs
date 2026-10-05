@@ -354,6 +354,7 @@ impl LocalMcpError {
 pub struct LocalMcpProvider {
     policy: LocalMcpPolicy,
     signed_current: Option<crate::n8n_release_read::VerifiedSignedLocalProvider>,
+    observer: Option<Arc<crate::admin_state::RuntimeObservedLaunch>>,
 }
 
 impl LocalMcpProvider {
@@ -368,6 +369,7 @@ impl LocalMcpProvider {
         Ok(Self {
             policy,
             signed_current: None,
+            observer: None,
         })
     }
 
@@ -397,6 +399,7 @@ impl LocalMcpProvider {
         Ok(Self {
             policy: proof.policy().clone(),
             signed_current: Some(proof),
+            observer: None,
         })
     }
 
@@ -476,8 +479,7 @@ impl LocalMcpProvider {
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(LocalMcpError::RequestTimeout);
         }
-        let process = OwnedProcess::spawn(&spec)
-            .map_err(|error| map_process_error(&error, ProcessPhase::Spawn))?;
+        let process = self.spawn_observed_process(&spec)?;
         let identity = process.identity().clone();
         let memory_before = zero_memory_sample();
         let memory_during = process
@@ -508,7 +510,10 @@ impl LocalMcpProvider {
             Err(_) => LocalMcpShutdownReason::Failed,
         };
         let shutdown_started = Instant::now();
-        let (shutdown, memory_samples, teardown_error) = session.finish(&self.policy, reason);
+        let (shutdown, memory_samples, mut teardown_error) = session.finish(&self.policy, reason);
+        if teardown_error.is_none() {
+            teardown_error = self.observe_completed_session(&session, &shutdown).err();
+        }
         let shutdown_latency_ms = elapsed_ms(shutdown_started.elapsed());
         let result_code = outcome.as_ref().err().map_or_else(
             || {
@@ -541,6 +546,43 @@ impl LocalMcpProvider {
             },
             result_code,
         })
+    }
+    fn spawn_observed_process(&self, spec: &ProcessSpec) -> Result<OwnedProcess, LocalMcpError> {
+        if let Some(observer) = &self.observer {
+            observer
+                .claim(&spec.expected_runtime_executable_digest)
+                .map_err(|_| LocalMcpError::ProcessIdentity)?;
+        }
+        let mut process = OwnedProcess::spawn(spec)
+            .map_err(|error| map_process_error(&error, ProcessPhase::Spawn))?;
+        if self
+            .observer
+            .as_ref()
+            .is_some_and(|observer| observer.attach(process.identity()).is_err())
+        {
+            let _ = process.terminate(millis(self.policy.shutdown_timeout_ms));
+            return Err(LocalMcpError::ProcessIdentity);
+        }
+        Ok(process)
+    }
+
+    fn observe_completed_session(
+        &self,
+        session: &LocalMcpSession,
+        shutdown: &LocalMcpShutdownReceipt,
+    ) -> Result<(), LocalMcpError> {
+        let Some(observer) = &self.observer else {
+            return Ok(());
+        };
+        if !session.teardown_complete || !session.workers_joined {
+            return Err(LocalMcpError::ProcessStop);
+        }
+        let mut report = fcp_sandbox::TerminationReport::default();
+        report.completion.reaped = shutdown.completion.reaped;
+        report.completion.group_absent = shutdown.completion.group_absent;
+        observer
+            .retire(report)
+            .map_err(|_| LocalMcpError::ProcessStop)
     }
 }
 
@@ -604,6 +646,7 @@ struct LocalMcpSession {
     response_bytes: u64,
     stdout_overflow: Arc<AtomicBool>,
     teardown_complete: bool,
+    workers_joined: bool,
 }
 
 impl LocalMcpSession {
@@ -657,6 +700,7 @@ impl LocalMcpSession {
             response_bytes: 0,
             stdout_overflow,
             teardown_complete: false,
+            workers_joined: false,
         }
     }
 }
@@ -743,11 +787,9 @@ impl LocalMcpWriter {
         }
     }
 
-    fn stop_and_join(&mut self) {
+    fn stop_and_join(&mut self) -> bool {
         self.sender.take();
-        if let Some(join) = self.join.take() {
-            let _ = join.join();
-        }
+        self.join.take().is_some_and(|join| join.join().is_ok())
     }
 
     fn detach(&mut self) {
@@ -1031,10 +1073,12 @@ impl LocalMcpSession {
             if let Some(process) = self.process.as_mut() {
                 process.abandon();
             }
-            if let Some(writer) = self.writer.as_mut() {
-                writer.stop_and_join();
-            }
-            self.join_readers();
+            let writer_joined = self
+                .writer
+                .as_mut()
+                .is_some_and(LocalMcpWriter::stop_and_join);
+            let readers_joined = self.join_readers();
+            self.workers_joined = writer_joined && readers_joined;
         } else {
             self.detach_after_teardown_failure();
         }
@@ -1052,13 +1096,16 @@ impl LocalMcpSession {
         }
     }
 
-    fn join_readers(&mut self) {
-        if let Some(thread) = self.stdout_thread.take() {
-            let _ = thread.join();
-        }
-        if let Some(thread) = self.stderr_thread.take() {
-            let _ = thread.join();
-        }
+    fn join_readers(&mut self) -> bool {
+        let stdout = self
+            .stdout_thread
+            .take()
+            .is_some_and(|thread| thread.join().is_ok());
+        let stderr = self
+            .stderr_thread
+            .take()
+            .is_some_and(|thread| thread.join().is_ok());
+        stdout && stderr
     }
 }
 
@@ -1572,6 +1619,80 @@ mod tests {
         policy.package_metadata_digest = blake3::hash(accepted_metadata).to_hex().to_string();
         assert!(verify_package_metadata(&policy).is_ok());
         println!("package_metadata_version_evidence={}", path.display());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn observer_fixture_local_session_requires_physical_teardown_and_worker_joins() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("observer-local-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store =
+            crate::admin_state::HostAdminStateStore::observer_fixture(root.join("state.json"));
+        let launcher = PathBuf::from("/bin/sh");
+        let runtime = std::fs::canonicalize(&launcher).unwrap();
+        let digest = blake3::hash(&std::fs::read(&runtime).unwrap())
+            .to_hex()
+            .to_string();
+        let proof = store
+            .observer_fixture_pending("local-owned", &digest)
+            .unwrap();
+        let mut provider = LocalMcpProvider::new(test_policy()).unwrap();
+        provider.observer = Some(proof);
+        let spec = ProcessSpec {
+            launcher_path: launcher.clone(),
+            launcher_digest: blake3::hash(&std::fs::read(&launcher).unwrap())
+                .to_hex()
+                .to_string(),
+            runtime_executable: runtime,
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec!["-c".into(), "while IFS= read -r line; do :; done".into()],
+            fixed_env: BTreeMap::new(),
+            network_disabled: true,
+        };
+        let process = provider.spawn_observed_process(&spec).unwrap();
+        assert!(process.identity().pid > 0 && process.identity().start_time_ticks > 0);
+        let mut session = LocalMcpSession::new(process, 4096);
+        let (shutdown, _, teardown_error) =
+            session.finish(provider.policy(), LocalMcpShutdownReason::Completed);
+        assert!(teardown_error.is_none());
+        assert!(shutdown.completion.reaped && shutdown.completion.group_absent);
+        assert!(session.workers_joined);
+        let mut incomplete = shutdown.clone();
+        incomplete.completion.reaped = false;
+        assert!(
+            provider
+                .observe_completed_session(&session, &incomplete)
+                .is_err()
+        );
+        incomplete = shutdown.clone();
+        incomplete.completion.group_absent = false;
+        assert!(
+            provider
+                .observe_completed_session(&session, &incomplete)
+                .is_err()
+        );
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 1));
+        provider
+            .observe_completed_session(&session, &shutdown)
+            .unwrap();
+        store.observer_fixture_complete_coverage();
+        assert_eq!(store.observer_fixture_status().unwrap(), (Some(true), 0));
+        assert!(
+            provider.spawn_observed_process(&spec).is_err(),
+            "replay refuses before another physical spawn"
+        );
+        session.workers_joined = false;
+        assert!(
+            provider
+                .observe_completed_session(&session, &shutdown)
+                .is_err(),
+            "negative-only worker evidence cannot authorize completion"
+        );
     }
 
     fn test_policy() -> LocalMcpPolicy {

@@ -121,6 +121,7 @@ pub enum OwnedInvocationError {
 
 /// A single request-scoped process actor.
 pub struct OwnedInvocationHandle {
+    observer: Option<Arc<crate::admin_state::RuntimeObservedLaunch>>,
     command_tx: Option<SyncSender<ActorCommand>>,
     cancel: Arc<AtomicBool>,
     stderr: Arc<StderrCounters>,
@@ -156,7 +157,22 @@ impl OwnedInvocationHandle {
         child_endpoint: UnixStream,
         config: OwnedInvocationConfig,
     ) -> Result<Self, OwnedInvocationError> {
+        Self::launch_inner(spec, child_endpoint, config, None).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn launch_inner(
+        spec: ProcessSpec,
+        child_endpoint: UnixStream,
+        config: OwnedInvocationConfig,
+        observer: Option<Arc<crate::admin_state::RuntimeObservedLaunch>>,
+    ) -> Result<Self, OwnedInvocationError> {
         let config = config.validate()?;
+        if let Some(observer) = &observer {
+            observer
+                .claim(&spec.expected_runtime_executable_digest)
+                .map_err(|_| OwnedInvocationError::WorkerStopped)?;
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let stderr = Arc::new(StderrCounters::default());
         let (command_tx, command_rx) = mpsc::sync_channel(8);
@@ -164,6 +180,7 @@ impl OwnedInvocationHandle {
         let (ready_tx, ready_rx) = fcp_async_core::channel::oneshot::channel();
         let actor_cancel = Arc::clone(&cancel);
         let actor_stderr = Arc::clone(&stderr);
+        let actor_observer = observer.clone();
         let actor_join = thread::Builder::new()
             .name("fcp-owned-invocation".to_owned())
             .spawn(move || {
@@ -176,6 +193,7 @@ impl OwnedInvocationHandle {
                     ActorEvidence {
                         completion: &completion_tx,
                         stderr: &actor_stderr,
+                        observer: actor_observer.as_deref(),
                     },
                     &actor_cancel,
                 );
@@ -184,6 +202,7 @@ impl OwnedInvocationHandle {
 
         match ready_rx.await {
             Ok(Ok(())) => Ok(Self {
+                observer,
                 command_tx: Some(command_tx),
                 cancel,
                 stderr,
@@ -286,6 +305,7 @@ impl OwnedInvocationHandle {
             .take()
             .ok_or(OwnedInvocationError::Closed)?;
         let actor_join = self.actor_join.take().ok_or(OwnedInvocationError::Closed)?;
+        let observer = self.observer.take();
         // Never wait for a full command queue. The atomic cancellation bit is
         // the authoritative exit request if this best-effort command cannot be
         // enqueued or the actor already stopped after a fatal RPC.
@@ -301,7 +321,14 @@ impl OwnedInvocationHandle {
                     .recv()
                     .unwrap_or(Err(OwnedInvocationError::WorkerStopped));
                 let result = if actor_join.join().is_ok() {
-                    result
+                    result.and_then(|report| {
+                        if let Some(observer) = observer {
+                            observer
+                                .retire(report)
+                                .map_err(|_| OwnedInvocationError::TerminationIncomplete)?;
+                        }
+                        Ok(report)
+                    })
                 } else {
                     Err(OwnedInvocationError::WorkerStopped)
                 };
@@ -387,6 +414,7 @@ enum FrameReadError {
 struct ActorEvidence<'a> {
     completion: &'a SyncSender<Result<TerminationReport, OwnedInvocationError>>,
     stderr: &'a Arc<StderrCounters>,
+    observer: Option<&'a crate::admin_state::RuntimeObservedLaunch>,
 }
 
 #[cfg(target_os = "linux")]
@@ -402,6 +430,7 @@ fn actor_main(
     let ActorEvidence {
         completion: completion_tx,
         stderr,
+        observer,
     } = evidence;
     let mut process = match OwnedProcess::spawn_with_host_egress_channel(spec, child_endpoint) {
         Ok(process) => process,
@@ -411,6 +440,12 @@ fn actor_main(
             return;
         }
     };
+    if observer.is_some_and(|observer| observer.attach(process.identity()).is_err()) {
+        let _ = process.terminate(config.termination_grace);
+        let _ = ready_tx.send(Err(OwnedInvocationError::WorkerStopped));
+        let _ = completion_tx.send(Err(OwnedInvocationError::WorkerStopped));
+        return;
+    }
     let workers = match take_and_spawn_workers(&mut process, config.max_frame_bytes, stderr) {
         Ok(workers) => workers,
         Err(error) => {
@@ -830,6 +865,7 @@ mod tests {
 
     fn memory_test_handle(command_tx: Option<SyncSender<ActorCommand>>) -> OwnedInvocationHandle {
         OwnedInvocationHandle {
+            observer: None,
             command_tx,
             cancel: Arc::new(AtomicBool::new(false)),
             stderr: Arc::new(StderrCounters::default()),
@@ -999,6 +1035,46 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn run<T>(future: impl std::future::Future<Output = T>) -> T {
         fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn observer_fixture_real_actor_active_to_verified_idle() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("observer-actor-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store =
+            crate::admin_state::HostAdminStateStore::observer_fixture(root.join("state.json"));
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 0));
+        let spec = shell_spec("while IFS= read -r line; do :; done");
+        let launch = store
+            .observer_fixture_pending("owned-fixture", &spec.expected_runtime_executable_digest)
+            .unwrap();
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 1));
+        let (parent, child) = UnixStream::pair().unwrap();
+        let handle = run(OwnedInvocationHandle::launch_inner(
+            spec,
+            child,
+            OwnedInvocationConfig::default(),
+            Some(launch),
+        ))
+        .unwrap();
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 1));
+        store.observer_fixture_complete_coverage();
+        let report = run(handle.terminate()).unwrap();
+        assert!(report.completion.reaped && report.completion.group_absent);
+        drop(parent);
+        assert_eq!(store.observer_fixture_status().unwrap(), (Some(true), 0));
+        assert!(
+            !run(store.export_snapshot_json())
+                .unwrap()
+                .to_string()
+                .contains("fixture-principal")
+        );
     }
 
     #[cfg(target_os = "linux")]

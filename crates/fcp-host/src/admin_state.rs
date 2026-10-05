@@ -6,6 +6,8 @@
 //! shape, monotonic journal semantics, and persistence invariants.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(unix)]
+use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -2661,6 +2663,8 @@ pub struct HostAdminStateSnapshot {
     receipts: Vec<ReceiptSummary>,
     #[serde(default)]
     simulate_receipts: Vec<SimulateReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_observer: Option<RuntimeObserverSnapshot>,
 }
 
 impl Default for HostAdminStateSnapshot {
@@ -2681,6 +2685,7 @@ impl Default for HostAdminStateSnapshot {
             issuer_verifying_keys: HashMap::new(),
             receipts: Vec::new(),
             simulate_receipts: Vec::new(),
+            runtime_observer: None,
         }
     }
 }
@@ -2892,11 +2897,457 @@ struct LegacyHostLifecycleSnapshot {
     pinned_versions: HashMap<ConnectorId, Version>,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeObserverSnapshot {
+    epoch: String,
+    boot_id: String,
+    release: String,
+    revision: u64,
+    coverage_complete: bool,
+    sessions: BTreeMap<String, RuntimeObservedSession>,
+}
+
+impl std::fmt::Debug for RuntimeObserverSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeObserverSnapshot")
+            .field("revision", &self.revision)
+            .field("sessions", &self.sessions.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeObservedSession {
+    principal: String,
+    zone: String,
+    server: String,
+    correlation: String,
+    instance: String,
+    session: String,
+    artifact: String,
+    phase: RuntimeObservedPhase,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeObservedPhase {
+    Pending,
+    Launching,
+    Attached {
+        pid: u32,
+        pgid: i32,
+        session: i32,
+        start_ticks: u64,
+    },
+    Retired,
+    Unknown,
+}
+
+// No production constructor: the current caller-UID host is not an
+// authenticated lifecycle writer. Only private test authority can currently
+// exercise these transactions. No path, environment flag or UID enables it.
+struct RuntimeObserverAuthority {
+    path: PathBuf,
+    lock_path: PathBuf,
+    owner: u32,
+    parent_identity: (u64, u64),
+    lock_identity: (u64, u64),
+    epoch: String,
+    boot_id: String,
+    release: String,
+    seen_revision: std::sync::atomic::AtomicU64,
+}
+
+fn observer_refused() -> LifecycleError {
+    LifecycleError::Persistence {
+        reason: "runtime_observer_unavailable".to_owned(),
+    }
+}
+
+impl RuntimeObserverAuthority {
+    #[cfg(unix)]
+    fn validate_namespace(&self) -> Result<(), LifecycleError> {
+        use std::os::unix::fs::MetadataExt;
+        let parent = std::fs::symlink_metadata(self.path.parent().ok_or_else(observer_refused)?)
+            .map_err(|_| observer_refused())?;
+        let lock = std::fs::symlink_metadata(&self.lock_path).map_err(|_| observer_refused())?;
+        if !parent.is_dir()
+            || parent.uid() != self.owner
+            || parent.mode() & 0o777 != 0o700
+            || (parent.dev(), parent.ino()) != self.parent_identity
+            || !lock.is_file()
+            || lock.uid() != self.owner
+            || lock.mode() & 0o777 != 0o600
+            || lock.nlink() != 1
+            || (lock.dev(), lock.ino()) != self.lock_identity
+        {
+            return Err(observer_refused());
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn transaction<T>(
+        &self,
+        mutate: impl FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
+    ) -> Result<(T, HostAdminStateSnapshot), LifecycleError> {
+        self.locked_snapshot(mutate, true)
+    }
+
+    #[cfg(unix)]
+    fn locked_snapshot<T>(
+        &self,
+        mutate: impl FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
+        persist: bool,
+    ) -> Result<(T, HostAdminStateSnapshot), LifecycleError> {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let parent = self.path.parent().ok_or_else(observer_refused)?;
+        self.validate_namespace()?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.lock_path)
+            .map_err(|_| observer_refused())?;
+        let lock_meta = file.metadata().map_err(|_| observer_refused())?;
+        let path_meta =
+            std::fs::symlink_metadata(&self.lock_path).map_err(|_| observer_refused())?;
+        if !lock_meta.is_file()
+            || lock_meta.uid() != self.owner
+            || lock_meta.mode() & 0o777 != 0o600
+            || lock_meta.nlink() != 1
+            || (lock_meta.dev(), lock_meta.ino()) != self.lock_identity
+            || (path_meta.dev(), path_meta.ino()) != self.lock_identity
+        {
+            return Err(observer_refused());
+        }
+        let _lock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|_| observer_refused())?;
+        self.validate_namespace()?;
+        let state_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.path)
+            .map_err(|_| observer_refused())?;
+        let state_meta = state_file.metadata().map_err(|_| observer_refused())?;
+        if !state_meta.is_file()
+            || state_meta.uid() != self.owner
+            || state_meta.mode() & 0o777 != 0o600
+            || state_meta.nlink() != 1
+            || state_meta.len() > 16 * 1024 * 1024
+        {
+            return Err(observer_refused());
+        }
+        let mut snapshot: HostAdminStateSnapshot =
+            serde_json::from_reader(state_file).map_err(|_| observer_refused())?;
+        let observer = snapshot
+            .runtime_observer
+            .as_ref()
+            .ok_or_else(observer_refused)?;
+        if snapshot.schema_version != HOST_ADMIN_STATE_SNAPSHOT_VERSION
+            || observer.epoch != self.epoch
+            || observer.boot_id != self.boot_id
+            || observer.release != self.release
+            || observer.revision == 0
+            || observer.revision
+                < self
+                    .seen_revision
+                    .load(std::sync::atomic::Ordering::Acquire)
+            || observer.sessions.len() > 4096
+        {
+            return Err(observer_refused());
+        }
+        let revision = observer
+            .revision
+            .checked_add(1)
+            .ok_or_else(observer_refused)?;
+        let result = mutate(&mut snapshot)?;
+        self.validate_namespace()?;
+        let current = std::fs::symlink_metadata(&self.path).map_err(|_| observer_refused())?;
+        if (current.dev(), current.ino()) != (state_meta.dev(), state_meta.ino()) {
+            return Err(observer_refused());
+        }
+        if !persist {
+            self.seen_revision.store(
+                observer_revision(&snapshot)?,
+                std::sync::atomic::Ordering::Release,
+            );
+            return Ok((result, snapshot));
+        }
+        snapshot
+            .runtime_observer
+            .as_mut()
+            .ok_or_else(observer_refused)?
+            .revision = revision;
+        let temp = self
+            .path
+            .with_extension(format!("observer-{}-{revision}", std::process::id()));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&temp)
+            .map_err(|_| observer_refused())?;
+        serde_json::to_writer(&mut output, &snapshot).map_err(|_| observer_refused())?;
+        output.sync_all().map_err(|_| observer_refused())?;
+        std::fs::rename(&temp, &self.path).map_err(|_| observer_refused())?;
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| observer_refused())?;
+        self.seen_revision
+            .store(revision, std::sync::atomic::Ordering::Release);
+        Ok((result, snapshot))
+    }
+
+    #[cfg(not(unix))]
+    fn transaction<T>(
+        &self,
+        _mutate: impl FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
+    ) -> Result<(T, HostAdminStateSnapshot), LifecycleError> {
+        Err(observer_refused())
+    }
+}
+
+fn observer_revision(snapshot: &HostAdminStateSnapshot) -> Result<u64, LifecycleError> {
+    snapshot
+        .runtime_observer
+        .as_ref()
+        .map(|observer| observer.revision)
+        .ok_or_else(observer_refused)
+}
+
+#[cfg(all(test, unix))]
+impl HostAdminStateStore {
+    pub(crate) fn observer_fixture(path: PathBuf) -> Self {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let parent = path.parent().unwrap();
+        let parent_meta = std::fs::symlink_metadata(parent).unwrap();
+        assert_eq!(parent_meta.mode() & 0o777, 0o700);
+        let lock_path = path.with_extension("observer-lock");
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&lock_path)
+            .unwrap();
+        let lock_meta = lock.metadata().unwrap();
+        let initial = HostAdminStateSnapshot {
+            runtime_observer: Some(RuntimeObserverSnapshot {
+                epoch: "private-fixture-epoch".to_owned(),
+                boot_id: "fixture-boot".to_owned(),
+                release: "fixture-release".to_owned(),
+                revision: 1,
+                coverage_complete: false,
+                sessions: BTreeMap::new(),
+            }),
+            ..HostAdminStateSnapshot::default()
+        };
+        if !path.exists() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path)
+                .unwrap();
+            serde_json::to_writer(&file, &initial).unwrap();
+            file.sync_all().unwrap();
+            std::fs::File::open(parent).unwrap().sync_all().unwrap();
+        }
+        Self {
+            state: RwLock::new(initial),
+            state_path: Some(path.clone()),
+            persist_lock: Mutex::new(()),
+            observer_authority: Some(std::sync::Arc::new(RuntimeObserverAuthority {
+                path,
+                lock_path,
+                owner: parent_meta.uid(),
+                parent_identity: (parent_meta.dev(), parent_meta.ino()),
+                lock_identity: (lock_meta.dev(), lock_meta.ino()),
+                epoch: "private-fixture-epoch".to_owned(),
+                boot_id: "fixture-boot".to_owned(),
+                release: "fixture-release".to_owned(),
+                seen_revision: std::sync::atomic::AtomicU64::new(0),
+            })),
+        }
+    }
+
+    pub(crate) fn observer_fixture_pending(
+        &self,
+        id: &str,
+        artifact: &str,
+    ) -> Result<std::sync::Arc<RuntimeObservedLaunch>, LifecycleError> {
+        let authority = self
+            .observer_authority
+            .as_ref()
+            .ok_or_else(observer_refused)?;
+        authority.transaction(|snapshot| {
+            let sessions = &mut snapshot
+                .runtime_observer
+                .as_mut()
+                .ok_or_else(observer_refused)?
+                .sessions;
+            if sessions.len() >= 4096 || sessions.contains_key(id) || id.is_empty() {
+                return Err(observer_refused());
+            }
+            sessions.insert(
+                id.to_owned(),
+                RuntimeObservedSession {
+                    principal: "fixture-principal".to_owned(),
+                    zone: "z:fixture".to_owned(),
+                    server: "eec".to_owned(),
+                    correlation: id.to_owned(),
+                    instance: "fixture-instance".to_owned(),
+                    session: "fixture-session".to_owned(),
+                    artifact: artifact.to_owned(),
+                    phase: RuntimeObservedPhase::Pending,
+                },
+            );
+            Ok(())
+        })?;
+        Ok(std::sync::Arc::new(RuntimeObservedLaunch {
+            authority: std::sync::Arc::clone(authority),
+            id: id.to_owned(),
+        }))
+    }
+
+    pub(crate) fn observer_fixture_status(&self) -> Result<(Option<bool>, usize), LifecycleError> {
+        let authority = self
+            .observer_authority
+            .as_ref()
+            .ok_or_else(observer_refused)?;
+        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false)?;
+        let observer = snapshot.runtime_observer.ok_or_else(observer_refused)?;
+        let active = observer
+            .sessions
+            .values()
+            .filter(|record| !matches!(record.phase, RuntimeObservedPhase::Retired))
+            .count();
+        let idle = (observer.coverage_complete && active == 0).then_some(true);
+        Ok((idle, active))
+    }
+
+    pub(crate) fn observer_fixture_complete_coverage(&self) {
+        self.observer_authority
+            .as_ref()
+            .unwrap()
+            .transaction(|snapshot| {
+                snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .unwrap()
+                    .coverage_complete = true;
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
+/// A sealed pending launch, never constructible from invocation JSON or an
+/// unverified principal. Its current factory exists only in private tests.
+pub struct RuntimeObservedLaunch {
+    authority: std::sync::Arc<RuntimeObserverAuthority>,
+    id: String,
+}
+
+impl std::fmt::Debug for RuntimeObservedLaunch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("RuntimeObservedLaunch([sealed])")
+    }
+}
+
+impl RuntimeObservedLaunch {
+    pub(crate) fn claim(&self, artifact: &str) -> Result<(), LifecycleError> {
+        self.authority
+            .transaction(|snapshot| {
+                let record = snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .ok_or_else(observer_refused)?
+                    .sessions
+                    .get_mut(&self.id)
+                    .ok_or_else(observer_refused)?;
+                if !matches!(record.phase, RuntimeObservedPhase::Pending)
+                    || record.artifact != artifact
+                {
+                    return Err(observer_refused());
+                }
+                record.phase = RuntimeObservedPhase::Launching;
+                Ok(())
+            })
+            .map(|_| ())
+    }
+
+    pub(crate) fn attach(
+        &self,
+        identity: &fcp_sandbox::ProcessIdentity,
+    ) -> Result<(), LifecycleError> {
+        self.authority
+            .transaction(|snapshot| {
+                let record = snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .ok_or_else(observer_refused)?
+                    .sessions
+                    .get_mut(&self.id)
+                    .ok_or_else(observer_refused)?;
+                if !matches!(record.phase, RuntimeObservedPhase::Launching)
+                    || identity.pid == 0
+                    || identity.start_time_ticks == 0
+                    || record.artifact != identity.runtime_executable_digest
+                {
+                    return Err(observer_refused());
+                }
+                record.phase = RuntimeObservedPhase::Attached {
+                    pid: identity.pid,
+                    pgid: identity.pgid,
+                    session: identity.session_id,
+                    start_ticks: identity.start_time_ticks,
+                };
+                Ok(())
+            })
+            .map(|_| ())
+    }
+
+    pub(crate) fn retire(
+        &self,
+        report: fcp_sandbox::TerminationReport,
+    ) -> Result<(), LifecycleError> {
+        self.authority
+            .transaction(|snapshot| {
+                let record = snapshot
+                    .runtime_observer
+                    .as_mut()
+                    .ok_or_else(observer_refused)?
+                    .sessions
+                    .get_mut(&self.id)
+                    .ok_or_else(observer_refused)?;
+                if !matches!(record.phase, RuntimeObservedPhase::Attached { .. })
+                    || !report.completion.reaped
+                    || !report.completion.group_absent
+                {
+                    return Err(observer_refused());
+                }
+                record.phase = RuntimeObservedPhase::Retired;
+                Ok(())
+            })
+            .map(|_| ())
+    }
+}
+
 /// Durable host-side admin-state store.
 pub struct HostAdminStateStore {
     state: RwLock<HostAdminStateSnapshot>,
     state_path: Option<PathBuf>,
     persist_lock: Mutex<()>,
+    observer_authority: Option<std::sync::Arc<RuntimeObserverAuthority>>,
 }
 
 impl Default for HostAdminStateStore {
@@ -2913,6 +3364,7 @@ impl HostAdminStateStore {
             state: RwLock::new(HostAdminStateSnapshot::default()),
             state_path: None,
             persist_lock: Mutex::new(()),
+            observer_authority: None,
         }
     }
 
@@ -2954,6 +3406,7 @@ impl HostAdminStateStore {
             state: RwLock::new(state),
             state_path,
             persist_lock: Mutex::new(()),
+            observer_authority: None,
         })
     }
 
@@ -2962,15 +3415,20 @@ impl HostAdminStateStore {
         F: FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
     {
         let _persist_guard = self.persist_lock.lock().await;
+        if let Some(authority) = &self.observer_authority {
+            let (result, snapshot) = authority.transaction(mutate)?;
+            *self.state.write().await = snapshot;
+            return Ok(result);
+        }
+        if let Some(path) = &self.state_path {
+            let expected_observer = self.state.read().await.runtime_observer.is_some();
+            let (result, snapshot) =
+                ordinary_snapshot_transaction(path, expected_observer, mutate)?;
+            *self.state.write().await = snapshot;
+            return Ok(result);
+        }
         let mut snapshot = self.state.read().await.clone();
         let result = mutate(&mut snapshot)?;
-
-        let path = self.state_path.clone();
-        // Host admin-state writes are serialized behind `persist_lock` and only
-        // flush one small JSON snapshot, so persisting inline is preferable to
-        // reaching for a Tokio-only blocking shim in the async-core stack.
-        persist_admin_state_snapshot(path.as_deref(), &snapshot)?;
-
         *self.state.write().await = snapshot;
         Ok(result)
     }
@@ -3007,10 +3465,10 @@ impl HostAdminStateStore {
     ///
     /// Returns an error if the snapshot cannot be serialized.
     pub async fn export_snapshot_json(&self) -> Result<Value, LifecycleError> {
-        serde_json::to_value(self.state.read().await.clone()).map_err(|err| {
-            LifecycleError::Persistence {
-                reason: format!("could not serialize admin state export: {err}"),
-            }
+        let mut public_snapshot = self.state.read().await.clone();
+        public_snapshot.runtime_observer = None;
+        serde_json::to_value(public_snapshot).map_err(|err| LifecycleError::Persistence {
+            reason: format!("could not serialize admin state export: {err}"),
         })
     }
 
@@ -4966,7 +5424,14 @@ fn load_admin_state_snapshot(path: &Path) -> HostResult<HostAdminStateSnapshot> 
         ))
     })?;
 
-    let raw: Value = serde_json::from_slice(&bytes).map_err(|err| {
+    parse_admin_state_snapshot_bytes(path, &bytes)
+}
+
+fn parse_admin_state_snapshot_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> HostResult<HostAdminStateSnapshot> {
+    let raw: Value = serde_json::from_slice(bytes).map_err(|err| {
         HostError::Internal(format!(
             "failed to parse admin state file '{}': {err}",
             path.display()
@@ -5016,6 +5481,131 @@ fn load_admin_state_snapshot(path: &Path) -> HostResult<HostAdminStateSnapshot> 
     Ok(HostAdminStateSnapshot::from_legacy(legacy))
 }
 
+#[cfg(unix)]
+fn ordinary_snapshot_transaction<T>(
+    path: &Path,
+    expected_observer: bool,
+    mutate: impl FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
+) -> Result<(T, HostAdminStateSnapshot), LifecycleError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|_| observer_refused())?;
+    let parent_meta = std::fs::symlink_metadata(parent).map_err(|_| observer_refused())?;
+    if !parent_meta.is_dir() {
+        return Err(observer_refused());
+    }
+    let lock_path = path.with_extension("observer-lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .map_err(|_| observer_refused())?;
+    let lock_meta = file.metadata().map_err(|_| observer_refused())?;
+    if !lock_meta.is_file()
+        || lock_meta.uid() != parent_meta.uid()
+        || lock_meta.mode() & 0o777 != 0o600
+        || lock_meta.nlink() != 1
+    {
+        return Err(observer_refused());
+    }
+    let _lock = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        .map_err(|_| observer_refused())?;
+    let current_lock = std::fs::symlink_metadata(&lock_path).map_err(|_| observer_refused())?;
+    if (current_lock.dev(), current_lock.ino()) != (lock_meta.dev(), lock_meta.ino()) {
+        return Err(observer_refused());
+    }
+    let mut state_identity = None;
+    let mut snapshot = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => {
+            let meta = file.metadata().map_err(|_| observer_refused())?;
+            if !meta.is_file()
+                || meta.uid() != parent_meta.uid()
+                || meta.nlink() != 1
+                || meta.len() > 16 * 1024 * 1024
+            {
+                return Err(observer_refused());
+            }
+            state_identity = Some((meta.dev(), meta.ino()));
+            let mut bytes = Vec::new();
+            file.take(16 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| observer_refused())?;
+            if bytes.len() > 16 * 1024 * 1024 {
+                return Err(observer_refused());
+            }
+            parse_admin_state_snapshot_bytes(path, &bytes).map_err(|_| observer_refused())?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !expected_observer => {
+            HostAdminStateSnapshot::default()
+        }
+        Err(_) => return Err(observer_refused()),
+    };
+    if expected_observer && snapshot.runtime_observer.is_none() {
+        return Err(observer_refused());
+    }
+    let observer_before = snapshot.runtime_observer.clone();
+    let result = mutate(&mut snapshot)?;
+    // Ordinary lifecycle permission is not permission to assert process state.
+    if snapshot.runtime_observer != observer_before {
+        return Err(observer_refused());
+    }
+    if let Some(observer) = &mut snapshot.runtime_observer {
+        if parent_meta.mode() & 0o777 != 0o700 || observer.revision == 0 {
+            return Err(observer_refused());
+        }
+        observer.revision = observer
+            .revision
+            .checked_add(1)
+            .ok_or_else(observer_refused)?;
+    }
+    let after_lock = std::fs::symlink_metadata(&lock_path).map_err(|_| observer_refused())?;
+    if (after_lock.dev(), after_lock.ino()) != (lock_meta.dev(), lock_meta.ino()) {
+        return Err(observer_refused());
+    }
+    let after_parent = std::fs::symlink_metadata(parent).map_err(|_| observer_refused())?;
+    if !after_parent.is_dir()
+        || (after_parent.dev(), after_parent.ino()) != (parent_meta.dev(), parent_meta.ino())
+    {
+        return Err(observer_refused());
+    }
+    match (state_identity, std::fs::symlink_metadata(path)) {
+        (Some(identity), Ok(meta)) if meta.is_file() && (meta.dev(), meta.ino()) == identity => {}
+        (None, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(observer_refused()),
+    }
+    persist_admin_state_snapshot(Some(path), &snapshot)?;
+    Ok((result, snapshot))
+}
+
+#[cfg(not(unix))]
+fn ordinary_snapshot_transaction<T>(
+    path: &Path,
+    expected_observer: bool,
+    mutate: impl FnOnce(&mut HostAdminStateSnapshot) -> Result<T, LifecycleError>,
+) -> Result<(T, HostAdminStateSnapshot), LifecycleError> {
+    let mut snapshot = load_admin_state_snapshot(path).map_err(|_| observer_refused())?;
+    if expected_observer || snapshot.runtime_observer.is_some() {
+        return Err(observer_refused());
+    }
+    let result = mutate(&mut snapshot)?;
+    if snapshot.runtime_observer.is_some() {
+        return Err(observer_refused());
+    }
+    persist_admin_state_snapshot(Some(path), &snapshot)?;
+    Ok((result, snapshot))
+}
+
 fn persist_admin_state_snapshot(
     path: Option<&Path>,
     snapshot: &HostAdminStateSnapshot,
@@ -5044,8 +5634,16 @@ fn persist_admin_state_snapshot(
         })?;
     let temp_path = temporary_admin_state_path(path);
     let write_result = (|| -> Result<(), LifecycleError> {
-        let mut file =
-            std::fs::File::create(&temp_path).map_err(|err| LifecycleError::Persistence {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(&temp_path)
+            .map_err(|err| LifecycleError::Persistence {
                 reason: format!(
                     "could not create temporary admin state file '{}': {err}",
                     temp_path.display()
@@ -5066,13 +5664,17 @@ fn persist_admin_state_snapshot(
                 path.display()
             ),
         })?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| observer_refused())?;
         Ok(())
     })();
 
-    if write_result.is_err() && temp_path.exists() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-
+    // Failed temporary evidence is retained; a later call never truncates it.
     write_result
 }
 
@@ -5286,6 +5888,176 @@ mod tests {
     use fcp_crypto::cose::CoseToken;
     use fcp_kernel::{CanaryPolicy, ConnectorHealth, HealthMetrics};
     use fcp_prelude::SafetyTier;
+
+    #[cfg(unix)]
+    fn observer_retained_root() -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::Builder::new()
+            .prefix("observer-store-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn observer_fixture_legacy_transactions_and_guards() {
+        let root = observer_retained_root();
+        let path = root.join("state.json");
+        let second = HostAdminStateStore::with_state_path(path.clone()).unwrap();
+        let first = HostAdminStateStore::observer_fixture(path.clone());
+        for store in [&first, &second] {
+            store
+                .apply_mutation(|snapshot| {
+                    snapshot.next_event_sequence += 1;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        let authority = first.observer_authority.as_ref().unwrap();
+        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
+        assert_eq!(
+            snapshot.next_event_sequence, 3,
+            "reload prevents stale-cache lost update"
+        );
+        assert_eq!(
+            first.observer_fixture_status().unwrap(),
+            (None, 0),
+            "new empty epoch is not idle"
+        );
+        let pending = first
+            .observer_fixture_pending("pending", "expected-artifact")
+            .unwrap();
+        assert!(
+            second
+                .apply_mutation(|snapshot| {
+                    snapshot.runtime_observer = None;
+                    Ok(())
+                })
+                .await
+                .is_err(),
+            "ordinary writer cannot erase observer registry"
+        );
+        assert!(pending.claim("wrong-artifact").is_err());
+        pending.claim("expected-artifact").unwrap();
+        assert!(
+            pending.claim("expected-artifact").is_err(),
+            "one launch claim only"
+        );
+        assert!(
+            pending
+                .retire(fcp_sandbox::TerminationReport {
+                    completion: fcp_sandbox::TerminationCompletion {
+                        reaped: true,
+                        group_absent: true
+                    },
+                    ..fcp_sandbox::TerminationReport::default()
+                })
+                .is_err(),
+            "pending cannot retire without attached physical identity"
+        );
+        let lock = std::fs::File::open(&authority.lock_path).unwrap();
+        let guard =
+            nix::fcntl::Flock::lock(lock, nix::fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+        assert!(
+            first.observer_fixture_status().is_err(),
+            "busy is not empty idle"
+        );
+        drop(guard);
+        let original = std::fs::read(&path).unwrap();
+        for key in ["epoch", "boot_id", "release", "revision"] {
+            let mut altered: Value = serde_json::from_slice(&original).unwrap();
+            altered["runtime_observer"][key] = if key == "revision" {
+                Value::from(0)
+            } else {
+                Value::from("UNKNOWN_CANARY")
+            };
+            std::fs::write(&path, altered.to_string()).unwrap();
+            assert!(
+                first.observer_fixture_status().is_err(),
+                "{key} drift refused"
+            );
+            std::fs::write(&path, &original).unwrap();
+        }
+        std::fs::write(&path, b"malformed").unwrap();
+        assert!(first.observer_fixture_status().is_err());
+        std::fs::write(&path, original).unwrap();
+        assert_eq!(first.observer_fixture_status().unwrap(), (None, 1));
+        assert!(
+            !first
+                .export_snapshot_json()
+                .await
+                .unwrap()
+                .to_string()
+                .contains("fixture-principal")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "Private retained observer fixture subprocess; never a production writer"]
+    fn observer_fixture_subprocess_writer() {
+        let path = PathBuf::from(std::env::var("FCP_PRIVATE_OBSERVER_FIXTURE").unwrap());
+        assert!(path.starts_with("/srv/dev-ssd/fcp/nqm81-35"));
+        let store = match std::env::var("FCP_PRIVATE_OBSERVER_WRITER_KIND").as_deref() {
+            Ok("ordinary") => HostAdminStateStore::with_state_path(path).unwrap(),
+            Ok("observer") => HostAdminStateStore::observer_fixture(path),
+            _ => panic!("private fixture writer kind required"),
+        };
+        for _ in 0..12 {
+            let mut completed = false;
+            for _ in 0..200 {
+                let result =
+                    fcp_async_core::runtime::block_on_sync(store.apply_mutation(|snapshot| {
+                        snapshot.next_event_sequence += 1;
+                        Ok(())
+                    }))
+                    .unwrap();
+                if result.is_ok() {
+                    completed = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(completed, "bounded fixture lock contention");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observer_fixture_separate_process_writers_preserve_legacy_updates() {
+        let path = observer_retained_root().join("state.json");
+        let store = HostAdminStateStore::observer_fixture(path.clone());
+        let mut children = Vec::new();
+        for kind in ["ordinary", "observer"] {
+            children.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("TMPDIR", "/srv/dev-ssd/fcp/tmp")
+                    .args([
+                        "--exact",
+                        "admin_state::tests::observer_fixture_subprocess_writer",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("FCP_PRIVATE_OBSERVER_FIXTURE", &path)
+                    .env("FCP_PRIVATE_OBSERVER_WRITER_KIND", kind)
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        let authority = store.observer_authority.as_ref().unwrap();
+        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
+        assert_eq!(snapshot.next_event_sequence, 25);
+        assert_eq!(store.observer_fixture_status().unwrap(), (None, 0));
+    }
 
     fn canonicalize_json(value: Value) -> Value {
         match value {

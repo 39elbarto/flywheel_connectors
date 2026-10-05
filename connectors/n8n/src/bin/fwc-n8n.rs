@@ -1064,7 +1064,11 @@ fn run_once(operation: &str) -> Result<Value, AppError> {
         return runtime_status_from_bytes(&bytes);
     }
     if operation == "n8n.targets.resolve" {
-        return public_targets_resolve(&bytes);
+        return public_targets_resolve_with_reads(
+            &bytes,
+            request_started_at,
+            execute_host_run_once,
+        );
     }
     if matches!(operation, "n8n.knowledge.query" | "n8n.validation.run") {
         let value: Value =
@@ -1480,6 +1484,125 @@ fn resolve_exact_public_target(input: PublicTarget) -> Result<Value, AppError> {
         }
     }
     Ok(json!({"resolution":"resolved","target":projected}))
+}
+
+fn public_targets_resolve_with_reads<F>(
+    bytes: &[u8],
+    started: Instant,
+    mut dispatch: F,
+) -> Result<Value, AppError>
+where
+    F: FnMut(HostRunOnceEnvelope, Instant) -> Result<Value, AppError>,
+{
+    let resolved = public_targets_resolve(bytes)?;
+    let envelope: LocalRunOnceInput =
+        serde_json::from_slice(bytes).map_err(|_| AppError::new("invalid_input"))?;
+    let targets = if resolved["resolution"] == "ambiguous" {
+        resolved["candidates"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| AppError::new("target_response_invalid"))?
+    } else {
+        vec![resolved["target"].clone()]
+    };
+    let correlation = envelope
+        .correlation_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut verified = Vec::new();
+    for target in targets {
+        let (operation, input) = target_existence_read(&target)?;
+        let request = serde_json::to_vec(&json!({"server_id":target["server"],
+            "input":input,"deadline_ms":30000,"correlation_id":correlation}))
+        .map_err(|_| AppError::new("invalid_input"))?;
+        let response = run_once_from_bytes_at(operation, &request, started, &mut dispatch)?;
+        if target_existence_result(&target, operation, &response)? {
+            verified.push(target);
+        }
+    }
+    Ok(match verified.len() {
+        0 => json!({"resolution":"not_found"}),
+        1 => json!({"resolution":"resolved","target":verified.remove(0)}),
+        _ => json!({"resolution":"ambiguous","candidates":verified}),
+    })
+}
+
+fn target_existence_read(target: &Value) -> Result<(&'static str, Value), AppError> {
+    let invalid = || AppError::new("target_response_invalid");
+    let server = target["server"].as_str().ok_or_else(invalid)?;
+    if !matches!(server, "eec" | "hetzner") {
+        return Err(AppError::new("target_provider_existence_unavailable"));
+    }
+    let uri = target["resourceUri"].as_str().ok_or_else(invalid)?;
+    let prefix = format!("fwc-n8n://{server}");
+    let tail = uri.strip_prefix(&prefix).ok_or_else(invalid)?;
+    let segments = tail
+        .trim_start_matches('/')
+        .split('/')
+        .map(|segment| {
+            percent_encoding::percent_decode_str(segment)
+                .decode_utf8()
+                .map(std::borrow::Cow::into_owned)
+                .map_err(|_| invalid())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    match segments.as_slice() {
+        [empty] if empty.is_empty() => Ok(("n8n.capabilities.inspect", json!({}))),
+        [kind, _] if kind == "projects" => Ok((
+            "n8n.structure.search",
+            json!({"kind":"projects","page":{"limit":100}}),
+        )),
+        [kind, id] if kind == "workflows" => Ok((
+            "n8n.workflows.get",
+            json!({"id":id,"version":"draft","detail":"minimal","includeCode":false}),
+        )),
+        [kind, workflow, child, id] if kind == "workflows" && child == "executions" => Ok((
+            "n8n.executions.get",
+            json!({"id":id,"workflow_id":workflow}),
+        )),
+        _ => Err(AppError::new("target_provider_existence_unavailable")),
+    }
+}
+
+fn target_existence_result(
+    target: &Value,
+    operation: &str,
+    response: &Value,
+) -> Result<bool, AppError> {
+    let invalid = || AppError::new("target_provider_binding_mismatch");
+    if response["status"] != "ok" {
+        return Err(invalid());
+    }
+    let (_, input) = target_existence_read(target)?;
+    let result = &response["result"];
+    match operation {
+        "n8n.capabilities.inspect" if result["capabilities"]["serverId"] == target["server"] => {
+            Ok(true)
+        }
+        "n8n.workflows.get" if result["workflow"]["id"] == input["id"] => Ok(true),
+        "n8n.executions.get"
+            if result["id"] == input["id"] && result["workflowId"] == input["workflow_id"] =>
+        {
+            Ok(true)
+        }
+        "n8n.structure.search" => {
+            let items = result["items"].as_array().ok_or_else(invalid)?;
+            if !result["page"].get("nextCursor").is_some_and(Value::is_null)
+                || result["page"]["total"].as_u64() != Some(items.len() as u64)
+                || items.len() >= 100
+            {
+                return Err(invalid());
+            }
+            let matches = items
+                .iter()
+                .filter(|row| row["resourceUri"] == target["resourceUri"])
+                .count();
+            if matches > 1 {
+                return Err(invalid());
+            }
+            Ok(matches == 1)
+        }
+        _ => Err(invalid()),
+    }
 }
 
 fn run_local_once_from_bytes<F>(
@@ -4519,6 +4642,11 @@ fn execute_host_run_once(
 
     let operation = envelope.operation;
     let server_id = envelope.server_id;
+    if operation == HostRunOnceOperation::CredentialsList {
+        bundle
+            .require_credential_metadata_read(server_id.as_str())
+            .map_err(|_| AppError::new("credential_metadata_mapping_denied"))?;
+    }
     if operation == HostRunOnceOperation::WorkflowsActivate {
         let response = run_host_bridge_once(
             &bundle,
@@ -4613,7 +4741,7 @@ fn decode_host_read_response(
     response: Value,
 ) -> Result<Value, AppError> {
     if operation == HostRunOnceOperation::CredentialsList {
-        return decode_official_credentials_response(server_id, input, response);
+        return decode_original_credentials_response(server_id, input, response);
     }
     if operation == HostRunOnceOperation::StructureSearch {
         return decode_official_structure_response(server_id, input, response);
@@ -5080,6 +5208,36 @@ fn project_official_sdk_result(
     )
 }
 
+fn decode_original_credentials_response(
+    server: HostRunOnceServerId,
+    input: &Value,
+    response: Value,
+) -> Result<Value, AppError> {
+    let invalid = || AppError::new("official_credential_response_invalid");
+    let arguments = fcp_n8n::types::official_credentials_input(input).map_err(AppError::new)?;
+    if response["status"] != "ok" || response.get("error").is_some_and(|value| !value.is_null()) {
+        return Err(AppError::new("official_credential_provider_failed"));
+    }
+    let data = response
+        .get("result")
+        .filter(|value| value.is_object())
+        .ok_or_else(invalid)?;
+    let rows = data["credentials"].as_array().ok_or_else(invalid)?;
+    let limit =
+        usize::try_from(arguments["limit"].as_u64().ok_or_else(invalid)?).map_err(|_| invalid())?;
+    let expected = fcp_n8n::types::project_official_credentials(
+        &json!({"data":rows,"count":rows.len()}),
+        server.as_str(),
+        limit,
+    )
+    .map_err(AppError::new)?;
+    if &expected != data {
+        return Err(invalid());
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
 fn decode_official_credentials_response(
     server: HostRunOnceServerId,
     input: &Value,
@@ -6688,10 +6846,6 @@ fn expected_host_run_once_resource_uri(
         HostRunOnceOperation::CapabilitiesInspect => {
             Ok(format!("fwc-mcp-bridge://{}", server_id.as_str()))
         }
-        HostRunOnceOperation::CredentialsList => Ok(format!(
-            "fwc-mcp-bridge://{}/tools/list%5Fcredentials",
-            server_id.as_str()
-        )),
         HostRunOnceOperation::OfficialSdkValidation if input["subject"] == "remote_workflow" => {
             let read = fcp_n8n::types::RemoteWorkflowValidationInput::parse(input)
                 .map_err(AppError::new)?;
@@ -6703,7 +6857,8 @@ fn expected_host_run_once_resource_uri(
         HostRunOnceOperation::OfficialKnowledge | HostRunOnceOperation::OfficialSdkValidation => {
             official_sdk_resource_uri(server_id, operation, input)
         }
-        HostRunOnceOperation::ExecutionsSearch
+        HostRunOnceOperation::CredentialsList
+        | HostRunOnceOperation::ExecutionsSearch
         | HostRunOnceOperation::ExecutionsList
         | HostRunOnceOperation::ProjectsList
         | HostRunOnceOperation::TagsList
@@ -7243,6 +7398,62 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "explicit fixed installed network-disabled knowledge process; not signed candidate CLI admission"]
+    fn public_get_node_seven_modes_use_real_owned_local_process() {
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+            &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json").unwrap(),
+        )
+        .unwrap();
+        assert!(policy.network_disabled);
+        assert_eq!(policy.package_id, "n8n-mcp");
+        let dispatcher = LocalN8nDispatcher::with_max_input_bytes(
+            LocalMcpProvider::new(policy.clone()).unwrap(),
+            usize::try_from(policy.max_request_bytes).unwrap(),
+        );
+        for mode in [
+            "info",
+            "docs",
+            "search_properties",
+            "versions",
+            "compare",
+            "breaking",
+            "migrations",
+        ] {
+            let mut input = json!({"action":"get_node","nodeType":"nodes-base.set","mode":mode,"detail":"minimal"});
+            if mode == "search_properties" {
+                input["propertyQuery"] = json!("assignment");
+            }
+            if matches!(mode, "compare" | "breaking" | "migrations") {
+                input["fromVersion"] = json!("3");
+                input["toVersion"] = json!("3.4");
+            }
+            let bytes = serde_json::to_vec(&json!({"input":input})).unwrap();
+            let result = run_local_once_from_bytes("n8n.knowledge.query", &bytes, |request| {
+                let response = dispatcher
+                    .dispatch(request, Arc::new(AtomicBool::new(false)))
+                    .map_err(map_local_dispatch_error)?;
+                let value = serde_json::to_value(&response).unwrap();
+                assert!(value["result"]["teardown_error_code"].is_null());
+                assert_eq!(value["result"]["shutdown"]["reaped"], true);
+                assert_eq!(value["result"]["shutdown"]["group_absent"], true);
+                Ok(
+                    json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp","response":response}),
+                )
+            });
+            assert!(
+                result.is_ok(),
+                "closed mode {mode} failed with {}",
+                result.as_ref().err().map_or("none", |error| error.code)
+            );
+            let projected = result.unwrap();
+            assert_eq!(projected["action"], "get_node");
+            assert_eq!(projected["data"]["node"]["nodeType"], "nodes-base.set");
+            assert!(projected.get("content").is_none());
+            assert!(projected.get("structuredContent").is_none());
+        }
+    }
+
+    #[test]
     fn node_catalog_conditions_keep_bound_property_names_and_refuse_unknown_shapes() {
         let metadata = json!({"name":"operation","default":"CATALOG_DEFAULT_CANARY",
             "displayOptions":{"show":{"resource":["message"],"@version":[1,2]},"hide":{"operation":["delete"]}}});
@@ -7302,6 +7513,121 @@ mod tests {
         ] {
             assert!(resolve(input).is_err());
         }
+    }
+
+    #[test]
+    fn public_targets_resolve_reads_exact_ids_and_complete_project_snapshot() {
+        for server in ["eec", "hetzner"] {
+            for (input, operation, provider) in [
+                (
+                    json!({"server":server,"workflowId":"wf-one"}),
+                    "n8n.workflows.get",
+                    json!({"workflow":{"id":"wf-one","name":"TARGET_PRIVATE_CANARY"}}),
+                ),
+                (
+                    json!({"server":server,"workflowId":"wf-one","executionId":"exec-one"}),
+                    "n8n.executions.get",
+                    json!({"id":"exec-one","workflowId":"wf-one"}),
+                ),
+                (
+                    json!({"resourceUri":format!("fwc-n8n://{server}/projects/p%2Fone")}),
+                    "n8n.structure.search",
+                    json!({"items":[{"resourceUri":format!("fwc-n8n://{server}/projects/p%2Fone"),"id":"p/one","name":"TARGET_PRIVATE_CANARY","type":"project"}],"page":{"total":1,"nextCursor":null}}),
+                ),
+                (
+                    json!({"server":server}),
+                    "n8n.capabilities.inspect",
+                    json!({"capabilities":{"serverId":server}}),
+                ),
+            ] {
+                let mut calls = 0;
+                let projected = public_targets_resolve_with_reads(
+                    &serde_json::to_vec(&json!({"input":input})).unwrap(), Instant::now(),
+                    |request, deadline| {
+                        calls += 1;
+                        assert_eq!(request.server_id.as_str(), server);
+                        assert_eq!(request.operation.as_str(), operation);
+                        assert!(deadline > Instant::now());
+                        assert!(request.resource_uri.contains(server));
+                        assert!(request.approval_token.is_none());
+                        if operation == "n8n.workflows.get" {
+                            assert_eq!(request.input, json!({"id":"wf-one","version":"draft","detail":"minimal","includeCode":false}));
+                            assert_eq!(request.resource_uri, format!("fwc-n8n://{server}/workflows/wf%2Done"));
+                        }
+                        if operation == "n8n.executions.get" {
+                            assert_eq!(request.input, json!({"id":"exec-one","workflow_id":"wf-one"}));
+                        }
+                        Ok(json!({"status":"ok","result":provider}))
+                    }).unwrap();
+                assert_eq!(calls, 1);
+                assert_eq!(projected["resolution"], "resolved");
+                assert_eq!(projected["target"]["server"], server);
+                assert!(!projected.to_string().contains("TARGET_PRIVATE_CANARY"));
+            }
+        }
+        let bytes = serde_json::to_vec(
+            &json!({"input":{"candidateServers":["eec","hetzner"],"projectId":"p"}}),
+        )
+        .unwrap();
+        let result = public_targets_resolve_with_reads(&bytes, Instant::now(), |request, _| {
+            let items = if request.server_id == HostRunOnceServerId::Eec {
+                json!([{"resourceUri":"fwc-n8n://eec/projects/p"}])
+            } else { json!([]) };
+            Ok(json!({"status":"ok","result":{"page":{"nextCursor":null,"total":items.as_array().unwrap().len()},"items":items}}))
+        }).unwrap();
+        assert_eq!(result["resolution"], "resolved");
+        assert_eq!(result["target"]["server"], "eec");
+    }
+
+    #[test]
+    fn public_targets_provider_bindings_errors_and_deadlines_fail_closed() {
+        let bytes = br#"{"input":{"server":"eec","workflowId":"wf"}}"#;
+        for response in [
+            json!({"status":"ok","result":{"workflow":{"id":"other"}}}),
+            json!({"status":"error","result":{"workflow":{"id":"wf"}}}),
+            json!({"status":"ok","result":null}),
+        ] {
+            assert!(
+                public_targets_resolve_with_reads(bytes, Instant::now(), |_, _| Ok(
+                    response.clone()
+                ))
+                .is_err()
+            );
+        }
+        let mut calls = 0;
+        assert!(
+            public_targets_resolve_with_reads(
+                bytes,
+                Instant::now() - Duration::from_secs(31),
+                |_, _| {
+                    calls += 1;
+                    Ok(json!({"status":"ok"}))
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(calls, 0);
+        let project =
+            public_targets_resolve(br#"{"input":{"server":"eec","projectId":"p"}}"#).unwrap();
+        for page in [
+            json!({"total":1,"nextCursor":"more"}),
+            json!({"total":2,"nextCursor":null}),
+            json!({"total":1}),
+        ] {
+            assert!(target_existence_result(&project["target"],"n8n.structure.search", &json!({"status":"ok","result":{"items":[{"resourceUri":"fwc-n8n://eec/projects/p"}],"page":page}})).is_err());
+        }
+        let saturated = vec![json!({"resourceUri":"fwc-n8n://eec/projects/p"}); 100];
+        assert!(target_existence_result(&project["target"],"n8n.structure.search",
+            &json!({"status":"ok","result":{"items":saturated,"page":{"total":100,"nextCursor":null}}})).is_err(),
+            "native saturated cap is not proof of a complete project snapshot");
+        let empty = public_targets_resolve_with_reads(br#"{"input":{"server":"eec","projectId":"missing"}}"#,Instant::now(), |_,_| Ok(json!({"status":"ok","result":{"items":[],"page":{"total":0,"nextCursor":null}}}))).unwrap();
+        assert_eq!(empty["resolution"], "not_found");
+        assert!(
+            public_targets_resolve_with_reads(bytes, Instant::now(), |_, _| Err(AppError::new(
+                "provider_not_collected"
+            )))
+            .is_err()
+        );
     }
 
     #[test]
@@ -7638,6 +7964,24 @@ mod tests {
             "httpHeaderAuth"
         );
         assert!(!projected.to_string().contains("PRIVATE_CANARY"));
+        let original = json!({"status":"ok","result":projected["result"].clone()});
+        assert_eq!(
+            decode_original_credentials_response(
+                HostRunOnceServerId::Eec,
+                &json!({"page":{"limit":1}}),
+                original.clone()
+            )
+            .unwrap(),
+            original
+        );
+        assert!(
+            decode_original_credentials_response(
+                HostRunOnceServerId::Eec,
+                &json!({"page":{"limit":1}}),
+                response.clone()
+            )
+            .is_err()
+        );
         assert_eq!(
             HostRunOnceOperation::CredentialsList.credential_purpose(),
             BrokerCredentialPurpose::OfficialMcp
@@ -7649,7 +7993,7 @@ mod tests {
                 &json!({})
             )
             .unwrap(),
-            "fwc-mcp-bridge://eec/tools/list%5Fcredentials"
+            "fwc-n8n://eec"
         );
         let mut changed = response.clone();
         changed["result"]["data"]["page"]["returnedCount"] = json!(2);

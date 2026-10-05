@@ -1648,23 +1648,34 @@ unbounded search parity. Official workflow search excludes archives, so
 Native query/project/folder/tag filtering is bound to the same request; active
 filtering is applied only after completeness has been established.
 
-Direct FCP `n8n.credentials.list` remains open and refuses before HTTP. Its
-existing REST response cannot meet the advertised metadata contract. The
-gateway currently verifies an unbound token and retains no typed verified-parent
-constraint proof for child attenuation. Existing token issuance is a new grant,
-not a proven parent-to-child transformation, and cannot silently replace the
-original principal, instance, replay or caveat bindings. The separately checked
-wrapper/host official route does not close this direct-FCP criterion.
-Child-token attenuation is not the only possible design: a fixed native MCP
-transport inside the original instance-bound n8n invocation could avoid a
-child FCP token. That route is also unproven here. The existing host egress
-credential guard admits `fcp.n8n` only with the `n8n` profile and
-`X-N8N-API-KEY`; MCP bearer credentials are separately bound to
-`fcp.mcp-bridge`. An approved mapping must bind the original operation, server,
-resource, exact request body and credential profile before transport. Simply
-widening the connector condition, changing headers or allowing a caller to
-select a broker credential purpose would not establish that mapping. Both
-alternatives remain outside this stage; the pre-HTTP refusal stays in place.
+Direct FCP credential checkpoint (2026-10-05, LOCAL A source only): the earlier
+pre-HTTP refusal remains the default when managed mapping is absent. The new
+optional closed `credential_metadata_read` mapping keeps the original
+`BoundVerified` token, instance, accepted owned session, principal, zone,
+resource, request and caveats. It creates no child token or grant. Only fixed
+`list_credentials` arguments and the two observed raw schema pins are accepted;
+MCP credential selection must intersect the original `credential_allow` and
+the fixed bearer profile/purpose. Generic API-key and bridge guards remain.
+
+Normal producer and signer/provision validation agree on an explicit separately
+admitted input. With mapping, only `credentials.list` uses EEC:443 or
+Hetzner:8443; every other operation retains REST:443. The signed Hetzner entry
+must use exactly `[8443]`, not a union. Null, partial, unknown or drifted mapping
+and altered per-operation networks refuse. Historical signed modes cannot gain
+this mapping. The portable manifest envelope is not a grant of either port.
+
+`credentials_owned_http_original_authority_and_metadata_success` exercises the
+real host HTTP handler, original synthetic authority, a controlled loopback MCP
+server, exact query/type/project/sharing filters, projection and refusal cases.
+Cancellation is tested before HTTP and while a response is pending; closed
+admission prevents subsequent dispatch. This is component/mock transport
+evidence, not original connector child-process or installed CLI acceptance.
+Pure producer fixtures exercise the native pre-seed validator and synthetic
+signed provision validation. Real mapping activation, new source admission and
+installed original-invocation acceptance remain OPEN; signed source7592 does
+not contain LOCAL A. Native credential continuation also remains OPEN. Earlier
+unbound-token/child-attenuation findings remain historical; this implementation
+does not add general delegation or reinterpret them as a successful live call.
 
 Candidate `runtime.status` returns `idle:null` and `activeRuns:null` when the
 host has no shared-supervisor observation. Its explicit `observation` reports
@@ -1723,7 +1734,7 @@ separate signed schema/profile and runtime admission before installed use.
 | Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and Code fingerprints only; public defaults explicit | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, manifest/executable schema parity test |
 | Draft/published compare: semantic/layout/validation | New public composition missing | Same single GET crossbinds both graphs; semantic/layout digests; two owned local validations; no public raw graph | `captured_comparison_graphs` tests and retained native local comparison test; missing published/validator failure is limited outcome, not empty success |
 | Executions search/get metadata | Existing metadata routes; new filter parity needs validation | Native workflow/time/status pushdown; running explicitly requested/merged; queryless exact metadata GET, no execution payload | Six `metadata_*` HTTP tests passed; wrong workflow denied; payload/history/rollback remain outside .35 |
-| Credentials list query/type/project/sharing/page | REST lacks required official metadata | Wrapper/host fixed official adapter gives safe scopes/managed/global/homeProject metadata; direct FCP refuses pre-HTTP | `official_credentials_*`, native serialized projection tests; direct credential-profile/authority mapping and native continuation remain open |
+| Credentials list query/type/project/sharing/page | REST lacks required official metadata; installed direct FCP mapping absent | Wrapper/host official adapter plus LOCAL A optional original-invocation mapping; bounded safe metadata, no native cursor | `official_credentials_*`, `credentials_owned_*`, retained producer/signer/provision fixtures; component mock HTTP is not child-process/installed CLI acceptance. Mapping/source admission and continuation remain OPEN |
 | Audit credentials/database/filesystem/nodes | Source-proved fixed native POST, no installed audit invocation | Explicit four-category selection and redacted report/count projection; legitimate native empty array accepted | `audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes`; instance/default-all denied before HTTP pending external-effect decision, never full-audit success |
 
 History/rollback (.36), external credential lookup (.39), execution payload (.40)

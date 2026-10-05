@@ -283,6 +283,19 @@ struct CommonInventoryConfig {
     base_url: String,
     credential_id: String,
     server_id: String,
+    #[serde(default, deserialize_with = "deserialize_metadata_read_mapping")]
+    credential_metadata_read: Option<fcp_host::CredentialMetadataReadMapping>,
+}
+
+fn deserialize_metadata_read_mapping<'de, D>(
+    deserializer: D,
+) -> Result<Option<fcp_host::CredentialMetadataReadMapping>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mapping = fcp_host::CredentialMetadataReadMapping::deserialize(deserializer)?;
+    mapping.validate().map_err(serde::de::Error::custom)?;
+    Ok(Some(mapping))
 }
 
 #[derive(Deserialize)]
@@ -2156,7 +2169,14 @@ fn validate_unsigned_release_tree_with_schema_mode(
             } else {
                 ServerId::Hetzner
             };
-            let inventory = read_value(&path, MAX_INVENTORY_BYTES)?;
+            let bytes = read_bounded(&path, MAX_INVENTORY_BYTES)
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::Policy))?;
+            // Preserve native serde duplicate-field refusal before converting
+            // signed configuration to the generic policy comparison value.
+            let _: Vec<CommonInventoryEntry> = serde_json::from_slice(&bytes)
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::Policy))?;
+            let inventory: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| ProvisionError::new(ProvisionErrorCode::Policy))?;
             let search = inventory_search_read(root, server, lifecycle_schema_mode)?;
             validate_common_inventory(
                 &inventory,
@@ -2519,8 +2539,24 @@ fn validate_common_inventory(
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
     let expected_bounded_network =
         expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1_048_576);
+    let metadata_network = expected_n8n_network_constraint(
+        expected_host,
+        match server {
+            ServerId::Eec => 443,
+            ServerId::Hetzner => 8443,
+        },
+    );
+    if entry.config.credential_metadata_read.is_some()
+        && !matches!(schema_mode, CommonInventorySchemaMode::Current)
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
     if expected_operations.iter().any(|operation| {
-        let expected = if matches!(
+        let expected = if *operation == "n8n.credentials.list"
+            && entry.config.credential_metadata_read.is_some()
+        {
+            &metadata_network
+        } else if matches!(
             schema_mode,
             CommonInventorySchemaMode::Current
                 | CommonInventorySchemaMode::Previous
@@ -4743,6 +4779,51 @@ for server in ('eec','hetzner'):
             )
             .expect("synthetic signed receipt");
         }
+
+        fn enable_metadata_read_from_pure_producer(&self) {
+            let script = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/n8n_release_assembler.sh"
+            );
+            let code = r#"
+import json, pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+body = source.split('credential_metadata_mapping() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+ns = {'__name__': 'retained_metadata_fixture'}
+exec(compile(body, sys.argv[1], 'exec'), ns)
+entry = {'credential_id':'550e8400-e29b-41d4-a716-446655440001',
+ 'purpose':'n8n.credentials.metadata.read','tool':'list_credentials','class':'read',
+ 'input_schema_digest':ns['INPUT_PIN'],'output_schema_digest':ns['OUTPUT_PIN']}
+data = {'schema':'fwc.n8n.credential-metadata-mapping.v1','servers':{'eec':entry,'hetzner':entry}}
+mapping = ns['validate_mapping'](json.dumps(data).encode())
+for field in entry:
+    altered = json.loads(json.dumps(data))
+    altered['servers']['hetzner'][field] = 'UNKNOWN_CANARY'
+    try: ns['validate_mapping'](json.dumps(altered).encode())
+    except ValueError: pass
+    else: raise AssertionError('producer accepted drift')
+for raw in (b'null', b'{"schema":"x","schema":"y"}', b'[]'):
+    try: ns['validate_mapping'](raw)
+    except ValueError: pass
+    else: raise AssertionError('producer accepted malformed input')
+root = pathlib.Path(sys.argv[2])
+for server in ('eec','hetzner'):
+    path = root/'inventory'/f'{server}.json'
+    original = json.loads(path.read_bytes())[0]
+    output = ns['add_metadata_inventory'](original, server, mapping)
+    for operation, network in original['operation_network_constraints'].items():
+        if operation != 'n8n.credentials.list': assert output['operation_network_constraints'][operation] == network
+    assert output['operation_network_constraints']['n8n.credentials.list']['port_allow'] == ([443] if server == 'eec' else [8443])
+    path.write_text(json.dumps([output]))
+"#;
+            let output = std::process::Command::new("/usr/bin/python3")
+                .args(["-c", code, script])
+                .arg(&self.stage)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "pure metadata producer denied");
+            self.refresh_stage_receipts();
+        }
     }
 
     impl Drop for Fixture {
@@ -4787,6 +4868,106 @@ for server in ('eec','hetzner'):
                     ),
                     Some(search)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_metadata_read_producer_signer_provision_and_runtime_agree() {
+        for enabled in [false, true] {
+            let fixture = Fixture::retained();
+            if enabled {
+                fixture.enable_metadata_read_from_pure_producer();
+            }
+            let request = fixture.request();
+            validate_unsigned_release_tree(
+                &fixture.stage,
+                &fixture.release_id,
+                &request.git_revision,
+                &request.bindings,
+                fixture.owner,
+                &fixture.releases.join(&fixture.release_id),
+            )
+            .unwrap();
+            request.validate().unwrap();
+            for server in ["eec", "hetzner"] {
+                let path = fixture.stage.join(format!("inventory/{server}.json"));
+                let value = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+                let config: CommonInventoryConfig =
+                    serde_json::from_value(value[0]["config"].clone()).unwrap();
+                assert_eq!(config.credential_metadata_read.is_some(), enabled);
+                if let Some(mapping) = config.credential_metadata_read {
+                    mapping.validate().unwrap();
+                }
+                let mut malformed = value[0]["config"].clone();
+                malformed["credential_metadata_read"] = Value::Null;
+                assert!(serde_json::from_value::<CommonInventoryConfig>(malformed).is_err());
+                if enabled {
+                    let raw = value.to_string();
+                    let duplicate = raw.replacen("\"purpose\":\"n8n.credentials.metadata.read\"",
+                        "\"purpose\":\"n8n.credentials.metadata.read\",\"purpose\":\"n8n.credentials.metadata.read\"", 1);
+                    assert_ne!(raw, duplicate);
+                    fs::write(&path, duplicate).unwrap();
+                    fixture.refresh_stage_receipts();
+                    assert!(
+                        fixture.request().validate().is_err(),
+                        "duplicate signed mapping field denied"
+                    );
+                    fs::write(&path, raw).unwrap();
+                    fixture.refresh_stage_receipts();
+                    for case in [
+                        "network_union",
+                        "wrong_port",
+                        "other_operation",
+                        "server",
+                        "null",
+                        "purpose",
+                        "missing_output",
+                        "unknown",
+                    ] {
+                        let mut changed = value.clone();
+                        match case {
+                            "network_union" => {
+                                changed[0]["operation_network_constraints"]["n8n.credentials.list"]
+                                    ["port_allow"] = serde_json::json!([443, 8443])
+                            }
+                            "wrong_port" => {
+                                changed[0]["operation_network_constraints"]["n8n.credentials.list"]
+                                    ["port_allow"] = serde_json::json!([9443])
+                            }
+                            "other_operation" => {
+                                changed[0]["operation_network_constraints"]["n8n.workflows.get"]["port_allow"] =
+                                    serde_json::json!([8443])
+                            }
+                            "server" => {
+                                changed[0]["config"]["server_id"] = serde_json::json!("local")
+                            }
+                            "null" => {
+                                changed[0]["config"]["credential_metadata_read"] = Value::Null
+                            }
+                            "purpose" => {
+                                changed[0]["config"]["credential_metadata_read"]["purpose"] =
+                                    serde_json::json!("n8n.workflows.execute")
+                            }
+                            "missing_output" => {
+                                changed[0]["config"]["credential_metadata_read"]
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .remove("output_schema_digest");
+                            }
+                            "unknown" => {
+                                changed[0]["config"]["credential_metadata_read"]["unknown"] =
+                                    serde_json::json!(true)
+                            }
+                            _ => unreachable!(),
+                        }
+                        fs::write(&path, changed.to_string()).unwrap();
+                        fixture.refresh_stage_receipts();
+                        assert!(fixture.request().validate().is_err(), "{server}:{case}");
+                        fs::write(&path, value.to_string()).unwrap();
+                        fixture.refresh_stage_receipts();
+                    }
+                }
             }
         }
     }

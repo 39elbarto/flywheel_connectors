@@ -532,6 +532,105 @@ impl N8nClient {
         Ok(response)
     }
 
+    pub(crate) async fn credentials_metadata_read(
+        &self,
+        mapping: &fcp_host::CredentialMetadataReadMapping,
+        server: &str,
+        input: &serde_json::Value,
+        context: HostEgressContext,
+    ) -> N8nResult<serde_json::Value> {
+        let denied = || N8nError::InvalidInput("credential_metadata_read_denied".into());
+        if !matches!(self.auth, N8nAuth::CredentialId(_))
+            || context.connector_id != "fcp.n8n"
+            || context.operation_id != "n8n.credentials.list"
+            || context.resource_uri != format!("fwc-n8n://{server}")
+        {
+            return Err(denied());
+        }
+        let endpoint = Url::parse(
+            fcp_host::CredentialMetadataReadMapping::endpoint(server).map_err(|_| denied())?,
+        )
+        .map_err(|_| denied())?;
+        let api_origin = Url::parse(
+            fcp_host::CredentialMetadataReadMapping::api_origin(server).map_err(|_| denied())?,
+        )
+        .map_err(|_| denied())?;
+        if api_origin.origin() != self.base_url.origin() {
+            return Err(denied());
+        }
+        let arguments = crate::types::official_credentials_input(input).map_err(|_| denied())?;
+        let mut protocol = fcp_host::CredentialMetadataReadProtocol::new(
+            mapping.clone(),
+            server,
+            &context.request_id,
+            arguments,
+        )
+        .map_err(|_| denied())?;
+        let proxy = self
+            .runtime
+            .host_egress_proxy_client()
+            .map_err(|_| denied())?
+            .ok_or_else(denied)?;
+        while !protocol.completed() {
+            let body = protocol.request().map_err(|_| denied())?;
+            protocol.admit_request(&body).map_err(|_| denied())?;
+            let mut headers = vec![
+                HostEgressHttpHeader {
+                    name: "Content-Type".into(),
+                    value: "application/json".into(),
+                },
+                HostEgressHttpHeader {
+                    name: "Accept".into(),
+                    value: "application/json, text/event-stream".into(),
+                },
+                HostEgressHttpHeader {
+                    name: "MCP-Protocol-Version".into(),
+                    value: protocol.protocol_version().into(),
+                },
+            ];
+            if let Some(session) = protocol.session() {
+                headers.push(HostEgressHttpHeader {
+                    name: "Mcp-Session-Id".into(),
+                    value: session.into(),
+                });
+            }
+            let request = HostEgressHttpRequest {
+                context: context.clone(),
+                url: endpoint.to_string(),
+                method: "POST".into(),
+                headers,
+                body: Some(Base64Bytes::from_vec(
+                    serde_json::to_vec(&body).map_err(|_| denied())?,
+                )),
+                credential_id: Some(mapping.credential_id().into()),
+            };
+            let response = proxy
+                .http(&request)
+                .await
+                .map_err(|error| map_host_egress_error(&error))?;
+            validate_host_egress_decision(&response.egress, &context, &endpoint)
+                .map_err(|_| N8nError::MalformedProviderResponse)?;
+            let sessions = response
+                .headers
+                .iter()
+                .filter(|h| h.name.eq_ignore_ascii_case("Mcp-Session-Id"))
+                .collect::<Vec<_>>();
+            if sessions.len() > 1 {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            protocol
+                .accept_response(
+                    response.status,
+                    sessions.first().map(|h| h.value.as_str()),
+                    response.body.as_bytes(),
+                )
+                .map_err(|_| N8nError::MalformedProviderResponse)?;
+        }
+        protocol
+            .projection()
+            .map_err(|_| N8nError::MalformedProviderResponse)
+    }
+
     async fn get_url_mediated(
         &self,
         url: Url,

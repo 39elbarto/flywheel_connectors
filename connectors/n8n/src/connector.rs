@@ -64,11 +64,23 @@ use crate::{
 };
 
 /// Parsed and validated n8n connector configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct N8nConfig {
     auth: N8nAuth,
     base_url: String,
     server_id: String,
+    metadata_read: Option<fcp_host::CredentialMetadataReadMapping>,
+}
+
+impl std::fmt::Debug for N8nConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("N8nConfig")
+            .field("auth", &self.auth)
+            .field("base_url", &self.base_url)
+            .field("server_id", &self.server_id)
+            .field("metadata_read_configured", &self.metadata_read.is_some())
+            .finish()
+    }
 }
 
 impl N8nConfig {
@@ -135,10 +147,35 @@ impl N8nConfig {
         let base_url =
             N8nClient::canonicalize_base_url(base_url).map_err(|error| error.to_fcp_error())?;
 
+        let metadata_read = params
+            .get("credential_metadata_read")
+            .map(|value| {
+                let mapping: fcp_host::CredentialMetadataReadMapping =
+                    serde_json::from_value(value.clone()).map_err(|_| {
+                        FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "credential metadata mapping invalid".into(),
+                        }
+                    })?;
+                mapping.validate().map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "credential metadata mapping invalid".into(),
+                })?;
+                if !matches!(auth, N8nAuth::CredentialId(_)) {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "credential metadata requires mediated auth".into(),
+                    });
+                }
+                Ok(mapping)
+            })
+            .transpose()?;
+
         Ok(Self {
             auth,
             base_url,
             server_id: server_id.to_string(),
+            metadata_read,
         })
     }
 
@@ -2198,15 +2235,23 @@ impl N8nConnector {
 
     async fn invoke_credentials_list(
         &self,
-        _client: &N8nClient,
-        _input: &serde_json::Value,
-        _context: Option<HostEgressContext>,
+        client: &N8nClient,
+        input: &serde_json::Value,
+        context: Option<HostEgressContext>,
     ) -> Result<serde_json::Value, N8nError> {
-        // No REST result can satisfy the advertised official metadata contract.
-        // Host mediation remains required; this refusal is not parity completion.
-        Err(N8nError::InvalidInput(
-            "credentials_require_admitted_official_mcp".into(),
-        ))
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| N8nError::InvalidInput("not_configured".into()))?;
+        let mapping = config.metadata_read.as_ref().ok_or_else(|| {
+            N8nError::InvalidInput("credentials_require_admitted_official_mcp".into())
+        })?;
+        let context = context.ok_or_else(|| {
+            N8nError::InvalidInput("credential_metadata_bound_context_required".into())
+        })?;
+        client
+            .credentials_metadata_read(mapping, &config.server_id, input, context)
+            .await
     }
 
     fn host_egress_context(
@@ -8158,6 +8203,66 @@ mod tests {
         assert_eq!(
             runtime.output_schema["required"],
             json!(["credentials", "page"])
+        );
+    }
+
+    #[test]
+    fn credential_metadata_managed_config_closed_and_manifest_network() {
+        for server in ["eec", "hetzner"] {
+            let mut config = json!({"server_id":server,"base_url":if server == "eec" {
+                "https://n8n.europeaneyecenter.com/api/v1"
+            } else { "https://n8nhet.levilaser.com/api/v1" },
+                "credential_id":"550e8400-e29b-41d4-a716-446655440000"});
+            assert!(
+                N8nConfig::from_params(&config)
+                    .unwrap()
+                    .metadata_read
+                    .is_none()
+            );
+            config["credential_metadata_read"] = json!({
+                "credential_id":"550e8400-e29b-41d4-a716-446655440001",
+                "purpose":"n8n.credentials.metadata.read", "tool":"list_credentials", "class":"read",
+                "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+                "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"});
+            assert!(
+                N8nConfig::from_params(&config)
+                    .unwrap()
+                    .metadata_read
+                    .is_some()
+            );
+            let debug = format!("{:?}", N8nConfig::from_params(&config).unwrap());
+            assert!(!debug.contains("550e8400-e29b-41d4-a716-446655440001"));
+            for field in [
+                "purpose",
+                "tool",
+                "class",
+                "input_schema_digest",
+                "output_schema_digest",
+                "unknown",
+            ] {
+                let mut changed = config.clone();
+                changed["credential_metadata_read"][field] = json!("UNKNOWN_CANARY");
+                assert!(N8nConfig::from_params(&changed).is_err());
+            }
+            config["credential_metadata_read"] = Value::Null;
+            assert!(N8nConfig::from_params(&config).is_err());
+        }
+        let manifest = fcp_manifest::ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        assert_eq!(
+            manifest.provides.operations["n8n.credentials.list"]
+                .network_constraints
+                .as_ref()
+                .unwrap()
+                .port_allow,
+            vec![443, 8443]
+        );
+        assert_eq!(
+            manifest.provides.operations["n8n.workflows.compare"]
+                .network_constraints
+                .as_ref()
+                .unwrap()
+                .port_allow,
+            vec![443]
         );
     }
 

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b690752aa55d1e15db0946c4561aec25e88dd8bf6ef2b856cc3d230fd390df19"
+interface_hash = "blake3-256:fcp.interface.v2:3d56f91497ab2e8ad04f2842ece54200ceeffdaf042b1a00153ed125b9d0d656"
 
 [connector]
 id = "fcp.n8n"
@@ -252,7 +252,7 @@ properties = { credentials = { type = "array", maxItems = 200, items = { type = 
 
 [provides.operations."n8n.credentials.list".network_constraints]
 host_allow = ["operator-configured"]
-port_allow = [443]
+port_allow = [443, 8443]
 ip_allow = []
 cidr_deny = []
 deny_localhost = true

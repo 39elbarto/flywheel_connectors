@@ -604,68 +604,7 @@ pub fn official_credentials_output_schema() -> Value {
 
 /// Project only the required official credential metadata. Descriptions,
 /// gateway suggestions and unknown provider fields never enter this output.
-pub fn project_official_credentials(
-    input: &Value,
-    server: &str,
-    limit: usize,
-) -> Result<Value, &'static str> {
-    use serde_json::json;
-    if !matches!(server, "eec" | "hetzner") || !(1..=200).contains(&limit) {
-        return Err("official_credential_response_invalid");
-    }
-    let object = input
-        .as_object()
-        .ok_or("official_credential_response_invalid")?;
-    if object.contains_key("error") {
-        return Err("official_credential_provider_failed");
-    }
-    let rows = object
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or("official_credential_response_invalid")?;
-    if rows.len() > limit || object.get("count").and_then(Value::as_u64) != Some(rows.len() as u64)
-    {
-        return Err("official_credential_response_invalid");
-    }
-    let text = |value: &Value| -> Result<String, &'static str> {
-        value
-            .as_str()
-            .filter(|value| {
-                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-            })
-            .map(str::to_owned)
-            .ok_or("official_credential_response_invalid")
-    };
-    let mut ids = std::collections::BTreeSet::new();
-    let mut projected = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = text(&row["id"])?;
-        if !ids.insert(id.clone()) {
-            return Err("official_credential_response_invalid");
-        }
-        let scopes = row["scopes"]
-            .as_array()
-            .filter(|items| items.len() <= 64)
-            .ok_or("official_credential_response_invalid")?
-            .iter()
-            .map(&text)
-            .collect::<Result<Vec<_>, _>>()?;
-        let home = match row.get("homeProject") {
-            Some(Value::Null) => Value::Null,
-            Some(home) if home.is_object() => {
-                json!({"id":text(&home["id"])? ,"name":text(&home["name"])? ,"type":text(&home["type"])?})
-            }
-            _ => return Err("official_credential_response_invalid"),
-        };
-        projected.push(json!({"resourceUri":format!("fwc-n8n://{server}/credentials/{}",percent_encoding::utf8_percent_encode(&id,percent_encoding::NON_ALPHANUMERIC)),
-            "id":id,"name":text(&row["name"])? ,"type":text(&row["type"])? ,"scopes":scopes,
-            "isManaged":row["isManaged"].as_bool().ok_or("official_credential_response_invalid")?,
-            "isGlobal":row["isGlobal"].as_bool().ok_or("official_credential_response_invalid")?,"homeProject":home}));
-    }
-    Ok(
-        json!({"credentials":projected,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}}),
-    )
-}
+pub use fcp_host::project_official_n8n_credentials as project_official_credentials;
 
 pub fn metadata_search_schema(operation: &str) -> Value {
     use serde_json::json;

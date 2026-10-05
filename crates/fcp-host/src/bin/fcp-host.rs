@@ -4126,6 +4126,339 @@ struct OwnedPerInvocationBinding {
     capability_token_cbor_b64: String,
     network_constraints: NetworkConstraints,
     comparison_capture: Option<Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>>,
+    credentials_session: Option<Arc<std::sync::Mutex<OwnedCredentialsSession>>>,
+}
+
+// Private to one owned invocation. Neither the token nor the accepted session
+// is serializable or caller-selectable. This is not permission to use an MCP
+// credential: the fixed transport/purpose intersection remains a separate gate.
+#[cfg(target_os = "linux")]
+struct OwnedCredentialsSession {
+    instance: InstanceId,
+    accepted: Option<fcp_core::SessionId>,
+    closed: bool,
+    cancel_http: Option<oneshot::Sender<()>>,
+    resource: String,
+    arguments: Value,
+    original: fcp_core::CapabilityToken<fcp_core::BoundVerified>,
+    protocol: Option<fcp_host::CredentialMetadataReadProtocol>,
+    mapped_credential: Option<String>,
+    endpoint: String,
+    started: Instant,
+    timeout: Duration,
+    transferred: u64,
+    max_bytes: u64,
+}
+
+// Revokes the invocation's private admission on every exit, including a
+// cancelled future and a failing teardown. It cannot create an admission.
+#[cfg(target_os = "linux")]
+struct OwnedCredentialsAdmissionGuard(Option<Arc<std::sync::Mutex<OwnedCredentialsSession>>>);
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedCredentialsAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(session) = &self.0 {
+            let mut proof = session
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            proof.accepted = None;
+            proof.closed = true;
+            if let Some(cancel) = proof.cancel_http.take() {
+                let _ = cancel.send(());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedCredentialsSession {
+    fn from_plan(plan: &PerInvocationExecutionPlan, request: &InvokeRequest) -> HostResult<Self> {
+        if plan.connector_id.as_str() != "fcp.n8n"
+            || plan.operation.as_str() != "n8n.credentials.list"
+            || plan.connector_id != request.connector_id
+            || plan.operation != request.operation
+            || plan.zone_id != request.zone_id
+            || plan.request_id != request.id
+        {
+            return Err(HostError::PreflightFailed(
+                "credential invocation operation binding invalid".into(),
+            ));
+        }
+        let instance = plan.requested_instance_id.clone().ok_or_else(|| {
+            HostError::PreflightFailed("credential invocation instance unavailable".into())
+        })?;
+        let key = plan.capability_verifying_key.ok_or_else(|| {
+            HostError::PreflightFailed("credential invocation verification key unavailable".into())
+        })?;
+        let server = plan
+            .configure_payload
+            .as_ref()
+            .and_then(|config| config.get("server_id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                HostError::PreflightFailed("credential invocation server unavailable".into())
+            })?;
+        let server = match server {
+            "eec" => N8nReadOnlyServerId::Eec,
+            "hetzner" => N8nReadOnlyServerId::Hetzner,
+            _ => {
+                return Err(HostError::PreflightFailed(
+                    "credential invocation server invalid".into(),
+                ));
+            }
+        };
+        let resource =
+            expected_n8n_read_only_resource_uri(server, "n8n.credentials.list", &request.input)?;
+        let arguments = official_credentials_read_arguments(&request.input)?;
+        let original = CapabilityVerifier::new(key, plan.zone_id.clone(), instance.clone())
+            .verify_bound(
+                request.capability_token.clone(),
+                &plan.manifest_operation.capability,
+                &plan.operation,
+                std::slice::from_ref(&resource),
+            )
+            .map_err(|_| {
+                HostError::PreflightFailed("credential invocation bound authority denied".into())
+            })?;
+        if original
+            .claims()
+            .get_expiration()
+            .is_none_or(|expiry| expiry <= Utc::now().timestamp())
+        {
+            return Err(HostError::PreflightFailed(
+                "credential invocation expiry denied".into(),
+            ));
+        }
+        let encoded = original
+            .claims()
+            .get(fcp2_claims::CONSTRAINTS)
+            .and_then(|value| value.as_map())
+            .ok_or_else(|| {
+                HostError::PreflightFailed("credential metadata constraints denied".into())
+            })?;
+        let mut names = std::collections::BTreeSet::new();
+        for (key, _) in encoded {
+            let name = key.as_text().ok_or_else(|| {
+                HostError::PreflightFailed("credential metadata constraints denied".into())
+            })?;
+            if !names.insert(name)
+                || !matches!(
+                    name,
+                    "resource_allow"
+                        | "resource_deny"
+                        | "max_calls"
+                        | "max_bytes"
+                        | "idempotency_key"
+                        | "credential_allow"
+                )
+            {
+                return Err(HostError::PreflightFailed(
+                    "credential metadata unsupported constraint denied".into(),
+                ));
+            }
+        }
+        enforce_live_capability_constraints(
+            request,
+            original.claims(),
+            original.claims().get_principal_id().ok_or_else(|| {
+                HostError::PreflightFailed("credential metadata principal unavailable".into())
+            })?,
+            Some(&resource),
+        )?;
+        let constraints = capability_constraints_from_claims(original.claims())?;
+        let mapping = plan
+            .configure_payload
+            .as_ref()
+            .and_then(|config| config.get("credential_metadata_read"))
+            .map(|value| {
+                serde_json::from_value::<fcp_host::CredentialMetadataReadMapping>(value.clone())
+            })
+            .transpose()
+            .map_err(|_| HostError::PreflightFailed("credential metadata mapping denied".into()))?;
+        let server_name = match server {
+            N8nReadOnlyServerId::Eec => "eec",
+            N8nReadOnlyServerId::Hetzner => "hetzner",
+        };
+        let endpoint =
+            fcp_host::CredentialMetadataReadMapping::endpoint(server_name).map_err(|_| {
+                HostError::PreflightFailed("credential metadata endpoint denied".into())
+            })?;
+        let mapped_credential = mapping
+            .as_ref()
+            .map(|mapping| mapping.credential_id().to_owned());
+        if mapped_credential.as_ref().is_some_and(|id| {
+            !constraints
+                .credential_allow
+                .iter()
+                .any(|allowed| allowed.to_string() == *id)
+        }) {
+            return Err(HostError::PreflightFailed(
+                "credential metadata credential intersection denied".into(),
+            ));
+        }
+        let protocol = mapping
+            .map(|mapping| {
+                fcp_host::CredentialMetadataReadProtocol::new(
+                    mapping,
+                    server_name,
+                    &request.id.to_string(),
+                    arguments.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|_| {
+                HostError::PreflightFailed("credential metadata protocol denied".into())
+            })?;
+        Ok(Self {
+            instance,
+            accepted: None,
+            closed: false,
+            cancel_http: None,
+            resource,
+            arguments,
+            original,
+            protocol,
+            mapped_credential,
+            endpoint: endpoint.into(),
+            started: Instant::now(),
+            timeout: Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000)),
+            transferred: 0,
+            max_bytes: constraints
+                .max_bytes
+                .unwrap_or(2 * 1024 * 1024)
+                .min(2 * 1024 * 1024),
+        })
+    }
+
+    fn admit_http(&mut self, request: &HostEgressHttpRequest) -> HostResult<()> {
+        let denied =
+            || HostError::PreflightFailed("credential metadata request binding denied".into());
+        if !self.matches_context(&request.context)
+            || self.started.elapsed() >= self.timeout
+            || !self.authority_time_valid()
+            || request.method != "POST"
+            || request.url != self.endpoint
+            || request.credential_id != self.mapped_credential
+        {
+            return Err(denied());
+        }
+        let protocol = self.protocol.as_mut().ok_or_else(denied)?;
+        let expected = protocol.request().map_err(|_| denied())?;
+        let bytes = serde_json::to_vec(&expected).map_err(|_| denied())?;
+        if request
+            .body
+            .as_ref()
+            .is_none_or(|body| body.as_bytes() != bytes)
+        {
+            return Err(denied());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for header in &request.headers {
+            let name = header.name.to_ascii_lowercase();
+            if !seen.insert(name.clone()) {
+                return Err(denied());
+            }
+            let valid = match name.as_str() {
+                "content-type" => header.value == "application/json",
+                "accept" => header.value == "application/json, text/event-stream",
+                "mcp-protocol-version" => header.value == protocol.protocol_version(),
+                "mcp-session-id" => protocol.session() == Some(header.value.as_str()),
+                _ => false,
+            };
+            if !valid {
+                return Err(denied());
+            }
+        }
+        if !["content-type", "accept", "mcp-protocol-version"]
+            .iter()
+            .all(|name| seen.contains(*name))
+            || protocol.session().is_some() != seen.contains("mcp-session-id")
+        {
+            return Err(denied());
+        }
+        self.transferred = self
+            .transferred
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(denied)?;
+        if self.transferred > self.max_bytes {
+            return Err(denied());
+        }
+        protocol.admit_request(&expected).map_err(|_| denied())
+    }
+
+    fn authority_time_valid(&self) -> bool {
+        let now = Utc::now().timestamp();
+        self.original
+            .claims()
+            .get_expiration()
+            .is_some_and(|expiry| expiry > now)
+            && self
+                .original
+                .claims()
+                .get_not_before()
+                .is_none_or(|start| start <= now)
+    }
+
+    fn retain_http(&mut self, response: &HostEgressHttpResponse) -> HostResult<()> {
+        let denied =
+            || HostError::PreflightFailed("credential metadata response binding denied".into());
+        if self.started.elapsed() >= self.timeout {
+            return Err(denied());
+        }
+        self.transferred = self
+            .transferred
+            .checked_add(response.body.as_bytes().len() as u64)
+            .ok_or_else(denied)?;
+        if self.transferred > self.max_bytes {
+            return Err(denied());
+        }
+        let sessions = response
+            .headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("mcp-session-id"))
+            .collect::<Vec<_>>();
+        if sessions.len() > 1 {
+            return Err(denied());
+        }
+        self.protocol
+            .as_mut()
+            .ok_or_else(denied)?
+            .accept_response(
+                response.status,
+                sessions.first().map(|header| header.value.as_str()),
+                response.body.as_bytes(),
+            )
+            .map_err(|_| denied())
+    }
+
+    fn accept(
+        &mut self,
+        instance: Option<&InstanceId>,
+        session: &fcp_core::SessionId,
+    ) -> HostResult<()> {
+        if self.closed
+            || instance != Some(&self.instance)
+            || self.accepted.is_some()
+            || session.0.is_nil()
+        {
+            return Err(HostError::PreflightFailed(
+                "credential invocation session binding invalid".into(),
+            ));
+        }
+        self.accepted = Some(session.clone());
+        Ok(())
+    }
+
+    fn matches_context(&self, context: &HostEgressContext) -> bool {
+        // Keep the complete verified claims, including mandatory caveats. A
+        // request ID alone cannot stand in for the original authority.
+        !self.closed
+            && self.accepted.is_some()
+            && context.resource_uri == self.resource
+            && self.arguments.is_object()
+            && self.original.claims().get_zone_id() == Some(context.zone_id.as_str())
+    }
 }
 
 // Invocation-private: deliberately neither Debug nor Serialize. Raw provider
@@ -4297,11 +4630,24 @@ impl OwnedPerInvocationBinding {
             capability_token_cbor_b64,
             network_constraints: plan.network_constraints.clone(),
             comparison_capture,
+            credentials_session: if plan.connector_id.as_str() == "fcp.n8n"
+                && plan.operation.as_str() == "n8n.credentials.list"
+            {
+                Some(Arc::new(std::sync::Mutex::new(
+                    OwnedCredentialsSession::from_plan(plan, request)?,
+                )))
+            } else {
+                None
+            },
         })
     }
 
     fn matches_context(&self, context: &HostEgressContext) -> bool {
-        self.connector_id == context.connector_id
+        self.credentials_session.as_ref().is_none_or(|session| {
+            session
+                .lock()
+                .is_ok_and(|session| session.matches_context(context))
+        }) && self.connector_id == context.connector_id
             && self.operation_id == context.operation_id
             && self.zone_id == context.zone_id
             && self.request_id == context.request_id
@@ -4559,6 +4905,24 @@ async fn owned_perform_egress(
 ) -> HostResult<HostEgressWireResponseBody> {
     match payload {
         HostEgressWireRequestPayload::Http(request) => {
+            if !binding.matches_context(&request.context) {
+                return Err(HostError::PreflightFailed(
+                    "owned egress context binding denied".into(),
+                ));
+            }
+            if let Some(session) = &binding.credentials_session {
+                if binding.network_constraints.max_redirects != 0 {
+                    return Err(HostError::PreflightFailed(
+                        "credential metadata redirects denied".into(),
+                    ));
+                }
+                session
+                    .lock()
+                    .map_err(|_| {
+                        HostError::Internal("credential metadata lock unavailable".into())
+                    })?
+                    .admit_http(&request)?;
+            }
             if let Some(capture) = &binding.comparison_capture {
                 capture
                     .lock()
@@ -4566,7 +4930,7 @@ async fn owned_perform_egress(
                     .admit_request(&request)?;
             }
             let started_at = Instant::now();
-            let authorized = authorize_host_egress_context(
+            let mut authorized = authorize_host_egress_context(
                 state,
                 &request.context,
                 &request.context.resource_uri,
@@ -4591,6 +4955,22 @@ async fn owned_perform_egress(
                     "owned host-egress authorization did not match invocation binding".to_string(),
                 ));
             }
+            if let Some(session) = &binding.credentials_session {
+                let proof = session.lock().map_err(|_| {
+                    HostError::Internal("credential metadata budget lock unavailable".into())
+                })?;
+                let remaining = proof
+                    .max_bytes
+                    .checked_sub(proof.transferred)
+                    .filter(|remaining| *remaining > 0)
+                    .ok_or_else(|| {
+                        HostError::PreflightFailed(
+                            "credential metadata byte budget exhausted".into(),
+                        )
+                    })?;
+                authorized.constraints.max_response_bytes =
+                    authorized.constraints.max_response_bytes.min(remaining);
+            }
             let lease = acquire_host_egress_credential_lease(
                 state,
                 &authorized.zone_id,
@@ -4601,19 +4981,116 @@ async fn owned_perform_egress(
             .inspect_err(|_| {
                 emit_n8n_run_once_owned_egress_stage(N8nRunOnceOwnedEgressStage::CredentialLease);
             })?;
-            let result = authorize_and_perform_host_http_egress(
-                state,
-                &authorized,
-                request,
-                lease.as_ref(),
-                started_at,
-                true,
-            )
-            .await;
+            let result = if let Some(session) = &binding.credentials_session {
+                let preparation = (|| {
+                    let lease = lease.as_ref().ok_or_else(|| {
+                        HostError::PreflightFailed("credential metadata lease unavailable".into())
+                    })?;
+                    validate_owned_metadata_credential_profile(lease)?;
+                    let mut proof = session.lock().map_err(|_| {
+                        HostError::Internal("credential metadata lock unavailable".into())
+                    })?;
+                    if !proof.matches_context(&request.context) || !proof.authority_time_valid() {
+                        return Err(HostError::PreflightFailed(
+                            "credential metadata authority expired".into(),
+                        ));
+                    }
+                    proof
+                        .protocol
+                        .as_ref()
+                        .ok_or_else(|| {
+                            HostError::PreflightFailed(
+                                "credential metadata attempt unavailable".into(),
+                            )
+                        })?
+                        .verify_in_flight_bytes(
+                            request
+                                .body
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    HostError::PreflightFailed(
+                                        "credential metadata attempt unavailable".into(),
+                                    )
+                                })?
+                                .as_bytes(),
+                        )
+                        .map_err(|_| {
+                            HostError::PreflightFailed("credential metadata attempt changed".into())
+                        })?;
+                    let original =
+                        fcp_core::CapabilityToken::from_raw(proof.original.raw().clone());
+                    verify_live_revocation_cascade(state, &original, proof.original.claims())?;
+                    let remaining = proof
+                        .timeout
+                        .checked_sub(proof.started.elapsed())
+                        .ok_or_else(|| {
+                            HostError::PreflightFailed(
+                                "credential metadata deadline exceeded".into(),
+                            )
+                        })?;
+                    let (cancel_tx, cancel_rx) = oneshot::channel();
+                    proof.cancel_http = Some(cancel_tx);
+                    Ok((remaining, cancel_rx))
+                })();
+                match preparation {
+                    Err(error) => Err(error),
+                    Ok((remaining, cancel_rx)) => {
+                        let injector = HostCredentialInjector::new(lease.clone());
+                        let mut http = Box::pin(fcp_async_core::time::timeout(
+                            remaining,
+                            perform_authorized_host_http_egress_once(
+                                &authorized,
+                                &request,
+                                &injector,
+                                started_at,
+                                true,
+                            ),
+                        ));
+                        let mut cancelled = Box::pin(cancel_rx);
+                        match futures_util::future::select(http.as_mut(), cancelled.as_mut()).await
+                        {
+                            futures_util::future::Either::Left((result, _)) => result
+                                .unwrap_or_else(|_| {
+                                    Err(HostError::PreflightFailed(
+                                        "credential metadata deadline exceeded".into(),
+                                    ))
+                                }),
+                            futures_util::future::Either::Right(_) => {
+                                Err(HostError::PreflightFailed(
+                                    "credential metadata invocation closed".into(),
+                                ))
+                            }
+                        }
+                    }
+                }
+            } else {
+                authorize_and_perform_host_http_egress(
+                    state,
+                    &authorized,
+                    request,
+                    lease.as_ref(),
+                    started_at,
+                    true,
+                )
+                .await
+            };
             if let Some(lease) = lease {
                 release_host_egress_credential_lease(state, lease).await;
             }
+            if let Some(session) = &binding.credentials_session
+                && let Ok(mut proof) = session.lock()
+            {
+                proof.cancel_http.take();
+            }
             let response = result?;
+            if let Some(session) = &binding.credentials_session {
+                session
+                    .lock()
+                    .map_err(|_| {
+                        HostError::Internal("credential metadata lock unavailable".into())
+                    })?
+                    .retain_http(&response)?;
+            }
             if let Some(capture) = &binding.comparison_capture {
                 capture
                     .lock()
@@ -4623,6 +5100,11 @@ async fn owned_perform_egress(
             Ok(HostEgressWireResponseBody::Http(response))
         }
         HostEgressWireRequestPayload::Tcp(request) => {
+            if binding.credentials_session.is_some() {
+                return Err(HostError::PreflightFailed(
+                    "credential metadata TCP denied".into(),
+                ));
+            }
             let started_at = Instant::now();
             let authorized = authorize_host_egress_context(
                 state,
@@ -4765,6 +5247,7 @@ async fn owned_run_protocol(
     plan: &PerInvocationExecutionPlan,
     request: &InvokeRequest,
     activated: &AtomicBool,
+    credentials_session: Option<&Arc<std::sync::Mutex<OwnedCredentialsSession>>>,
 ) -> HostResult<InvokeResponse> {
     if let Some(configure_payload) = plan.configure_payload.clone() {
         let _ = owned_rpc(handle, "configure", configure_payload).await?;
@@ -4790,7 +5273,9 @@ async fn owned_run_protocol(
                 .to_string(),
         ));
     }
-    activated.store(true, Ordering::Release);
+    if credentials_session.is_none() {
+        activated.store(true, Ordering::Release);
+    }
 
     if let Some(host_public_key) = plan.capability_verifying_key {
         let zone_dir = owned_handshake_zone_dir(
@@ -4825,6 +5310,13 @@ async fn owned_run_protocol(
             return Err(HostError::PreflightFailed(
                 "connector handshake was not accepted".to_string(),
             ));
+        }
+        if let Some(session) = credentials_session {
+            session
+                .lock()
+                .map_err(|_| HostError::Internal("credential session lock unavailable".into()))?
+                .accept(plan.requested_instance_id.as_ref(), &response.session_id)?;
+            activated.store(true, Ordering::Release);
         }
     }
 
@@ -4929,6 +5421,8 @@ async fn invoke_owned_per_invocation(
         Instant::now() + Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000));
     let binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
     let comparison_capture = binding.comparison_capture.clone();
+    let credentials_session = binding.credentials_session.clone();
+    let _credentials_admission_guard = OwnedCredentialsAdmissionGuard(credentials_session.clone());
     let auth_token = owned_launch_auth_token();
     let spec = owned_process_spec(&plan, &auth_token)?;
     let (host_endpoint, child_endpoint) = StdUnixStream::pair().map_err(|_| {
@@ -4968,7 +5462,14 @@ async fn invoke_owned_per_invocation(
             return Err(owned_invocation_error(error));
         }
     };
-    let operation_result = owned_run_protocol(&mut handle, &plan, &request, &activated).await;
+    let operation_result = owned_run_protocol(
+        &mut handle,
+        &plan,
+        &request,
+        &activated,
+        credentials_session.as_ref(),
+    )
+    .await;
     let response = owned_finalize(
         handle,
         host_shutdown,
@@ -4977,6 +5478,32 @@ async fn invoke_owned_per_invocation(
         operation_result,
     )
     .await?;
+    if let Some(session) = credentials_session {
+        let mut proof = session.lock().map_err(|_| {
+            HostError::Internal("credential metadata closing lock unavailable".into())
+        })?;
+        proof.accepted = None;
+        if response.error.is_none() {
+            let projected = proof
+                .protocol
+                .as_ref()
+                .ok_or_else(|| {
+                    HostError::PreflightFailed("credential metadata completion missing".into())
+                })?
+                .projection()
+                .map_err(|_| {
+                    HostError::PreflightFailed("credential metadata completion denied".into())
+                })?;
+            if response.result.as_ref() != Some(&projected)
+                || proof.started.elapsed() >= proof.timeout
+            {
+                return Err(HostError::PreflightFailed(
+                    "credential metadata closing result denied".into(),
+                ));
+            }
+        }
+        return Ok(response);
+    }
     if let Some(capture) = comparison_capture {
         if request.operation.as_str() == "n8n.validation.run" {
             complete_owned_remote_validation(capture, &request, response, comparison_deadline).await
@@ -5750,6 +6277,7 @@ mod owned_per_invocation_unit_tests {
             capability_token_cbor_b64: "secret-token".to_string(),
             network_constraints: constraints,
             comparison_capture: None,
+            credentials_session: None,
         };
         let mut context = HostEgressContext {
             connector_id: "fcp.test".to_string(),
@@ -21270,6 +21798,25 @@ async fn acquire_host_egress_credential_lease(
     Ok(Some(lease))
 }
 
+// Only the invocation-private metadata branch calls this after original bound
+// authorization and exact owner-managed mapping/body checks. Generic n8n and
+// bridge credential rules below remain unchanged.
+fn validate_owned_metadata_credential_profile(lease: &CredentialLease) -> HostResult<()> {
+    let denied = || HostError::PreflightFailed("credential metadata profile denied".into());
+    let profile = lease.payload.as_auth_profile().ok_or_else(denied)?;
+    let AuthMethodKind::ApiKey(method) = &profile.method else {
+        return Err(denied());
+    };
+    if lease.pool_key.provider.as_str() != "mcp-bridge"
+        || profile.provider != "mcp-bridge"
+        || !method.header_name.eq_ignore_ascii_case("Authorization")
+        || method.value_prefix.as_deref() != Some("Bearer")
+    {
+        return Err(denied());
+    }
+    Ok(())
+}
+
 fn validate_n8n_specific_host_egress_credential(
     connector_id: &ConnectorId,
     resource_uri: &str,
@@ -27418,6 +27965,953 @@ deny_ptrace = true
         assert!(
             !msg.contains("/definitely/missing"),
             "denial should prove the connector was not spawned or loaded: {msg}"
+        );
+    }
+
+    fn credentials_bound_test_fixture(
+        capability: &str,
+    ) -> (
+        PerInvocationExecutionPlan,
+        InvokeRequest,
+        InstanceId,
+        CapabilityConstraints,
+        fcp_crypto::ed25519::Ed25519SigningKey,
+    ) {
+        let signing = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[61; 32]).unwrap();
+        let instance = InstanceId::new();
+        let mut request = runtime_network_test_request("fcp.n8n", "n8n.credentials.list");
+        request.input = json!({"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"page":{"limit":3}});
+        let resource = expected_n8n_read_only_resource_uri(
+            N8nReadOnlyServerId::Eec,
+            "n8n.credentials.list",
+            &request.input,
+        )
+        .unwrap();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec![resource.clone()],
+            credential_allow: vec![fcp_core::CredentialId::new()],
+            ..Default::default()
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&constraints, &mut encoded).unwrap();
+        let now = Utc::now();
+        request.capability_token = fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability)
+                .zone_id(request.zone_id.as_str())
+                .target_instance(instance.as_str())
+                .principal("principal:original")
+                .operations(&["n8n.credentials.list"])
+                .issuer("node:synthetic")
+                .validity(now, now + chrono::Duration::minutes(1))
+                .try_constraints_cbor(&encoded)
+                .unwrap()
+                .sign(&signing)
+                .unwrap(),
+        );
+        let plan = PerInvocationExecutionPlan {
+            registry_generation: 1,
+            connector_id: request.connector_id.clone(),
+            operation: request.operation.clone(),
+            zone_id: request.zone_id.clone(),
+            request_id: request.id.clone(),
+            request_correlation_id: request.correlation_id.clone(),
+            manifest_operation: dispatcher_introspection(
+                "n8n.credentials.list",
+                capability,
+                SafetyTier::Safe,
+            )
+            .operations
+            .remove(0),
+            launch_snapshot: ValidatedConnectorLaunchSnapshot {
+                launcher_path: "/never-executed".into(),
+                launcher_digest: "synthetic".into(),
+                runtime_executable: "/never-executed".into(),
+                expected_runtime_executable_digest: "synthetic".into(),
+                fixed_args: Vec::new(),
+                fixed_env: BTreeMap::new(),
+                network_disabled: true,
+            },
+            network_constraints: serde_json::from_value(
+                json!({"host_allow":[],"port_allow":[],"require_sni":false}),
+            )
+            .unwrap(),
+            configure_payload: Some(json!({"server_id":"eec"})),
+            capability_verifying_key: Some(signing.verifying_key().to_bytes()),
+            requested_instance_id: Some(instance.clone()),
+            state_root: None,
+        };
+        (plan, request, instance, constraints, signing)
+    }
+
+    #[test]
+    fn credentials_owned_session_requires_real_bound_token_and_accepted_handshake() {
+        let (mut plan, request, instance, constraints, _) =
+            credentials_bound_test_fixture("n8n.credentials.metadata.read");
+        let mut proof = OwnedCredentialsSession::from_plan(&plan, &request).unwrap();
+        assert_eq!(
+            proof.arguments,
+            json!({"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"limit":3})
+        );
+        assert_eq!(
+            proof.original.claims().get_principal_id(),
+            Some("principal:original")
+        );
+        assert_eq!(
+            serde_json::to_value(
+                capability_constraints_from_claims(proof.original.claims()).unwrap()
+            )
+            .unwrap(),
+            serde_json::to_value(&constraints).unwrap()
+        );
+        let mut context = HostEgressContext {
+            connector_id: "fcp.n8n".into(),
+            operation_id: "n8n.credentials.list".into(),
+            resource_uri: proof.resource.clone(),
+            zone_id: request.zone_id.to_string(),
+            request_id: request.id.to_string(),
+            correlation_id: None,
+            capability_token_cbor_b64: capability_token_b64(&request.capability_token).unwrap(),
+        };
+        assert!(!proof.matches_context(&context));
+        let session = fcp_core::SessionId::new();
+        assert!(proof.accept(Some(&InstanceId::new()), &session).is_err());
+        assert!(proof.accept(None, &session).is_err());
+        proof.accept(Some(&instance), &session).unwrap();
+        assert!(proof.matches_context(&context));
+        assert!(proof.accept(Some(&instance), &session).is_err());
+        let mapping = json!({"credential_id":constraints.credential_allow[0].to_string(),"purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"});
+        for field in [
+            "credential_id",
+            "purpose",
+            "tool",
+            "class",
+            "input_schema_digest",
+            "output_schema_digest",
+            "unknown",
+        ] {
+            let mut altered = mapping.clone();
+            altered[field] = if field == "credential_id" {
+                json!(CredentialId::new().to_string())
+            } else {
+                json!("UNKNOWN_CANARY")
+            };
+            plan.configure_payload =
+                Some(json!({"server_id":"eec","credential_metadata_read":altered}));
+            assert!(OwnedCredentialsSession::from_plan(&plan, &request).is_err());
+        }
+        plan.configure_payload =
+            Some(json!({"server_id":"eec","credential_metadata_read":mapping}));
+        assert!(
+            OwnedCredentialsSession::from_plan(&plan, &request)
+                .unwrap()
+                .protocol
+                .is_some()
+        );
+        context.resource_uri = "fwc-n8n://hetzner/credentials".into();
+        assert!(!proof.matches_context(&context));
+        plan.requested_instance_id = Some(InstanceId::new());
+        assert!(OwnedCredentialsSession::from_plan(&plan, &request).is_err());
+        plan.requested_instance_id = None;
+        assert!(OwnedCredentialsSession::from_plan(&plan, &request).is_err());
+        plan.requested_instance_id = Some(instance);
+        plan.configure_payload = Some(json!({"server_id":"hetzner"}));
+        assert!(OwnedCredentialsSession::from_plan(&plan, &request).is_err());
+        plan.configure_payload = Some(json!({"server_id":"eec"}));
+        plan.operation = OperationId::from_static("n8n.workflows.execute");
+        assert!(OwnedCredentialsSession::from_plan(&plan, &request).is_err());
+    }
+
+    #[test]
+    fn credentials_owned_admission_drop_revokes_completion_error_and_cancel() {
+        for exit in ["completion", "teardown_error", "cancel"] {
+            let (plan, request, instance, _, _) =
+                credentials_bound_test_fixture("n8n.credentials.metadata.read");
+            let mut proof = OwnedCredentialsSession::from_plan(&plan, &request).unwrap();
+            proof
+                .accept(Some(&instance), &fcp_core::SessionId::new())
+                .unwrap();
+            let session = Arc::new(std::sync::Mutex::new(proof));
+            {
+                let _guard = OwnedCredentialsAdmissionGuard(Some(Arc::clone(&session)));
+                assert!(session.lock().unwrap().accepted.is_some(), "{exit}");
+            }
+            assert!(session.lock().unwrap().accepted.is_none(), "{exit}");
+        }
+    }
+
+    #[test]
+    fn credentials_owned_original_443_policy_cannot_gain_hetzner_8443() {
+        let context = fcp_host::RuntimeEgressDecisionContext {
+            connector_id: "fcp.n8n",
+            operation: "n8n.credentials.list",
+            zone_id: "z:work",
+            request_id: "synthetic-port-proof",
+            correlation_id: None,
+            execution_mode: RuntimeNetworkEnforcement::HostEgressProxy,
+            constraint_source: "managed_connector_config.operation_network_constraints",
+            credential_allow: &[],
+        };
+        for port in [443, 8443] {
+            let constraints = runtime_network_test_constraints(
+                "n8nhet.levilaser.com",
+                ManagedPortConstraint::Static(port),
+            )
+            .resolve(None)
+            .unwrap();
+            let mut request = fcp_sandbox::EgressHttpRequest {
+                url: "https://n8nhet.levilaser.com:8443/mcp-server/http".into(),
+                method: "POST".into(),
+                headers: vec![],
+                body: None,
+                credential_id: None,
+            };
+            let outcome = fcp_host::authorize_runtime_http_egress(
+                &context,
+                &constraints,
+                &mut request,
+                &NoOpCredentialInjector,
+            );
+            assert_eq!(outcome.is_ok(), port == 8443);
+        }
+    }
+
+    #[test]
+    fn credentials_owned_bound_constraints_expiry_and_instance_negatives() {
+        for case in [
+            "credential_allow",
+            "expiry",
+            "instance",
+            "zone",
+            "operation",
+            "resource",
+            "unsupported_caveat",
+        ] {
+            let (mut plan, mut request, instance, mut constraints, signing) =
+                credentials_bound_test_fixture("n8n.credentials.metadata.read");
+            let credential = constraints.credential_allow[0];
+            plan.configure_payload.as_mut().unwrap()["credential_metadata_read"] = json!({
+                "credential_id":credential.to_string(), "purpose":"n8n.credentials.metadata.read",
+                "tool":"list_credentials", "class":"read",
+                "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+                "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"});
+            if case == "credential_allow" {
+                constraints.credential_allow.clear();
+            }
+            if case == "resource" {
+                constraints.resource_allow = vec!["fwc-n8n://hetzner".into()];
+            }
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&constraints, &mut encoded).unwrap();
+            if case == "unsupported_caveat" {
+                let mut raw: ciborium::Value = ciborium::from_reader(encoded.as_slice()).unwrap();
+                if let ciborium::Value::Map(fields) = &mut raw {
+                    fields.push((
+                        ciborium::Value::Text("goal".into()),
+                        ciborium::Value::Text("synthetic".into()),
+                    ));
+                } else {
+                    panic!("synthetic constraints map");
+                }
+                encoded.clear();
+                ciborium::into_writer(&raw, &mut encoded).unwrap();
+            }
+            let now = Utc::now();
+            let bound_instance = if case == "instance" {
+                InstanceId::new()
+            } else {
+                instance
+            };
+            request.capability_token = fcp_core::CapabilityToken::from_raw(
+                fcp_crypto::cose::CapabilityTokenBuilder::new()
+                    .capability_id("n8n.credentials.metadata.read")
+                    .zone_id(if case == "zone" {
+                        "z:owner"
+                    } else {
+                        request.zone_id.as_str()
+                    })
+                    .target_instance(bound_instance.as_str())
+                    .principal("principal:original")
+                    .operations(&[if case == "operation" {
+                        "mcp.tools.call"
+                    } else {
+                        "n8n.credentials.list"
+                    }])
+                    .issuer("node:synthetic")
+                    .validity(
+                        now - chrono::Duration::minutes(2),
+                        if case == "expiry" {
+                            now - chrono::Duration::minutes(1)
+                        } else {
+                            now + chrono::Duration::minutes(1)
+                        },
+                    )
+                    .try_constraints_cbor(&encoded)
+                    .unwrap()
+                    .sign(&signing)
+                    .unwrap(),
+            );
+            assert!(
+                OwnedCredentialsSession::from_plan(&plan, &request).is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[cfg(feature = "n8n-test-support")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn credentials_owned_http_original_authority_and_metadata_success() {
+        let (mut plan, mut request, instance, constraints, signing) =
+            credentials_bound_test_fixture("cap.test.egress");
+        let credential = constraints.credential_allow[0];
+        let mapping_value = json!({"credential_id":credential.to_string(),"purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"});
+        plan.configure_payload.as_mut().unwrap()["credential_metadata_read"] =
+            mapping_value.clone();
+        let input_schema = json!({"type":"object"});
+        let output_schema = json!({"type":"object","required":["data","count"]});
+        let listener = StdTcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_input = input_schema.clone();
+        let server_output = output_schema.clone();
+        let (http_waiting_tx, http_waiting_rx) = oneshot::channel();
+        let mut http_waiting_rx = Some(http_waiting_rx);
+        let (release_waiting_tx, release_waiting_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut http_waiting_tx = Some(http_waiting_tx);
+            for attempt in 0_usize..5 {
+                let phase = attempt.saturating_sub(1);
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(stream) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(_) => panic!("bounded metadata fixture accept denied"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut byte = [0; 1];
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    bytes.push(byte[0]);
+                    assert!(bytes.len() < 8192);
+                }
+                let headers = std::str::from_utf8(&bytes).unwrap().to_ascii_lowercase();
+                assert!(headers.starts_with("post /mcp-server/http http/1.1\r\n"));
+                assert!(headers.contains("authorization: bearer synthetic-mcp-token\r\n"));
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(length < 8192);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let native: Value = serde_json::from_slice(&body).unwrap();
+                let expected = [
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                    "tools/call",
+                ][phase];
+                assert_eq!(native["method"], expected);
+                if attempt == 0 {
+                    http_waiting_tx.take().unwrap().send(()).unwrap();
+                    release_waiting_rx
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap();
+                    continue;
+                }
+                if phase == 3 {
+                    assert_eq!(
+                        native["params"],
+                        json!({"name":"list_credentials","arguments":{"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"limit":3}})
+                    );
+                }
+                let result = match phase {
+                    0 => json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}),
+                    2 => {
+                        json!({"tools":[{"name":"list_credentials","annotations":{"readOnlyHint":true},"inputSchema":server_input,"outputSchema":server_output}]})
+                    }
+                    _ => {
+                        json!({"structuredContent":{"data":[{"id":"credential-one","name":"synthetic","type":"test","scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,"data":{"secret":"PROVIDER_SECRET_CANARY"}}],"count":1},"isError":false})
+                    }
+                };
+                let response = if phase == 1 {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&json!({"jsonrpc":"2.0","id":native["id"],"result":result}))
+                        .unwrap()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        let managed = d9us6_loopback_constraints(address.port());
+        plan.network_constraints = managed.resolve(None).unwrap();
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let issued = lifecycle
+            .issue_capability_token_for_instance(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: "fcp.n8n".into(),
+                    capability_id: "cap.test.egress".into(),
+                    zone_id: ZoneId::work().to_string(),
+                    principal_id: "principal:original".into(),
+                    operations: vec!["n8n.credentials.list".into()],
+                    ttl_secs: 60,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: constraints.resource_allow.clone(),
+                    resource_deny: Vec::new(),
+                    max_calls: Some(1),
+                    max_bytes: Some(2 * 1024 * 1024),
+                    credential_allow: vec![credential],
+                    dry_run: false,
+                },
+                &signing,
+                &instance,
+            )
+            .await
+            .unwrap();
+        request.capability_token = capability_token_from_cbor_b64(
+            issued.token_cbor_b64.as_deref().unwrap(),
+            "synthetic metadata fixture",
+        )
+        .unwrap();
+        let mut policies = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = dispatcher_app_state(
+            d9us6_host_egress_registry_with_constraints("fcp.n8n", "n8n.credentials.list", managed),
+            lifecycle,
+            Some(signing.verifying_key()),
+            policies,
+        );
+        let profile = AuthProfile::new(
+            "synthetic-metadata",
+            "mcp-bridge",
+            AuthMethodKind::ApiKey(ApiKeyAuth::bearer("synthetic-mcp-token").unwrap()),
+            "synthetic metadata",
+            0,
+        )
+        .unwrap();
+        state
+            .credential_pools
+            .lock()
+            .await
+            .add_credential(
+                CredentialPoolKey::new(ProviderKey::new("mcp-bridge").unwrap(), ZoneId::work()),
+                CredentialPoolStrategy::Priority,
+                fcp_host::PooledCredential::new(
+                    credential,
+                    fcp_host::CredentialSource::Manual,
+                    0,
+                    "synthetic metadata",
+                    CredentialPayload::auth_profile_with_allowed_hosts(profile, ["127.0.0.1"]),
+                ),
+                CredentialUpsertMode::RejectExisting,
+            )
+            .unwrap();
+        let binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+        let session = binding.credentials_session.as_ref().unwrap();
+        {
+            let mut proof = session.lock().unwrap();
+            proof
+                .accept(Some(&instance), &fcp_core::SessionId::new())
+                .unwrap();
+            // Only this private test object uses the synthetic server and schema
+            // fixtures. No production configuration can override fixed pins/URL.
+            proof.endpoint = format!("http://{address}/mcp-server/http");
+            proof.protocol = Some(
+                fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                    serde_json::from_value(mapping_value).unwrap(),
+                    "eec",
+                    &request.id.to_string(),
+                    proof.arguments.clone(),
+                    &input_schema,
+                    &output_schema,
+                )
+                .unwrap(),
+            );
+        }
+        let context = HostEgressContext {
+            connector_id: "fcp.n8n".into(),
+            operation_id: "n8n.credentials.list".into(),
+            resource_uri: expected_n8n_read_only_resource_uri(
+                N8nReadOnlyServerId::Eec,
+                "n8n.credentials.list",
+                &request.input,
+            )
+            .unwrap(),
+            zone_id: request.zone_id.to_string(),
+            request_id: request.id.to_string(),
+            correlation_id: request.correlation_id.as_ref().map(ToString::to_string),
+            capability_token_cbor_b64: capability_token_b64(&request.capability_token).unwrap(),
+        };
+        let mut alternate_constraints = Vec::new();
+        ciborium::into_writer(&constraints, &mut alternate_constraints).unwrap();
+        let now = Utc::now();
+        let alternate = fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id("cap.test.egress")
+                .zone_id(request.zone_id.as_str())
+                .target_instance(instance.as_str())
+                .principal("principal:other")
+                .operations(&["n8n.credentials.list"])
+                .issuer("node:synthetic")
+                .validity(now, now + chrono::Duration::minutes(1))
+                .try_constraints_cbor(&alternate_constraints)
+                .unwrap()
+                .sign(&signing)
+                .unwrap(),
+        );
+        let verified = CapabilityVerifier::new(
+            signing.verifying_key().to_bytes(),
+            request.zone_id.clone(),
+            instance.clone(),
+        )
+        .verify_bound(
+            alternate.clone(),
+            &plan.manifest_operation.capability,
+            &plan.operation,
+            std::slice::from_ref(&context.resource_uri),
+        )
+        .unwrap();
+        assert_eq!(
+            verified.claims().get_principal_id(),
+            Some("principal:other")
+        );
+        let alternate_token = capability_token_b64(&alternate).unwrap();
+        for phase in 0..4 {
+            let (body, endpoint) = {
+                let proof = session.lock().unwrap();
+                (
+                    proof.protocol.as_ref().unwrap().request().unwrap(),
+                    proof.endpoint.clone(),
+                )
+            };
+            let native = HostEgressHttpRequest {
+                context: context.clone(),
+                url: endpoint,
+                method: "POST".into(),
+                headers: vec![
+                    HostEgressHttpHeader {
+                        name: "Content-Type".into(),
+                        value: "application/json".into(),
+                    },
+                    HostEgressHttpHeader {
+                        name: "Accept".into(),
+                        value: "application/json, text/event-stream".into(),
+                    },
+                    HostEgressHttpHeader {
+                        name: "MCP-Protocol-Version".into(),
+                        value: "2025-11-25".into(),
+                    },
+                ],
+                body: Some(fcp_manifest::Base64Bytes::from_vec(
+                    serde_json::to_vec(&body).unwrap(),
+                )),
+                credential_id: Some(credential.to_string()),
+            };
+            if phase == 0 {
+                let pending_http = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let pending_session = pending_http.credentials_session.as_ref().unwrap();
+                {
+                    let mut proof = pending_session.lock().unwrap();
+                    proof
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .unwrap();
+                    proof.endpoint = native.url.clone();
+                    proof.protocol = Some(fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                        serde_json::from_value(plan.configure_payload.as_ref().unwrap()["credential_metadata_read"].clone()).unwrap(),
+                        "eec", &request.id.to_string(), proof.arguments.clone(), &input_schema, &output_schema,
+                    ).unwrap());
+                }
+                let http_guard = OwnedCredentialsAdmissionGuard(Some(Arc::clone(pending_session)));
+                let pending_state = Arc::clone(&state);
+                let pending_binding = pending_http.clone();
+                let pending_request = native.clone();
+                let http_task = task::spawn(async move {
+                    owned_perform_egress(
+                        &pending_state,
+                        &pending_binding,
+                        HostEgressWireRequestPayload::Http(pending_request),
+                    )
+                    .await
+                });
+                fcp_async_core::time::timeout(
+                    Duration::from_secs(2),
+                    http_waiting_rx.take().unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                drop(http_guard);
+                let cancelled = fcp_async_core::time::timeout(Duration::from_secs(2), http_task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(cancelled.is_err());
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &pending_http,
+                        HostEgressWireRequestPayload::Http(native.clone())
+                    )
+                    .await
+                    .is_err()
+                );
+                release_waiting_tx.send(()).unwrap();
+                let saved_mapping = plan
+                    .configure_payload
+                    .as_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("credential_metadata_read")
+                    .unwrap();
+                let unmapped = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                plan.configure_payload.as_mut().unwrap()["credential_metadata_read"] =
+                    saved_mapping;
+                {
+                    let mut proof = unmapped
+                        .credentials_session
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap();
+                    proof
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .unwrap();
+                    proof.endpoint = native.url.clone();
+                    assert!(proof.protocol.is_none());
+                }
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &unmapped,
+                        HostEgressWireRequestPayload::Http(native.clone())
+                    )
+                    .await
+                    .is_err()
+                );
+                // Poll an invocation-owned future once, then cancel it. The
+                // independently retained egress binding must lose admission
+                // before it can reach the real loopback HTTP listener.
+                let cancelled = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let cancelled_session = cancelled.credentials_session.as_ref().unwrap();
+                {
+                    let mut proof = cancelled_session.lock().unwrap();
+                    proof
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .unwrap();
+                    proof.endpoint = native.url.clone();
+                }
+                let mut pending = Box::pin(async {
+                    let _guard =
+                        OwnedCredentialsAdmissionGuard(Some(Arc::clone(cancelled_session)));
+                    std::future::pending::<()>().await;
+                });
+                let mut task_context = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    std::future::Future::poll(pending.as_mut(), &mut task_context).is_pending()
+                );
+                drop(pending);
+                assert!(cancelled_session.lock().unwrap().accepted.is_none());
+                assert!(
+                    cancelled_session
+                        .lock()
+                        .unwrap()
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .is_err()
+                );
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &cancelled,
+                        HostEgressWireRequestPayload::Http(native.clone())
+                    )
+                    .await
+                    .is_err()
+                );
+                let mut changed = native.clone();
+                changed.context.request_id = "different-request".into();
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &binding,
+                        HostEgressWireRequestPayload::Http(changed)
+                    )
+                    .await
+                    .is_err()
+                );
+                for field in [
+                    "operation",
+                    "zone",
+                    "resource",
+                    "correlation",
+                    "token",
+                    "principal",
+                    "server",
+                    "credential",
+                    "header",
+                    "redirect",
+                ] {
+                    let mut changed = native.clone();
+                    match field {
+                        "operation" => {
+                            changed.context.operation_id = "n8n.workflows.execute".into()
+                        }
+                        "zone" => changed.context.zone_id = "z:owner".into(),
+                        "resource" => changed.context.resource_uri = "fwc-n8n://hetzner".into(),
+                        "correlation" => {
+                            changed.context.correlation_id = Some("different-correlation".into())
+                        }
+                        "token" => {
+                            changed.context.capability_token_cbor_b64 = "invalid-token".into()
+                        }
+                        "principal" => {
+                            changed.context.capability_token_cbor_b64 = alternate_token.clone()
+                        }
+                        "server" => {
+                            changed.url = "https://n8nhet.levilaser.com:8443/mcp-server/http".into()
+                        }
+                        "credential" => {
+                            changed.credential_id = Some(CredentialId::new().to_string())
+                        }
+                        "header" => changed.headers.push(HostEgressHttpHeader {
+                            name: "Authorization".into(),
+                            value: "Bearer CALLER_CANARY".into(),
+                        }),
+                        "redirect" => changed.url.push_str("?redirect=https://example.invalid"),
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        owned_perform_egress(
+                            &state,
+                            &binding,
+                            HostEgressWireRequestPayload::Http(changed)
+                        )
+                        .await
+                        .is_err()
+                    );
+                }
+                for body in [
+                    br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"execute_workflow"}}"#.as_slice(),
+                    br#"[{"jsonrpc":"2.0","method":"initialize","id":1}]"#.as_slice(),
+                    br#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"arbitrary_tool"}}"#.as_slice(),
+                ] {
+                    let mut changed = native.clone();
+                    changed.body = Some(fcp_manifest::Base64Bytes::from_vec(body.to_vec()));
+                    assert!(owned_perform_egress(&state, &binding,
+                        HostEgressWireRequestPayload::Http(changed)).await.is_err());
+                }
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &binding,
+                        HostEgressWireRequestPayload::Tcp(fcp_manifest::HostEgressTcpRequest {
+                            context: context.clone(),
+                            host: "127.0.0.1".into(),
+                            port: address.port(),
+                            tls: false,
+                            sni_override: None,
+                            write: None,
+                            read_limit_bytes: Some(1),
+                            credential_id: Some(credential.to_string()),
+                        })
+                    )
+                    .await
+                    .is_err()
+                );
+                {
+                    let mut proof = session.lock().unwrap();
+                    proof.timeout = Duration::ZERO;
+                }
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &binding,
+                        HostEgressWireRequestPayload::Http(native.clone())
+                    )
+                    .await
+                    .is_err()
+                );
+                session.lock().unwrap().timeout = Duration::from_secs(30);
+                let overlap = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                {
+                    let mut proof = overlap
+                        .credentials_session
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap();
+                    proof
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .unwrap();
+                    proof.endpoint = native.url.clone();
+                    proof.protocol = Some(fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                        serde_json::from_value(plan.configure_payload.as_ref().unwrap()["credential_metadata_read"].clone()).unwrap(),
+                        "eec", &request.id.to_string(), proof.arguments.clone(), &input_schema, &output_schema,
+                    ).unwrap());
+                    proof.admit_http(&native).unwrap();
+                }
+                assert!(
+                    owned_perform_egress(
+                        &state,
+                        &overlap,
+                        HostEgressWireRequestPayload::Http(native.clone())
+                    )
+                    .await
+                    .is_err()
+                );
+                let lease_cancelled =
+                    OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let lease_session = lease_cancelled.credentials_session.as_ref().unwrap();
+                {
+                    let mut proof = lease_session.lock().unwrap();
+                    proof
+                        .accept(Some(&instance), &fcp_core::SessionId::new())
+                        .unwrap();
+                    proof.endpoint = native.url.clone();
+                    proof.protocol = Some(fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                        serde_json::from_value(plan.configure_payload.as_ref().unwrap()["credential_metadata_read"].clone()).unwrap(),
+                        "eec", &request.id.to_string(), proof.arguments.clone(), &input_schema, &output_schema,
+                    ).unwrap());
+                }
+                let invocation_guard =
+                    OwnedCredentialsAdmissionGuard(Some(Arc::clone(lease_session)));
+                let pool_hold = state.credential_pools.lock().await;
+                let mut awaiting_lease = Box::pin(owned_perform_egress(
+                    &state,
+                    &lease_cancelled,
+                    HostEgressWireRequestPayload::Http(native.clone()),
+                ));
+                let mut task_context = std::task::Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    std::future::Future::poll(awaiting_lease.as_mut(), &mut task_context)
+                        .is_pending()
+                );
+                assert!(
+                    lease_session
+                        .lock()
+                        .unwrap()
+                        .protocol
+                        .as_ref()
+                        .unwrap()
+                        .request()
+                        .is_err()
+                );
+                drop(invocation_guard);
+                drop(pool_hold);
+                assert!(awaiting_lease.await.is_err());
+            }
+            assert!(matches!(
+                owned_perform_egress(&state, &binding, HostEgressWireRequestPayload::Http(native))
+                    .await
+                    .unwrap(),
+                HostEgressWireResponseBody::Http(_)
+            ));
+        }
+        server.join().unwrap();
+        let proof = session.lock().unwrap();
+        let projected = proof.protocol.as_ref().unwrap().projection().unwrap();
+        assert_eq!(projected["credentials"][0]["id"], "credential-one");
+        assert!(!projected.to_string().contains("PROVIDER_SECRET_CANARY"));
+        assert_eq!(
+            proof.original.claims().get_principal_id(),
+            Some("principal:original")
+        );
+        assert!(proof.protocol.as_ref().unwrap().request().is_err());
+        drop(proof);
+        // A fresh private test protocol makes revocation, rather than completed
+        // protocol state, the reason for denial before any further HTTP.
+        {
+            let mut proof = session.lock().unwrap();
+            proof.protocol = Some(
+                fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                    serde_json::from_value(
+                        plan.configure_payload.as_ref().unwrap()["credential_metadata_read"]
+                            .clone(),
+                    )
+                    .unwrap(),
+                    "eec",
+                    &request.id.to_string(),
+                    proof.arguments.clone(),
+                    &input_schema,
+                    &output_schema,
+                )
+                .unwrap(),
+            );
+        }
+        state
+            .lifecycle
+            .revoke_token(&fcp_host::TokenRevocationRequest {
+                token_id: issued.token_id,
+                reason: Some("synthetic metadata revocation".into()),
+            })
+            .await
+            .unwrap();
+        let body = session
+            .lock()
+            .unwrap()
+            .protocol
+            .as_ref()
+            .unwrap()
+            .request()
+            .unwrap();
+        let revoked = HostEgressHttpRequest {
+            context,
+            url: format!("http://{address}/mcp-server/http"),
+            method: "POST".into(),
+            headers: vec![
+                HostEgressHttpHeader {
+                    name: "Content-Type".into(),
+                    value: "application/json".into(),
+                },
+                HostEgressHttpHeader {
+                    name: "Accept".into(),
+                    value: "application/json, text/event-stream".into(),
+                },
+                HostEgressHttpHeader {
+                    name: "MCP-Protocol-Version".into(),
+                    value: "2025-11-25".into(),
+                },
+            ],
+            body: Some(fcp_manifest::Base64Bytes::from_vec(
+                serde_json::to_vec(&body).unwrap(),
+            )),
+            credential_id: Some(credential.to_string()),
+        };
+        let error = owned_perform_egress(
+            &state,
+            &binding,
+            HostEgressWireRequestPayload::Http(revoked),
+        )
+        .await
+        .err()
+        .expect("revoked original token denied");
+        assert!(
+            error.to_string().contains("revok"),
+            "expected native revocation refusal"
         );
     }
 
@@ -38705,6 +40199,7 @@ done"#;
             "n8n",
             ApiKeyAuth::new("rest-canary", "X-N8N-API-KEY", None::<String>).expect("REST profile"),
         );
+        assert!(validate_owned_metadata_credential_profile(&rest).is_err());
         assert!(
             validate_n8n_specific_host_egress_credential(
                 &ConnectorId::from_static("fcp.n8n"),
@@ -38727,6 +40222,19 @@ done"#;
             "mcp-bridge",
             ApiKeyAuth::bearer("mcp-canary").expect("official MCP profile"),
         );
+        assert!(validate_owned_metadata_credential_profile(&official).is_ok());
+        let wrong_pool = n8n_specific_test_lease(
+            "n8n",
+            "mcp-bridge",
+            ApiKeyAuth::bearer("synthetic-canary").unwrap(),
+        );
+        assert!(validate_owned_metadata_credential_profile(&wrong_pool).is_err());
+        let wrong_header = n8n_specific_test_lease(
+            "mcp-bridge",
+            "mcp-bridge",
+            ApiKeyAuth::new("synthetic-canary", "X-N8N-API-KEY", None::<String>).unwrap(),
+        );
+        assert!(validate_owned_metadata_credential_profile(&wrong_header).is_err());
         assert!(
             validate_n8n_specific_host_egress_credential(
                 &ConnectorId::from_static("fcp.mcp-bridge"),

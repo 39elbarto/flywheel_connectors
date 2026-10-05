@@ -21,6 +21,588 @@ const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_LIST_ITEMS: usize = 20;
 
+/// Data supplied only by managed configuration.
+///
+/// Deserialization is not an authority proof; the owned host must intersect the original bound token,
+/// accepted child session, network policy and leased credential purpose.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialMetadataReadMapping {
+    credential_id: String,
+    purpose: String,
+    tool: String,
+    class: String,
+    input_schema_digest: String,
+    output_schema_digest: String,
+}
+
+impl CredentialMetadataReadMapping {
+    /// # Errors
+    /// Refuses every mapping except the exact observed metadata read contract.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        fcp_core::CredentialId::parse(&self.credential_id)
+            .map_err(|_| "credential_metadata_mapping_denied")?;
+        if self.purpose != "n8n.credentials.metadata.read"
+            || self.tool != "list_credentials"
+            || self.class != "read"
+            || self.input_schema_digest
+                != "sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821"
+            || self.output_schema_digest
+                != "sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        {
+            return Err("credential_metadata_mapping_denied");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn credential_id(&self) -> &str {
+        &self.credential_id
+    }
+
+    /// Fixed server endpoints; neither caller input nor the mapping selects URL.
+    /// # Errors
+    /// Rejects local, legacy and unknown servers.
+    pub fn endpoint(server: &str) -> Result<&'static str, &'static str> {
+        match server {
+            "eec" => Ok("https://n8n.europeaneyecenter.com/mcp-server/http"),
+            "hetzner" => Ok("https://n8nhet.levilaser.com:8443/mcp-server/http"),
+            _ => Err("credential_metadata_mapping_denied"),
+        }
+    }
+
+    /// The admitted server's existing REST origin, used only for consistency.
+    /// Native MCP ports remain subject to the original egress constraints.
+    /// # Errors
+    /// Rejects unknown servers without selecting an alternate transport.
+    pub fn api_origin(server: &str) -> Result<&'static str, &'static str> {
+        match server {
+            "eec" => Ok("https://n8n.europeaneyecenter.com"),
+            "hetzner" => Ok("https://n8nhet.levilaser.com"),
+            _ => Err("credential_metadata_mapping_denied"),
+        }
+    }
+}
+
+/// Closed four-request native protocol, shared by connector construction and
+/// the invocation-private host gate.
+///
+/// It cannot select tools or arbitrary args.
+/// No raw provider body or schema is retained in the final public projection.
+pub struct CredentialMetadataReadProtocol {
+    mapping: CredentialMetadataReadMapping,
+    server: String,
+    request_id: String,
+    arguments: Value,
+    phase: u8,
+    in_flight: bool,
+    session: Option<String>,
+    protocol_version: &'static str,
+    projected: Option<Value>,
+}
+
+impl CredentialMetadataReadProtocol {
+    /// Synthetic schemas for owned transport tests only. This creates no
+    /// capability, session, credential lease or installed-provider proof.
+    /// Production builds do not include this fixture constructor.
+    /// # Errors
+    /// Retains all normal argument and mapping checks before fixture rebinding.
+    #[cfg(any(test, feature = "n8n-test-support"))]
+    pub fn synthetic_schema_fixture(
+        mapping: CredentialMetadataReadMapping,
+        server: &str,
+        request_id: &str,
+        arguments: Value,
+        input: &Value,
+        output: &Value,
+    ) -> Result<Self, &'static str> {
+        let mut protocol = Self::new(mapping, server, request_id, arguments)?;
+        protocol.mapping.input_schema_digest = credential_metadata_schema_digest(input)?;
+        protocol.mapping.output_schema_digest = credential_metadata_schema_digest(output)?;
+        Ok(protocol)
+    }
+
+    /// # Errors
+    /// Rejects unsupported server, mapping, request identity or native filters.
+    pub fn new(
+        mapping: CredentialMetadataReadMapping,
+        server: &str,
+        request_id: &str,
+        arguments: Value,
+    ) -> Result<Self, &'static str> {
+        mapping.validate()?;
+        CredentialMetadataReadMapping::endpoint(server)?;
+        if request_id.is_empty()
+            || request_id.len() > 128
+            || request_id.chars().any(char::is_control)
+        {
+            return Err("credential_metadata_request_denied");
+        }
+        let object = arguments
+            .as_object()
+            .ok_or("credential_metadata_request_denied")?;
+        if object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "query" | "type" | "projectId" | "onlySharedWithMe" | "limit"
+            )
+        }) || arguments["limit"]
+            .as_u64()
+            .is_none_or(|n| !(1..=200).contains(&n))
+        {
+            return Err("credential_metadata_request_denied");
+        }
+        for key in ["query", "type", "projectId"] {
+            if object.get(key).is_some_and(|v| {
+                v.as_str().is_none_or(|s| {
+                    s.is_empty() || s.len() > 256 || s.chars().any(char::is_control)
+                })
+            }) {
+                return Err("credential_metadata_request_denied");
+            }
+        }
+        if object
+            .get("onlySharedWithMe")
+            .is_some_and(|v| !v.is_boolean())
+        {
+            return Err("credential_metadata_request_denied");
+        }
+        Ok(Self {
+            mapping,
+            server: server.into(),
+            request_id: request_id.into(),
+            arguments,
+            phase: 0,
+            in_flight: false,
+            session: None,
+            protocol_version: "2025-11-25",
+            projected: None,
+        })
+    }
+
+    /// # Errors
+    /// A completed, failed or currently outstanding protocol cannot be replayed.
+    pub fn request(&self) -> Result<Value, &'static str> {
+        if self.phase > 3 || self.in_flight {
+            return Err("credential_metadata_replay_denied");
+        }
+        self.phase_request()
+    }
+
+    fn phase_request(&self) -> Result<Value, &'static str> {
+        let id = format!("{}:metadata:{}", self.request_id, self.phase);
+        Ok(match self.phase {
+            0 => {
+                json!({"jsonrpc":"2.0","id":id,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"fwc-n8n-credentials-read","version":"1"}}})
+            }
+            1 => json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            2 => json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":{}}),
+            3 => {
+                json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"list_credentials","arguments":self.arguments}})
+            }
+            _ => return Err("credential_metadata_replay_denied"),
+        })
+    }
+
+    /// # Errors
+    /// Refuses native body substitution, generic batches, duplicate attempts.
+    pub fn admit_request(&mut self, body: &Value) -> Result<(), &'static str> {
+        if *body != self.request()? {
+            return Err("credential_metadata_request_denied");
+        }
+        self.in_flight = true;
+        Ok(())
+    }
+
+    /// # Errors
+    /// Refuses a non-outstanding or substituted native attempt after an await.
+    pub fn verify_in_flight_bytes(&self, bytes: &[u8]) -> Result<(), &'static str> {
+        if !self.in_flight || self.phase > 3 {
+            return Err("credential_metadata_request_denied");
+        }
+        let expected = serde_json::to_vec(&self.phase_request()?)
+            .map_err(|_| "credential_metadata_request_denied")?;
+        if bytes != expected {
+            return Err("credential_metadata_request_denied");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
+    }
+
+    #[must_use]
+    pub const fn protocol_version(&self) -> &'static str {
+        self.protocol_version
+    }
+
+    #[must_use]
+    pub const fn completed(&self) -> bool {
+        self.phase == 4 && !self.in_flight
+    }
+
+    /// # Errors
+    /// Refuses malformed/error responses, changed native schemas and metadata.
+    /// A refusal leaves the attempted phase outstanding: no automatic retry.
+    pub fn accept_response(
+        &mut self,
+        status: u16,
+        session: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        let denied = || "credential_metadata_response_denied";
+        if !self.in_flight || bytes.len() > 2 * 1024 * 1024 {
+            return Err(denied());
+        }
+        if self.phase == 1 {
+            if !matches!(status, 200 | 202 | 204)
+                || !bytes.is_empty()
+                || session.is_some_and(|s| Some(s) != self.session())
+            {
+                return Err(denied());
+            }
+        } else {
+            if status != 200 {
+                return Err(denied());
+            }
+            let response = credential_metadata_rpc_json(bytes)?;
+            let object = response.as_object().ok_or_else(denied)?;
+            if object.len() != 3
+                || response["jsonrpc"] != "2.0"
+                || response["id"] != format!("{}:metadata:{}", self.request_id, self.phase)
+                || !object.contains_key("result")
+            {
+                return Err(denied());
+            }
+            let result = &response["result"];
+            match self.phase {
+                0 => {
+                    self.protocol_version = match result["protocolVersion"].as_str() {
+                        Some("2025-11-25") => "2025-11-25",
+                        Some("2025-06-18") => "2025-06-18",
+                        _ => return Err(denied()),
+                    };
+                    if !result["capabilities"]["tools"].is_object() {
+                        return Err(denied());
+                    }
+                    if let Some(s) = session {
+                        if s.is_empty() || s.len() > 256 || !s.bytes().all(|b| b.is_ascii_graphic())
+                        {
+                            return Err(denied());
+                        }
+                        self.session = Some(s.into());
+                    }
+                }
+                2 => {
+                    let tools = result["tools"]
+                        .as_array()
+                        .filter(|v| v.len() <= 200)
+                        .ok_or_else(denied)?;
+                    if result.get("nextCursor").is_some() {
+                        return Err(denied());
+                    }
+                    credential_metadata_catalog_structure(tools)?;
+                    let selected = tools
+                        .iter()
+                        .filter(|t| t["name"] == "list_credentials")
+                        .collect::<Vec<_>>();
+                    if selected.len() != 1 {
+                        return Err(denied());
+                    }
+                    let tool = selected[0];
+                    if tool["annotations"]["readOnlyHint"] != true
+                        || !tool["inputSchema"].is_object()
+                        || !tool["outputSchema"].is_object()
+                        || credential_metadata_schema_digest(&tool["inputSchema"])?
+                            != self.mapping.input_schema_digest
+                        || credential_metadata_schema_digest(&tool["outputSchema"])?
+                            != self.mapping.output_schema_digest
+                    {
+                        return Err(denied());
+                    }
+                }
+                3 => {
+                    let native = credential_metadata_call_value(result)?;
+                    let limit =
+                        usize::try_from(self.arguments["limit"].as_u64().ok_or_else(denied)?)
+                            .map_err(|_| denied())?;
+                    self.projected = Some(project_official_n8n_credentials(
+                        &native,
+                        &self.server,
+                        limit,
+                    )?);
+                }
+                _ => return Err(denied()),
+            }
+            if self.phase != 0 && session.is_some_and(|s| Some(s) != self.session()) {
+                return Err(denied());
+            }
+        }
+        self.in_flight = false;
+        self.phase += 1;
+        Ok(())
+    }
+
+    /// # Errors
+    /// No success projection exists until the one admitted native read completes.
+    pub fn projection(&self) -> Result<Value, &'static str> {
+        if !self.completed() {
+            return Err("credential_metadata_incomplete");
+        }
+        self.projected
+            .clone()
+            .ok_or("credential_metadata_incomplete")
+    }
+}
+
+fn credential_metadata_catalog_structure(tools: &[Value]) -> Result<(), &'static str> {
+    let denied = || "credential_metadata_response_denied";
+    let mut names = std::collections::BTreeSet::new();
+    for entry in tools {
+        let entry = entry.as_object().ok_or_else(denied)?;
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty() && name.len() <= 256)
+            .ok_or_else(denied)?;
+        if !names.insert(name)
+            || !entry
+                .get("inputSchema")
+                .is_some_and(|schema| schema.is_object() && schema["type"] == "object")
+            || entry
+                .get("outputSchema")
+                .is_some_and(|schema| !schema.is_object() || schema["type"] != "object")
+            || entry
+                .get("annotations")
+                .is_some_and(|value| !value.is_object())
+        {
+            return Err(denied());
+        }
+    }
+    Ok(())
+}
+
+fn credential_metadata_call_value(result: &Value) -> Result<Value, &'static str> {
+    let denied = || "credential_metadata_response_denied";
+    if result.get("isError").is_some_and(|value| value != false) {
+        return Err(denied());
+    }
+    let text = result
+        .get("content")
+        .map(|content| {
+            let content = content
+                .as_array()
+                .filter(|values| values.len() == 1)
+                .ok_or_else(denied)?;
+            if content[0]["type"] != "text" {
+                return Err(denied());
+            }
+            credential_metadata_unique_json(
+                content[0]["text"].as_str().ok_or_else(denied)?.as_bytes(),
+            )
+        })
+        .transpose()?;
+    if let Some(structured) = result.get("structuredContent") {
+        if text.as_ref().is_some_and(|text| text != structured) {
+            return Err(denied());
+        }
+        Ok(structured.clone())
+    } else {
+        text.ok_or_else(denied)
+    }
+}
+
+fn credential_metadata_rpc_json(bytes: &[u8]) -> Result<Value, &'static str> {
+    if let Ok(value) = credential_metadata_unique_json(bytes) {
+        return Ok(value);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| "credential_metadata_response_denied")?;
+    let mut data = None;
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("data:") {
+            if data.is_some() {
+                return Err("credential_metadata_response_denied");
+            }
+            data = Some(value.trim_start());
+        } else if !line.is_empty() && line != "event: message" {
+            return Err("credential_metadata_response_denied");
+        }
+    }
+    credential_metadata_unique_json(
+        data.ok_or("credential_metadata_response_denied")?
+            .as_bytes(),
+    )
+}
+
+// Duplicate keys must not acquire authority through serde_json's last-value
+// semantics. The parser's normal recursion limit remains enabled.
+fn credential_metadata_unique_json(bytes: &[u8]) -> Result<Value, &'static str> {
+    struct Unique(Value);
+    impl<'de> Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = Unique;
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("unique-key JSON")
+                }
+                fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique, E> {
+                    Ok(Unique(Value::Bool(v)))
+                }
+                fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique, E> {
+                    Ok(Unique(v.into()))
+                }
+                fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique, E> {
+                    Ok(Unique(v.into()))
+                }
+                fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Unique, E> {
+                    serde_json::Number::from_f64(v)
+                        .map(|v| Unique(Value::Number(v)))
+                        .ok_or_else(|| E::custom("invalid number"))
+                }
+                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique, E> {
+                    Ok(Unique(Value::String(v.into())))
+                }
+                fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
+                    Ok(Unique(Value::Null))
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Unique, A::Error> {
+                    let mut values = Vec::new();
+                    while let Some(Unique(value)) = seq.next_element()? {
+                        values.push(value);
+                    }
+                    Ok(Unique(Value::Array(values)))
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Unique, A::Error> {
+                    let mut values = serde_json::Map::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        if values.contains_key(&key) {
+                            return Err(serde::de::Error::custom("duplicate key"));
+                        }
+                        let Unique(value) = map.next_value()?;
+                        values.insert(key, value);
+                    }
+                    Ok(Unique(Value::Object(values)))
+                }
+            }
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+    serde_json::from_slice::<Unique>(bytes)
+        .map(|value| value.0)
+        .map_err(|_| "credential_metadata_response_denied")
+}
+
+fn credential_metadata_schema_digest(value: &Value) -> Result<String, &'static str> {
+    use sha2::{Digest, Sha256};
+    fn ordered(value: &Value) -> Value {
+        match value {
+            Value::Object(values) => Value::Object(
+                values
+                    .iter()
+                    .map(|(k, v)| (k.clone(), ordered(v)))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_iter()
+                    .collect(),
+            ),
+            Value::Array(values) => Value::Array(values.iter().map(ordered).collect()),
+            other => other.clone(),
+        }
+    }
+    Ok(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&ordered(value))
+                .map_err(|_| "credential_metadata_response_denied")?
+        ))
+    ))
+}
+
+/// Shared public credential-metadata projection for the wrapper and original
+/// host-owned invocation. Credential bodies and undeclared fields are discarded.
+///
+/// # Errors
+/// Rejects malformed metadata, duplicate identities and exceeded bounds.
+pub fn project_official_n8n_credentials(
+    input: &Value,
+    server: &str,
+    limit: usize,
+) -> Result<Value, &'static str> {
+    if !matches!(server, "eec" | "hetzner") || !(1..=200).contains(&limit) {
+        return Err("official_credential_response_invalid");
+    }
+    let object = input
+        .as_object()
+        .ok_or("official_credential_response_invalid")?;
+    if object.contains_key("error") {
+        return Err("official_credential_provider_failed");
+    }
+    let rows = object
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("official_credential_response_invalid")?;
+    if rows.len() > limit || object.get("count").and_then(Value::as_u64) != Some(rows.len() as u64)
+    {
+        return Err("official_credential_response_invalid");
+    }
+    let text = |value: &Value| -> Result<String, &'static str> {
+        value
+            .as_str()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+            })
+            .map(str::to_owned)
+            .ok_or("official_credential_response_invalid")
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    let mut projected = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = text(&row["id"])?;
+        if !ids.insert(id.clone()) {
+            return Err("official_credential_response_invalid");
+        }
+        let scopes = row["scopes"]
+            .as_array()
+            .filter(|items| items.len() <= 64)
+            .ok_or("official_credential_response_invalid")?
+            .iter()
+            .map(&text)
+            .collect::<Result<Vec<_>, _>>()?;
+        let home = match row.get("homeProject") {
+            Some(Value::Null) => Value::Null,
+            Some(home) if home.is_object() => {
+                json!({"id":text(&home["id"])? ,"name":text(&home["name"])? ,"type":text(&home["type"])?})
+            }
+            _ => return Err("official_credential_response_invalid"),
+        };
+        let mut encoded_id = String::new();
+        for byte in id.bytes() {
+            if byte.is_ascii_alphanumeric() {
+                encoded_id.push(char::from(byte));
+            } else {
+                use std::fmt::Write as _;
+                write!(encoded_id, "%{byte:02X}")
+                    .map_err(|_| "official_credential_response_invalid")?;
+            }
+        }
+        projected.push(json!({"resourceUri":format!("fwc-n8n://{server}/credentials/{encoded_id}"),
+            "id":id,"name":text(&row["name"])? ,"type":text(&row["type"])? ,"scopes":scopes,
+            "isManaged":row["isManaged"].as_bool().ok_or("official_credential_response_invalid")?,
+            "isGlobal":row["isGlobal"].as_bool().ok_or("official_credential_response_invalid")?,"homeProject":home}));
+    }
+    Ok(
+        json!({"credentials":projected,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}}),
+    )
+}
+
 /// Closed official SDK reads. These arguments never select authoring tools.
 ///
 /// # Errors
@@ -1584,6 +2166,340 @@ const fn map_provider_error(error: &LocalMcpError) -> LocalN8nDispatchError {
 #[cfg(test)]
 mod typed_batch_tests {
     use super::*;
+
+    #[test]
+    fn credential_metadata_protocol_native_shapes_and_redaction() {
+        let mapping: CredentialMetadataReadMapping = serde_json::from_value(json!({
+            "credential_id":fcp_core::CredentialId::new().to_string(),
+            "purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        })).unwrap();
+        let mut protocol = CredentialMetadataReadProtocol::new(
+            mapping,
+            "eec",
+            "original-request",
+            json!({"limit":10,"projectId":"p"}),
+        )
+        .unwrap();
+        // Synthetic schema admission belongs only to this in-module fixture;
+        // production construction retains the two fixed installed raw pins.
+        let input = json!({"type":"object","properties":{"limit":{"type":"integer"}}});
+        let output = json!({"type":"object","properties":{"data":{"type":"array"}}});
+        protocol.mapping.input_schema_digest = credential_metadata_schema_digest(&input).unwrap();
+        protocol.mapping.output_schema_digest = credential_metadata_schema_digest(&output).unwrap();
+        let native = json!({"data":[{"id":"c/1","name":"synthetic","type":"test","scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,"data":{"secret":"SECRET_CANARY"}}],"count":1});
+        let results = [
+            json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}),
+            Value::Null,
+            json!({"tools":[{"name":"list_credentials","annotations":{"readOnlyHint":true},"inputSchema":input,"outputSchema":output}]}),
+            json!({"structuredContent":native,"isError":false}),
+        ];
+        for (phase, result) in results.into_iter().enumerate() {
+            let request = protocol.request().unwrap();
+            if phase == 3 {
+                assert_eq!(
+                    request["params"]["arguments"],
+                    json!({"limit":10,"projectId":"p"})
+                );
+            }
+            assert!(
+                protocol
+                    .verify_in_flight_bytes(&serde_json::to_vec(&request).unwrap())
+                    .is_err()
+            );
+            protocol.admit_request(&request).unwrap();
+            assert!(protocol.request().is_err());
+            assert!(
+                protocol
+                    .verify_in_flight_bytes(&serde_json::to_vec(&request).unwrap())
+                    .is_ok()
+            );
+            assert!(protocol.verify_in_flight_bytes(b"[]").is_err());
+            let bytes = if phase == 1 {
+                Vec::new()
+            } else {
+                serde_json::to_vec(&json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+                    .unwrap()
+            };
+            protocol
+                .accept_response(
+                    if phase == 1 { 202 } else { 200 },
+                    Some("native-session"),
+                    &bytes,
+                )
+                .unwrap();
+        }
+        let projected = protocol.projection().unwrap();
+        assert_eq!(
+            projected["credentials"][0]["resourceUri"],
+            "fwc-n8n://eec/credentials/c%2F1"
+        );
+        assert!(!projected.to_string().contains("SECRET_CANARY"));
+        assert!(protocol.request().is_err());
+        assert!(
+            protocol
+                .admit_request(&json!({"method":"tools/call"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_metadata_duplicate_keys_and_batches_denied() {
+        for bytes in [
+            br#"{"result":{},"result":{"secret":"SECRET_CANARY"}}"#.as_slice(),
+            br#"{"result":{"data":[],"data":["SECRET_CANARY"]}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                credential_metadata_unique_json(bytes).unwrap_err(),
+                "credential_metadata_response_denied"
+            );
+            assert!(credential_metadata_rpc_json(bytes).is_err());
+        }
+        assert!(credential_metadata_unique_json(br#"{"ok":[true,null,1,"x"]}"#).is_ok());
+        assert!(credential_metadata_rpc_json(b"data: {}\ndata: {}\n").is_err());
+    }
+
+    #[test]
+    fn credential_metadata_schema_presence_drift_and_partial_response_denied() {
+        let mapping: CredentialMetadataReadMapping=serde_json::from_value(json!({
+            "credential_id":fcp_core::CredentialId::new().to_string(),"purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"})).unwrap();
+        let schema = json!({"type":"object"});
+        for defect in [
+            "input_drift",
+            "missing_output",
+            "write_annotation",
+            "duplicate",
+            "wrong_id",
+            "partial_eof",
+            "oversize",
+            "session",
+            "unrelated_null",
+            "unrelated_missing_input",
+            "unrelated_null_output",
+            "unrelated_array_schema",
+            "unrelated_duplicate",
+            "unrelated_valid_addition",
+            "unrelated_valid_drift",
+        ] {
+            let mut protocol = CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                mapping.clone(),
+                "hetzner",
+                "negative",
+                json!({"limit":3}),
+                &schema,
+                &schema,
+            )
+            .unwrap();
+            let initialize = protocol.request().unwrap();
+            protocol.admit_request(&initialize).unwrap();
+            protocol.accept_response(200,None,&serde_json::to_vec(&json!({"jsonrpc":"2.0","id":initialize["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{}}}})).unwrap()).unwrap();
+            assert_eq!(protocol.protocol_version(), "2025-06-18");
+            let initialized = protocol.request().unwrap();
+            protocol.admit_request(&initialized).unwrap();
+            protocol.accept_response(202, None, &[]).unwrap();
+            let list = protocol.request().unwrap();
+            protocol.admit_request(&list).unwrap();
+            let mut tool = json!({"name":"list_credentials","annotations":{"readOnlyHint":true},"inputSchema":schema,"outputSchema":schema});
+            match defect {
+                "input_drift" => tool["inputSchema"] = json!({"type":"array"}),
+                "missing_output" => {
+                    tool.as_object_mut().unwrap().remove("outputSchema");
+                }
+                "write_annotation" => tool["annotations"]["readOnlyHint"] = json!(false),
+                _ => {}
+            }
+            let mut tools = if defect == "duplicate" {
+                json!([tool.clone(), tool])
+            } else {
+                json!([tool])
+            };
+            let unrelated = json!({"name":"unrelated_write","inputSchema":{"type":"object"},"annotations":{"readOnlyHint":false}});
+            match defect {
+                "unrelated_null" => tools.as_array_mut().unwrap().push(Value::Null),
+                "unrelated_missing_input" => tools.as_array_mut().unwrap().push(json!({"name":"other"})),
+                "unrelated_null_output" => tools.as_array_mut().unwrap().push(json!({"name":"other","inputSchema":{"type":"object"},"outputSchema":null})),
+                "unrelated_array_schema" => tools.as_array_mut().unwrap().push(json!({"name":"other","inputSchema":{"type":"array"}})),
+                "unrelated_duplicate" => tools.as_array_mut().unwrap().extend([unrelated.clone(), unrelated]),
+                "unrelated_valid_addition" => tools.as_array_mut().unwrap().push(unrelated),
+                "unrelated_valid_drift" => tools.as_array_mut().unwrap().push(json!({"name":"unrelated_write","inputSchema":{"type":"object","properties":{"changed":{"type":"string"}}},"outputSchema":{"type":"object","additionalProperties":true}})),
+                _ => {}
+            }
+            let mut response = json!({"jsonrpc":"2.0","id":list["id"],"result":{"tools":tools}});
+            if defect == "wrong_id" {
+                response["id"] = json!("different");
+            }
+            let bytes = match defect {
+                "partial_eof" => br#"{"jsonrpc":"2.0","result":"#.to_vec(),
+                "oversize" => vec![b' '; 2 * 1024 * 1024 + 1],
+                _ => serde_json::to_vec(&response).unwrap(),
+            };
+            if matches!(defect, "unrelated_valid_addition" | "unrelated_valid_drift") {
+                protocol.accept_response(200, None, &bytes).unwrap();
+                let application = protocol.request().unwrap();
+                assert_eq!(application["params"]["name"], "list_credentials");
+                continue;
+            }
+            assert!(
+                protocol
+                    .accept_response(
+                        200,
+                        if defect == "session" {
+                            Some("unexpected")
+                        } else {
+                            None
+                        },
+                        &bytes
+                    )
+                    .is_err()
+            );
+            assert!(protocol.request().is_err());
+            assert!(protocol.projection().is_err());
+        }
+        assert!(
+            credential_metadata_call_value(
+                &json!({"isError":true,"content":[{"type":"text","text":"SECRET_CANARY"}]})
+            )
+            .is_err()
+        );
+        assert!(credential_metadata_call_value(&json!({"structuredContent":{"data":[],"count":0},"content":[{"type":"text","text":"{}"}]})).is_err());
+        assert!(CredentialMetadataReadMapping::endpoint("legacy").is_err());
+        assert_eq!(
+            CredentialMetadataReadMapping::api_origin("hetzner").unwrap(),
+            "https://n8nhet.levilaser.com"
+        );
+        assert_eq!(
+            CredentialMetadataReadMapping::endpoint("hetzner").unwrap(),
+            "https://n8nhet.levilaser.com:8443/mcp-server/http"
+        );
+    }
+
+    #[test]
+    fn credential_metadata_protocol_real_loopback_transport() {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::time::Duration;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mapping: CredentialMetadataReadMapping=serde_json::from_value(json!({
+            "credential_id":fcp_core::CredentialId::new().to_string(),"purpose":"n8n.credentials.metadata.read",
+            "tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        })).unwrap();
+        let mut protocol = CredentialMetadataReadProtocol::new(
+            mapping,
+            "hetzner",
+            "transport-test",
+            json!({"limit":2,"type":"test"}),
+        )
+        .unwrap();
+        let input = json!({"type":"object"});
+        let output = json!({"type":"object","required":["data","count"]});
+        protocol.mapping.input_schema_digest = credential_metadata_schema_digest(&input).unwrap();
+        protocol.mapping.output_schema_digest = credential_metadata_schema_digest(&output).unwrap();
+        let server = std::thread::spawn(move || {
+            let methods = [
+                "initialize",
+                "notifications/initialized",
+                "tools/list",
+                "tools/call",
+            ];
+            for (phase, method) in methods.into_iter().enumerate() {
+                let deadline = std::time::Instant::now() + Duration::from_secs(3);
+                let (mut stream, _) = loop {
+                    match listener.accept() {
+                        Ok(stream) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(5))
+                        }
+                        Err(_) => panic!("bounded synthetic transport accept failed"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut received = Vec::new();
+                let mut byte = [0u8; 1];
+                while !received.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    received.push(byte[0]);
+                    assert!(received.len() < 4096);
+                }
+                let header = std::str::from_utf8(&received).unwrap();
+                assert!(header.starts_with("POST /mcp-server/http HTTP/1.1\r\n"));
+                let length: usize = header
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(length < 4096);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let request = credential_metadata_unique_json(&body).unwrap();
+                assert_eq!(request["method"], method);
+                if phase == 3 {
+                    assert_eq!(
+                        request["params"],
+                        json!({"name":"list_credentials","arguments":{"limit":2,"type":"test"}})
+                    );
+                }
+                let result = match phase {
+                    0 => json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}),
+                    2 => {
+                        json!({"tools":[{"name":"list_credentials","annotations":{"readOnlyHint":true},"inputSchema":input,"outputSchema":output}]})
+                    }
+                    _ => json!({"structuredContent":{"data":[],"count":0},"isError":false}),
+                };
+                let response = if phase == 1 {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+                        .unwrap()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.len()
+                )
+                .unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        // This is a native HTTP/protocol fixture, not the production TLS,
+        // credential injection, capability or installed-admission proof.
+        for _ in 0..4 {
+            let request = protocol.request().unwrap();
+            let body = serde_json::to_vec(&request).unwrap();
+            protocol.admit_request(&request).unwrap();
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(stream,"POST /mcp-server/http HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+            stream.write_all(&body).unwrap();
+            let mut response = Vec::new();
+            stream.take(8192).read_to_end(&mut response).unwrap();
+            let start = response
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            protocol
+                .accept_response(200, None, &response[start..])
+                .unwrap();
+        }
+        server.join().unwrap();
+        assert!(protocol.completed());
+        assert_eq!(protocol.projection().unwrap()["credentials"], json!([]));
+    }
 
     #[test]
     #[ignore = "requires the existing fixed network-disabled local catalog; explicit synthetic current-graph process check"]

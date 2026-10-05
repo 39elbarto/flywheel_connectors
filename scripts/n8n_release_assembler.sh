@@ -839,6 +839,121 @@ if __name__ == "__main__":
 PY
 }
 
+credential_metadata_mapping() {
+  # Separate owner-admitted input; search-read opt-in never enables this lane.
+  local admission="${FWC_N8N_CREDENTIAL_METADATA_MAPPING_SHA256:-}"
+  [[ -n "$admission" ]] || return 0
+  [[ "$admission" =~ ^[0-9a-f]{64}$ ]] || die "credential metadata mapping digest is invalid"
+  python3 - "$1" "$admission" "${2:-}" <<'PY'
+import copy
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+INPUT = "/srv/dev-ssd/rc41-inputs/credential-metadata-mapping.json"
+INPUT_PIN = "sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821"
+OUTPUT_PIN = "sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("credential metadata mapping denied")
+        result[key] = value
+    return result
+
+def validate_mapping(raw):
+    if len(raw) > 8192:
+        raise ValueError("credential metadata mapping denied")
+    value = json.loads(raw, object_pairs_hook=closed_object)
+    if (not isinstance(value, dict) or set(value) != {"schema", "servers"}
+        or value["schema"] != "fwc.n8n.credential-metadata-mapping.v1"
+        or not isinstance(value["servers"], dict)
+        or set(value["servers"]) != {"eec", "hetzner"}):
+        raise ValueError("credential metadata mapping denied")
+    for mapping in value["servers"].values():
+        if (not isinstance(mapping, dict)
+            or set(mapping) != {"credential_id", "purpose", "tool", "class", "input_schema_digest", "output_schema_digest"}
+            or not isinstance(mapping["credential_id"], str)
+            or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", mapping["credential_id"])
+            or mapping["purpose"] != "n8n.credentials.metadata.read"
+            or mapping["tool"] != "list_credentials" or mapping["class"] != "read"
+            or mapping["input_schema_digest"] != INPUT_PIN
+            or mapping["output_schema_digest"] != OUTPUT_PIN):
+            raise ValueError("credential metadata mapping denied")
+    return value
+
+def add_metadata_inventory(common, server, mapping):
+    result = copy.deepcopy(common)
+    config = result["config"]
+    operation = "n8n.credentials.list"
+    expected_api = "https://n8n.europeaneyecenter.com/api/v1" if server == "eec" else "https://n8nhet.levilaser.com/api/v1"
+    if (server not in ("eec", "hetzner") or config.get("server_id") != server
+        or config.get("base_url") != expected_api
+        or set(config) != {"base_url", "credential_id", "server_id"}
+        or operation not in result["allowed_operations"]):
+        raise ValueError("credential metadata mapping denied")
+    network = result["operation_network_constraints"][operation]
+    expected_host = "n8n.europeaneyecenter.com" if server == "eec" else "n8nhet.levilaser.com"
+    if network.get("host_allow") != [expected_host] or network.get("port_allow") != [443]:
+        raise ValueError("credential metadata mapping denied")
+    config["credential_metadata_read"] = copy.deepcopy(mapping["servers"][server])
+    network["port_allow"] = [443 if server == "eec" else 8443]
+    return result
+
+def identity(meta):
+    return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+        meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+
+def main():
+    mode, digest, stage = sys.argv[1:]
+    for name in ("/srv", "/srv/dev-ssd", "/srv/dev-ssd/rc41-inputs"):
+        meta = os.lstat(name)
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError("credential metadata mapping denied")
+    with os.fdopen(os.open(INPUT, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or stat.S_IMODE(before.st_mode) != 0o600:
+            raise ValueError("credential metadata mapping denied")
+        raw = stream.read(8193)
+        after = os.fstat(stream.fileno())
+    if identity(before) != identity(after) or identity(os.lstat(INPUT)) != identity(after) or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("credential metadata mapping denied")
+    mapping = validate_mapping(raw)
+    prefix = {"check": "/usr/local/lib/fwc-n8n/releases/", "apply": "/var/lib/fwc-n8n/staging/"}.get(mode)
+    if prefix is None or not stage.startswith(prefix) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", stage[len(prefix):]):
+        raise ValueError("credential metadata mapping denied")
+    root = pathlib.Path(stage)
+    for directory in (root, root / "inventory"):
+        meta = directory.lstat()
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError("credential metadata mapping denied")
+    updates = []
+    for server in ("eec", "hetzner"):
+        path = root / "inventory" / f"{server}.json"
+        meta = path.lstat()
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError("credential metadata mapping denied")
+        entries = json.loads(path.read_bytes(), object_pairs_hook=closed_object)
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise ValueError("credential metadata mapping denied")
+        updates.append((path, add_metadata_inventory(entries[0], server, mapping)))
+    if mode == "apply":
+        for path, output in updates:
+            path.write_text(json.dumps([output], indent=2) + "\n")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        raise SystemExit("credential metadata mapping denied") from None
+PY
+}
+
 write_inventory_and_request() {
   local stage_root="$1"
   local source_release="$2"
@@ -1195,6 +1310,7 @@ main() {
   # Refuse inconsistent admitted inputs before any Cargo/build or stage writes.
   validate_official_schema_baselines "$source_release/bin/fwc-n8n"
   search_read_policy check "$source_release"
+  credential_metadata_mapping check "$source_release"
   RELEASE_ID="$release_id"
   stage_root="${STAGING_ROOT}/${release_id}"
   [[ ! -e "$stage_root" ]] || die "staging target already exists; refusing to overwrite"
@@ -1225,6 +1341,7 @@ main() {
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"
   search_read_policy apply "$stage_root"
+  credential_metadata_mapping apply "$stage_root"
   write_metadata "$stage_root" "$git_revision" "$hash_helper"
   echo "assembled_release=${release_id}"
   echo "git_revision=${git_revision}"

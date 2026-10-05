@@ -1786,6 +1786,32 @@ requires the supervisor gate, appropriate Landlock exclusions and closing cgroup
 FDs before target exec; those integrations remain deferred. A process group or
 shared provider UID972 alone does not establish containment.
 
+The selected physical A1 SPEC (2026-10-05, AM11476) requires a separate user,
+PID and mount namespace per invocation; the user namespace must own the PID/mount
+namespaces and its creator must not be caller UID1000. Proposed mappings are
+inner UID0 to outer971 for the monitor and inner UID1 to outer972 for the provider,
+with narrowly specified GIDs, no outer0/1000, extra ranges or supplementary groups.
+Monitor lifecycle capabilities must be confined to that child user namespace;
+setup SYS_ADMIN/SETUID/SETGID must be dropped before provider exec. Provider
+capabilities must be empty with no_new_privs and no exec privilege regain; exact
+securebits/bounding-set controls remain unresolved. Mounts must be private,
+with namespace-local proc, fixed read-only runtime and private temporary storage,
+and no host root/proc/sys/cgroup/state/broker/shared-writable paths or inherited
+FDs. This applies to REST, MCP and local launches independently of network_disabled.
+
+The bootstrap/guardian/monitor parent-and-wait topology remains unresolved:
+entering a new PID namespace affects future children, so merely execing the
+launcher cannot place the existing host Child/monitor in it. PID1 monitor death
+and kernel descendant termination are not a completed/reaped/IO-joined proof;
+init reaping, signal and session handling need separate qualification. Actual
+cross-UID inspection/signals, escapes, crashes and namespace availability remain
+pending. No privileged API, OS namespace activation, service or broker change is
+implemented by this SPEC or the fixture protocol. The relevant kernel contracts
+are [user namespaces](https://man7.org/linux/man-pages/man7/user_namespaces.7.html),
+[PID namespaces](https://man7.org/linux/man-pages/man7/pid_namespaces.7.html) and
+[capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html); this
+selection does not establish production authority or containment.
+
 Current local package identity is a separate observed boundary: the signed
 RC43c policy admits `n8n-mcp@2.90.0`, while the public installed package metadata
 now reports `2.91.0` (SHA-256

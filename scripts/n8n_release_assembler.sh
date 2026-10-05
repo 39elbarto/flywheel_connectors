@@ -92,6 +92,7 @@ usage: sudo FWC_N8N_OWNER_PUBLIC_KEY_HEX=<64 lowercase hex chars> \
   FWC_N8N_HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
+  [FWC_N8N_LOCAL_CALL_BUDGET_SHA256=<64 lowercase hex chars>] \
   scripts/n8n_release_assembler.sh \
   --release-id <safe-release-id> \
   [--target-dir /srv/dev-ssd/fcp/targets/<name>]
@@ -100,6 +101,10 @@ Builds and stages a release only. It does not sign, install, switch current,
 invoke n8n, read API keys, or run a provider operation.
 The script adds /home/ubuntu/.cargo/bin to PATH for the host Rust toolchain.
 Cargo output and temporary files are guarded below /srv/dev-ssd/fcp.
+The optional local-call-budget digest binds separately admitted root:root 0600
+/srv/dev-ssd/rc41-inputs/local-call-budget.json with exactly
+{"schema":"fwc.n8n.local-call-budget.v1","max_sequential_calls":20}.
+Without this opt-in, the generated signed policy retains 7 calls.
 EOF
 }
 
@@ -352,12 +357,14 @@ write_local_mcp_policy() {
   local stage_root="$1"
   local hash_helper="$2"
   local export_binary="${3:-}"
+  local sequential_calls
+  sequential_calls="$(local_call_budget)"
   require_fixed_local_mcp_file "$LOCAL_MCP_NODE_PATH" 1
   require_fixed_local_mcp_file "$LOCAL_MCP_PACKAGE_METADATA_PATH"
   require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
   python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
     "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
-    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" "$export_binary" \
+    "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" "$export_binary" "$sequential_calls" \
     -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
 import json
 import pathlib
@@ -382,6 +389,7 @@ second_separator = args.index("--", first_separator + 1)
     protocol_version,
     assembler_path,
     export_binary,
+    sequential_calls,
 ) = args[:first_separator]
 catalog_tools = args[first_separator + 1 : second_separator]
 catalog_digests = args[second_separator + 1 :]
@@ -597,7 +605,7 @@ policy = {
     "max_frame_bytes": 262144,
     "max_request_bytes": 65536,
     "max_result_bytes": 262144,
-    "max_sequential_calls": 7,
+    "max_sequential_calls": int(sequential_calls),
     "startup_timeout_ms": 30000,
     "request_timeout_ms": 30000,
     "shutdown_timeout_ms": 2000,
@@ -699,6 +707,79 @@ copy_templates() {
   done
   install -o root -g root -m 0644 "$source_release/policy/zone-policies.json" "$stage_root/policy/zone-policies.json"
   install -o root -g root -m 0644 "$source_release/policy/local-mcp.json" "$stage_root/policy/local-mcp.json"
+}
+
+local_call_budget() {
+  # A digest selects separately admitted protected DATA, never an ambient count.
+  # This validator is not owner approval; absent opt-in retains the default 7.
+  python3 - "${FWC_N8N_LOCAL_CALL_BUDGET_SHA256:-}" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+INPUT = '/srv/dev-ssd/rc41-inputs/local-call-budget.json'
+
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate field')
+        result[key] = value
+    return result
+
+def policy_call_budget(raw, digest):
+    if raw is None and digest == '':
+        return 7
+    if not re.fullmatch(r'[0-9a-f]{64}', digest) or raw is None or len(raw) > 1024:
+        raise ValueError('invalid admission binding')
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError('admission digest mismatch')
+    value = json.loads(raw, object_pairs_hook=closed_object)
+    if (not isinstance(value, dict) or set(value) != {'schema', 'max_sequential_calls'}
+            or value['schema'] != 'fwc.n8n.local-call-budget.v1'
+            or type(value['max_sequential_calls']) is not int
+            or value['max_sequential_calls'] != 20):
+        raise ValueError('unsupported call budget')
+    return 20
+
+def input_identity(meta):
+    return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+            meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+
+def admitted_call_budget(digest):
+    if digest == '':
+        return policy_call_budget(None, digest)
+    if not re.fullmatch(r'[0-9a-f]{64}', digest):
+        raise ValueError('invalid digest')
+    for parent in ('/srv', '/srv/dev-ssd', '/srv/dev-ssd/rc41-inputs'):
+        meta = os.lstat(parent)
+        if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0
+                or stat.S_IMODE(meta.st_mode) & 0o022):
+            raise ValueError('unsafe parent')
+    fd = os.open(INPUT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
+                or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1):
+            raise ValueError('unsafe admitted input')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            raw = stream.read(1025)
+        after = os.fstat(fd)
+        if input_identity(before) != input_identity(after) or input_identity(os.lstat(INPUT)) != input_identity(after):
+            raise ValueError('admitted input changed')
+        return policy_call_budget(raw, digest)
+    finally:
+        os.close(fd)
+
+if __name__ == '__main__':
+    try:
+        print(admitted_call_budget(sys.argv[1]))
+    except (OSError, ValueError, TypeError, UnicodeError):
+        raise SystemExit('protected local call budget validation denied') from None
+PY
 }
 
 search_read_policy() {
@@ -1354,6 +1435,7 @@ main() {
   validate_official_schema_baselines "$source_release/bin/fwc-n8n"
   search_read_policy check "$source_release"
   credential_metadata_mapping check "$source_release"
+  local_call_budget >/dev/null
   RELEASE_ID="$release_id"
   stage_root="${STAGING_ROOT}/${release_id}"
   [[ ! -e "$stage_root" ]] || die "staging target already exists; refusing to overwrite"

@@ -4804,6 +4804,76 @@ for server in ('eec','hetzner'):
             .expect("synthetic signed receipt");
         }
 
+        fn local_call_budget_from_pure_producer(&self, enabled: bool) {
+            let script = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/n8n_release_assembler.sh"
+            );
+            let code = r#"
+import hashlib, json, pathlib, sys, types
+source = pathlib.Path(sys.argv[1]).read_text()
+body = source.split('local_call_budget() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+ns = {'__name__': 'retained_budget_fixture'}
+exec(compile(body, sys.argv[1], 'exec'), ns)
+data = {'schema':'fwc.n8n.local-call-budget.v1','max_sequential_calls':20}
+raw = json.dumps(data).encode()
+digest = hashlib.sha256(raw).hexdigest()
+assert ns['policy_call_budget'](None, '') == 7
+assert ns['policy_call_budget'](raw, digest) == 20
+for altered in (None, [], dict(data, extra=True), dict(data, schema='unknown'),
+                dict(data, max_sequential_calls=True), dict(data, max_sequential_calls=7),
+                dict(data, max_sequential_calls=21), dict(data, max_sequential_calls='20')):
+    value = json.dumps(altered).encode()
+    try: ns['policy_call_budget'](value, hashlib.sha256(value).hexdigest())
+    except ValueError: pass
+    else: raise AssertionError('producer accepted unsupported budget')
+for value, pin in ((raw, ''), (None, digest), (raw, '0'*64), (raw, digest.upper()),
+                   (b'x'*1025, hashlib.sha256(b'x'*1025).hexdigest()),
+                   (b'{"schema":"x","schema":"y","max_sequential_calls":20}', 'same')):
+    if pin == 'same': pin = hashlib.sha256(value).hexdigest()
+    try: ns['policy_call_budget'](value, pin)
+    except ValueError: pass
+    else: raise AssertionError('producer accepted malformed binding')
+# Execute the actual policy dict producer with synthetic fixed metadata/catalog,
+# not the root reader, provider launcher, or a copied policy field expression.
+metadata = dict(st_dev=1, st_ino=2, st_uid=0, st_gid=0, st_mode=0o100600,
+    st_nlink=1, st_size=len(raw), st_mtime_ns=3, st_ctime_ns=4, st_atime_ns=5)
+identity = ns['input_identity'](types.SimpleNamespace(**metadata))
+assert ns['input_identity'](types.SimpleNamespace(**dict(metadata, st_atime_ns=6))) == identity
+for field in metadata:
+    if field == 'st_atime_ns': continue
+    changed = dict(metadata)
+    changed[field] += 1
+    assert ns['input_identity'](types.SimpleNamespace(**changed)) != identity
+root = pathlib.Path(sys.argv[2])
+path = root/'policy/local-mcp.json'
+original = json.loads(path.read_bytes())
+bindings = {key:original[key] for key in ('expected_catalog','callable_tools')}
+for key in ('expected_output_catalog','reviewed_schemas'):
+    if key in original: bindings[key] = original[key]
+context = dict(package_id=original['package_id'], observed_version=original['package_version'],
+    node_path=original['launcher_path'], package_metadata_path=original['package_metadata_path'],
+    package_metadata=b'FIXTURE_ONLY', wrapper_path=original['fixed_args'][0],
+    protocol_version=original['protocol_version'], bindings=bindings,
+    blake3_path=lambda _:original['launcher_digest'],
+    blake3_bytes=lambda _:original['package_metadata_digest'],
+    sequential_calls=str(ns['policy_call_budget'](raw, digest) if sys.argv[3] == '20' else ns['policy_call_budget'](None, '')))
+producer = source.split('write_local_mcp_policy() {', 1)[1].split('\npolicy = {', 1)[1].split('\nstage_policy.write_text', 1)[0]
+exec(compile('policy = {' + producer, sys.argv[1], 'exec'), context)
+expected = dict(original, max_sequential_calls=int(context['sequential_calls']))
+assert context['policy'] == expected
+path.write_text(json.dumps(context['policy']))
+"#;
+            let output = std::process::Command::new("/usr/bin/python3")
+                .args(["-c", code, script])
+                .arg(&self.stage)
+                .arg(if enabled { "20" } else { "7" })
+                .output()
+                .expect("retained pure budget producer");
+            assert!(output.status.success(), "pure budget producer denied");
+            self.refresh_stage_receipts();
+        }
+
         fn enable_metadata_read_from_pure_producer(&self) {
             let script = concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -4855,6 +4925,94 @@ for server in ('eec','hetzner'):
             if !self.retain {
                 let _ = fs::remove_dir_all(&self.root);
             }
+        }
+    }
+
+    #[test]
+    fn retained_local_call_budget_closed_reader_rejects_nonregular_and_closes_fd() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/n8n_release_assembler.sh"
+        );
+        let code = r#"
+import hashlib, io, json, pathlib, stat, sys, types
+source = pathlib.Path(sys.argv[1]).read_text()
+body = source.split('local_call_budget() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
+ns = {'__name__':'retained_closed_reader_fixture'}
+exec(compile(body, sys.argv[1], 'exec'), ns)
+real_os = ns['os']
+raw = json.dumps({'schema':'fwc.n8n.local-call-budget.v1','max_sequential_calls':20}).encode()
+digest = hashlib.sha256(raw).hexdigest()
+regular = dict(st_dev=1, st_ino=2, st_uid=0, st_gid=0, st_mode=stat.S_IFREG|0o600,
+    st_nlink=1, st_size=len(raw), st_mtime_ns=3, st_ctime_ns=4)
+parent = types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755, st_uid=0, st_gid=0)
+for fields in (regular, dict(regular, st_mode=stat.S_IFIFO|0o600),
+               dict(regular, st_mode=stat.S_IFDIR|0o600), dict(regular, st_mode=stat.S_IFLNK|0o600),
+               dict(regular, st_uid=1000), dict(regular, st_gid=1000),
+               dict(regular, st_mode=stat.S_IFREG|0o644), dict(regular, st_nlink=2)):
+    opened, closed = [], []
+    metadata = types.SimpleNamespace(**fields)
+    def open_fixed(path, flags):
+        assert path == ns['INPUT']
+        assert flags == real_os.O_RDONLY|real_os.O_NOFOLLOW|real_os.O_NONBLOCK
+        opened.append(9)
+        return 9
+    ns['os'] = types.SimpleNamespace(O_RDONLY=real_os.O_RDONLY, O_NOFOLLOW=real_os.O_NOFOLLOW,
+        O_NONBLOCK=real_os.O_NONBLOCK, open=open_fixed, fstat=lambda _:metadata,
+        lstat=lambda path:metadata if path == ns['INPUT'] else parent,
+        fdopen=lambda fd, mode, closefd:io.BytesIO(raw), close=lambda fd:closed.append(fd))
+    assert ns['admitted_call_budget']('') == 7 and not opened
+    try: result = ns['admitted_call_budget'](digest)
+    except ValueError:
+        assert fields != regular
+    else:
+        assert fields == regular and result == 20
+    assert opened == [9] and closed == [9]
+# An actual open refusal also propagates; no retry or attempted close of an unopened FD.
+def refused(path, flags): raise OSError('SYNTHETIC_PRIVATE_CANARY')
+ns['os'].open = refused
+try: ns['admitted_call_budget'](digest)
+except OSError: pass
+else: raise AssertionError('reader suppressed open refusal')
+"#;
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", code, script])
+            .output()
+            .expect("memory-only closed reader fixture");
+        assert!(output.status.success(), "closed reader fixture denied");
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn retained_local_call_budget_producer_signed_policy_consumer_agree() {
+        for enabled in [false, true] {
+            let fixture = Fixture::retained();
+            fixture.local_call_budget_from_pure_producer(enabled);
+            let path = fixture.stage.join("policy/local-mcp.json");
+            let value = read_value(&path, MAX_INVENTORY_BYTES).expect("produced policy");
+            let policy: LocalMcpPolicy = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(policy.max_sequential_calls, if enabled { 20 } else { 7 });
+            policy.validate().expect("actual runtime policy consumer");
+            validate_local_mcp_policy(&value).expect("native provision policy consumer");
+            let request = fixture.request();
+            validate_unsigned_release_tree(
+                &fixture.stage,
+                &fixture.release_id,
+                &request.git_revision,
+                &request.bindings,
+                fixture.owner,
+                &fixture.releases.join(&fixture.release_id),
+            )
+            .expect("native pre-seed signed-policy input validation");
+            request.validate().expect("synthetic signed policy tree");
+            let mut altered = value;
+            altered["max_sequential_calls"] = json!(if enabled { 7 } else { 20 });
+            fs::write(&path, altered.to_string()).expect("retained tamper fixture");
+            assert!(
+                fixture.request().validate().is_err(),
+                "unsigned budget drift"
+            );
         }
     }
 

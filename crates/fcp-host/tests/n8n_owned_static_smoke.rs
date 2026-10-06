@@ -49,7 +49,10 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
     let mut handle = run(OwnedInvocationHandle::launch(
         spec,
         child_endpoint,
-        OwnedInvocationConfig::default(),
+        OwnedInvocationConfig {
+            max_frame_bytes: 128 * 1024,
+            ..OwnedInvocationConfig::default()
+        },
     ))
     .expect("owned fcp-n8n launch");
 

@@ -510,9 +510,23 @@ pub struct N8nConnector {
     request_count: AtomicU64,
     error_count: AtomicU64,
     mcp_access_locks: Arc<Mutex<BTreeSet<String>>>,
+    #[cfg(feature = "n8n-test-support")]
+    owned_credential_schema_fixture: bool,
 }
 
 impl N8nConnector {
+    /// Fixed synthetic schema admission for the dedicated owned-process fixture.
+    /// This admits no endpoint, credential, capability or signed runtime.
+    /// Ordinary constructors (including the production main) never enable it.
+    /// # Errors
+    /// Retains the ordinary fail-closed host-launch configuration checks.
+    #[cfg(feature = "n8n-test-support")]
+    pub fn owned_credential_process_fixture() -> N8nResult<Self> {
+        let mut connector = Self::try_new()?;
+        connector.owned_credential_schema_fixture = true;
+        Ok(connector)
+    }
+
     /// Create a new n8n connector without reading process environment.
     ///
     /// This compatibility constructor is intended for tests and callers that
@@ -568,6 +582,8 @@ impl N8nConnector {
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
             mcp_access_locks: Arc::new(Mutex::new(BTreeSet::new())),
+            #[cfg(feature = "n8n-test-support")]
+            owned_credential_schema_fixture: false,
         }
     }
 }
@@ -593,6 +609,14 @@ impl N8nConnector {
             self.runtime_config.clone(),
         )
         .map_err(|e| e.to_fcp_error())?;
+        #[cfg(feature = "n8n-test-support")]
+        let client = {
+            let mut client = client;
+            if self.owned_credential_schema_fixture {
+                client.admit_owned_credential_schema_fixture();
+            }
+            client
+        };
 
         if let Some(old_client) = self.client.take() {
             old_client.shutdown();
@@ -955,6 +979,10 @@ impl N8nConnector {
                 self.invoke_workflows_get(client, &input, Some(context.clone()))
                     .await
             }
+            "n8n.workflows.get_code" => {
+                self.invoke_workflows_get_code(client, &input, Some(context.clone()))
+                    .await
+            }
             "n8n.workflows.compare" => {
                 self.invoke_workflows_compare(client, &input, Some(context.clone()))
                     .await
@@ -1118,6 +1146,29 @@ impl N8nConnector {
         input: &Value,
         context: Option<HostEgressContext>,
     ) -> N8nResult<Value> {
+        // One budget covers every native page, not a new full timeout per page.
+        fcp_async_core::time::timeout(
+            self.runtime_config.request_timeout,
+            self.collect_metadata_search(client, operation, input, context),
+        )
+        .await
+        .map_err(|error| N8nError::Api {
+            status_code: if matches!(error, fcp_async_core::AsyncError::Timeout { .. }) {
+                408
+            } else {
+                0
+            },
+            message: "metadata_snapshot_wait_failed".into(),
+        })?
+    }
+
+    async fn collect_metadata_search(
+        &self,
+        client: &N8nClient,
+        operation: &str,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
         let search = MetadataSearch::parse(operation, input)
             .map_err(|code| N8nError::InvalidInput(code.into()))?;
         if operation == "n8n.executions.search" {
@@ -1134,6 +1185,7 @@ impl N8nConnector {
             ));
         }
         let mut records = Vec::new();
+        let mut collected_bytes = 0_usize;
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::new();
         let mut complete = false;
@@ -1266,6 +1318,12 @@ impl N8nConnector {
             if page.len() > 200 || page.is_empty() && next.is_some() {
                 return Err(N8nError::MalformedProviderResponse);
             }
+            collected_bytes = collected_bytes
+                .checked_add(serde_json::to_vec(&page)?.len())
+                .filter(|size| *size <= 10 * 1024 * 1024)
+                .ok_or_else(|| {
+                    N8nError::InvalidInput("metadata_snapshot_byte_bound_exceeded".into())
+                })?;
             records.extend(page);
             if records.len() > 2000 {
                 return Err(N8nError::InvalidInput(
@@ -1764,6 +1822,11 @@ impl N8nConnector {
     ) -> Result<serde_json::Value, N8nError> {
         let read = crate::types::WorkflowReadInput::parse(input)
             .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        if read.include_code == Some(true) {
+            return Err(N8nError::InvalidInput(
+                "sensitive_code_requires_get_code".into(),
+            ));
+        }
         let workflow = client.get_workflow_typed(&read.id, context).await?;
         if workflow.id != read.id {
             return Err(N8nError::MalformedProviderResponse);
@@ -1774,6 +1837,18 @@ impl N8nConnector {
             return Ok(serde_json::to_value(normalize_workflow_state(workflow)?)?);
         }
         project_workflow_read(workflow, &read)
+    }
+
+    async fn invoke_workflows_get_code(
+        &self,
+        client: &N8nClient,
+        input: &Value,
+        context: Option<HostEgressContext>,
+    ) -> N8nResult<Value> {
+        let read = fcp_host::WorkflowCodeReadInput::parse(input)
+            .map_err(|code| N8nError::InvalidInput(code.into()))?;
+        let workflow = client.get_workflow_typed(&read.id, context).await?;
+        project_workflow_code(&workflow, &read)
     }
 
     async fn invoke_workflow_draft_write(
@@ -2703,6 +2778,9 @@ impl N8nConnector {
                 workflow_resource_uri(server_id, workflow_id)
                     .map_err(|error| error.to_fcp_error())?
             }
+            "n8n.workflows.get_code" => fcp_host::WorkflowCodeReadInput::parse(input)
+                .and_then(|read| read.resource_uri(server_id))
+                .map_err(|code| N8nError::InvalidInput(code.into()).to_fcp_error())?,
             "n8n.executions.get" => {
                 let workflow_id =
                     require_str(input, "workflow_id").map_err(|error| error.to_fcp_error())?;
@@ -3249,6 +3327,111 @@ fn project_workflow_comparison(
         "validationDelta":{"status":"not_collected","reason":"trusted_local_validation_composition_required"}}))
 }
 
+fn project_workflow_code(
+    workflow: &WorkflowDetail,
+    read: &fcp_host::WorkflowCodeReadInput,
+) -> N8nResult<Value> {
+    // The private dispatch reaches this projection only after original bound
+    // code.read/get_code authority and the pin-qualified resource were verified.
+    let state = normalize_workflow_state(workflow.clone())?;
+    if state.id != read.id {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    let mut total = 0_usize;
+    let mut versions = Vec::new();
+    for (label, pin) in &read.pins {
+        let (version_id, nodes, connections) = if label == "draft" {
+            (&workflow.version_id, &workflow.nodes, &workflow.connections)
+        } else {
+            let crate::types::RequiredNullable::Value(published) = &workflow.active_version else {
+                return Err(N8nError::InvalidInput(
+                    "published_version_unavailable".into(),
+                ));
+            };
+            (
+                &published.version_id,
+                &published.nodes,
+                &published.connections,
+            )
+        };
+        if version_id != &pin.version_id
+            || workflow_graph_digest(nodes, connections)? != pin.graph_digest
+            || nodes.len() > 1000
+        {
+            return Err(N8nError::MalformedProviderResponse);
+        }
+        let mut code_nodes = Vec::new();
+        let mut ids = BTreeSet::new();
+        for node in nodes {
+            if node["type"] != "n8n-nodes-base.code" {
+                continue;
+            }
+            let id = node["id"]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control))
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            if !ids.insert(id) || code_nodes.len() >= 100 {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            let parameters = node["parameters"]
+                .as_object()
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            // Code.node.ts versions 1/2 default to JavaScript. Version 1
+            // never selects Python; version 2 also accepts legacy `python`.
+            let version = match node.get("typeVersion") {
+                None => 2,
+                Some(value) => value
+                    .as_u64()
+                    .filter(|version| matches!(version, 1 | 2))
+                    .ok_or(N8nError::MalformedProviderResponse)?,
+            };
+            let selector = match parameters.get("language") {
+                None => "javaScript",
+                Some(Value::String(selector))
+                    if matches!(selector.as_str(), "javaScript" | "python" | "pythonNative") =>
+                {
+                    selector
+                }
+                _ => return Err(N8nError::MalformedProviderResponse),
+            };
+            if version == 1 && selector != "javaScript" {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            // The editor can retain the other language's source. Never return
+            // it or use its presence to infer the effective language.
+            let (language, source) = match selector {
+                "javaScript" => ("javascript", parameters.get("jsCode")),
+                "python" | "pythonNative" => ("python", parameters.get("pythonCode")),
+                _ => return Err(N8nError::MalformedProviderResponse),
+            };
+            let source = source
+                .and_then(Value::as_str)
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            total = total
+                .checked_add(source.len())
+                .filter(|size| *size <= 600_000)
+                .ok_or(N8nError::MalformedProviderResponse)?;
+            if source.len() > 300_000 {
+                return Err(N8nError::MalformedProviderResponse);
+            }
+            let digest = digest_canonical_json(
+                b"fwc-n8n.code-source.v1",
+                &json!({"language":language,"source":source}),
+            )?;
+            code_nodes
+                .push(json!({"nodeId":id,"language":language,"source":source,"digest":digest}));
+        }
+        versions.push(json!({"version":label,"versionId":version_id,"graphDigest":pin.graph_digest,"codeNodes":code_nodes}));
+    }
+    let result = json!({"id":read.id,"versions":versions});
+    let serialized =
+        serde_json::to_vec(&result).map_err(|_| N8nError::MalformedProviderResponse)?;
+    if serialized.len() > 4_000_000 {
+        return Err(N8nError::MalformedProviderResponse);
+    }
+    Ok(result)
+}
+
 fn project_workflow_read(
     workflow: WorkflowDetail,
     read: &crate::types::WorkflowReadInput,
@@ -3686,6 +3869,15 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
         | "n8n.credentials.list"
         | "n8n.tags.list" => parse_list_query(input).map(|_| ()),
         "n8n.workflows.get" => crate::types::WorkflowReadInput::parse(input)
+            .and_then(|read| {
+                if read.include_code == Some(true) {
+                    Err("sensitive_code_requires_get_code")
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|code| N8nError::InvalidInput(code.into())),
+        "n8n.workflows.get_code" => fcp_host::WorkflowCodeReadInput::parse(input)
             .map(|_| ())
             .map_err(|code| N8nError::InvalidInput(code.into())),
         "n8n.workflows.compare" => crate::types::WorkflowCompareInput::parse(input)
@@ -6199,6 +6391,18 @@ fn operations_info() -> Vec<OperationInfo> {
             },
         ),
         op_info(
+            "n8n.workflows.get_code",
+            "Read sensitive Code source from exact pinned current workflow versions",
+            fcp_host::workflow_code_read_input_schema(),
+            fcp_host::workflow_code_read_output_schema(),
+            "n8n.workflows.code.read", RiskLevel::Medium, SafetyTier::Safe, IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Read sensitive Code source only with separate code.read authority and exact current version/graph pins.".into(),
+                common_mistakes: vec!["Code source may contain secrets; metadata read authority does not permit it.".into()],
+                examples: vec![], related: vec![CapabilityId::from_static("n8n.workflows.get")],
+            },
+        ),
+        op_info(
             "n8n.workflows.create_draft",
             "Create an inactive n8n workflow draft and verify it by independent readback",
             workflow_draft_input_schema(false),
@@ -6646,6 +6850,395 @@ mod tests {
     use crate::types::RequiredNullable;
     use fcp_prelude::ExecutionScope;
 
+    #[fcp_async_core::runtime::test]
+    async fn rest_workflow_snapshot_uses_native_filters_complete_pages_and_one_deadline() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        let server = MockServer::start().await;
+        let mut connector = N8nConnector::new();
+        connector
+            .handle_configure(
+                json!({"server_id":"eec", "base_url":format!("{}/api/v1", server.uri()), "api_key":"synthetic-loopback"}),
+            )
+            .await
+            .unwrap();
+        let row = |id: &str, name: &str| {
+            json!({"id":id,"name":name,"active":true,"versionId":"version-one",
+            "activeVersionId":null,"shared":[{"projectId":"project-one"}],
+            "staticData":{"secret":"SNAPSHOT_SECRET_CANARY"},"pinData":{"secret":"SNAPSHOT_SECRET_CANARY"}})
+        };
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows"))
+            .and(query_param("projectId", "project-one"))
+            .and(query_param("active", "true"))
+            .and(query_param("limit", "200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data":[row("workflow-z", "Zebra")],"nextCursor":"native-second"}),
+            ))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows"))
+            .and(query_param("projectId", "project-one"))
+            .and(query_param("active", "true"))
+            .and(query_param("cursor", "native-second"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":[row("workflow-a", "Alpha")],"nextCursor":null})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let input =
+            json!({"projectId":"project-one","active":true,"sort":"name:asc","page":{"limit":1}});
+        let output = connector
+            .invoke_metadata_search(
+                connector.client.as_ref().unwrap(),
+                "n8n.workflows.search",
+                &input,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(output["workflows"][0]["id"], "workflow-a");
+        assert_eq!(output["page"]["total"], 2);
+        assert!(output["page"]["nextCursor"].is_string());
+        assert!(!output.to_string().contains("SNAPSHOT_SECRET_CANARY"));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+
+        let delayed = MockServer::start().await;
+        let mut timed = N8nConnector::new_with_runtime_config(
+            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_millis(20)),
+        );
+        timed
+            .handle_configure(
+                json!({"server_id":"eec","base_url":format!("{}/api/v1", delayed.uri()),"api_key":"synthetic-loopback"}),
+            )
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/workflows"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({"data":[],"nextCursor":null})),
+            )
+            .mount(&delayed)
+            .await;
+        assert!(
+            timed
+                .invoke_metadata_search(
+                    timed.client.as_ref().unwrap(),
+                    "n8n.workflows.search",
+                    &json!({}),
+                    None
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(delayed.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rest_workflow_snapshot_refuses_native_cursor_cycle_and_project_drift() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        for drift in [false, true] {
+            let server = MockServer::start().await;
+            let mut connector = N8nConnector::new();
+            connector.handle_configure(json!({"server_id":"eec", "base_url":format!("{}/api/v1", server.uri()), "api_key":"synthetic-loopback"})).await.unwrap();
+            Mock::given(method("GET")).and(path("/api/v1/workflows"))
+                .and(query_param("projectId", "project-one"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"workflow-one","name":"Synthetic","active":true,
+                    "projectId":if drift {"wrong-project"} else {"project-one"}}],"nextCursor":"repeated"})))
+                .mount(&server).await;
+            assert!(matches!(
+                connector
+                    .invoke_metadata_search(
+                        connector.client.as_ref().unwrap(),
+                        "n8n.workflows.search",
+                        &json!({"projectId":"project-one"}),
+                        None
+                    )
+                    .await,
+                Err(N8nError::MalformedProviderResponse)
+            ));
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                if drift { 1 } else { 2 }
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rest_workflow_snapshot_refuses_aggregate_bytes_before_projection() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path, query_param},
+        };
+        let server = MockServer::start().await;
+        let mut connector = N8nConnector::new();
+        connector.handle_configure(json!({"server_id":"eec","base_url":format!("{}/api/v1",server.uri()),"api_key":"synthetic-loopback"})).await.unwrap();
+        let large_name = "S".repeat(6 * 1024 * 1024);
+        Mock::given(method("GET")).and(path("/api/v1/workflows"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"workflow-one","name":large_name,"active":false}],"nextCursor":"second"})))
+            .with_priority(2).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/v1/workflows")).and(query_param("cursor","second"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"workflow-two","name":large_name,"active":false}],"nextCursor":"third"})))
+            .with_priority(1).mount(&server).await;
+        let result = connector
+            .invoke_metadata_search(
+                connector.client.as_ref().unwrap(),
+                "n8n.workflows.search",
+                &json!({}),
+                None,
+            )
+            .await;
+        assert!(
+            matches!(result, Err(N8nError::InvalidInput(ref code)) if code == "metadata_snapshot_byte_bound_exceeded")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    // Qualification of a proposed sensitive-code read contract only. This
+    // private fixture is not reachable from public dispatch and does not grant
+    // workflows.read access to source or change its fingerprint projection.
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct CodeSourceFixtureDto {
+        node_id: String,
+        name: String,
+        language: String,
+        source: String,
+        digest: String,
+    }
+
+    fn code_source_fixture(
+        token: CapabilityToken,
+        key: [u8; 32],
+        instance: fcp_core::InstanceId,
+        expected_version: &str,
+        graph: &Value,
+    ) -> Result<Vec<CodeSourceFixtureDto>, &'static str> {
+        if expected_version.is_empty()
+            || expected_version.len() > 256
+            || !expected_version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err("sensitive_code_binding_denied");
+        }
+        // Proposed fixture resource binds the captured current version in the
+        // real signed token constraint. Changing both the requested version and
+        // graph cannot reuse a token issued for the original current snapshot.
+        let resource = format!("fwc-n8n://eec/workflows/workflow-one?versionId={expected_version}");
+        CapabilityVerifier::new(key, ZoneId::work(), instance)
+            .verify_bound(
+                token,
+                &"n8n.workflows.code.read".parse().unwrap(),
+                &"n8n.workflows.get".parse().unwrap(),
+                &[resource],
+            )
+            .map_err(|_| "sensitive_code_authority_denied")?;
+        if graph["id"] != "workflow-one" || graph["versionId"] != expected_version {
+            return Err("sensitive_code_binding_denied");
+        }
+        let nodes = graph["nodes"]
+            .as_array()
+            .filter(|nodes| nodes.len() <= 100)
+            .ok_or("sensitive_code_shape_denied")?;
+        let mut ids = BTreeSet::new();
+        let mut total = 0_usize;
+        let mut output = Vec::new();
+        for node in nodes {
+            if node["type"] != "n8n-nodes-base.code" {
+                continue;
+            }
+            let text = |value: &Value| {
+                value
+                    .as_str()
+                    .filter(|value| {
+                        !value.is_empty()
+                            && value.len() <= 256
+                            && !value.chars().any(char::is_control)
+                    })
+                    .map(str::to_owned)
+                    .ok_or("sensitive_code_shape_denied")
+            };
+            let id = text(&node["id"])?;
+            if !ids.insert(id.clone()) {
+                return Err("sensitive_code_shape_denied");
+            }
+            let name = text(&node["name"])?;
+            let parameters = node["parameters"]
+                .as_object()
+                .ok_or("sensitive_code_shape_denied")?;
+            let fields = ["jsCode", "pythonCode"]
+                .into_iter()
+                .filter(|field| parameters.contains_key(*field))
+                .collect::<Vec<_>>();
+            if fields.len() != 1 {
+                return Err("sensitive_code_shape_denied");
+            }
+            let source = parameters[fields[0]]
+                .as_str()
+                .filter(|source| source.len() <= 300_000)
+                .ok_or("sensitive_code_bound_denied")?;
+            total = total
+                .checked_add(source.len())
+                .filter(|size| *size <= 600_000)
+                .ok_or("sensitive_code_bound_denied")?;
+            output.push(CodeSourceFixtureDto {
+                node_id: id,
+                name,
+                language: if fields[0] == "jsCode" {
+                    "javascript"
+                } else {
+                    "python"
+                }
+                .into(),
+                source: source.into(),
+                digest: digest_canonical_json(b"FCP/n8n/read-code/v1\0", &json!(source))
+                    .map_err(|_| "sensitive_code_shape_denied")?,
+            });
+        }
+        Ok(output)
+    }
+
+    #[test]
+    fn sensitive_code_fixture_requires_distinct_bound_authority_and_closed_projection() {
+        let signing = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[44; 32]).unwrap();
+        let instance = fcp_core::InstanceId::new();
+        let token = |capability: &str, zone: &str, target: &str, resource: &str| {
+            let constraints = fcp_core::CapabilityConstraints {
+                resource_allow: vec![resource.into()],
+                ..Default::default()
+            };
+            let mut encoded = Vec::new();
+            ciborium::into_writer(&constraints, &mut encoded).unwrap();
+            let now = chrono::Utc::now();
+            CapabilityToken::from_raw(
+                fcp_crypto::cose::CapabilityTokenBuilder::new()
+                    .capability_id(capability)
+                    .zone_id(zone)
+                    .target_instance(target)
+                    .principal("principal:synthetic-code-read")
+                    .operations(&["n8n.workflows.get"])
+                    .issuer("node:synthetic")
+                    .validity(now, now + chrono::Duration::minutes(1))
+                    .try_constraints_cbor(&encoded)
+                    .unwrap()
+                    .sign(&signing)
+                    .unwrap(),
+            )
+        };
+        let resource = "fwc-n8n://eec/workflows/workflow-one?versionId=version-one";
+        let graph = json!({"id":"workflow-one","versionId":"version-one","nodes":[
+            {"id":"code-one","name":"Code","type":"n8n-nodes-base.code",
+             "parameters":{"jsCode":"return []; // PRIVATE_CODE_CANARY", "token":"PARAMETER_SECRET_CANARY"},
+             "credentials":{"secret":"CREDENTIAL_SECRET_CANARY"}},
+            {"id":"other","type":"ordinary-node","parameters":{"secret":"OTHER_SECRET_CANARY"}}]});
+        let invoke = |capability: &str,
+                      zone: &str,
+                      target: &str,
+                      resource: &str,
+                      version: &str,
+                      graph: &Value| {
+            code_source_fixture(
+                token(capability, zone, target, resource),
+                signing.verifying_key().to_bytes(),
+                instance.clone(),
+                version,
+                graph,
+            )
+        };
+        let output = invoke(
+            "n8n.workflows.code.read",
+            "z:work",
+            instance.as_str(),
+            resource,
+            "version-one",
+            &graph,
+        )
+        .unwrap();
+        let projected = serde_json::to_value(output).unwrap();
+        assert_eq!(projected[0]["source"], "return []; // PRIVATE_CODE_CANARY");
+        assert_eq!(projected[0].as_object().unwrap().len(), 5);
+        assert!(!projected.to_string().contains("SECRET_CANARY"));
+        for (cap, zone, target, uri) in [
+            ("n8n.workflows.read", "z:work", instance.as_str(), resource),
+            (
+                "n8n.workflows.code.read",
+                "z:private",
+                instance.as_str(),
+                resource,
+            ),
+            (
+                "n8n.workflows.code.read",
+                "z:work",
+                "instance-wrong",
+                resource,
+            ),
+            (
+                "n8n.workflows.code.read",
+                "z:work",
+                instance.as_str(),
+                "fwc-n8n://hetzner/workflows/workflow-one",
+            ),
+        ] {
+            assert!(invoke(cap, zone, target, uri, "version-one", &graph).is_err());
+        }
+        assert!(
+            invoke(
+                "n8n.workflows.code.read",
+                "z:work",
+                instance.as_str(),
+                resource,
+                "version-wrong",
+                &graph
+            )
+            .is_err()
+        );
+        let mut changed_current = graph.clone();
+        changed_current["versionId"] = json!("version-two");
+        assert!(
+            invoke(
+                "n8n.workflows.code.read",
+                "z:work",
+                instance.as_str(),
+                resource,
+                "version-two",
+                &changed_current
+            )
+            .is_err()
+        );
+        let mut extra = projected[0].clone();
+        extra["credentials"] = json!("SECRET_CANARY");
+        assert!(serde_json::from_value::<CodeSourceFixtureDto>(extra).is_err());
+        for malformed in [
+            json!({"id":"wrong","versionId":"version-one","nodes":[]}),
+            json!({"id":"workflow-one","versionId":"version-one","nodes":[{"id":"code-one","name":"Code","type":"n8n-nodes-base.code","parameters":{"jsCode":"a","pythonCode":"b"}}]}),
+            json!({"id":"workflow-one","versionId":"version-one","nodes":[{"id":"code-one","name":"Code","type":"n8n-nodes-base.code","parameters":{"jsCode":"x".repeat(300_001)}}]}),
+        ] {
+            assert!(
+                invoke(
+                    "n8n.workflows.code.read",
+                    "z:work",
+                    instance.as_str(),
+                    resource,
+                    "version-one",
+                    &malformed
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes() {
         let categories = vec!["credentials".to_owned()];
@@ -6777,6 +7370,115 @@ mod tests {
             "activeVersion": null
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn get_code_production_projection_is_exact_pinned_and_sensitive() {
+        let workflow = digest_test_workflow();
+        let digest = workflow_graph_digest(&workflow.nodes, &workflow.connections).unwrap();
+        let input = json!({"id":workflow.id,"version":"draft","pins":{"draft":{"versionId":workflow.version_id,"graphDigest":digest}}});
+        let read = fcp_host::WorkflowCodeReadInput::parse(&input).unwrap();
+        let output = project_workflow_code(&workflow, &read).unwrap();
+        assert_eq!(
+            output["versions"][0]["codeNodes"][0]["source"],
+            "return items;"
+        );
+        assert!(!output.to_string().contains("credential-1"));
+        assert_eq!(output.as_object().unwrap().len(), 2);
+        for field in ["id", "versionId", "graphDigest"] {
+            let mut changed = input.clone();
+            if field == "id" {
+                changed["id"] = json!("wrong");
+            } else {
+                changed["pins"]["draft"][field] = if field == "graphDigest" {
+                    json!(format!("blake3-256:{}", "0".repeat(64)))
+                } else {
+                    json!("wrong")
+                };
+            }
+            let read = fcp_host::WorkflowCodeReadInput::parse(&changed).unwrap();
+            assert!(project_workflow_code(&workflow, &read).is_err());
+        }
+        let mut missing = input.clone();
+        missing["version"] = json!("both");
+        assert!(fcp_host::WorkflowCodeReadInput::parse(&missing).is_err());
+        for extra in ["includeCode", "url", "credentials"] {
+            let mut changed = input.clone();
+            changed[extra] = json!(true);
+            assert!(fcp_host::WorkflowCodeReadInput::parse(&changed).is_err());
+        }
+        let mut oversized = workflow.clone();
+        oversized.nodes[0]["parameters"]["jsCode"] = json!("S".repeat(300_001));
+        let mut read = read.clone();
+        read.pins.get_mut("draft").unwrap().graph_digest =
+            workflow_graph_digest(&oversized.nodes, &oversized.connections).unwrap();
+        assert!(project_workflow_code(&oversized, &read).is_err());
+        let project = |changed: WorkflowDetail| {
+            let mut read = fcp_host::WorkflowCodeReadInput::parse(&input).unwrap();
+            read.pins.get_mut("draft").unwrap().graph_digest =
+                workflow_graph_digest(&changed.nodes, &changed.connections).unwrap();
+            project_workflow_code(&changed, &read)
+        };
+        for selector in ["python", "pythonNative"] {
+            let mut python = workflow.clone();
+            python.nodes[0]["typeVersion"] = json!(2);
+            python.nodes[0]["parameters"] = json!({"language":selector,"pythonCode":"return _items","jsCode":"INACTIVE_JS_CANARY"});
+            assert!(
+                !project(python.clone())
+                    .unwrap()
+                    .to_string()
+                    .contains("INACTIVE_JS_CANARY")
+            );
+            assert_eq!(
+                project(python.clone()).unwrap()["versions"][0]["codeNodes"][0]["language"],
+                "python"
+            );
+            python.nodes[0]["typeVersion"] = json!(1);
+            assert!(project(python).is_err());
+        }
+        for selector in [json!("python"), json!("unknown"), Value::Null, json!(true)] {
+            let mut changed = workflow.clone();
+            changed.nodes[0]["parameters"]["language"] = selector;
+            assert!(project(changed).is_err());
+        }
+        let mut javascript = workflow.clone();
+        javascript.nodes[0]["parameters"]["pythonCode"] = json!("INACTIVE_PYTHON_CANARY");
+        assert!(
+            !project(javascript.clone())
+                .unwrap()
+                .to_string()
+                .contains("INACTIVE_PYTHON_CANARY")
+        );
+        for invalid in [Value::Null, json!(true), json!(42), json!({})] {
+            javascript.nodes[0]["parameters"]["jsCode"] = invalid;
+            assert!(project(javascript.clone()).is_err());
+        }
+        let mut excessive = workflow.clone();
+        excessive.nodes = (0..101)
+            .map(|id| {
+                let mut node = workflow.nodes[0].clone();
+                node["id"] = json!(format!("code-{id}"));
+                node
+            })
+            .collect();
+        assert!(project(excessive).is_err());
+        let mut escaped = workflow.clone();
+        escaped.nodes[0]["parameters"]["jsCode"] = json!("\u{0000}".repeat(300_000));
+        let first = escaped.nodes[0].clone();
+        let mut second = first;
+        second["id"] = json!("code-second");
+        escaped.nodes.push(second);
+        let output = project(escaped.clone()).unwrap();
+        assert!(serde_json::to_vec(&output).unwrap().len() < 4_000_000);
+        escaped.nodes[1]["parameters"]["jsCode"] = json!("\u{0000}".repeat(300_001));
+        assert!(project(escaped).is_err());
+        assert!(
+            validate_operation_input(
+                "n8n.workflows.get",
+                &json!({"id":"workflow-1","includeCode":true})
+            )
+            .is_err()
+        );
     }
 
     fn normalized_state_digest(workflow: WorkflowDetail) -> String {
@@ -7287,6 +7989,7 @@ mod tests {
                 "n8n.workflows.delete_disposable",
                 "n8n.workflows.execute",
                 "n8n.workflows.get",
+                "n8n.workflows.get_code",
                 "n8n.workflows.lifecycle",
                 "n8n.workflows.list",
                 "n8n.workflows.search",
@@ -7848,6 +8551,19 @@ mod tests {
                 "accepted {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn code_read_serialized_bounds_measure_native_descriptor() {
+        let descriptor =
+            json!({"connector_id":"fcp.n8n","version":"0.1.0","operations":operations_info()});
+        let frame =
+            serde_json::to_vec(&json!({"jsonrpc":"2.0","id":1,"result":descriptor})).unwrap();
+        println!("native_introspection_serialized_bytes={}", frame.len());
+        assert!(frame.len() < 128 * 1024);
+        let escaped = serde_json::to_vec(&"\u{0000}".repeat(600_000)).unwrap();
+        println!("maximum_selected_source_json_bytes={}", escaped.len());
+        assert_eq!(escaped.len(), 3_600_002);
     }
 
     #[test]

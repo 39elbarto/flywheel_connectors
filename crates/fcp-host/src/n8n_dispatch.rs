@@ -6,6 +6,7 @@
 //! executable paths, environment, and MCP tool names are all host-owned.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::sync::{Arc, atomic::AtomicBool};
 
 use serde::de::Error as _;
@@ -20,6 +21,112 @@ pub const DEFAULT_LOCAL_N8N_INPUT_MAX_BYTES: usize = 16 * 1024;
 const MAX_CORRELATION_ID_BYTES: usize = 128;
 const MAX_TEXT_BYTES: usize = 1_024;
 const MAX_LIST_ITEMS: usize = 20;
+
+/// Immutable current-version selector for a separately authorized sensitive read.
+///
+/// Parsing this data is not authority; the exact resource must be verified with
+/// the original bound `n8n.workflows.code.read` token before any HTTP request.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowCodeReadInput {
+    pub id: String,
+    pub version: String,
+    pub pins: std::collections::BTreeMap<String, WorkflowCodeReadPin>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowCodeReadPin {
+    pub version_id: String,
+    pub graph_digest: String,
+}
+
+impl WorkflowCodeReadInput {
+    /// # Errors
+    /// Refuses unknown fields, ambiguous selectors and incomplete/invalid pins.
+    pub fn parse(value: &Value) -> Result<Self, &'static str> {
+        let input: Self =
+            serde_json::from_value(value.clone()).map_err(|_| "invalid_code_read_input")?;
+        let safe_id = |id: &str| {
+            !id.is_empty()
+                && id.len() <= 256
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        };
+        let labels: &[&str] = match input.version.as_str() {
+            "draft" => &["draft"],
+            "published" => &["published"],
+            "both" => &["draft", "published"],
+            _ => return Err("invalid_code_read_input"),
+        };
+        if !safe_id(&input.id)
+            || input.pins.len() != labels.len()
+            || labels.iter().any(|label| {
+                input.pins.get(*label).is_none_or(|pin| {
+                    !safe_id(&pin.version_id)
+                        || pin.graph_digest.len() != 75
+                        || !pin.graph_digest.starts_with("blake3-256:")
+                        || !pin.graph_digest[11..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+            })
+        {
+            return Err("invalid_code_read_input");
+        }
+        Ok(input)
+    }
+
+    /// # Errors
+    /// Only explicit current EEC/Hetzner targets are supported.
+    pub fn resource_uri(&self, server: &str) -> Result<String, &'static str> {
+        if !matches!(server, "eec" | "hetzner") {
+            return Err("invalid_code_read_target");
+        }
+        let mut resource = format!(
+            "fwc-n8n://{server}/workflows/{}?codeVersion={}",
+            self.id, self.version
+        );
+        for (label, pin) in &self.pins {
+            write!(
+                resource,
+                "&{label}VersionId={}&{label}GraphDigest={}",
+                pin.version_id, pin.graph_digest
+            )
+            .map_err(|_| "invalid_code_read_target")?;
+        }
+        Ok(resource)
+    }
+}
+
+#[must_use]
+pub fn workflow_code_read_input_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["id","version","pins"],"properties":{
+        "id":{"type":"string","minLength":1,"maxLength":256,"pattern":"^[A-Za-z0-9_-]+$"},
+        "version":{"type":"string","enum":["draft","published","both"]},
+        "pins":{"type":"object","additionalProperties":false,"minProperties":1,"maxProperties":2,
+            "properties":{"draft":workflow_code_read_pin_schema(),"published":workflow_code_read_pin_schema()}}}})
+}
+
+fn workflow_code_read_pin_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["versionId","graphDigest"],"properties":{
+        "versionId":{"type":"string","minLength":1,"maxLength":256,"pattern":"^[A-Za-z0-9_-]+$"},
+        "graphDigest":{"type":"string","pattern":"^blake3-256:[0-9a-f]{64}$"}}})
+}
+
+#[must_use]
+pub fn workflow_code_read_output_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["id","versions"],"properties":{
+        "id":{"type":"string"},"versions":{"type":"array","minItems":1,"maxItems":2,"items":{
+            "type":"object","additionalProperties":false,"required":["version","versionId","graphDigest","codeNodes"],"properties":{
+                "version":{"type":"string","enum":["draft","published"]},"versionId":{"type":"string"},
+                "graphDigest":{"type":"string","pattern":"^blake3-256:[0-9a-f]{64}$"},
+                "codeNodes":{"type":"array","maxItems":100,"items":{"type":"object","additionalProperties":false,
+                    "required":["nodeId","language","source","digest"],"properties":{
+                        "nodeId":{"type":"string","maxLength":256},"language":{"type":"string","enum":["javascript","python"]},
+                        "source":{"type":"string","maxLength":300_000},"digest":{"type":"string","pattern":"^blake3-256:[0-9a-f]{64}$"}}}}}}}}})
+}
 
 /// Data supplied only by managed configuration.
 ///

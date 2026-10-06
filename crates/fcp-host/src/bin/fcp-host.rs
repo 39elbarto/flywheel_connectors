@@ -450,7 +450,8 @@ const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
 #[cfg(target_os = "linux")]
 static FIXED_READ_ONLY_LANDLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
-const N8N_READ_ONLY_OPERATIONS: [&str; 16] = [
+const N8N_READ_ONLY_OPERATIONS: [&str; 17] = [
+    "n8n.workflows.get_code",
     "n8n.validation.run",
     "n8n.workflows.compare",
     "n8n.workflows.search",
@@ -479,7 +480,8 @@ const N8N_WRITE_OPERATIONS: [&str; 9] = [
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 25] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 26] = [
+    "n8n.workflows.get_code",
     "n8n.validation.run",
     "n8n.workflows.compare",
     "n8n.workflows.search",
@@ -705,7 +707,12 @@ impl TrustedResourceBinding {
             ));
         }
         if request.connector_id.as_str() == "fcp.n8n" {
-            validate_n8n_read_only_resource_uri(self.server_id, &self.resource_uri)?;
+            validate_n8n_read_only_resource_uri(
+                self.server_id,
+                &self.resource_uri,
+                request.operation.as_str(),
+                &request.input,
+            )?;
         }
         Ok(&self.resource_uri)
     }
@@ -4127,6 +4134,104 @@ struct OwnedPerInvocationBinding {
     network_constraints: NetworkConstraints,
     comparison_capture: Option<Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>>,
     credentials_session: Option<Arc<std::sync::Mutex<OwnedCredentialsSession>>>,
+    read_wait: Option<Arc<OwnedReadWait>>,
+    code_read: Option<Arc<OwnedCodeRead>>,
+    #[cfg(test)]
+    fixture_http: Option<Arc<std::sync::Mutex<OwnedCredentialHttpFixture>>>,
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedCodeRead {
+    endpoint: String,
+    resource: String,
+    attempted: AtomicBool,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedCodeRead {
+    fn admit(&self, request: &HostEgressHttpRequest) -> HostResult<()> {
+        if request.url != self.endpoint
+            || request.method != "GET"
+            || request.body.is_some()
+            || request.context.resource_uri != self.resource
+            || self.attempted.swap(true, Ordering::AcqRel)
+        {
+            return Err(HostError::PreflightFailed(
+                "code read original request binding denied".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedReadWait {
+    deadline: Instant,
+    state: std::sync::Mutex<(bool, Option<oneshot::Sender<()>>)>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedReadWait {
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.0 = true;
+            if let Some(sender) = state.1.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    async fn wait<T>(
+        &self,
+        future: impl std::future::Future<Output = HostResult<T>>,
+    ) -> HostResult<T> {
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = self.state.lock().map_err(|_| {
+                HostError::Internal("owned read cancellation lock unavailable".into())
+            })?;
+            if state.0 || state.1.is_some() || Instant::now() >= self.deadline {
+                return Err(HostError::PreflightFailed(
+                    "owned read invocation closed".into(),
+                ));
+            }
+            state.1 = Some(sender);
+        }
+        let result = {
+            let mut pending = Box::pin(fcp_async_core::time::timeout(
+                self.deadline.saturating_duration_since(Instant::now()),
+                future,
+            ));
+            let mut cancelled = Box::pin(receiver);
+            match futures_util::future::select(pending.as_mut(), cancelled.as_mut()).await {
+                futures_util::future::Either::Left((result, _)) => result.unwrap_or_else(|_| {
+                    self.close();
+                    Err(HostError::PreflightFailed(
+                        "owned read invocation deadline exceeded".into(),
+                    ))
+                }),
+                futures_util::future::Either::Right(_) => Err(HostError::PreflightFailed(
+                    "owned read invocation closed".into(),
+                )),
+            }
+        }; // Drop the HTTP/refresh future and injector before releasing its lease.
+        if let Ok(mut state) = self.state.lock() {
+            state.1.take();
+        }
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedReadWaitGuard(Option<Arc<OwnedReadWait>>);
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedReadWaitGuard {
+    fn drop(&mut self) {
+        if let Some(wait) = &self.0 {
+            wait.close();
+        }
+    }
 }
 
 // Private to one owned invocation. Neither the token nor the accepted session
@@ -4148,6 +4253,69 @@ struct OwnedCredentialsSession {
     timeout: Duration,
     transferred: u64,
     max_bytes: u64,
+    #[cfg(test)]
+    fixture_http: Option<Arc<std::sync::Mutex<OwnedCredentialHttpFixture>>>,
+}
+
+// Only the binary test module can construct this transport. It replaces the
+// network response after the original authorization, credential and HTTP policy
+// checks; it does not replace any admission or change the requested endpoint.
+#[cfg(all(test, target_os = "linux"))]
+struct OwnedCredentialHttpFixture {
+    requests: Vec<Value>,
+    bad_schema: bool,
+    workflow_response: Option<Value>,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl std::fmt::Debug for OwnedCredentialHttpFixture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnedCredentialHttpFixture([redacted])")
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl OwnedCredentialHttpFixture {
+    fn response(&mut self, request: &EgressHttpRequest) -> HostResult<Vec<u8>> {
+        let denied = || HostError::PreflightFailed("owned credential fixture denied".into());
+        if request.method == "GET"
+            && request.body.is_none()
+            && let Some(workflow) = &self.workflow_response
+        {
+            self.requests
+                .push(json!({"method":"GET","path":request.url}));
+            return serde_json::to_vec(workflow).map_err(|_| denied());
+        }
+        let native: Value = serde_json::from_slice(request.body.as_deref().ok_or_else(denied)?)
+            .map_err(|_| denied())?;
+        let phase = self.requests.len();
+        let method = [
+            "initialize",
+            "notifications/initialized",
+            "tools/list",
+            "tools/call",
+        ]
+        .get(phase)
+        .ok_or_else(denied)?;
+        if native["method"] != *method {
+            return Err(denied());
+        }
+        self.requests.push(native.clone());
+        let result = match phase {
+            0 => json!({"protocolVersion":"2025-11-25","capabilities":{"tools":{}}}),
+            1 => return Ok(Vec::new()),
+            2 => json!({"tools":[{"name":"list_credentials","annotations":{"readOnlyHint":true},
+                "inputSchema":if self.bad_schema {json!({"type":"object","extra":true})} else {json!({"type":"object"})},
+                "outputSchema":{"type":"object","required":["data","count"]}}]}),
+            _ => {
+                json!({"structuredContent":{"data":[{"id":"credential-one","name":"synthetic","type":"test",
+                "scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,
+                "data":{"secret":"CHILD_PROVIDER_SECRET_CANARY"}}],"count":1},"isError":false})
+            }
+        };
+        serde_json::to_vec(&json!({"jsonrpc":"2.0","id":native["id"],"result":result}))
+            .map_err(|_| denied())
+    }
 }
 
 // Revokes the invocation's private admission on every exit, including a
@@ -4328,6 +4496,8 @@ impl OwnedCredentialsSession {
                 .max_bytes
                 .unwrap_or(2 * 1024 * 1024)
                 .min(2 * 1024 * 1024),
+            #[cfg(test)]
+            fixture_http: None,
         })
     }
 
@@ -4630,6 +4800,42 @@ impl OwnedPerInvocationBinding {
             capability_token_cbor_b64,
             network_constraints: plan.network_constraints.clone(),
             comparison_capture,
+            #[cfg(test)]
+            fixture_http: None,
+            code_read: if plan.operation.as_str() == "n8n.workflows.get_code" {
+                let read = fcp_host::WorkflowCodeReadInput::parse(&request.input)
+                    .map_err(|code| HostError::InvalidFilter(code.into()))?;
+                let config = plan.configure_payload.as_ref().ok_or_else(|| {
+                    HostError::PreflightFailed("code read configuration unavailable".into())
+                })?;
+                let server = config["server_id"].as_str().ok_or_else(|| {
+                    HostError::PreflightFailed("code read server unavailable".into())
+                })?;
+                let base = config["base_url"]
+                    .as_str()
+                    .filter(|base| base.ends_with("/api/v1"))
+                    .ok_or_else(|| {
+                        HostError::PreflightFailed("code read API binding unavailable".into())
+                    })?;
+                Some(Arc::new(OwnedCodeRead {
+                    endpoint: format!("{base}/workflows/{}", read.id),
+                    resource: read
+                        .resource_uri(server)
+                        .map_err(|code| HostError::InvalidFilter(code.into()))?,
+                    attempted: AtomicBool::new(false),
+                }))
+            } else {
+                None
+            },
+            read_wait: (plan.connector_id.as_str() == "fcp.n8n"
+                && N8N_READ_ONLY_OPERATIONS.contains(&plan.operation.as_str()))
+            .then(|| {
+                Arc::new(OwnedReadWait {
+                    deadline: Instant::now()
+                        + Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000)),
+                    state: std::sync::Mutex::new((false, None)),
+                })
+            }),
             credentials_session: if plan.connector_id.as_str() == "fcp.n8n"
                 && plan.operation.as_str() == "n8n.credentials.list"
             {
@@ -4643,11 +4849,15 @@ impl OwnedPerInvocationBinding {
     }
 
     fn matches_context(&self, context: &HostEgressContext) -> bool {
-        self.credentials_session.as_ref().is_none_or(|session| {
-            session
-                .lock()
-                .is_ok_and(|session| session.matches_context(context))
-        }) && self.connector_id == context.connector_id
+        self.code_read
+            .as_ref()
+            .is_none_or(|read| read.resource == context.resource_uri)
+            && self.credentials_session.as_ref().is_none_or(|session| {
+                session
+                    .lock()
+                    .is_ok_and(|session| session.matches_context(context))
+            })
+            && self.connector_id == context.connector_id
             && self.operation_id == context.operation_id
             && self.zone_id == context.zone_id
             && self.request_id == context.request_id
@@ -4910,6 +5120,9 @@ async fn owned_perform_egress(
                     "owned egress context binding denied".into(),
                 ));
             }
+            if let Some(read) = &binding.code_read {
+                read.admit(&request)?;
+            }
             if let Some(session) = &binding.credentials_session {
                 if binding.network_constraints.max_redirects != 0 {
                     return Err(HostError::PreflightFailed(
@@ -4955,6 +5168,10 @@ async fn owned_perform_egress(
                     "owned host-egress authorization did not match invocation binding".to_string(),
                 ));
             }
+            #[cfg(test)]
+            {
+                authorized.fixture_http = binding.fixture_http.clone();
+            }
             if let Some(session) = &binding.credentials_session {
                 let proof = session.lock().map_err(|_| {
                     HostError::Internal("credential metadata budget lock unavailable".into())
@@ -4970,6 +5187,10 @@ async fn owned_perform_egress(
                     })?;
                 authorized.constraints.max_response_bytes =
                     authorized.constraints.max_response_bytes.min(remaining);
+                #[cfg(test)]
+                {
+                    authorized.fixture_http = proof.fixture_http.clone();
+                }
             }
             let lease = acquire_host_egress_credential_lease(
                 state,
@@ -5064,15 +5285,28 @@ async fn owned_perform_egress(
                     }
                 }
             } else {
-                authorize_and_perform_host_http_egress(
+                let credential_validation = lease.as_ref().map_or(Ok(()), |lease| {
+                    validate_n8n_specific_host_egress_credential(
+                        &authorized.connector_id,
+                        &request.context.resource_uri,
+                        lease,
+                    )
+                });
+                let http = authorize_and_perform_host_http_egress(
                     state,
                     &authorized,
                     request,
                     lease.as_ref(),
                     started_at,
                     true,
-                )
-                .await
+                );
+                if let Err(error) = credential_validation {
+                    Err(error)
+                } else if let Some(wait) = &binding.read_wait {
+                    wait.wait(http).await
+                } else {
+                    http.await
+                }
             };
             if let Some(lease) = lease {
                 release_host_egress_credential_lease(state, lease).await;
@@ -5203,6 +5437,62 @@ async fn owned_egress_loop(
                 }
             }
             Err(error) => {
+                #[cfg(test)]
+                if binding.code_read.is_some() {
+                    let label = match &error {
+                        HostError::ConnectorNotFound(_) => "connector_not_found",
+                        HostError::InvalidFilter(_) => "invalid_filter",
+                        HostError::PreflightFailed(code)
+                            if code == "code read original request binding denied" =>
+                        {
+                            "request_binding"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code == "n8n host-egress credential profile binding was denied" =>
+                        {
+                            "credential_profile"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code.starts_with("host-egress capability token rejected:") =>
+                        {
+                            "capability_binding"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code.starts_with(
+                                "host-egress capability token rejected by host state:",
+                            ) =>
+                        {
+                            "persisted_capability"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code.starts_with("persisted host-egress") =>
+                        {
+                            "persisted_verification"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code
+                                == "owned host-egress authorization did not match invocation binding" =>
+                        {
+                            "authorization_context"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code.starts_with("host-egress proxy") =>
+                        {
+                            "network_snapshot"
+                        }
+                        HostError::PreflightFailed(code) if code.contains("credential") => {
+                            "credential_lease_or_injection"
+                        }
+                        HostError::PreflightFailed(code)
+                            if code.starts_with("host-egress HTTP") =>
+                        {
+                            "http_policy"
+                        }
+                        HostError::PreflightFailed(_) => "preflight_unclassified",
+                        _ => "unclassified",
+                    };
+                    eprintln!("code_child_host_refusal={label}");
+                }
                 emit_n8n_run_once_host_error_diagnostic(&error);
                 let (status, code) = owned_egress_error_response(&error);
                 let response = codec
@@ -5239,6 +5529,32 @@ fn owned_write_result(
         }
         Err(error) => Err(owned_codec_error(error)),
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn owned_read_protocol_until_deadline(
+    handle: &mut OwnedInvocationHandle,
+    plan: &PerInvocationExecutionPlan,
+    request: &InvokeRequest,
+    activated: &AtomicBool,
+    credentials_session: Option<&Arc<std::sync::Mutex<OwnedCredentialsSession>>>,
+    deadline: Instant,
+) -> HostResult<InvokeResponse> {
+    fcp_async_core::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        owned_run_protocol(handle, plan, request, activated, credentials_session),
+    )
+    .await
+    .map_err(|error| {
+        HostError::PreflightFailed(
+            if matches!(error, fcp_async_core::AsyncError::Timeout { .. }) {
+                "owned read invocation deadline exceeded"
+            } else {
+                "owned read invocation wait failed"
+            }
+            .into(),
+        )
+    })?
 }
 
 #[cfg(target_os = "linux")]
@@ -5419,7 +5735,14 @@ async fn invoke_owned_per_invocation(
 ) -> HostResult<InvokeResponse> {
     let comparison_deadline =
         Instant::now() + Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000));
-    let binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
+    let mut binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
+    if binding.read_wait.is_some() {
+        binding.read_wait = Some(Arc::new(OwnedReadWait {
+            deadline: comparison_deadline,
+            state: std::sync::Mutex::new((false, None)),
+        }));
+    }
+    let read_wait_guard = OwnedReadWaitGuard(binding.read_wait.clone());
     let comparison_capture = binding.comparison_capture.clone();
     let credentials_session = binding.credentials_session.clone();
     let _credentials_admission_guard = OwnedCredentialsAdmissionGuard(credentials_session.clone());
@@ -5462,14 +5785,32 @@ async fn invoke_owned_per_invocation(
             return Err(owned_invocation_error(error));
         }
     };
-    let operation_result = owned_run_protocol(
-        &mut handle,
-        &plan,
-        &request,
-        &activated,
-        credentials_session.as_ref(),
-    )
-    .await;
+    let operation_result = if plan.connector_id.as_str() == "fcp.n8n"
+        && N8N_READ_ONLY_OPERATIONS.contains(&request.operation.as_str())
+    {
+        owned_read_protocol_until_deadline(
+            &mut handle,
+            &plan,
+            &request,
+            &activated,
+            credentials_session.as_ref(),
+            comparison_deadline,
+        )
+        .await
+    } else {
+        owned_run_protocol(
+            &mut handle,
+            &plan,
+            &request,
+            &activated,
+            credentials_session.as_ref(),
+        )
+        .await
+    };
+    // Close the private admission (including an in-flight HTTP cancel sender)
+    // before waiting for proxy IO and child teardown, on every outcome.
+    drop(_credentials_admission_guard);
+    drop(read_wait_guard);
     let response = owned_finalize(
         handle,
         host_shutdown,
@@ -5845,6 +6186,14 @@ fn owned_invocation_config(
     operation: &OperationId,
 ) -> OwnedInvocationConfig {
     let mut config = OwnedInvocationConfig::default();
+    if connector_id.as_str() == "fcp.n8n" {
+        // Every original n8n child sends the same complete descriptor before
+        // invoke. Its measured serialized envelope is 65,607 bytes.
+        config.max_frame_bytes = N8N_DESCRIPTOR_RPC_MAX_FRAME_BYTES;
+        if operation.as_str() == "n8n.workflows.get_code" {
+            config.max_frame_bytes = N8N_CODE_RPC_MAX_FRAME_BYTES;
+        }
+    }
     if connector_id.as_str() == "fcp.mcp-bridge"
         && matches!(
             operation.as_str(),
@@ -6151,12 +6500,72 @@ mod owned_per_invocation_unit_tests {
         );
         assert_eq!(
             connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.get")),
-            CONNECTOR_RPC_MAX_FRAME_BYTES
+            N8N_DESCRIPTOR_RPC_MAX_FRAME_BYTES
+        );
+        let code = owned_invocation_config(
+            &ConnectorId::from_static("fcp.n8n"),
+            &OperationId::from_static("n8n.workflows.get_code"),
+        );
+        assert_eq!(code.max_frame_bytes, N8N_CODE_RPC_MAX_FRAME_BYTES);
+        assert_eq!(
+            code.rpc_timeout,
+            OwnedInvocationConfig::default().rpc_timeout
+        );
+        assert_eq!(
+            connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.get_code")),
+            code.max_frame_bytes
         );
         assert_eq!(
             connector_rpc_frame_limit(Some("fcp.test"), Some("n8n.workflows.list")),
             CONNECTOR_RPC_MAX_FRAME_BYTES
         );
+    }
+
+    #[test]
+    fn code_read_fixed_request_is_one_shot_across_binding_clones() {
+        let request = HostEgressHttpRequest {
+            context: HostEgressContext {
+                connector_id: "fcp.n8n".into(),
+                operation_id: "n8n.workflows.get_code".into(),
+                resource_uri: "synthetic-pinned-resource".into(),
+                zone_id: "z:work".into(),
+                request_id: "synthetic-request".into(),
+                correlation_id: None,
+                capability_token_cbor_b64: String::new(),
+            },
+            url: "https://n8n.europeaneyecenter.com/api/v1/workflows/one".into(),
+            method: "GET".into(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
+        let read = Arc::new(OwnedCodeRead {
+            endpoint: request.url.clone(),
+            resource: request.context.resource_uri.clone(),
+            attempted: AtomicBool::new(false),
+        });
+        for field in ["url", "method", "body", "resource"] {
+            let mut changed = request.clone();
+            match field {
+                "url" => changed.url.push_str("/other"),
+                "method" => changed.method = "POST".into(),
+                "body" => changed.body = Some(fcp_manifest::Base64Bytes::from_vec(b"{}".to_vec())),
+                "resource" => changed.context.resource_uri.push_str("-other"),
+                _ => unreachable!(),
+            }
+            assert!(read.admit(&changed).is_err());
+        }
+        let first = Arc::clone(&read);
+        let first_request = request.clone();
+        let second = Arc::clone(&read);
+        let second_request = request.clone();
+        let first = std::thread::spawn(move || first.admit(&first_request).is_ok());
+        let second = std::thread::spawn(move || second.admit(&second_request).is_ok());
+        assert_eq!(
+            usize::from(first.join().unwrap()) + usize::from(second.join().unwrap()),
+            1
+        );
+        assert!(read.admit(&request).is_err());
     }
 
     #[test]
@@ -6278,6 +6687,9 @@ mod owned_per_invocation_unit_tests {
             network_constraints: constraints,
             comparison_capture: None,
             credentials_session: None,
+            read_wait: None,
+            code_read: None,
+            fixture_http: None,
         };
         let mut context = HostEgressContext {
             connector_id: "fcp.test".to_string(),
@@ -7589,6 +8001,10 @@ const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 /// delimiter. Larger results must use a bounded connector-level page or compact
 /// receipt instead of widening this transport frame.
 const CONNECTOR_RPC_MAX_FRAME_BYTES: usize = 64 * 1024;
+const N8N_DESCRIPTOR_RPC_MAX_FRAME_BYTES: usize = 128 * 1024;
+// 600,000 selected UTF-8 bytes can occupy 3,600,000 escaped JSON bytes.
+// The connector separately caps the complete projected result at 4,000,000.
+const N8N_CODE_RPC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES: usize = 256 * 1024;
 /// Bounded frame for the two n8n operations whose compact, page-bounded result
 /// can legitimately exceed the generic connector frame. This is selected only
@@ -7599,11 +8015,12 @@ const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 fn connector_rpc_frame_limit(connector_id: Option<&str>, operation: Option<&str>) -> usize {
     if connector_id == Some("fcp.n8n") {
         match operation {
+            Some("n8n.workflows.get_code") => N8N_CODE_RPC_MAX_FRAME_BYTES,
             Some("n8n.executions.diagnostics") => N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES,
             Some("n8n.workflows.list" | "n8n.mcp_access.reconcile") => {
                 N8N_BOUNDED_RPC_MAX_FRAME_BYTES
             }
-            _ => CONNECTOR_RPC_MAX_FRAME_BYTES,
+            _ => N8N_DESCRIPTOR_RPC_MAX_FRAME_BYTES,
         }
     } else {
         CONNECTOR_RPC_MAX_FRAME_BYTES
@@ -11639,7 +12056,21 @@ fn parse_n8n_read_only_run_once_input(input: &[u8]) -> HostResult<N8nReadOnlyRun
 fn validate_n8n_read_only_resource_uri(
     server_id: N8nReadOnlyServerId,
     resource_uri: &str,
+    operation: &str,
+    input: &Value,
 ) -> HostResult<()> {
+    if operation == "n8n.workflows.get_code" {
+        let expected = fcp_host::WorkflowCodeReadInput::parse(input)
+            .and_then(|read| read.resource_uri(server_id.as_str()))
+            .map_err(|code| HostError::InvalidFilter(code.into()))?;
+        return if resource_uri == expected {
+            Ok(())
+        } else {
+            Err(HostError::InvalidFilter(
+                "sensitive code resource binding denied".into(),
+            ))
+        };
+    }
     if resource_uri.is_empty() || resource_uri.trim() != resource_uri || resource_uri.contains('*')
     {
         return Err(HostError::InvalidFilter(
@@ -12618,6 +13049,9 @@ fn expected_n8n_read_only_resource_uri(
 ) -> HostResult<String> {
     let root = format!("fwc-n8n://{}", server_id.as_str());
     match operation {
+        "n8n.workflows.get_code" => fcp_host::WorkflowCodeReadInput::parse(input)
+            .and_then(|read| read.resource_uri(server_id.as_str()))
+            .map_err(|code| HostError::InvalidFilter(code.into())),
         "n8n.credentials.list"
         | "n8n.workflows.search"
         | "n8n.executions.search"
@@ -12807,7 +13241,12 @@ fn build_n8n_read_only_run_once_plan(
             })
         })
         .transpose()?;
-    validate_n8n_read_only_resource_uri(input.server_id, &input.resource_uri)?;
+    validate_n8n_read_only_resource_uri(
+        input.server_id,
+        &input.resource_uri,
+        &input.operation,
+        &input.input,
+    )?;
     let credential_binding = run_once_n8n_credential_binding_for_operation(
         config,
         &zone_id,
@@ -21653,6 +22092,8 @@ struct AuthorizedHostEgress {
     idempotency: IdempotencyClass,
     constraints: NetworkConstraints,
     credential_allow: Vec<String>,
+    #[cfg(all(test, target_os = "linux"))]
+    fixture_http: Option<Arc<std::sync::Mutex<OwnedCredentialHttpFixture>>>,
 }
 
 impl AuthorizedHostEgress {
@@ -21836,6 +22277,8 @@ async fn authorize_host_egress_context(
         idempotency: tool.idempotency,
         constraints,
         credential_allow,
+        #[cfg(all(test, target_os = "linux"))]
+        fixture_http: None,
     })
 }
 
@@ -22355,6 +22798,19 @@ async fn perform_authorized_host_http_egress_once(
                 decision.canonical_host, authorized.constraints.total_timeout_ms
             ))
         })?;
+    #[cfg(all(test, target_os = "linux"))]
+    if let Some(fixture) = &authorized.fixture_http {
+        let body = fixture
+            .lock()
+            .map_err(|_| HostError::Internal("owned credential fixture lock unavailable".into()))?
+            .response(&guard_request)?;
+        return Ok(HostEgressHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: fcp_manifest::Base64Bytes::from_vec(body),
+            egress: authorized.metadata(&decision, started_at.elapsed().as_millis()),
+        });
+    }
     let response = fcp_async_core::time::timeout(
         remaining_timeout,
         perform_host_http_egress(
@@ -28337,6 +28793,951 @@ deny_ptrace = true
         }
     }
 
+    #[cfg(all(feature = "n8n-test-support", target_os = "linux"))]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[ignore = "requires the explicit dedicated n8n-owned-credential-fixture test executable"]
+    async fn credentials_original_child_inherited_transport() {
+        let binary = std::fs::canonicalize(
+            std::env::var_os("FCP_N8N_CREDENTIAL_FIXTURE_BINARY")
+                .expect("explicit dedicated fixture binary"),
+        )
+        .unwrap();
+        let digest = blake3::hash(&std::fs::read(&binary).unwrap())
+            .to_hex()
+            .to_string();
+        let retained_root = tempfile::Builder::new()
+            .prefix("original-child-state-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        for server in ["eec", "hetzner"] {
+            for mode in ["success", "schema", "body", "token", "port", "deadline"] {
+                if server == "eec" && mode == "port" {
+                    continue;
+                }
+                let (mut plan, mut request, instance, mut constraints, signing) =
+                    credentials_bound_test_fixture("n8n.credentials.metadata.read");
+                plan.state_root = Some(retained_root.join(server).join(mode));
+                constraints.resource_allow = vec![format!("fwc-n8n://{server}")];
+                let native_host = if server == "eec" {
+                    "n8n.europeaneyecenter.com"
+                } else {
+                    "n8nhet.levilaser.com"
+                };
+                let native_port = if server == "hetzner" && mode != "port" {
+                    8443
+                } else {
+                    443
+                };
+                let credential = constraints.credential_allow[0];
+                let mapping = json!({"credential_id":credential.to_string(),
+                "purpose":"n8n.credentials.metadata.read","tool":"list_credentials","class":"read",
+                "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+                "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"});
+                plan.configure_payload = Some(json!({"server_id":server,
+                "base_url":format!("https://{native_host}/api/v1"),
+                "credential_id":credential.to_string(),"credential_metadata_read":mapping}));
+                let mut managed = d9us6_loopback_constraints(native_port);
+                managed.host_allow = vec![native_host.into()];
+                managed.require_sni = true;
+                plan.network_constraints = managed.resolve(None).unwrap();
+                let lifecycle = Arc::new(HostAdminStateStore::new());
+                let issued = lifecycle
+                    .issue_capability_token_for_instance(
+                        &fcp_host::CapabilityIssuanceRequest {
+                            connector_id: "fcp.n8n".into(),
+                            capability_id: "n8n.credentials.metadata.read".into(),
+                            zone_id: ZoneId::work().to_string(),
+                            principal_id: "principal:original".into(),
+                            operations: vec!["n8n.credentials.list".into()],
+                            ttl_secs: 60,
+                            not_before_delay_secs: None,
+                            holder_node: None,
+                            max_delegation_depth: 0,
+                            resource_allow: constraints.resource_allow.clone(),
+                            resource_deny: Vec::new(),
+                            max_calls: Some(1),
+                            max_bytes: Some(2 * 1024 * 1024),
+                            credential_allow: vec![credential],
+                            dry_run: false,
+                        },
+                        &signing,
+                        &instance,
+                    )
+                    .await
+                    .unwrap();
+                request.capability_token = capability_token_from_cbor_b64(
+                    issued.token_cbor_b64.as_deref().unwrap(),
+                    "synthetic child fixture",
+                )
+                .unwrap();
+                let (host_endpoint, child_endpoint) = StdUnixStream::pair().unwrap();
+                let host_shutdown = host_endpoint.try_clone().unwrap();
+                let mut handle = OwnedInvocationHandle::launch(
+                    ProcessSpec {
+                        launcher_path: binary.clone(),
+                        launcher_digest: digest.clone(),
+                        runtime_executable: binary.clone(),
+                        expected_runtime_executable_digest: digest.clone(),
+                        fixed_args: Vec::new(),
+                        fixed_env: BTreeMap::from([
+                            ("FCP_HOST_EGRESS_TRANSPORT".into(), "inherited-fd-v1".into()),
+                            (
+                                "FCP_HOST_EGRESS_AUTH_TOKEN".into(),
+                                "owned-child-fixture-token".into(),
+                            ),
+                        ]),
+                        network_disabled: true,
+                    },
+                    child_endpoint,
+                    owned_invocation_config(&plan.connector_id, &plan.operation),
+                )
+                .await
+                .unwrap();
+                let introspection = owned_rpc(&mut handle, "introspect", json!({}))
+                    .await
+                    .unwrap();
+                let descriptor: Introspection =
+                    serde_json::from_value(introspection.clone()).unwrap();
+                plan.manifest_operation = descriptor
+                    .operations
+                    .into_iter()
+                    .find(|operation| operation.id == request.operation)
+                    .unwrap();
+                let mut policies = HashMap::new();
+                policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+                let state = dispatcher_app_state(
+                    owned_fixture_registry_with_introspection(
+                        "fcp.n8n",
+                        "n8n.credentials.list",
+                        managed,
+                        introspection,
+                    ),
+                    lifecycle,
+                    Some(signing.verifying_key()),
+                    policies,
+                );
+                let profile = AuthProfile::new(
+                    "synthetic-child",
+                    "mcp-bridge",
+                    AuthMethodKind::ApiKey(ApiKeyAuth::bearer("synthetic-child-token").unwrap()),
+                    "synthetic child",
+                    0,
+                )
+                .unwrap();
+                state
+                    .credential_pools
+                    .lock()
+                    .await
+                    .add_credential(
+                        CredentialPoolKey::new(
+                            ProviderKey::new("mcp-bridge").unwrap(),
+                            ZoneId::work(),
+                        ),
+                        CredentialPoolStrategy::Priority,
+                        fcp_host::PooledCredential::new(
+                            credential,
+                            fcp_host::CredentialSource::Manual,
+                            0,
+                            "synthetic child",
+                            CredentialPayload::auth_profile_with_allowed_hosts(
+                                profile,
+                                [native_host],
+                            ),
+                        ),
+                        CredentialUpsertMode::RejectExisting,
+                    )
+                    .unwrap();
+                let binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let session = binding.credentials_session.as_ref().unwrap().clone();
+                let fixture = Arc::new(std::sync::Mutex::new(OwnedCredentialHttpFixture {
+                    requests: Vec::new(),
+                    bad_schema: mode == "schema",
+                    workflow_response: None,
+                }));
+                {
+                    let mut proof = session.lock().unwrap();
+                    proof.protocol = Some(
+                    fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                        serde_json::from_value(
+                            plan.configure_payload.as_ref().unwrap()["credential_metadata_read"]
+                                .clone(),
+                        )
+                        .unwrap(),
+                        server,
+                        &request.id.to_string(),
+                        proof.arguments.clone(),
+                        &json!({"type":"object"}),
+                        &json!({"type":"object","required":["data","count"]}),
+                    )
+                    .unwrap(),
+                );
+                    proof.fixture_http = Some(fixture.clone());
+                }
+                let activated = Arc::new(AtomicBool::new(false));
+                let shutting_down = Arc::new(AtomicBool::new(false));
+                host_endpoint.set_nonblocking(true).unwrap();
+                let codec = InheritedEgressCodec::new(
+                    fcp_async_core::net::UnixStream::from_std(host_endpoint).unwrap(),
+                    "owned-child-fixture-token",
+                )
+                .unwrap();
+                let egress_task = task::spawn(owned_egress_loop(
+                    state,
+                    codec,
+                    binding,
+                    activated.clone(),
+                    shutting_down.clone(),
+                ));
+                let mut sent = request.clone();
+                if mode == "body" {
+                    sent.input["query"] = json!("changed");
+                }
+                if mode == "token" {
+                    sent.capability_token = credentials_bound_test_fixture("wrong.capability")
+                        .1
+                        .capability_token;
+                }
+                let deadline = Instant::now()
+                    + if mode == "deadline" {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(30)
+                    };
+                let response = owned_read_protocol_until_deadline(
+                    &mut handle,
+                    &plan,
+                    &sent,
+                    &activated,
+                    Some(&session),
+                    deadline,
+                )
+                .await;
+                let recorded_before_closing = fixture.lock().unwrap().requests.clone();
+                let replay = if mode == "success"
+                    && response.as_ref().is_ok_and(|value| value.error.is_none())
+                {
+                    Some(
+                        owned_rpc(&mut handle, "invoke", serde_json::to_value(&sent).unwrap())
+                            .await,
+                    )
+                } else {
+                    None
+                };
+                drop(OwnedCredentialsAdmissionGuard(Some(session.clone())));
+                let cancelled = if response.is_ok() {
+                    Some(
+                        owned_rpc(
+                            &mut handle,
+                            "invoke",
+                            serde_json::to_value(&request).unwrap(),
+                        )
+                        .await,
+                    )
+                } else {
+                    None
+                };
+                // Join/reap before checking scenario assertions. A protocol failure
+                // must not turn fixture Drop's detached cancellation into claimed
+                // observed teardown.
+                shutting_down.store(true, Ordering::Release);
+                let shutdown_result = host_shutdown.shutdown(Shutdown::Both);
+                let egress_result = egress_task.await;
+                let teardown = handle.terminate().await;
+                assert!(shutdown_result.is_ok(), "{mode}: endpoint shutdown");
+                let teardown = teardown.unwrap();
+                assert!(teardown.completion.reaped && teardown.completion.group_absent);
+                eprintln!(
+                    "credential_child_fixture server={server} case={mode} request={} messages={} reaped=true group_absent=true",
+                    request.id,
+                    recorded_before_closing.len()
+                );
+                let egress_result = egress_result.unwrap();
+                assert!(
+                    egress_result.is_ok()
+                        || matches!(egress_result, Err(HostError::InvalidFilter(ref message))
+                        if message == "owned host-egress request identity does not match invocation"),
+                    "{mode}: unexpected closing egress completion"
+                );
+                assert_eq!(
+                    fixture.lock().unwrap().requests.len(),
+                    recorded_before_closing.len()
+                );
+                if mode == "deadline" {
+                    assert!(
+                        matches!(response, Err(HostError::PreflightFailed(ref message))
+                        if message == "owned read invocation deadline exceeded")
+                    );
+                    assert!(recorded_before_closing.is_empty());
+                    assert!(session.lock().unwrap().closed);
+                    continue;
+                }
+                let response = response.unwrap();
+                let cancelled: InvokeResponse =
+                    serde_json::from_value(cancelled.unwrap().unwrap()).unwrap();
+                assert!(cancelled.error.is_some());
+                assert!(session.lock().unwrap().closed);
+                if mode == "success" {
+                    assert!(response.error.is_none());
+                    let output = response.result.as_ref().unwrap();
+                    assert_eq!(output["credentials"][0]["id"], "credential-one");
+                    assert_eq!(
+                        output["credentials"][0]["resourceUri"],
+                        format!("fwc-n8n://{server}/credentials/credential%2Done")
+                    );
+                    assert_eq!(output["page"]["continuation"], "unavailable");
+                    assert!(!output.to_string().contains("CHILD_PROVIDER_SECRET_CANARY"));
+                    assert_eq!(recorded_before_closing.len(), 4);
+                    assert_eq!(
+                        recorded_before_closing[3]["params"],
+                        json!({"name":"list_credentials",
+                    "arguments":{"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"limit":3}})
+                    );
+                    let replay: InvokeResponse =
+                        serde_json::from_value(replay.unwrap().unwrap()).unwrap();
+                    assert!(replay.error.is_some());
+                } else {
+                    assert!(response.error.is_some());
+                    assert_eq!(
+                        recorded_before_closing.len(),
+                        if matches!(mode, "schema" | "body") {
+                            3
+                        } else {
+                            0
+                        },
+                        "{mode}: rejected before credential tool call"
+                    );
+                    if matches!(mode, "schema" | "body") {
+                        assert_eq!(
+                            recorded_before_closing
+                                .iter()
+                                .map(|value| value["method"].as_str().unwrap())
+                                .collect::<Vec<_>>(),
+                            ["initialize", "notifications/initialized", "tools/list"],
+                            "{mode}: no application tools/call dispatched"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(all(feature = "n8n-test-support", target_os = "linux"))]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[ignore = "requires the explicit original connector fixture executable"]
+    async fn get_code_original_child_sensitive_authority_and_pins() {
+        let binary =
+            std::fs::canonicalize(std::env::var_os("FCP_N8N_CREDENTIAL_FIXTURE_BINARY").unwrap())
+                .unwrap();
+        let digest = blake3::hash(&std::fs::read(&binary).unwrap())
+            .to_hex()
+            .to_string();
+        let retained = tempfile::Builder::new()
+            .prefix("original-code-child-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        for server in ["eec", "hetzner"] {
+            for case in [
+                "success",
+                "published",
+                "both",
+                "metadata",
+                "metadata-false",
+                "metadata-absent",
+                "metadata-null",
+                "wrong-cap",
+                "wrong-op",
+                "wrong-instance",
+                "wrong-server",
+                "wrong-workflow",
+                "wrong-version",
+                "wrong-request",
+                "wrong-body",
+                "response-version",
+                "response-graph",
+                "wrong-profile",
+                "oauth",
+                "no-credential-allow",
+            ] {
+                let (mut plan, mut request, instance, _, signing) =
+                    credentials_bound_test_fixture("n8n.workflows.code.read");
+                plan.operation = "n8n.workflows.get_code".parse().unwrap();
+                request.operation = plan.operation.clone();
+                let metadata = case.starts_with("metadata");
+                if metadata {
+                    plan.operation = "n8n.workflows.get".parse().unwrap();
+                    request.operation = plan.operation.clone();
+                }
+                let nodes = json!([{"id":"code-one","name":"Code","type":"n8n-nodes-base.code","parameters":{"jsCode":"SENSITIVE_CODE_CANARY","pythonCode":"INACTIVE_SOURCE_CANARY","unrelated":"PRIVATE_PARAMETERS_CANARY"},"credentials":{"secret":"CREDENTIAL_CANARY"}}]);
+                let graph_digest =
+                    n8n_run_once_graph_digest(&json!({"graph":{"nodes":nodes,"connections":{}}}))
+                        .unwrap();
+                request.input = json!({"id":"workflow-one","version":"draft","pins":{"draft":{"versionId":"version-one","graphDigest":graph_digest}}});
+                if case == "published" {
+                    request.input = json!({"id":"workflow-one","version":"published","pins":{"published":{"versionId":"published-one","graphDigest":graph_digest}}});
+                } else if case == "both" {
+                    request.input["version"] = json!("both");
+                    request.input["pins"]["published"] =
+                        json!({"versionId":"published-one","graphDigest":graph_digest});
+                }
+                let read = fcp_host::WorkflowCodeReadInput::parse(&request.input).unwrap();
+                let resource = if metadata {
+                    expected_n8n_read_only_resource_uri(
+                        if server == "eec" {
+                            N8nReadOnlyServerId::Eec
+                        } else {
+                            N8nReadOnlyServerId::Hetzner
+                        },
+                        "n8n.workflows.get",
+                        &json!({"id":"workflow-one"}),
+                    )
+                    .unwrap()
+                } else {
+                    read.resource_uri(server).unwrap()
+                };
+                if metadata {
+                    request.input = json!({"id":"workflow-one"});
+                    if case != "metadata-absent" {
+                        request.input["includeCode"] = match case {
+                            "metadata-false" => json!(false),
+                            "metadata-null" => Value::Null,
+                            _ => json!(true),
+                        };
+                    }
+                }
+                let credential = CredentialId::new();
+                let constraints = CapabilityConstraints {
+                    resource_allow: vec![resource.clone()],
+                    credential_allow: vec![credential],
+                    ..Default::default()
+                };
+                let token_instance = if case == "wrong-instance" {
+                    InstanceId::new()
+                } else {
+                    instance.clone()
+                };
+                let lifecycle = Arc::new(HostAdminStateStore::new());
+                let issued = lifecycle
+                    .issue_capability_token_for_instance(
+                        &fcp_host::CapabilityIssuanceRequest {
+                            connector_id: "fcp.n8n".into(),
+                            capability_id: if metadata || case == "wrong-cap" {
+                                "n8n.workflows.read"
+                            } else {
+                                "n8n.workflows.code.read"
+                            }
+                            .into(),
+                            zone_id: request.zone_id.to_string(),
+                            principal_id: "principal:original".into(),
+                            operations: vec![
+                                if metadata || case == "wrong-op" {
+                                    "n8n.workflows.get"
+                                } else {
+                                    "n8n.workflows.get_code"
+                                }
+                                .into(),
+                            ],
+                            ttl_secs: 60,
+                            not_before_delay_secs: None,
+                            holder_node: None,
+                            max_delegation_depth: 0,
+                            resource_allow: constraints.resource_allow.clone(),
+                            resource_deny: Vec::new(),
+                            max_calls: Some(1),
+                            max_bytes: Some(4 * 1024 * 1024),
+                            credential_allow: if case == "no-credential-allow" {
+                                Vec::new()
+                            } else {
+                                vec![credential]
+                            },
+                            dry_run: false,
+                        },
+                        &signing,
+                        &token_instance,
+                    )
+                    .await
+                    .unwrap();
+                request.capability_token = capability_token_from_cbor_b64(
+                    issued.token_cbor_b64.as_deref().unwrap(),
+                    "synthetic code fixture",
+                )
+                .unwrap();
+                let host = if server == "eec" {
+                    "n8n.europeaneyecenter.com"
+                } else {
+                    "n8nhet.levilaser.com"
+                };
+                let mut managed = d9us6_loopback_constraints(443);
+                managed.host_allow = vec![host.into()];
+                managed.require_sni = true;
+                plan.network_constraints = managed.resolve(None).unwrap();
+                plan.configure_payload = Some(
+                    json!({"server_id":server,"base_url":format!("https://{host}/api/v1"),"credential_id":credential.to_string()}),
+                );
+                plan.state_root = Some(retained.join(server).join(case));
+                let (host_endpoint, child_endpoint) = StdUnixStream::pair().unwrap();
+                let host_shutdown = host_endpoint.try_clone().unwrap();
+                let mut handle = OwnedInvocationHandle::launch(
+                    ProcessSpec {
+                        launcher_path: binary.clone(),
+                        launcher_digest: digest.clone(),
+                        runtime_executable: binary.clone(),
+                        expected_runtime_executable_digest: digest.clone(),
+                        fixed_args: Vec::new(),
+                        fixed_env: BTreeMap::from([
+                            ("FCP_HOST_EGRESS_TRANSPORT".into(), "inherited-fd-v1".into()),
+                            (
+                                "FCP_HOST_EGRESS_AUTH_TOKEN".into(),
+                                "code-child-token".into(),
+                            ),
+                        ]),
+                        network_disabled: true,
+                    },
+                    child_endpoint,
+                    owned_invocation_config(&plan.connector_id, &plan.operation),
+                )
+                .await
+                .unwrap();
+                let introspection_response = handle.request("introspect", json!({})).await;
+                if let Err(error) = &introspection_response {
+                    let frame_too_large = matches!(error, OwnedInvocationError::FrameTooLarge);
+                    let teardown = handle.terminate().await;
+                    assert!(teardown.is_ok(), "introspection refusal teardown failed");
+                    panic!("introspection refused: frame_too_large={frame_too_large}");
+                }
+                let introspection_envelope = introspection_response.unwrap();
+                let introspection = introspection_envelope.get("result").cloned().unwrap();
+                let descriptor: Introspection =
+                    serde_json::from_value(introspection.clone()).unwrap();
+                plan.manifest_operation = descriptor
+                    .operations
+                    .into_iter()
+                    .find(|op| op.id == request.operation)
+                    .unwrap();
+                let mut policies = HashMap::new();
+                policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+                let state = dispatcher_app_state(
+                    owned_fixture_registry_with_introspection(
+                        "fcp.n8n",
+                        if metadata {
+                            "n8n.workflows.get"
+                        } else {
+                            "n8n.workflows.get_code"
+                        },
+                        managed,
+                        introspection,
+                    ),
+                    lifecycle,
+                    Some(signing.verifying_key()),
+                    policies,
+                );
+                let method = if case == "oauth" {
+                    AuthMethodKind::OAuthDeviceCode(
+                        OAuthDeviceCodeAuth::new(
+                            "synthetic-client",
+                            "https://invalid.example/device",
+                            "https://invalid.example/token",
+                            "synthetic-scope",
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    AuthMethodKind::ApiKey(
+                        ApiKeyAuth::new(
+                            "synthetic-code-key",
+                            if case == "wrong-profile" {
+                                "Authorization"
+                            } else {
+                                "X-N8N-API-KEY"
+                            },
+                            None::<String>,
+                        )
+                        .unwrap(),
+                    )
+                };
+                let profile =
+                    AuthProfile::new("synthetic-code-child", "n8n", method, "synthetic", 0)
+                        .unwrap();
+                state
+                    .credential_pools
+                    .lock()
+                    .await
+                    .add_credential(
+                        CredentialPoolKey::new(ProviderKey::new("n8n").unwrap(), ZoneId::work()),
+                        CredentialPoolStrategy::Priority,
+                        fcp_host::PooledCredential::new(
+                            credential,
+                            fcp_host::CredentialSource::Manual,
+                            0,
+                            "synthetic",
+                            CredentialPayload::auth_profile_with_allowed_hosts(profile, [host]),
+                        ),
+                        CredentialUpsertMode::RejectExisting,
+                    )
+                    .unwrap();
+                let mut binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let fixture = Arc::new(std::sync::Mutex::new(OwnedCredentialHttpFixture {
+                    requests: Vec::new(),
+                    bad_schema: false,
+                    workflow_response: Some(
+                        json!({"id":"workflow-one","name":"Synthetic","active":false,"isArchived":false,
+                        "versionId":if case == "response-version" {"changed-version"} else {"version-one"},"activeVersionId":"published-one","activeVersion":{"versionId":"published-one","nodes":nodes,"connections":{}},
+                        "nodes":if case=="response-graph" {json!([])} else {nodes.clone()},"connections":{},"staticData":"STATIC_CANARY","pinData":"PIN_CANARY"}),
+                    ),
+                }));
+                binding.fixture_http = Some(Arc::clone(&fixture));
+                let credential_state = Arc::clone(&state);
+                let wait_guard = OwnedReadWaitGuard(binding.read_wait.clone());
+                let activated = Arc::new(AtomicBool::new(false));
+                let shutting_down = Arc::new(AtomicBool::new(false));
+                host_endpoint.set_nonblocking(true).unwrap();
+                let codec = InheritedEgressCodec::new(
+                    fcp_async_core::net::UnixStream::from_std(host_endpoint).unwrap(),
+                    "code-child-token",
+                )
+                .unwrap();
+                let egress_task = task::spawn(owned_egress_loop(
+                    state,
+                    codec,
+                    binding,
+                    Arc::clone(&activated),
+                    Arc::clone(&shutting_down),
+                ));
+                let mut sent = request.clone();
+                let mut sent_plan = plan.clone();
+                match case {
+                    "wrong-server" => {
+                        sent_plan.configure_payload.as_mut().unwrap()["server_id"] =
+                            json!(if server == "eec" { "hetzner" } else { "eec" });
+                    }
+                    "wrong-workflow" => {
+                        sent.input["id"] = json!("workflow-other");
+                    }
+                    "wrong-version" => {
+                        sent.input["pins"]["draft"]["versionId"] = json!("version-other");
+                    }
+                    "wrong-request" => {
+                        sent.id = fcp_core::RequestId::random();
+                    }
+                    "wrong-body" => {
+                        sent.input["unexpected"] = json!("BODY_CANARY");
+                    }
+                    _ => {}
+                }
+                let response = owned_read_protocol_until_deadline(
+                    &mut handle,
+                    &sent_plan,
+                    &sent,
+                    &activated,
+                    None,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await;
+                drop(wait_guard);
+                shutting_down.store(true, Ordering::Release);
+                let shutdown = host_shutdown.shutdown(Shutdown::Both);
+                let egress = egress_task.await;
+                let teardown = handle.terminate().await;
+                assert!(shutdown.is_ok());
+                let egress = egress.unwrap();
+                assert!(
+                    egress.is_ok()
+                        || matches!(egress,Err(HostError::InvalidFilter(ref code))
+                    if code == "owned host-egress request identity does not match invocation")
+                );
+                let teardown = teardown.unwrap();
+                assert!(teardown.completion.reaped && teardown.completion.group_absent);
+                let lease = credential_state
+                    .credential_pools
+                    .lock()
+                    .await
+                    .acquire_specific_in_zone(&ZoneId::work(), credential, Utc::now())
+                    .unwrap();
+                release_host_egress_credential_lease(&credential_state, lease).await;
+                let response = response.unwrap();
+                let requests = fixture.lock().unwrap().requests.len();
+                if let Some(error) = &response.error {
+                    eprintln!(
+                        "code_child_refusal server={server} case={case} code={} http_calls={requests}",
+                        error.error_code()
+                    );
+                }
+                if matches!(case, "success" | "published" | "both") {
+                    assert!(response.error.is_none());
+                    let output = response.result.unwrap();
+                    assert_eq!(
+                        output["versions"][0]["codeNodes"][0]["source"],
+                        "SENSITIVE_CODE_CANARY"
+                    );
+                    for denied in [
+                        "INACTIVE_SOURCE_CANARY",
+                        "PRIVATE_PARAMETERS_CANARY",
+                        "CREDENTIAL_CANARY",
+                        "STATIC_CANARY",
+                        "PIN_CANARY",
+                    ] {
+                        assert!(!output.to_string().contains(denied));
+                    }
+                    assert_eq!(requests, 1);
+                } else if matches!(case, "metadata-false" | "metadata-absent") {
+                    assert!(response.error.is_none());
+                    assert!(
+                        !response
+                            .result
+                            .unwrap()
+                            .to_string()
+                            .contains("SENSITIVE_CODE_CANARY")
+                    );
+                    assert_eq!(requests, 1);
+                } else {
+                    assert!(response.error.is_some());
+                    assert_eq!(
+                        requests,
+                        usize::from(matches!(case, "response-version" | "response-graph"))
+                    );
+                }
+                eprintln!(
+                    "code_child_fixture server={server} case={case} http_calls={requests} reaped=true group_absent=true raw_source_logged=false"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(feature = "n8n-test-support", target_os = "linux"))]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[ignore = "requires the explicit original connector fixture executable"]
+    async fn workflows_original_child_pending_http_cancel_and_deadline() {
+        let binary =
+            std::fs::canonicalize(std::env::var_os("FCP_N8N_CREDENTIAL_FIXTURE_BINARY").unwrap())
+                .unwrap();
+        let digest = blake3::hash(&std::fs::read(&binary).unwrap())
+            .to_hex()
+            .to_string();
+        let retained = tempfile::Builder::new()
+            .prefix("original-rest-child-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        for cancel in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (observed_tx, observed_rx) = oneshot::channel();
+            let server = task::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() < 8192);
+                }
+                let headers = std::str::from_utf8(&bytes).unwrap().to_ascii_lowercase();
+                assert!(headers.starts_with("get /api/v1/workflows?"));
+                assert!(headers.contains("projectid=project-one"));
+                assert!(headers.contains("active=true"));
+                assert!(headers.contains("x-n8n-api-key: synthetic-rest-child"));
+                observed_tx.send(()).unwrap();
+                assert_eq!(stream.read(&mut buffer).await.unwrap(), 0);
+                assert!(
+                    fcp_async_core::time::timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let (mut plan, mut request, instance, _, signing) =
+                credentials_bound_test_fixture("n8n.workflows.read");
+            plan.operation = "n8n.workflows.search".parse().unwrap();
+            request.operation = plan.operation.clone();
+            request.input = json!({"projectId":"project-one","active":true,"page":{"limit":3}});
+            request.deadline_ms = Some(if cancel { 2000 } else { 1000 });
+            let credential = CredentialId::new();
+            let resource = expected_n8n_read_only_resource_uri(
+                N8nReadOnlyServerId::Eec,
+                "n8n.workflows.search",
+                &request.input,
+            )
+            .unwrap();
+            let lifecycle = Arc::new(HostAdminStateStore::new());
+            let issued = lifecycle
+                .issue_capability_token_for_instance(
+                    &fcp_host::CapabilityIssuanceRequest {
+                        connector_id: "fcp.n8n".into(),
+                        capability_id: "n8n.workflows.read".into(),
+                        zone_id: ZoneId::work().to_string(),
+                        principal_id: "principal:original".into(),
+                        operations: vec!["n8n.workflows.search".into()],
+                        ttl_secs: 60,
+                        not_before_delay_secs: None,
+                        holder_node: None,
+                        max_delegation_depth: 0,
+                        resource_allow: vec![resource],
+                        resource_deny: Vec::new(),
+                        max_calls: Some(1),
+                        max_bytes: Some(2 * 1024 * 1024),
+                        credential_allow: vec![credential],
+                        dry_run: false,
+                    },
+                    &signing,
+                    &instance,
+                )
+                .await
+                .unwrap();
+            request.capability_token = capability_token_from_cbor_b64(
+                issued.token_cbor_b64.as_deref().unwrap(),
+                "synthetic REST child",
+            )
+            .unwrap();
+            let managed = d9us6_loopback_constraints(address.port());
+            plan.network_constraints = managed.resolve(None).unwrap();
+            plan.state_root = Some(retained.join(if cancel { "cancel" } else { "deadline" }));
+            plan.configure_payload = Some(
+                json!({"server_id":"eec","base_url":format!("http://{address}/api/v1"),"credential_id":credential.to_string()}),
+            );
+            let (host_endpoint, child_endpoint) = StdUnixStream::pair().unwrap();
+            let host_shutdown = host_endpoint.try_clone().unwrap();
+            let mut handle = OwnedInvocationHandle::launch(
+                ProcessSpec {
+                    launcher_path: binary.clone(),
+                    launcher_digest: digest.clone(),
+                    runtime_executable: binary.clone(),
+                    expected_runtime_executable_digest: digest.clone(),
+                    fixed_args: Vec::new(),
+                    fixed_env: BTreeMap::from([
+                        ("FCP_HOST_EGRESS_TRANSPORT".into(), "inherited-fd-v1".into()),
+                        (
+                            "FCP_HOST_EGRESS_AUTH_TOKEN".into(),
+                            "rest-child-token".into(),
+                        ),
+                    ]),
+                    network_disabled: true,
+                },
+                child_endpoint,
+                owned_invocation_config(&plan.connector_id, &plan.operation),
+            )
+            .await
+            .unwrap();
+            let introspection = owned_rpc(&mut handle, "introspect", json!({}))
+                .await
+                .unwrap();
+            let descriptor: Introspection = serde_json::from_value(introspection.clone()).unwrap();
+            plan.manifest_operation = descriptor
+                .operations
+                .into_iter()
+                .find(|op| op.id == request.operation)
+                .unwrap();
+            let mut policies = HashMap::new();
+            policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+            let state = dispatcher_app_state(
+                owned_fixture_registry_with_introspection(
+                    "fcp.n8n",
+                    "n8n.workflows.search",
+                    managed,
+                    introspection,
+                ),
+                lifecycle,
+                Some(signing.verifying_key()),
+                policies,
+            );
+            let profile = AuthProfile::new(
+                "synthetic-rest-child",
+                "n8n",
+                AuthMethodKind::ApiKey(
+                    ApiKeyAuth::new("synthetic-rest-child", "X-N8N-API-KEY", None::<String>)
+                        .unwrap(),
+                ),
+                "synthetic",
+                0,
+            )
+            .unwrap();
+            state
+                .credential_pools
+                .lock()
+                .await
+                .add_credential(
+                    CredentialPoolKey::new(ProviderKey::new("n8n").unwrap(), ZoneId::work()),
+                    CredentialPoolStrategy::Priority,
+                    fcp_host::PooledCredential::new(
+                        credential,
+                        fcp_host::CredentialSource::Manual,
+                        0,
+                        "synthetic",
+                        CredentialPayload::auth_profile_with_allowed_hosts(profile, ["127.0.0.1"]),
+                    ),
+                    CredentialUpsertMode::RejectExisting,
+                )
+                .unwrap();
+            let binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+            let read_wait = binding.read_wait.clone().unwrap();
+            let guard = OwnedReadWaitGuard(Some(Arc::clone(&read_wait)));
+            let activated = Arc::new(AtomicBool::new(false));
+            let shutting_down = Arc::new(AtomicBool::new(false));
+            host_endpoint.set_nonblocking(true).unwrap();
+            let codec = InheritedEgressCodec::new(
+                fcp_async_core::net::UnixStream::from_std(host_endpoint).unwrap(),
+                "rest-child-token",
+            )
+            .unwrap();
+            let egress_task = task::spawn(owned_egress_loop(
+                Arc::clone(&state),
+                codec,
+                binding,
+                Arc::clone(&activated),
+                Arc::clone(&shutting_down),
+            ));
+            let result = {
+                let mut protocol = Box::pin(owned_read_protocol_until_deadline(
+                    &mut handle,
+                    &plan,
+                    &request,
+                    &activated,
+                    None,
+                    read_wait.deadline,
+                ));
+                let mut observed = Box::pin(fcp_async_core::time::timeout(
+                    Duration::from_secs(2),
+                    observed_rx,
+                ));
+                match futures_util::future::select(protocol.as_mut(), observed.as_mut()).await {
+                    futures_util::future::Either::Left((result, _)) => result,
+                    futures_util::future::Either::Right((observed, _)) => {
+                        observed.unwrap().unwrap();
+                        if cancel {
+                            read_wait.close();
+                        }
+                        protocol.await
+                    }
+                }
+            };
+            drop(guard);
+            let final_result =
+                owned_finalize(handle, host_shutdown, shutting_down, egress_task, result).await;
+            server.await.unwrap();
+            assert!(
+                final_result.is_err()
+                    || final_result
+                        .as_ref()
+                        .is_ok_and(|response| response.error.is_some())
+            );
+            assert!(read_wait.state.lock().unwrap().0);
+            let lease = acquire_host_egress_credential_lease(
+                &state,
+                &ZoneId::work(),
+                Some(&credential.to_string()),
+                &[credential.to_string()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            release_host_egress_credential_lease(&state, lease).await;
+            eprintln!(
+                "rest_child_fixture case={} http_pending_observed=true next_page=0 refresh=0 proxy_joined=true child_reaped_group_absent=true",
+                if cancel { "cancel" } else { "deadline" }
+            );
+        }
+    }
+
     #[cfg(feature = "n8n-test-support")]
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn credentials_owned_http_original_authority_and_metadata_success() {
@@ -28909,16 +30310,17 @@ deny_ptrace = true
             ));
         }
         server.join().unwrap();
-        let proof = session.lock().unwrap();
-        let projected = proof.protocol.as_ref().unwrap().projection().unwrap();
-        assert_eq!(projected["credentials"][0]["id"], "credential-one");
-        assert!(!projected.to_string().contains("PROVIDER_SECRET_CANARY"));
-        assert_eq!(
-            proof.original.claims().get_principal_id(),
-            Some("principal:original")
-        );
-        assert!(proof.protocol.as_ref().unwrap().request().is_err());
-        drop(proof);
+        {
+            let proof = session.lock().unwrap();
+            let projected = proof.protocol.as_ref().unwrap().projection().unwrap();
+            assert_eq!(projected["credentials"][0]["id"], "credential-one");
+            assert!(!projected.to_string().contains("PROVIDER_SECRET_CANARY"));
+            assert_eq!(
+                proof.original.claims().get_principal_id(),
+                Some("principal:original")
+            );
+            assert!(proof.protocol.as_ref().unwrap().request().is_err());
+        }
         // A fresh private test protocol makes revocation, rather than completed
         // protocol state, the reason for denial before any further HTTP.
         {
@@ -30261,6 +31663,20 @@ done
             SafetyTier::Safe,
         ))
         .expect("introspection serializes");
+        owned_fixture_registry_with_introspection(
+            connector_id,
+            operation_id,
+            constraints,
+            introspection,
+        )
+    }
+
+    fn owned_fixture_registry_with_introspection(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        constraints: ManagedNetworkConstraints,
+        introspection: Value,
+    ) -> Arc<SubprocessRegistry> {
         let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
         let runner_task = task::spawn(async move {
             while let Some(request) = runner_rx.recv().await {
@@ -31896,6 +33312,137 @@ done
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn owned_read_wait_cancels_pending_http_and_releases_lease() {
+        for cancelled_by_drop in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let (observed_tx, observed_rx) = oneshot::channel();
+            let server =
+                task::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0_u8; 1024];
+                    while !bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        let count = stream.read(&mut buffer).await.unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&buffer[..count]);
+                        assert!(bytes.len() <= 8192);
+                    }
+                    observed_tx.send(()).unwrap();
+                    // A dropped pending HTTP future closes its socket, without a
+                    // response, refresh, second page, or second connection.
+                    assert_eq!(stream.read(&mut buffer).await.unwrap(), 0);
+                    assert!(fcp_async_core::time::timeout(
+                    Duration::from_millis(50), listener.accept(),
+                ).await.is_err());
+                });
+            let connector = "fcp.test.d9us6-http:utility:1.0.0";
+            let operation = "test.egress_http";
+            let credential = CredentialId::parse("11111111-1111-1111-1111-111111111111").unwrap();
+            let (state, signing) = d9us6_host_egress_state(
+                connector, operation, address.port(), credential,
+                json!({"host_allow":["127.0.0.1"],"http":{"headers":[{"name":"Authorization","value":"Bearer synthetic-read-wait"}]}}),
+            ).await;
+            let token = test_capability_token_with_constraints(
+                &signing,
+                "cap.test.egress",
+                operation,
+                ZoneId::work().as_str(),
+                &fcp_core::CapabilityConstraints {
+                    resource_allow: vec!["*".into()],
+                    credential_allow: vec![credential],
+                    ..Default::default()
+                },
+            );
+            let context = HostEgressContext {
+                connector_id: connector.into(),
+                operation_id: operation.into(),
+                resource_uri: "fcp-test://host-egress/http".into(),
+                zone_id: ZoneId::work().to_string(),
+                request_id: "synthetic-read-wait".into(),
+                correlation_id: None,
+                capability_token_cbor_b64: capability_token_b64(&token).unwrap(),
+            };
+            let authorized = authorize_host_egress_context(&state, &context, &context.resource_uri)
+                .await
+                .unwrap();
+            let wait = Arc::new(OwnedReadWait {
+                deadline: Instant::now()
+                    + Duration::from_millis(if cancelled_by_drop { 2000 } else { 500 }),
+                state: std::sync::Mutex::new((false, None)),
+            });
+            let mut guard = Some(OwnedReadWaitGuard(Some(Arc::clone(&wait))));
+            let binding = OwnedPerInvocationBinding {
+                connector_id: connector.into(),
+                operation_id: operation.into(),
+                zone_id: context.zone_id.clone(),
+                request_id: context.request_id.clone(),
+                correlation_id: None,
+                capability_token_cbor_b64: context.capability_token_cbor_b64.clone(),
+                network_constraints: authorized.constraints,
+                comparison_capture: None,
+                credentials_session: None,
+                read_wait: Some(Arc::clone(&wait)),
+                code_read: None,
+                fixture_http: None,
+            };
+            let request = HostEgressHttpRequest {
+                context,
+                url: format!("http://{address}/api/v1/workflows?limit=200"),
+                method: "GET".into(),
+                headers: Vec::new(),
+                body: None,
+                credential_id: Some(credential.to_string()),
+            };
+            let pending_state = Arc::clone(&state);
+            let pending_binding = binding.clone();
+            let pending_request = request.clone();
+            let http = task::spawn(async move {
+                owned_perform_egress(
+                    &pending_state,
+                    &pending_binding,
+                    HostEgressWireRequestPayload::Http(pending_request),
+                )
+                .await
+            });
+            fcp_async_core::time::timeout(Duration::from_secs(2), observed_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            if cancelled_by_drop {
+                drop(guard.take());
+            }
+            let result = fcp_async_core::time::timeout(Duration::from_secs(2), http)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(result.is_err());
+            drop(guard);
+            server.await.unwrap();
+            assert!(wait.state.lock().unwrap().0);
+            assert!(
+                owned_perform_egress(
+                    &state,
+                    &binding,
+                    HostEgressWireRequestPayload::Http(request)
+                )
+                .await
+                .is_err()
+            );
+            let lease = acquire_host_egress_credential_lease(
+                &state,
+                &ZoneId::work(),
+                Some(&credential.to_string()),
+                &[credential.to_string()],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            release_host_egress_credential_lease(&state, lease).await;
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn br_d9us6_host_egress_http_loopback_injects_credential_without_echoing_secret() {
         let observed_request = Arc::new(StdMutex::new(None::<String>));
         let (addr, server_task) = d9us6_one_shot_http_server(Arc::clone(&observed_request)).await;
@@ -32008,6 +33555,8 @@ done
                 .resolve(None)
                 .expect("nqm81.20 test constraints resolve"),
             credential_allow: Vec::new(),
+            #[cfg(all(test, target_os = "linux"))]
+            fixture_http: None,
         }
     }
 

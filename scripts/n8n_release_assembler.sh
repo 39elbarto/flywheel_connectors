@@ -835,11 +835,14 @@ def validate_read_policy(raw):
     expected = {"name": "search_workflows", "class": "read",
         "input_schema_digest": INPUT_PIN, "output_schema_digest": OUTPUT_PIN,
         "input_schema_present": True, "output_schema_present": True}
-    if (not isinstance(value, dict) or set(value) != {"schema", "servers"}
+    if (not isinstance(value, dict) or set(value) not in ({"schema", "servers"}, {"schema", "servers", "code_read"})
         or value["schema"] not in ("fwc.n8n.search-read-policy.v1", "fwc.n8n.safe-read-policy.v1")
         or not isinstance(value["servers"], dict)
         or set(value["servers"]) != {"eec", "hetzner"}):
         raise ValueError("search read policy denied")
+    if "code_read" in value and (value["schema"] != "fwc.n8n.safe-read-policy.v1"
+        or value["code_read"] != {"operation": "n8n.workflows.get_code", "capability": "n8n.workflows.code.read"}):
+        raise ValueError("sensitive code read policy denied")
     for server in ("eec", "hetzner"):
         observed = value["servers"][server]
         if value["schema"] == "fwc.n8n.safe-read-policy.v1":
@@ -894,6 +897,16 @@ def add_read_inventory(official, common, server, policy):
         if operation not in inventory["allowed_operations"]:
             inventory["allowed_operations"].append(operation)
         network[operation] = copy.deepcopy(network[source])
+    if "code_read" in policy:
+        network = common["operation_network_constraints"]
+        source = network.get("n8n.workflows.get")
+        if not isinstance(source, dict) or source.get("port_allow") != [443]:
+            raise ValueError("sensitive code read network denied")
+        operation = "n8n.workflows.get_code"
+        if operation in network or operation in common["allowed_operations"]:
+            raise ValueError("sensitive code read duplicate denied")
+        common["allowed_operations"].append(operation)
+        network[operation] = copy.deepcopy(source)
     return official, common
 
 def input_identity(meta):

@@ -15,6 +15,13 @@ path = "src/lib.rs"
 
 [features]
 owner-signing = []
+n8n-test-support = ["fcp-host/n8n-test-support"]
+
+[[test]]
+name = "n8n-owned-credential-fixture"
+path = "tests/owned_credential_fixture.rs"
+harness = false
+required-features = ["n8n-test-support"]
 
 [[bin]]
 name = "fcp-n8n"

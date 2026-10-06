@@ -926,12 +926,20 @@ mod tests {
         sender: FixtureSender,
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CompletionObservation {
+        Pending,
+        Confirmed,
+    }
+
     struct MonitorProtocol {
         binding: MonitorBinding,
         seal: Arc<()>,
         next_sequence: u32,
         phase: MonitorPhase,
         monitor_reaped: bool,
+        guardian_reaped: CompletionObservation,
+        accounting_empty: CompletionObservation,
         host_io_joined: bool,
         actor_joined: bool,
     }
@@ -954,6 +962,8 @@ mod tests {
                     next_sequence: 0,
                     phase: MonitorPhase::AwaitReady,
                     monitor_reaped: false,
+                    guardian_reaped: CompletionObservation::Pending,
+                    accounting_empty: CompletionObservation::Pending,
                     host_io_joined: false,
                     actor_joined: false,
                 },
@@ -1046,9 +1056,38 @@ mod tests {
             self.finish_if_complete();
         }
 
+        // Fixture observations are separate from provider/monitor reports.
+        // A lost guardian wait or populated accounting is not inferred from
+        // a monitor completion frame, parenthood, UID or a subsequent query.
+        fn guardian_wait(&mut self, reaped: bool) {
+            self.guardian_reaped = if reaped {
+                CompletionObservation::Confirmed
+            } else {
+                CompletionObservation::Pending
+            };
+            if !reaped || self.phase != MonitorPhase::ProviderCompleted {
+                self.phase = MonitorPhase::Unknown;
+            }
+            self.finish_if_complete();
+        }
+
+        fn accounting_observation(&mut self, populated: bool) {
+            self.accounting_empty = if populated {
+                CompletionObservation::Pending
+            } else {
+                CompletionObservation::Confirmed
+            };
+            if populated || self.phase != MonitorPhase::ProviderCompleted {
+                self.phase = MonitorPhase::Unknown;
+            }
+            self.finish_if_complete();
+        }
+
         fn finish_if_complete(&mut self) {
             if self.phase == MonitorPhase::ProviderCompleted
                 && self.monitor_reaped
+                && self.guardian_reaped == CompletionObservation::Confirmed
+                && self.accounting_empty == CompletionObservation::Confirmed
                 && self.host_io_joined
                 && self.actor_joined
             {
@@ -1090,6 +1129,10 @@ mod tests {
         protocol.monitor_wait(true);
         assert!(protocol.phase == MonitorPhase::ProviderCompleted);
         protocol.host_joins(true, true);
+        assert!(protocol.phase == MonitorPhase::ProviderCompleted);
+        protocol.guardian_wait(true);
+        assert!(protocol.phase == MonitorPhase::ProviderCompleted);
+        protocol.accounting_observation(false);
         assert!(protocol.phase == MonitorPhase::Retired);
         let (mut incomplete, _, monitor) = MonitorProtocol::fixture();
         monitor_ready(&mut incomplete, &monitor);
@@ -1151,6 +1194,47 @@ mod tests {
         }
         let sample = protocol.frame(MonitorEvent::Sample { resident_bytes: 0 });
         assert!(protocol.accept(&monitor, &sample).is_err());
+    }
+
+    #[test]
+    fn a1_guardian_wait_and_empty_accounting_are_independent_requirements() {
+        for (guardian_reaped, populated) in
+            [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let (mut protocol, host, monitor) = MonitorProtocol::fixture();
+            monitor_ready(&mut protocol, &monitor);
+            let terminate = protocol.frame(MonitorEvent::Terminate);
+            protocol.accept(&host, &terminate).unwrap();
+            let completed = protocol.frame(MonitorEvent::Completed {
+                exec_identity_confirmed: true,
+                egress_closed: true,
+                provider_reaped: true,
+                descendants_absent: true,
+                io_joined: true,
+                permission_ok: true,
+            });
+            protocol.accept(&monitor, &completed).unwrap();
+            protocol.monitor_wait(true);
+            protocol.host_joins(true, true);
+            assert!(protocol.phase == MonitorPhase::ProviderCompleted);
+            protocol.guardian_wait(guardian_reaped);
+            protocol.accounting_observation(populated);
+            assert!(
+                protocol.phase
+                    == if guardian_reaped && !populated {
+                        MonitorPhase::Retired
+                    } else {
+                        MonitorPhase::Unknown
+                    }
+            );
+            if !guardian_reaped || populated {
+                // Subsequent apparently-empty accounting cannot recreate the
+                // missing historical wait or repair a crashed incarnation.
+                protocol.guardian_wait(true);
+                protocol.accounting_observation(false);
+                assert!(protocol.phase == MonitorPhase::Unknown);
+            }
+        }
     }
 
     #[test]

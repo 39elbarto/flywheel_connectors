@@ -114,6 +114,8 @@ pub struct N8nClient {
     auth: N8nAuth,
     base_url: Url,
     runtime: ConnectorRuntime,
+    #[cfg(feature = "n8n-test-support")]
+    credential_schema_fixture: bool,
 }
 
 impl fmt::Debug for N8nClient {
@@ -126,6 +128,11 @@ impl fmt::Debug for N8nClient {
 }
 
 impl N8nClient {
+    #[cfg(feature = "n8n-test-support")]
+    pub(crate) const fn admit_owned_credential_schema_fixture(&mut self) {
+        self.credential_schema_fixture = true;
+    }
+
     /// Create a new n8n client.
     ///
     /// `base_url` is required for n8n (self-hosted).
@@ -166,6 +173,8 @@ impl N8nClient {
             auth,
             base_url,
             runtime: ConnectorRuntime::new(runtime_config),
+            #[cfg(feature = "n8n-test-support")]
+            credential_schema_fixture: false,
         })
     }
 
@@ -559,13 +568,28 @@ impl N8nClient {
             return Err(denied());
         }
         let arguments = crate::types::official_credentials_input(input).map_err(|_| denied())?;
-        let mut protocol = fcp_host::CredentialMetadataReadProtocol::new(
+        let protocol = fcp_host::CredentialMetadataReadProtocol::new(
             mapping.clone(),
             server,
             &context.request_id,
             arguments,
         )
         .map_err(|_| denied())?;
+        #[cfg(feature = "n8n-test-support")]
+        let protocol = if self.credential_schema_fixture {
+            fcp_host::CredentialMetadataReadProtocol::synthetic_schema_fixture(
+                mapping.clone(),
+                server,
+                &context.request_id,
+                crate::types::official_credentials_input(input).map_err(|_| denied())?,
+                &serde_json::json!({"type":"object"}),
+                &serde_json::json!({"type":"object","required":["data","count"]}),
+            )
+            .map_err(|_| denied())?
+        } else {
+            protocol
+        };
+        let mut protocol = protocol;
         let proxy = self
             .runtime
             .host_egress_proxy_client()

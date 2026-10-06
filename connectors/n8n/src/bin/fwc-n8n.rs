@@ -369,6 +369,8 @@ enum HostRunOnceOperation {
     TagsList,
     #[serde(rename = "n8n.workflows.get")]
     WorkflowsGet,
+    #[serde(rename = "n8n.workflows.get_code")]
+    WorkflowsGetCode,
     #[serde(rename = "n8n.workflows.compare")]
     WorkflowsCompare,
     #[serde(rename = "n8n.workflows.list")]
@@ -412,6 +414,7 @@ impl HostRunOnceOperation {
             Self::ProjectsList => "n8n.projects.list",
             Self::TagsList => "n8n.tags.list",
             Self::WorkflowsGet => "n8n.workflows.get",
+            Self::WorkflowsGetCode => "n8n.workflows.get_code",
             Self::WorkflowsCompare => "n8n.workflows.compare",
             Self::WorkflowsList => "n8n.workflows.list",
             Self::WorkflowsCreateDraft => "n8n.workflows.create_draft",
@@ -444,6 +447,7 @@ impl HostRunOnceOperation {
             "n8n.projects.list" => Ok(Self::ProjectsList),
             "n8n.tags.list" => Ok(Self::TagsList),
             "n8n.workflows.get" => Ok(Self::WorkflowsGet),
+            "n8n.workflows.get_code" => Ok(Self::WorkflowsGetCode),
             "n8n.workflows.compare" => Ok(Self::WorkflowsCompare),
             "n8n.workflows.list" => Ok(Self::WorkflowsList),
             "n8n.workflows.create_draft" => Ok(Self::WorkflowsCreateDraft),
@@ -477,6 +481,7 @@ impl HostRunOnceOperation {
             | Self::ProjectsList
             | Self::TagsList
             | Self::WorkflowsGet
+            | Self::WorkflowsGetCode
             | Self::WorkflowsCompare
             | Self::WorkflowsList
             | Self::WorkflowsCreateDraft
@@ -1168,6 +1173,7 @@ fn normalize_public_read_target(
     if !matches!(
         operation,
         HostRunOnceOperation::WorkflowsGet
+            | HostRunOnceOperation::WorkflowsGetCode
             | HostRunOnceOperation::WorkflowsCompare
             | HostRunOnceOperation::WorkflowsSearch
             | HostRunOnceOperation::ExecutionsGet
@@ -1191,7 +1197,9 @@ fn normalize_public_read_target(
         .ok_or_else(refused)?;
     let known_workflow = matches!(
         operation,
-        HostRunOnceOperation::WorkflowsGet | HostRunOnceOperation::WorkflowsCompare
+        HostRunOnceOperation::WorkflowsGet
+            | HostRunOnceOperation::WorkflowsGetCode
+            | HostRunOnceOperation::WorkflowsCompare
     );
     let known_execution = operation == HostRunOnceOperation::ExecutionsGet;
     let server = if known_workflow || known_execution {
@@ -3356,6 +3364,32 @@ fn apply_public_read_defaults(
     Ok(())
 }
 
+fn route_sensitive_code_read(
+    operation: HostRunOnceOperation,
+    input: &mut HostRunOnceInput,
+) -> Result<HostRunOnceOperation, AppError> {
+    if operation != HostRunOnceOperation::WorkflowsGet
+        || input.input.get("includeCode") != Some(&json!(true))
+    {
+        return Ok(operation);
+    }
+    let object = input
+        .input
+        .as_object_mut()
+        .ok_or_else(|| AppError::new("invalid_operation_input"))?;
+    if object
+        .get("detail")
+        .is_some_and(|value| !matches!(value.as_str(), Some("minimal" | "standard" | "full")))
+    {
+        return Err(AppError::new("invalid_operation_input"));
+    }
+    object.remove("includeCode");
+    object.remove("detail");
+    object.entry("version").or_insert(json!("draft"));
+    fcp_host::WorkflowCodeReadInput::parse(&input.input).map_err(AppError::new)?;
+    Ok(HostRunOnceOperation::WorkflowsGetCode)
+}
+
 fn run_once_from_bytes_at_with_receipt_io<F, P>(
     operation: &str,
     bytes: &[u8],
@@ -3371,6 +3405,7 @@ where
     let operation = HostRunOnceOperation::parse(operation)?;
     let normalized = normalize_public_read_target(operation, bytes)?;
     let mut input = parse_host_run_once_input(&normalized)?;
+    let operation = route_sensitive_code_read(operation, &mut input)?;
     apply_public_read_defaults(operation, &mut input.input)?;
     let is_execute = operation == HostRunOnceOperation::WorkflowsExecute;
     let early_execute_correlation_id = if is_execute {
@@ -6182,6 +6217,9 @@ fn build_host_run_once_envelope(
     })
 }
 
+const CODE_READ_FIELDS: &[&str] = &["id", "version", "pins"];
+const WORKFLOW_READ_FIELDS: &[&str] = &["id", "version", "detail", "includeCode"];
+
 fn host_run_once_input_fields(
     operation: HostRunOnceOperation,
 ) -> (&'static [&'static str], &'static [&'static str]) {
@@ -6224,9 +6262,8 @@ fn host_run_once_input_fields(
             &["parent_folder_id", "project_id", "skip", "take"],
             &["project_id"],
         ),
-        HostRunOnceOperation::WorkflowsGet => {
-            (&["id", "version", "detail", "includeCode"], &["id"])
-        }
+        HostRunOnceOperation::WorkflowsGet => (WORKFLOW_READ_FIELDS, &["id"]),
+        HostRunOnceOperation::WorkflowsGetCode => (CODE_READ_FIELDS, CODE_READ_FIELDS),
         HostRunOnceOperation::WorkflowsCompare => (
             &["id", "leftVersion", "rightVersion", "detail"],
             &["id", "leftVersion", "rightVersion"],
@@ -6378,6 +6415,15 @@ fn validate_host_run_once_input(
             validate_bounded_integer(object, "take", 1, 200)
         }
         HostRunOnceOperation::WorkflowsGet => fcp_n8n::types::WorkflowReadInput::parse(input)
+            .and_then(|read| {
+                if read.include_code == Some(true) {
+                    Err("sensitive_code_requires_get_code")
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(AppError::new),
+        HostRunOnceOperation::WorkflowsGetCode => fcp_host::WorkflowCodeReadInput::parse(input)
             .map(|_| ())
             .map_err(AppError::new),
         HostRunOnceOperation::WorkflowsCompare => {
@@ -7197,6 +7243,9 @@ fn expected_host_run_once_resource_uri(
 ) -> Result<String, AppError> {
     let root = format!("fwc-n8n://{}", server_id.as_str());
     match operation {
+        HostRunOnceOperation::WorkflowsGetCode => fcp_host::WorkflowCodeReadInput::parse(input)
+            .and_then(|read| read.resource_uri(server_id.as_str()))
+            .map_err(AppError::new),
         HostRunOnceOperation::WorkflowsSearch => {
             fcp_host::official_n8n_workflow_search_arguments(input).map_err(AppError::new)?;
             Ok(format!(
@@ -7336,9 +7385,10 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.capabilities.inspect" => OperationIntent::CapabilitiesInspection,
         "n8n.knowledge.query" => OperationIntent::NodeKnowledge,
         "n8n.validation.run" => OperationIntent::Validation,
-        "n8n.workflows.get" | "n8n.executions.get" | "n8n.executions.diagnostics" => {
-            OperationIntent::KnownIdRead
-        }
+        "n8n.workflows.get"
+        | "n8n.workflows.get_code"
+        | "n8n.executions.get"
+        | "n8n.executions.diagnostics" => OperationIntent::KnownIdRead,
         "n8n.workflows.search" | "n8n.executions.search" | "n8n.structure.search" => {
             OperationIntent::Search
         }
@@ -7801,6 +7851,45 @@ mod tests {
             );
         }
         assert!(normalize_remote_validation_target(br#"{"server_id":"hetzner","input":{"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"}}}"#).is_err());
+    }
+
+    #[test]
+    fn include_code_routes_before_authoritative_envelope_and_binds_every_pin() {
+        for server in ["eec", "hetzner"] {
+            let input = json!({"server_id":server,"input":{"id":"workflow-one","version":"draft","includeCode":true,
+                "pins":{"draft":{"versionId":"version-one","graphDigest":format!("blake3-256:{}","a".repeat(64))}}}});
+            let bytes = serde_json::to_vec(&input).unwrap();
+            run_once_from_bytes_at("n8n.workflows.get", &bytes, Instant::now(), |request, _| {
+                assert_eq!(request.operation, HostRunOnceOperation::WorkflowsGetCode);
+                assert!(request.input.get("includeCode").is_none());
+                assert!(request.resource_uri.contains("draftVersionId=version-one"));
+                assert!(
+                    request
+                        .resource_uri
+                        .contains("draftGraphDigest=blake3-256:")
+                );
+                assert!(
+                    request
+                        .resource_uri
+                        .starts_with(&format!("fwc-n8n://{server}/"))
+                );
+                Ok(json!({"bounded":"synthetic"}))
+            })
+            .unwrap();
+            for invalid in [Value::Null, json!("true"), json!(1)] {
+                let mut changed = input.clone();
+                changed["input"]["includeCode"] = invalid;
+                assert!(
+                    run_once_from_bytes_at(
+                        "n8n.workflows.get",
+                        &serde_json::to_vec(&changed).unwrap(),
+                        Instant::now(),
+                        |_, _| panic!("invalid input dispatched")
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[test]

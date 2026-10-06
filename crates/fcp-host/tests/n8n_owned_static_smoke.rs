@@ -89,6 +89,7 @@ fn static_n8n_connector_introspects_under_owned_network_filter() {
             "n8n.workflows.delete_disposable",
             "n8n.workflows.execute",
             "n8n.workflows.get",
+            "n8n.workflows.get_code",
             "n8n.workflows.lifecycle",
             "n8n.workflows.list",
             "n8n.workflows.search",

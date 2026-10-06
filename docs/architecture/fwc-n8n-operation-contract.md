@@ -1591,7 +1591,8 @@ The table specifies the exact operation-specific `data` shape.
 | `validation.run` | `subject`, subject payload | `profile`, `target`, `detail` | `{valid,errors:[{path,code,message}],warnings:[...],normalizedDigest?}` |
 | `structure.search` | `target.server`, `kind` | `query`, `projectId`, `parentFolderId`, `page` | `{items:[{resourceUri,id,name,type,parentUri?}]}` |
 | `workflows.search` | `target.server` | `query`, `projectId`, `folderId`, `tags`, `active`, `isArchived`, `page`, `sort` | `{workflows:[{resourceUri,id,name,description?,active,isArchived,updatedAt?,projectId?,availableInMcp?}]}` |
-| `workflows.get` | exact workflow target | `detail`, `version=draft|published|both`, `includeCode=false` | `{workflow: NormalizedWorkflowState,graph?: object,codeNodes?: [{name,digest,source?}]}` |
+| `workflows.get` | exact workflow target | `detail`, `version=draft|published|both`, `includeCode=false`; true requires the exact pins below and routes before admission to `get_code` | `{workflow: NormalizedWorkflowState,graph?: object,codeNodes?: [{name,digest}]}` for metadata; sensitive route uses the separate result below |
+| `workflows.get_code` | exact workflow target, `version=draft|published|both`, `pins` containing exactly each selected label's `versionId` and `graphDigest` | none | `{id,versions:[{version,versionId,graphDigest,codeNodes:[{nodeId,language,source,digest}]}]}`; requires `n8n.workflows.code.read`, not metadata authority |
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
 | `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
@@ -1619,6 +1620,10 @@ The official tool accepts a limit of 1–200 but no cursor. Candidate output
 therefore reports `page.returnedCount`, `limit`, `continuation:"unavailable"`
 and `completeness:"not_established"`; cursor requests refuse before dispatch.
 This bounded first-page behavior does not complete required continuation parity.
+The native `data,count` result does not establish that `count` is an untruncated
+global total. Completing this row needs an admitted provider extension supplying
+a cursor (or offset plus proven total), stable filter/snapshot semantics and
+corresponding original input/output schemas; REST fields cannot substitute for it.
 The new typed bridge/schema projection is source-only until separately admitted;
 installed RC43c does not acquire these capabilities through discovery.
 
@@ -1761,8 +1766,9 @@ owner; proposed supervisor971 cannot reuse the current1000-owned store through
 a socket group. A future explicit broker admission must address that boundary
 without copying or changing ownership of secrets.
 
-A1 is the selected local lifecycle contract: the host parents one fixed monitor,
-and that monitor parents one provider. The private fixture endpoint binds a launch
+A1 is the selected local lifecycle contract: the host owns/reaps a fixed guardian;
+the guardian owns/reaps the namespace PID1 monitor, which owns the provider and
+orphan reaping. The private fixture endpoint binds a launch
 nonce, invocation, instance/session, artifact and epoch; it is never a provider
 endpoint and carries no credentials or store FD. `ready`, bounded `sample`, host
 `terminate` and monitor `completed` have a single bounded sequence. Wrong sender,
@@ -1773,7 +1779,11 @@ Monitor wait alone, disconnect/crash, incomplete cancellation or any missing
 completion condition stays unknown. Completion additionally requires confirmed
 child exec/identity and closed egress. Host IO joins and actor join are separate
 from provider IO and monitor reap; monitor wait alone cannot retire even after
-provider completion. Numeric sample fixtures qualify only message bounds and
+provider completion. Separate guardian wait and read-only accounting
+`populated:0` observations are also mandatory; neither can be inferred from
+monitor completion. The fixture rejects each missing/false observation and
+cannot recreate a lost wait after crash from a later empty-accounting query.
+Numeric sample fixtures qualify only message bounds and
 ordering, not timestamped current/global memory or availability. These are
 `a1_monitor_fixture_*` protocol
 tests, not a production constructor, authenticated OS channel or cross-UID proof.
@@ -1791,15 +1801,34 @@ PID and mount namespace per invocation; the user namespace must own the PID/moun
 namespaces and its creator must not be caller UID1000. Proposed mappings are
 inner UID0 to outer971 for the monitor and inner UID1 to outer972 for the provider,
 with narrowly specified GIDs, no outer0/1000, extra ranges or supplementary groups.
-Monitor lifecycle capabilities must be confined to that child user namespace;
-setup SYS_ADMIN/SETUID/SETGID must be dropped before provider exec. Provider
-capabilities must be empty with no_new_privs and no exec privilege regain; exact
-securebits/bounding-set controls remain unresolved. Mounts must be private,
+Monitor lifecycle capabilities must be confined to that child user namespace.
+The selected recommendation retains only KILL and SYS_PTRACE in bounded
+permitted/inheritable/ambient and bounding sets across fixed monitor exec,
+with locked NOROOT and NO_SETUID_FIXUP, no further ambient raise, KEEP_CAPS off
+and no_new_privs. The setup phase creates a blocked provider stub before losing
+SETUID/SETGID; the release barrier requires approved maps/mounts/proc,
+parent-death/liveness checks and confirmed post-exec identity. Provider inner1
+has empty permitted/effective/inheritable/ambient/bounding capabilities and
+supplementary groups, locked securebits/no regain, and no setup/control,
+namespace, state or broker FDs before fixed exec. PID1 monitor handles TERM;
+guardian escalation uses exact pidfd KILL with matching UID971, without retained
+root capabilities or cgroup.kill. These are selected SPEC controls, not tested
+physical authority, LSM, syscall, FD or crash acceptance. Mounts must be private,
 with namespace-local proc, fixed read-only runtime and private temporary storage,
 and no host root/proc/sys/cgroup/state/broker/shared-writable paths or inherited
 FDs. This applies to REST, MCP and local launches independently of network_disabled.
 
-The bootstrap/guardian/monitor parent-and-wait topology remains unresolved:
+The selected topology refinement (2026-10-06, AM11486) requires privileged
+bootstrap `clone3` with NEWUSER|NEWPID|NEWNS, without CLONE_PARENT. After setup
+the guardian uses proposed outer971 with no capabilities; the monitor maps to
+outer971. Exact pidfd signaling authority requires matching UID and LSM checks,
+not parenthood. Guardian and monitor parent-death signals must be established
+after credential/exec transitions, with parent-liveness and a start barrier;
+parent death is UNKNOWN. Root-created accounting/event FDs are read-only and
+the provider receives no migration/control FD. The broker's UID1000 credential
+acquisition still requires a distinct enforced security domain against malicious
+caller1000; dumpability, private FDs and peer UID alone do not provide it.
+This is a local SPEC and fixture, not implemented bootstrap or kernel proof:
 entering a new PID namespace affects future children, so merely execing the
 launcher cannot place the existing host Child/monitor in it. PID1 monitor death
 and kernel descendant termination are not a completed/reaped/IO-joined proof;
@@ -1868,10 +1897,10 @@ separate signed schema/profile and runtime admission before installed use.
 | Validation: remote_workflow/current draft or published, four profiles | Missing installed public composition | One exact REST GET captured privately; ID/version/digest bound; same selected graph validated by signed local provider with shared deadline/cancel/teardown | `remote_workflow_public_target_*`, `remote_validation_capture_*`, actual ignored local four-profile test; new runtime admission required; historical versions excluded |
 | Structure: projects/folders/tags | Installed projects call failed on both servers; folders/tags unproved | Fixed official read actions, exact native filters and complete bounded snapshots | `official_structure_bridge_projection_supports_complete_snapshot_pages`; native caps 100/100/500, truncation refuses |
 | Workflows search: filters/page/sort | REST cannot supply folder/global sort equivalence | Fixed official native search for query/project/folder/tags/sort, complete snapshot before public paging/active filtering | `official_workflow_search_native_query_is_not_replaced_with_page_local_name_filter`; cap 200 and archived search remain explicit capability limits |
-| Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and Code fingerprints only; public defaults explicit | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, manifest/executable schema parity test |
+| Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and metadata Code fingerprints. `includeCode:true` routes before admission to distinct pinned `workflows.get_code` / `workflows.code.read`; installed operation and rights remain OPEN | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, `get_code_production_projection_is_exact_pinned_and_sensitive`, `include_code_routes_before_authoritative_envelope_and_binds_every_pin`, `get_code_original_child_sensitive_authority_and_pins`; actual diagnostic CLI refusal is separate from callback/process fixtures |
 | Draft/published compare: semantic/layout/validation | New public composition missing | Same single GET crossbinds both graphs; semantic/layout digests; two owned local validations; no public raw graph | `captured_comparison_graphs` tests and retained native local comparison test; missing published/validator failure is limited outcome, not empty success |
 | Executions search/get metadata | Existing metadata routes; new filter parity needs validation | Native workflow/time/status pushdown; running explicitly requested/merged; queryless exact metadata GET, no execution payload | Six `metadata_*` HTTP tests passed; wrong workflow denied; payload/history/rollback remain outside .35 |
-| Credentials list query/type/project/sharing/page | REST lacks required official metadata; installed direct FCP mapping absent | Wrapper/host official adapter plus LOCAL A optional original-invocation mapping; bounded safe metadata, no native cursor | `official_credentials_*`, `credentials_owned_*`, retained producer/signer/provision fixtures; component mock HTTP is not child-process/installed CLI acceptance. Mapping/source admission and continuation remain OPEN |
+| Credentials list query/type/project/sharing/page | REST lacks required official metadata; installed direct FCP mapping absent | Wrapper/host official adapter plus LOCAL A optional original-invocation mapping; bounded safe metadata, no native cursor | `official_credentials_*`, `credentials_owned_*`, retained producer/signer/provision fixtures and `credentials_original_child_inherited_transport`: actual original child and inherited proxy with private synthetic transport, not installed CLI acceptance. Mapping/source admission and continuation remain OPEN |
 | Audit credentials/database/filesystem/nodes | Source-proved fixed native POST, no installed audit invocation | Explicit four-category selection and redacted report/count projection; legitimate native empty array accepted | `audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes`; instance/default-all denied before HTTP pending external-effect decision, never full-audit success |
 
 History/rollback (.36), external credential lookup (.39), execution payload (.40)
@@ -1899,9 +1928,27 @@ exclusions:
   bound is unsupported; a saturated result of exactly 200 rows is refused
   even when the native count equals the returned length. No per-page
   sort/filter is claimed as global parity.
-- `workflows.get includeCode:true` returns Code fingerprints, not source text.
-  Raw Code source is not exposed; callers requiring source have an OPEN
-  capability gap. Draft/published/both graph selectors are separately tested.
+- Local source adds `workflows.get_code` under distinct
+  `n8n.workflows.code.read` authority. Public `workflows.get includeCode:true`
+  routes to it before the authoritative envelope, capability acquisition and
+  host admission. False/absent retain metadata fingerprints; null/nonboolean
+  selectors and direct metadata invocation with true refuse before HTTP.
+  Each selected draft/published label requires an exact version ID and graph
+  digest in the original resource and request. One fixed REST GET must match
+  both before any source is projected. Only selected Code node ID, language,
+  source and digest are returned; credentials, other parameters, pin/static
+  data are omitted. Source is sensitive output, not a scrub-safe diagnostic.
+  Code language/source consistency follows the retained native Code node
+  source (`upgrade-target-code-node.ts`, SHA256 `26b388bc93387613253e8f00ab3ea9c3f7ad874577586afdb152c1211d8f6543`):
+  versions 1/2, JavaScript default, version-2 Python/legacy Python selectors.
+  Unknown versions/selectors and missing/nonstring active source refuse;
+  retained inactive-language source is omitted. Bounds are 100
+  Code nodes per selected version, 300000 UTF-8 source bytes per node, 600000
+  collectively and 4000000 bytes in the complete serialized projection.
+  The measured full descriptor is 65607 bytes; n8n's finite descriptor frame is
+  128KiB and only `get_code` has a 4MiB frame, with the original deadline.
+  Other connectors retain their existing ceilings. Installed operation,
+  signed inventory and code-read rights admission remain OPEN.
 - Combined template-search selectors use 2–4 fixed sequential calls under the
   existing policy and intersect only complete subsets, each bounded at 100.
   Native frame overflow and incomplete subsets refuse; no limit is raised.
@@ -1910,10 +1957,44 @@ exclusions:
   an explicitly proposed in-memory max20 policy; network/timeout/size fields
   stay identical. The unchanged seven-call policy refuses before launch.
   This proposed call-limit change is not signed-policy admission or activation.
-  The normal producer still emits seven calls at
-  `scripts/n8n_release_assembler.sh` (`max_sequential_calls`); a future reviewed
-  producer/source and signed-policy update must explicitly admit 20. No existing
-  policy file was changed to qualify the test.
+  Producer commit `980b3c5661ee` retains seven calls by default and supports
+  explicit SHA-bound, closed owner-managed input admitting exactly 20 at
+  `scripts/n8n_release_assembler.sh` (`max_sequential_calls`). The local producer
+  regression verifies default7 and opt-in20 through the signed-policy consumer;
+  this does not admit or activate the proposed input in an installed release.
+  No existing policy file was changed to qualify the process test.
+- Original credential child qualification (2026-10-06): the dedicated
+  `n8n-owned-credential-fixture` target reuses the original connector stdin
+  configure/handshake/invoke loop and inherited host proxy. Fixed synthetic
+  schemas are admitted only by its test constructor; ordinary main remains
+  strict even with the test-support feature. The host performs original-token,
+  server/resource/request, credential lease/profile and HTTP policy validation
+  before its private test transport supplies a response. Exact filters,
+  projection/redaction, schema/body/token rejection, replay/closed admission and
+  owned reap/group absence pass in `credentials_original_child_inherited_transport`
+  (`original-child-host-test-20261006-8.log`, both servers, eleven cases including
+  Hetzner old-port refusal and expired-before-dispatch cases). This is actual child/process and
+  controlled transport evidence, not installed CLI or live-schema acceptance.
+  Retained catalog originals are still required for native production-pin tests.
+- Native REST snapshot qualification uses genuine cursor pages and supported
+  `projectId`/`active` pushdown; global sorting follows complete bounded
+  collection. Its configured collective timer and aggregate byte limit are
+  separate from original host invocation cancellation. Unsupported native
+  folder/description/archived semantics and saturated official search still
+  refuse, rather than returning false-complete pages.
+- The earlier private sensitive-Code DTO fixture is historical partial evidence.
+  The production route now has original-child controlled-HTTP qualification
+  (`get_code_original_child_sensitive_authority_and_pins`) for both servers,
+  draft/published/both, metadata omission, original capability/instance/resource/
+  request/body binding and same-version graph drift. API-key profile, OAuth and
+  absent credential-allow negatives prove zero HTTP and released leases.
+  Provider response substitution is test-only after the original authorization
+  and HTTP policy checks. It is not installed/live or full public CLI success.
+  Optional signed producer input `code_read` is closed to exact operation
+  `n8n.workflows.get_code` and capability `n8n.workflows.code.read`; absent input
+  changes nothing, REST transport remains port443 and inventory enrollment
+  alone grants no caller capability. Native producer/consumer and projection
+  tests qualify local source only; no installed policy was activated.
 - Credential continuation completeness, direct-FCP credential mediation,
   global runtime observation, instance audit effects and SDK-code effects
   remain OPEN as described above. No source-only test closes installed

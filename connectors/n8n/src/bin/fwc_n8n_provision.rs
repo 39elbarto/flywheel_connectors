@@ -2509,6 +2509,16 @@ fn validate_common_inventory(
     if search {
         expected_operations.extend(["n8n.workflows.compare", "n8n.validation.run"]);
     }
+    if entry
+        .allowed_operations
+        .iter()
+        .any(|operation| operation == "n8n.workflows.get_code")
+    {
+        if !search || !matches!(schema_mode, CommonInventorySchemaMode::Current) {
+            return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+        }
+        expected_operations.push("n8n.workflows.get_code");
+    }
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
         .allowed_operations
@@ -4745,6 +4755,10 @@ mod tests {
         }
 
         fn enable_read_from_pure_producer(&self, safe: bool) {
+            self.enable_read_from_pure_producer_with_code(safe, false);
+        }
+
+        fn enable_read_from_pure_producer_with_code(&self, safe: bool, sensitive: bool) {
             let script = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../scripts/n8n_release_assembler.sh"
@@ -4778,6 +4792,15 @@ if sys.argv[3] == 'safe':
 else:
     policy = ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.search-read-policy.v1',
         'servers':{'eec':tool,'hetzner':tool}}).encode())
+if sys.argv[4] == 'code':
+    policy['code_read'] = {'operation':'n8n.workflows.get_code','capability':'n8n.workflows.code.read'}
+    policy = ns['validate_read_policy'](json.dumps(policy).encode())
+    for bad in (None, False, {'operation':'n8n.workflows.get','capability':'n8n.workflows.read'},
+        dict(policy['code_read'], extra=True)):
+        changed = dict(policy, code_read=bad)
+        try: ns['validate_read_policy'](json.dumps(changed).encode())
+        except ValueError: pass
+        else: raise AssertionError('sensitive code producer accepted malformed admission')
 root = pathlib.Path(sys.argv[2])
 for server in ('eec','hetzner'):
     paths = [root/'inventory'/f'{server}-official-mcp.json',root/'inventory'/f'{server}.json']
@@ -4789,6 +4812,7 @@ for server in ('eec','hetzner'):
                 .args(["-c", code, script])
                 .arg(&self.stage)
                 .arg(if safe { "safe" } else { "search" })
+                .arg(if sensitive { "code" } else { "metadata" })
                 .output()
                 .expect("pure producer subprocess");
             assert!(output.status.success(), "pure producer failed");
@@ -5013,6 +5037,66 @@ else: raise AssertionError('reader suppressed open refusal')
                 fixture.request().validate().is_err(),
                 "unsigned budget drift"
             );
+        }
+    }
+
+    #[test]
+    fn retained_get_code_explicit_producer_and_signed_policy_consumer_agree() {
+        let fixture = Fixture::retained();
+        fixture.enable_read_from_pure_producer_with_code(true, true);
+        let request = fixture.request();
+        validate_unsigned_release_tree(
+            &fixture.stage,
+            &fixture.release_id,
+            &request.git_revision,
+            &request.bindings,
+            fixture.owner,
+            &fixture.releases.join(&fixture.release_id),
+        )
+        .unwrap();
+        request.validate().unwrap();
+        for server in ["eec", "hetzner"] {
+            let path = fixture.stage.join(format!("inventory/{server}.json"));
+            let original = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+            assert!(
+                original[0]["allowed_operations"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("n8n.workflows.get_code"))
+            );
+            assert_eq!(
+                original[0]["operation_network_constraints"]["n8n.workflows.get_code"]["port_allow"],
+                json!([443])
+            );
+            for case in ["network", "duplicate", "missing-network", "unknown"] {
+                let mut changed = original.clone();
+                match case {
+                    "network" => {
+                        changed[0]["operation_network_constraints"]["n8n.workflows.get_code"]["port_allow"] =
+                            json!([8443])
+                    }
+                    "duplicate" => changed[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("n8n.workflows.get_code")),
+                    "missing-network" => {
+                        changed[0]["operation_network_constraints"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("n8n.workflows.get_code");
+                    }
+                    "unknown" => changed[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("n8n.workflows.get_all_secrets")),
+                    _ => unreachable!(),
+                }
+                fs::write(&path, changed.to_string()).unwrap();
+                fixture.refresh_stage_receipts();
+                assert!(fixture.request().validate().is_err(), "{server}:{case}");
+                fs::write(&path, original.to_string()).unwrap();
+                fixture.refresh_stage_receipts();
+            }
         }
     }
 

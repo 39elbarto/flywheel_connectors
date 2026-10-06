@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:3d56f91497ab2e8ad04f2842ece54200ceeffdaf042b1a00153ed125b9d0d656"
+interface_hash = "blake3-256:fcp.interface.v2:3a341d1247a35c72f5baf39ad811170e73246f04ed790e0d7cc30137ec51f8cd"
 
 [connector]
 id = "fcp.n8n"
@@ -54,6 +54,7 @@ optional = [
     "n8n.workflows.execute",
     "n8n.workflows.write",
     "n8n.workflows.read",
+    "n8n.workflows.code.read",
 ]
 forbidden = [
     "system.exec",
@@ -2807,6 +2808,39 @@ related = [
     "n8n.workflows.activate",
 ]
 
+[provides.operations."n8n.workflows.get_code"]
+description = "Read sensitive Code source from exact pinned current workflow versions"
+capability = "n8n.workflows.code.read"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["id", "version", "pins"], properties = { id = { type = "string", minLength = 1, maxLength = 256, pattern = "^[A-Za-z0-9_-]+$" }, version = { type = "string", enum = ["draft", "published", "both"] }, pins = { type = "object", additionalProperties = false, minProperties = 1, maxProperties = 2, properties = { draft = { type = "object", additionalProperties = false, required = ["versionId", "graphDigest"], properties = { versionId = { type = "string", minLength = 1, maxLength = 256, pattern = "^[A-Za-z0-9_-]+$" }, graphDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" } } }, published = { type = "object", additionalProperties = false, required = ["versionId", "graphDigest"], properties = { versionId = { type = "string", minLength = 1, maxLength = 256, pattern = "^[A-Za-z0-9_-]+$" }, graphDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" } } } } } } }
+output_schema = { type = "object", additionalProperties = false, required = ["id", "versions"], properties = { id = { type = "string" }, versions = { type = "array", minItems = 1, maxItems = 2, items = { type = "object", additionalProperties = false, required = ["version", "versionId", "graphDigest", "codeNodes"], properties = { version = { type = "string", enum = ["draft", "published"] }, versionId = { type = "string" }, graphDigest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" }, codeNodes = { type = "array", maxItems = 100, items = { type = "object", additionalProperties = false, required = ["nodeId", "language", "source", "digest"], properties = { nodeId = { type = "string", maxLength = 256 }, language = { type = "string", enum = ["javascript", "python"] }, source = { type = "string", maxLength = 300000 }, digest = { type = "string", pattern = "^blake3-256:[0-9a-f]{64}$" } } } } } } } } }
+[provides.operations."n8n.workflows.get_code".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+[provides.operations."n8n.workflows.get_code".ai_hints]
+when_to_use = "Read sensitive Code source only with separate code.read authority and exact current version/graph pins."
+common_mistakes = ["Code source may contain secrets; metadata read authority does not permit it."]
+examples = []
+related = ["n8n.workflows.get"]
+
 [provides.operations."n8n.workflows.list"]
 description = "List all workflows in the n8n instance"
 capability = "n8n.workflows.read"
@@ -3222,6 +3256,13 @@ burst = 20
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "n8n.workflows.code.read"
+requests = 200
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "n8n.workflows.write"
 requests = 50
 window_ms = 60000
@@ -3302,6 +3343,7 @@ scope = "instance"
 "n8n.tags.list" = ["n8n.tags.read"]
 "n8n.workflows.create_draft" = ["n8n.workflows.write"]
 "n8n.workflows.get" = ["n8n.workflows.read"]
+"n8n.workflows.get_code" = ["n8n.workflows.code.read"]
 "n8n.projects.list" = ["n8n.projects.read"]
 
 [provides.operations."n8n.workflows.compare"]

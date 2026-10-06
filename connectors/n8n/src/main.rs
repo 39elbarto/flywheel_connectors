@@ -46,6 +46,9 @@ fn main() -> Result<()> {
 fn run_fcp_loop() -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    #[cfg(all(test, feature = "n8n-test-support"))]
+    let mut connector = N8nConnector::owned_credential_process_fixture()?;
+    #[cfg(not(all(test, feature = "n8n-test-support")))]
     let mut connector = N8nConnector::try_new()?;
 
     let runtime = Builder::new_multi_thread().enable_all().build()?;
@@ -59,9 +62,9 @@ fn run_fcp_loop() -> Result<()> {
         }
 
         let response = if inherited_host_egress {
-            runtime.block_on_native(async { handle_message(&mut connector, &line).await })
+            runtime.block_on_native(async { Box::pin(handle_message(&mut connector, &line)).await })
         } else {
-            runtime.block_on(async { handle_message(&mut connector, &line).await })
+            runtime.block_on(async { Box::pin(handle_message(&mut connector, &line)).await })
         };
 
         let response_json = serde_json::to_string(&response)?;
@@ -70,6 +73,11 @@ fn run_fcp_loop() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "n8n-test-support"))]
+pub fn owned_credential_fixture_entrypoint() -> Result<()> {
+    run_fcp_loop()
 }
 
 async fn handle_message(connector: &mut N8nConnector, message: &str) -> serde_json::Value {
@@ -102,7 +110,7 @@ async fn handle_message(connector: &mut N8nConnector, message: &str) -> serde_js
         "doctor" => connector.handle_doctor().await,
         "self_check" => connector.handle_self_check().await,
         "introspect" => connector.handle_introspect().await,
-        "invoke" => handle_invoke(connector, params).await,
+        "invoke" => Box::pin(handle_invoke(connector, params)).await,
         "simulate" => connector.handle_simulate(params).await,
         "shutdown" => connector.handle_shutdown(params).await,
         _ => Err(fcp_core::FcpError::InvalidRequest {
@@ -169,12 +177,10 @@ fn serialize_invoke_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn invoke_results_use_normative_response_envelope() {
-        let success = serialize_invoke_response(
-            RequestId::new("test-success"),
+        let success = super::serialize_invoke_response(
+            super::RequestId::new("test-success"),
             Ok(serde_json::json!({"accepted": true})),
         )
         .expect("serialize successful invoke response");
@@ -183,9 +189,9 @@ mod tests {
         assert_eq!(success["status"], "ok");
         assert_eq!(success["result"]["accepted"], true);
 
-        let failure = serialize_invoke_response(
-            RequestId::new("test-failure"),
-            Err(FcpError::InvalidRequest {
+        let failure = super::serialize_invoke_response(
+            super::RequestId::new("test-failure"),
+            Err(super::FcpError::InvalidRequest {
                 code: 1003,
                 message: "rejected".to_string(),
             }),

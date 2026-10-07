@@ -897,6 +897,14 @@ def add_read_inventory(official, common, server, policy):
         if operation not in inventory["allowed_operations"]:
             inventory["allowed_operations"].append(operation)
         network[operation] = copy.deepcopy(network[source])
+        if operation == "n8n.validation.run":
+            # Exact existing manifest denylist, not the looser GET policy.
+            network[operation]["cidr_deny"] = [
+                "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+                "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
+                "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7",
+                "fe80::/10", "ff00::/8",
+            ]
     if "code_read" in policy:
         network = common["operation_network_constraints"]
         source = network.get("n8n.workflows.get")
@@ -1475,6 +1483,9 @@ main() {
   echo "[test] staged n8n manifest production validation" >&2
   FCP_N8N_STAGED_MANIFEST_PATH="$stage_root/manifests/fcp-n8n.toml" \
     bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test -p fcp-n8n operations_and_rate_pools_match_parsed_manifest
+  echo "[test] staged MCP bridge manifest production validation" >&2
+  FCP_MCP_BRIDGE_STAGED_MANIFEST_PATH="$stage_root/manifests/fcp-mcp-bridge.toml" \
+    bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test -p fcp-mcp-bridge --lib runtime_operation_catalog_matches_manifest_metadata
   write_local_mcp_policy "$stage_root" "$hash_helper"
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"

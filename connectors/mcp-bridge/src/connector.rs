@@ -2491,7 +2491,11 @@ mod tests {
     };
 
     fn strict_mcp_bridge_manifest() -> Result<ConnectorManifest, String> {
-        ConnectorManifest::parse_str(MANIFEST_TOML).map_err(|error| error.to_string())
+        let manifest_toml = match std::env::var_os("FCP_MCP_BRIDGE_STAGED_MANIFEST_PATH") {
+            Some(path) => std::fs::read_to_string(path).map_err(|error| error.to_string())?,
+            None => MANIFEST_TOML.to_owned(),
+        };
+        ConnectorManifest::parse_str(&manifest_toml).map_err(|error| error.to_string())
     }
 
     #[test]
@@ -3070,10 +3074,58 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_7_operations() {
+    fn operations_info_has_exact_supported_operations() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 7);
+        let ids = arr
+            .iter()
+            .map(|operation| operation["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            [
+                "mcp.tools.list",
+                "mcp.tools.call",
+                "mcp.n8n.read",
+                "mcp.resources.list",
+                "mcp.resources.read",
+                "mcp.prompts.list",
+                "mcp.sampling.handle",
+                "mcp.server.metrics",
+            ]
+        );
+    }
+
+    #[test]
+    fn typed_n8n_read_manifest_rejects_missing_approval_and_stale_interface_hash() {
+        let manifest = ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let read = &manifest.provides.operations["mcp.n8n.read"];
+        assert_eq!(read.requires_approval, ManifestApprovalMode::None);
+        assert_eq!(read.capability.as_str(), "mcp.n8n.read");
+        assert!(read.network_constraints.is_some());
+
+        let marker = "[provides.operations.\"mcp.n8n.read\"]";
+        let (before, after) = MANIFEST_TOML.split_once(marker).unwrap();
+        let missing_approval = format!(
+            "{before}{marker}{}",
+            after.replacen("requires_approval = \"none\"\n", "", 1)
+        );
+        let error = ConnectorManifest::parse_str(&missing_approval).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing field `requires_approval`")
+        );
+
+        let stale_hash = MANIFEST_TOML.replacen(
+            &manifest.manifest.interface_hash.to_string(),
+            "blake3-256:fcp.interface.v2:b0549f2b22d46077c0d3743e657d7bc0429d3fbee3141e19011619c92da3ae1a",
+            1,
+        );
+        assert!(matches!(
+            ConnectorManifest::parse_str(&stale_hash),
+            Err(fcp_manifest::ManifestError::InterfaceHashMismatch { .. })
+        ));
     }
 
     #[test]

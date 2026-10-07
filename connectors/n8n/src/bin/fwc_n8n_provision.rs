@@ -577,6 +577,7 @@ pub enum Promotion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CurrentValidationMode {
     SignedProvisionReceipt,
+    SignedProvisionReceiptIndependentReadPreviousNetwork,
     SignedProvisionReceiptRc42Lifecycle,
     SignedProvisionReceiptCurrentLegacyLimits,
     SignedProvisionReceiptPreviousExecute,
@@ -685,6 +686,9 @@ fn verify_signed_current(
     let (verified, mode) = verification?;
     let validation_mode = match mode {
         CurrentValidationMode::SignedProvisionReceipt => "signed_current",
+        CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork => {
+            "signed_independent_read_previous_network"
+        }
         CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle => "signed_rc42_lifecycle",
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits => {
             "signed_current_legacy_limits"
@@ -762,6 +766,7 @@ enum LifecycleSchemaMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommonInventorySchemaMode {
     Current,
+    IndependentReadPreviousNetwork,
     CurrentLegacyLimits,
     Previous,
     Legacy,
@@ -1887,12 +1892,66 @@ const SIGNED_CURRENT_SCHEMA_MODES: [CurrentValidationMode; 9] = [
     CurrentValidationMode::SignedProvisionReceiptLegacySchema,
 ];
 
+const INDEPENDENT_READ_PREDECESSOR_RELEASE: &str =
+    "release-20261007-independent-read-32296a893-rc1";
+const INDEPENDENT_READ_PREDECESSOR_SOURCE: &str = "d55fd963fc641ba447bd940e40e2ec8686733d96";
+const INDEPENDENT_READ_PREDECESSOR_RECEIPT_SHA256: &str =
+    "8f360ef570768fa0849ee96a35a4ebf9bbc855b8ad2ae381afdb917340ea4f2d";
+const INDEPENDENT_READ_PREDECESSOR_RECEIPT_BLAKE3: &str =
+    "f084890af0fd821be4fa122deb5f2a3ec8b1f13c841df88505956dec2f071146";
+
+/// Administrative verification of one retained signed predecessor only.
+/// This mode is deliberately absent from runtime and unsigned-stage modes.
+#[cfg(unix)]
+fn validate_independent_read_predecessor(
+    surface: ReleaseSurface<'_>,
+    expected_owner: u32,
+    owner_verification: &OwnerVerificationConfig,
+) -> Result<(), ProvisionError> {
+    use sha2::{Digest, Sha256};
+
+    if surface.release_id != INDEPENDENT_READ_PREDECESSOR_RELEASE
+        || surface.git_revision != INDEPENDENT_READ_PREDECESSOR_SOURCE
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Provenance));
+    }
+    let receipt_path = surface.root.join(PROVISION_RECEIPT_FILE);
+    validate_file(
+        &receipt_path,
+        expected_owner,
+        false,
+        MAX_PROVISION_RECEIPT_BYTES as u64,
+    )?;
+    let receipt = read_bounded(&receipt_path, MAX_PROVISION_RECEIPT_BYTES)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Receipt))?;
+    if format!("{:x}", Sha256::digest(&receipt)) != INDEPENDENT_READ_PREDECESSOR_RECEIPT_SHA256
+        || blake3::hash(&receipt).to_hex().as_str() != INDEPENDENT_READ_PREDECESSOR_RECEIPT_BLAKE3
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Receipt));
+    }
+    // No proof escapes until all artifact identities/digests, provenance,
+    // receipt bindings, admitted key and signature have been validated.
+    validate_release_tree_with_schema_mode_and_binding_mode(
+        surface,
+        expected_owner,
+        surface.root,
+        owner_verification,
+        LifecycleSchemaMode::CurrentPerServer,
+        CommonInventorySchemaMode::IndependentReadPreviousNetwork,
+        false,
+    )
+}
+
 #[cfg(unix)]
 fn select_signed_current_schema(
     surface: ReleaseSurface<'_>,
     expected_owner: u32,
     owner_verification: &OwnerVerificationConfig,
 ) -> Result<CurrentValidationMode, ProvisionError> {
+    if surface.release_id == INDEPENDENT_READ_PREDECESSOR_RELEASE {
+        validate_independent_read_predecessor(surface, expected_owner, owner_verification)?;
+        return Ok(CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork);
+    }
     // Preserve reviewed predecessor ordering and fall through only on Policy.
     // Integrity, signature and receipt failures never select another mode.
     for mode in SIGNED_CURRENT_SCHEMA_MODES {
@@ -1934,6 +1993,13 @@ fn validate_signed_tree_mode(
     allow_predecessor_execute: bool,
 ) -> Result<(), ProvisionError> {
     let (lifecycle, common) = match mode {
+        CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork => {
+            return validate_independent_read_predecessor(
+                surface,
+                expected_owner,
+                owner_verification,
+            );
+        }
         CurrentValidationMode::SignedProvisionReceipt => (
             LifecycleSchemaMode::CurrentPerServer,
             CommonInventorySchemaMode::Current,
@@ -2501,10 +2567,6 @@ fn validate_common_inventory(
         ServerId::Eec => EEC_API_URL,
         ServerId::Hetzner => HETZNER_API_URL,
     };
-    let (expected_host, expected_port) = match server {
-        ServerId::Eec => (EEC_MCP_HOST, 443_u64),
-        ServerId::Hetzner => (HETZNER_MCP_HOST, 443_u64),
-    };
     let mut expected_operations = common_inventory_operations(schema_mode).to_vec();
     if search {
         expected_operations.extend(["n8n.workflows.compare", "n8n.validation.run"]);
@@ -2514,7 +2576,13 @@ fn validate_common_inventory(
         .iter()
         .any(|operation| operation == "n8n.workflows.get_code")
     {
-        if !search || !matches!(schema_mode, CommonInventorySchemaMode::Current) {
+        if !search
+            || !matches!(
+                schema_mode,
+                CommonInventorySchemaMode::Current
+                    | CommonInventorySchemaMode::IndependentReadPreviousNetwork
+            )
+        {
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
         expected_operations.push("n8n.workflows.get_code");
@@ -2546,7 +2614,37 @@ fn validate_common_inventory(
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
+    validate_common_inventory_network(entry, server, schema_mode, &expected_operations)
+}
+
+fn validate_common_inventory_network(
+    entry: &CommonInventoryEntry,
+    server: ServerId,
+    schema_mode: CommonInventorySchemaMode,
+    expected_operations: &[&str],
+) -> Result<(), ProvisionError> {
+    let expected_host = match server {
+        ServerId::Eec => EEC_MCP_HOST,
+        ServerId::Hetzner => HETZNER_MCP_HOST,
+    };
+    let expected_port = 443;
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
+    let mut expected_validation_network = expected_network.clone();
+    expected_validation_network["cidr_deny"] = serde_json::json!([
+        "0.0.0.0/8",
+        "10.0.0.0/8",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+        "ff00::/8"
+    ]);
     let expected_bounded_network =
         expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1_048_576);
     let metadata_network = expected_n8n_network_constraint(
@@ -2557,18 +2655,29 @@ fn validate_common_inventory(
         },
     );
     if entry.config.credential_metadata_read.is_some()
-        && !matches!(schema_mode, CommonInventorySchemaMode::Current)
+        && !matches!(
+            schema_mode,
+            CommonInventorySchemaMode::Current
+                | CommonInventorySchemaMode::IndependentReadPreviousNetwork
+        )
     {
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     if expected_operations.iter().any(|operation| {
-        let expected = if *operation == "n8n.credentials.list"
+        let expected = if *operation == "n8n.validation.run"
+            && !matches!(
+                schema_mode,
+                CommonInventorySchemaMode::IndependentReadPreviousNetwork
+            ) {
+            &expected_validation_network
+        } else if *operation == "n8n.credentials.list"
             && entry.config.credential_metadata_read.is_some()
         {
             &metadata_network
         } else if matches!(
             schema_mode,
             CommonInventorySchemaMode::Current
+                | CommonInventorySchemaMode::IndependentReadPreviousNetwork
                 | CommonInventorySchemaMode::Previous
                 | CommonInventorySchemaMode::Legacy
                 | CommonInventorySchemaMode::LegacyDisposable
@@ -2593,9 +2702,9 @@ const fn common_inventory_operations(
     schema_mode: CommonInventorySchemaMode,
 ) -> &'static [&'static str] {
     match schema_mode {
-        CommonInventorySchemaMode::Current | CommonInventorySchemaMode::CurrentLegacyLimits => {
-            &COMMON_ALLOWED_OPERATIONS
-        }
+        CommonInventorySchemaMode::Current
+        | CommonInventorySchemaMode::CurrentLegacyLimits
+        | CommonInventorySchemaMode::IndependentReadPreviousNetwork => &COMMON_ALLOWED_OPERATIONS,
         CommonInventorySchemaMode::Previous => &PREVIOUS_COMMON_ALLOWED_OPERATIONS,
         CommonInventorySchemaMode::Legacy => &LEGACY_COMMON_ALLOWED_OPERATIONS,
         CommonInventorySchemaMode::LegacyDisposable => &LEGACY_DISPOSABLE_COMMON_ALLOWED_OPERATIONS,
@@ -3294,6 +3403,7 @@ where
             return Ok((current, selected_mode));
         }
         CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+        | CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork
         | CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
         | CurrentValidationMode::SignedProvisionReceiptPreviousExecute
         | CurrentValidationMode::SignedProvisionReceiptPreviousLifecycle
@@ -3313,6 +3423,7 @@ where
             let allow_predecessor_execute = !matches!(
                 mode,
                 CurrentValidationMode::SignedProvisionReceiptCurrentLegacyLimits
+                    | CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork
                     | CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
             );
             validate_binding_shape_with_predecessor(
@@ -3486,6 +3597,9 @@ fn validate_signed_target_predecessors(
         CurrentValidationMode::SignedProvisionReceiptLegacyDisposableInventory,
         CurrentValidationMode::SignedProvisionReceiptLegacySchema,
     ];
+    if surface.release_id == INDEPENDENT_READ_PREDECESSOR_RELEASE {
+        return validate_independent_read_predecessor(surface, expected_owner, owner_verification);
+    }
     // Target predecessor validation has always admitted previous execute pins
     // in every reviewed inventory mode. Only Policy permits another mode.
     for mode in TARGET_MODES {
@@ -3821,6 +3935,112 @@ mod tests {
     fn test_owner_verification() -> OwnerVerificationConfig {
         let key = test_signing_key();
         OwnerVerificationConfig::for_test(hex::encode(key.verifying_key().to_bytes()))
+    }
+
+    #[test]
+    #[ignore = "reads the exact retained public d55 signed tree; no seed, signer or mutation"]
+    fn retained_independent_read_predecessor_is_administrative_only() {
+        let root = Path::new(DEFAULT_INSTALL_ROOT)
+            .join("releases")
+            .join(INDEPENDENT_READ_PREDECESSOR_RELEASE);
+        let trust = OwnerVerificationConfig::from_immutable_public_key(Some(
+            "415ebdef429ee2e28da81da5748c394164669743a7c24096c93e33ca05296b22",
+        ))
+        .expect("existing public key mapping");
+        let receipt: ProvisionReceipt = read_json(
+            &root.join(PROVISION_RECEIPT_FILE),
+            0,
+            MAX_PROVISION_RECEIPT_BYTES,
+            ProvisionErrorCode::Receipt,
+        )
+        .expect("retained public receipt");
+        let surface = ReleaseSurface {
+            root: &root,
+            release_id: INDEPENDENT_READ_PREDECESSOR_RELEASE,
+            git_revision: INDEPENDENT_READ_PREDECESSOR_SOURCE,
+            bindings: &receipt.bindings,
+        };
+        assert_eq!(
+            select_signed_current_schema(surface, 0, &trust).expect("exact signed predecessor"),
+            CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork
+        );
+        validate_signed_tree_mode(
+            surface,
+            0,
+            &trust,
+            CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork,
+            false,
+        )
+        .expect("pinned mode revalidation");
+        assert!(!SIGNED_CURRENT_SCHEMA_MODES.contains(
+            &CurrentValidationMode::SignedProvisionReceiptIndependentReadPreviousNetwork
+        ));
+        assert_eq!(
+            validate_unsigned_release_tree(
+                &root,
+                surface.release_id,
+                surface.git_revision,
+                surface.bindings,
+                0,
+                &root,
+            )
+            .expect_err("historical network is not a new-stage policy")
+            .code(),
+            ProvisionErrorCode::Policy
+        );
+        assert_eq!(
+            validate_independent_read_predecessor(
+                ReleaseSurface {
+                    git_revision: "0123456789abcdef0123456789abcdef01234567",
+                    ..surface
+                },
+                0,
+                &trust,
+            )
+            .expect_err("wrong source")
+            .code(),
+            ProvisionErrorCode::Provenance
+        );
+        assert_eq!(
+            validate_independent_read_predecessor(surface, 0, &test_owner_verification())
+                .expect_err("wrong admitted verification key")
+                .code(),
+            ProvisionErrorCode::Signature
+        );
+        let fixture = Fixture::retained();
+        let retained_root = &fixture.stage;
+        let public_receipt = fs::read(root.join(PROVISION_RECEIPT_FILE)).expect("public receipt");
+        fs::write(retained_root.join(PROVISION_RECEIPT_FILE), &public_receipt)
+            .expect("retained public proof copy");
+        for name in [PROVENANCE_FILE, RECEIPT_FILE] {
+            fs::write(
+                retained_root.join(name),
+                fs::read(root.join(name)).expect("public metadata"),
+            )
+            .expect("retained public metadata copy");
+        }
+        let copied_surface = ReleaseSurface {
+            root: retained_root,
+            ..surface
+        };
+        assert_eq!(
+            validate_independent_read_predecessor(copied_surface, fixture.owner, &trust)
+                .expect_err("exact receipt cannot authenticate a substituted artifact tree")
+                .code(),
+            ProvisionErrorCode::Digest
+        );
+        let mut changed_receipt = public_receipt;
+        changed_receipt.push(b'\n');
+        fs::write(retained_root.join(PROVISION_RECEIPT_FILE), changed_receipt)
+            .expect("retained changed receipt fixture");
+        assert_eq!(
+            validate_independent_read_predecessor(copied_surface, fixture.owner, &trust)
+                .expect_err(
+                    "even valid JSON with changed signed bytes is not the pinned predecessor"
+                )
+                .code(),
+            ProvisionErrorCode::Receipt
+        );
     }
 
     #[test]
@@ -5212,6 +5432,55 @@ else: raise AssertionError('reader suppressed open refusal')
                     ),
                     Some(search)
                 );
+                if search {
+                    let path = fixture.stage.join(format!("inventory/{server}.json"));
+                    let original = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+                    let cidrs = &original[0]["operation_network_constraints"]["n8n.validation.run"]
+                        ["cidr_deny"];
+                    assert_eq!(cidrs.as_array().unwrap().len(), 13);
+                    for case in ["missing", "extra", "wrong", "get-policy"] {
+                        let mut changed = original.clone();
+                        let network = &mut changed[0]["operation_network_constraints"];
+                        match case {
+                            "missing" => {
+                                network["n8n.validation.run"]["cidr_deny"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .pop();
+                            }
+                            "extra" => network["n8n.validation.run"]["cidr_deny"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(json!("198.18.0.0/15")),
+                            "wrong" => {
+                                network["n8n.validation.run"]["cidr_deny"][0] =
+                                    json!("198.18.0.0/15")
+                            }
+                            "get-policy" => {
+                                network["n8n.validation.run"] = network["n8n.workflows.get"].clone()
+                            }
+                            _ => unreachable!(),
+                        }
+                        fs::write(&path, changed.to_string()).unwrap();
+                        fixture.refresh_stage_receipts();
+                        let invalid = fixture.request();
+                        assert!(
+                            validate_unsigned_release_tree(
+                                &fixture.stage,
+                                &fixture.release_id,
+                                &invalid.git_revision,
+                                &invalid.bindings,
+                                fixture.owner,
+                                &fixture.releases.join(&fixture.release_id)
+                            )
+                            .is_err(),
+                            "{server}/{case}"
+                        );
+                        assert!(invalid.validate().is_err(), "{server}/{case}");
+                        fs::write(&path, original.to_string()).unwrap();
+                        fixture.refresh_stage_receipts();
+                    }
+                }
             }
         }
     }

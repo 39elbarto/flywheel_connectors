@@ -2527,6 +2527,8 @@ struct SubprocessRegistry {
     version: Arc<AtomicU64>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     rate_limiters: Arc<HostRateLimiterStore>,
+    #[cfg(target_os = "linux")]
+    local_validation_worker: Arc<std::sync::Mutex<Option<OwnedLocalValidationWorker>>>,
 }
 
 struct RegistryEntry {
@@ -2935,6 +2937,8 @@ impl SubprocessRegistry {
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -5846,24 +5850,304 @@ async fn invoke_owned_per_invocation(
         return Ok(response);
     }
     if let Some(capture) = comparison_capture {
+        let worker = state
+            .registry
+            .local_validation_worker
+            .lock()
+            .map_err(|_| HostError::Internal("local_validation_worker_lock_unavailable".into()))?
+            .take();
+        let worker = match worker {
+            Some(worker) => worker,
+            None if !FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) => {
+                OwnedLocalValidationWorker::prepare()?
+            }
+            None => {
+                return Err(HostError::PreflightFailed(
+                    "local_validation_worker_not_prepared".into(),
+                ));
+            }
+        };
         if request.operation.as_str() == "n8n.validation.run" {
-            complete_owned_remote_validation(capture, &request, response, comparison_deadline).await
+            complete_owned_remote_validation(
+                capture,
+                &request,
+                response,
+                comparison_deadline,
+                worker,
+            )
+            .await
         } else {
-            complete_owned_workflow_comparison(capture, &request, response, comparison_deadline)
-                .await
+            complete_owned_workflow_comparison(
+                capture,
+                &request,
+                response,
+                comparison_deadline,
+                worker,
+            )
+            .await
         }
     } else {
         Ok(response)
     }
 }
 
+// Private, single-use handoff. Only the existing captured-response validators
+// construct these jobs; no tool, executable, arguments or environment are
+// supplied by the request. The thread is created before the main thread's
+// static-ELF Landlock restriction, but starts no provider until a bound job.
 #[cfg(target_os = "linux")]
-struct OwnedLocalValidationCancelGuard(Arc<AtomicBool>);
+enum OwnedLocalValidationJob {
+    CurrentGraph(Value, fcp_host::LocalN8nValidationProfile),
+    CurrentPair([Value; 2]),
+}
 
 #[cfg(target_os = "linux")]
-impl Drop for OwnedLocalValidationCancelGuard {
+#[derive(Clone, PartialEq, Eq)]
+struct OwnedLocalValidationBinding {
+    request_id: String,
+    operation: String,
+    zone: String,
+    resource: String,
+    correlation: String,
+    input_digest: String,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedLocalValidationBinding {
+    fn from_request(request: &InvokeRequest, resource: &str) -> HostResult<Self> {
+        if request.connector_id.as_str() != "fcp.n8n"
+            || !matches!(
+                request.operation.as_str(),
+                "n8n.workflows.compare" | "n8n.validation.run"
+            )
+        {
+            return Err(HostError::PreflightFailed(
+                "local_validation_original_binding_invalid".into(),
+            ));
+        }
+        Ok(Self {
+            request_id: request.id.to_string(),
+            operation: request.operation.to_string(),
+            zone: request.zone_id.to_string(),
+            resource: resource.to_owned(),
+            correlation: request
+                .correlation_id
+                .as_ref()
+                .map_or_else(|| request.id.to_string(), ToString::to_string),
+            input_digest: blake3::hash(&serde_json::to_vec(&request.input).map_err(|_| {
+                HostError::PreflightFailed("local_validation_original_binding_invalid".into())
+            })?)
+            .to_hex()
+            .to_string(),
+        })
+    }
+}
+
+// Construction stays immediately after native/projected ID, version and graph
+// digest cross-checks below. Neither this proof nor raw graphs are public data.
+#[cfg(target_os = "linux")]
+struct VerifiedOwnedLocalValidationJob {
+    job: OwnedLocalValidationJob,
+    binding: OwnedLocalValidationBinding,
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedLocalValidationWork {
+    verified: VerifiedOwnedLocalValidationJob,
+    expected: OwnedLocalValidationBinding,
+    deadline: Instant,
+    result: oneshot::Sender<HostResult<Value>>,
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedLocalValidationWorker {
+    sender: Option<std::sync::mpsc::SyncSender<OwnedLocalValidationWork>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl OwnedLocalValidationWorker {
+    fn prepare() -> HostResult<Self> {
+        // Qualify and retain the sealed fixed provider before creating the
+        // early lane or restricting the main thread. This constructs no child.
+        let provider = fcp_host::LocalMcpProvider::from_signed_current().map_err(|_| {
+            HostError::PreflightFailed("local_validation_signed_policy_unavailable".into())
+        })?;
+        Self::prepare_bound(move |job, correlation, deadline, cancelled| {
+            run_owned_local_validation_with_provider(
+                job,
+                correlation,
+                deadline,
+                cancelled,
+                provider,
+            )
+        })
+    }
+
+    // Private implementation seam: production has exactly the fixed signed
+    // provider function above. Tests can qualify the channel/thread lifecycle
+    // without weakening signed-current admission or running installed tools.
+    fn prepare_bound<F>(run: F) -> HostResult<Self>
+    where
+        F: FnOnce(OwnedLocalValidationJob, &str, Instant, &Arc<AtomicBool>) -> HostResult<Value>
+            + Send
+            + 'static,
+    {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<OwnedLocalValidationWork>(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = Arc::clone(&cancelled);
+        let thread = std::thread::Builder::new()
+            .name("n8n-bound-local-validation".into())
+            .spawn(move || {
+                let Ok(work) = receiver.recv() else {
+                    return;
+                };
+                let result = if worker_cancelled.load(Ordering::Acquire)
+                    || Instant::now() >= work.deadline
+                {
+                    Err(HostError::PreflightFailed(
+                        "local_validation_cancelled_or_expired".into(),
+                    ))
+                } else if work.verified.binding != work.expected {
+                    Err(HostError::PreflightFailed(
+                        "local_validation_channel_binding_invalid".into(),
+                    ))
+                } else {
+                    run(
+                        work.verified.job,
+                        &work.expected.correlation,
+                        work.deadline,
+                        &worker_cancelled,
+                    )
+                };
+                let result = if worker_cancelled.load(Ordering::Acquire)
+                    || Instant::now() >= work.deadline
+                {
+                    Err(HostError::PreflightFailed(
+                        "local_validation_cancelled_or_expired".into(),
+                    ))
+                } else {
+                    result
+                };
+                let _ = work.result.send(result);
+            })
+            .map_err(|_| HostError::Internal("local_validation_worker_unavailable".into()))?;
+        Ok(Self {
+            sender: Some(sender),
+            thread: Some(thread),
+            cancelled,
+        })
+    }
+
+    async fn complete(
+        mut self,
+        verified: VerifiedOwnedLocalValidationJob,
+        expected: OwnedLocalValidationBinding,
+        deadline: Instant,
+    ) -> HostResult<Value> {
+        let (result, receiver) = oneshot::channel();
+        self.sender
+            .take()
+            .ok_or_else(|| HostError::PreflightFailed("local_validation_worker_consumed".into()))?
+            .send(OwnedLocalValidationWork {
+                verified,
+                expected,
+                deadline,
+                result,
+            })
+            .map_err(|_| HostError::Internal("local_validation_worker_disconnected".into()))?;
+        let result = receiver.await.map_err(|_| {
+            HostError::Internal("local_validation_worker_result_unavailable".into())
+        })?;
+        self.thread
+            .take()
+            .ok_or_else(|| HostError::Internal("local_validation_worker_missing".into()))?
+            .join()
+            .map_err(|_| HostError::Internal("local_validation_worker_failed".into()))?;
+        result
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedLocalValidationWorker {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
+        self.cancelled.store(true, Ordering::Release);
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            // The provider owns cancellation, child reap, group absence and
+            // IO joins. Keep the invocation's worker alive until those finish.
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct OwnedLocalValidationPreparationGuard(
+    Arc<std::sync::Mutex<Option<OwnedLocalValidationWorker>>>,
+);
+
+#[cfg(target_os = "linux")]
+impl Drop for OwnedLocalValidationPreparationGuard {
+    fn drop(&mut self) {
+        let worker = self.0.lock().ok().and_then(|mut slot| slot.take());
+        drop(worker); // Release the slot lock before cancellation and join.
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_owned_local_validation_active(
+    deadline: Instant,
+    cancelled: &Arc<AtomicBool>,
+) -> HostResult<()> {
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err(HostError::PreflightFailed(
+            "local_validation_cancelled_or_expired".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_owned_local_validation_with_provider(
+    job: OwnedLocalValidationJob,
+    correlation: &str,
+    deadline: Instant,
+    cancelled: &Arc<AtomicBool>,
+    provider: fcp_host::LocalMcpProvider,
+) -> HostResult<Value> {
+    ensure_owned_local_validation_active(deadline, cancelled)?;
+    let bound = provider.policy().max_request_bytes as usize;
+    let dispatcher = fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
+    match job {
+        OwnedLocalValidationJob::CurrentPair(graphs) => {
+            let result = dispatcher
+                .validate_current_pair(correlation.to_owned(), graphs, cancelled, deadline)
+                .map_err(|_| {
+                    HostError::PreflightFailed("comparison_local_validation_failed".into())
+                })?;
+            project_comparison_validation(&result)
+        }
+        OwnedLocalValidationJob::CurrentGraph(graph, profile) => {
+            let result = dispatcher
+                .validate_current_graph(correlation.to_owned(), graph, profile, cancelled, deadline)
+                .map_err(|_| {
+                    HostError::PreflightFailed("remote_validation_local_provider_failed".into())
+                })?;
+            if result.result.status != fcp_host::LocalMcpResultStatus::Completed
+                || !result.result.startup.network_disabled
+                || result.result.responses.len() != 1
+                || result.result.teardown_error_code.is_some()
+                || !result.result.shutdown.completion.reaped
+                || !result.result.shutdown.completion.group_absent
+            {
+                return Err(HostError::PreflightFailed(
+                    "remote_validation_teardown_incomplete".into(),
+                ));
+            }
+            fcp_host::project_local_n8n_validation_call(&result.result.responses[0])
+                .map_err(|_| HostError::PreflightFailed("remote_validation_result_invalid".into()))
+        }
     }
 }
 
@@ -6031,18 +6315,20 @@ async fn complete_owned_remote_validation(
     request: &InvokeRequest,
     mut response: InvokeResponse,
     deadline: Instant,
+    worker: OwnedLocalValidationWorker,
 ) -> HostResult<InvokeResponse> {
     if response.status != InvokeStatus::Ok || response.error.is_some() {
         return Ok(response);
     }
-    let native = capture
-        .lock()
-        .map_err(|_| HostError::Internal("remote_validation_capture_unavailable".into()))?
-        .response
-        .take()
-        .ok_or_else(|| {
+    let (native, resource) = {
+        let mut capture = capture
+            .lock()
+            .map_err(|_| HostError::Internal("remote_validation_capture_unavailable".into()))?;
+        let native = capture.response.take().ok_or_else(|| {
             HostError::PreflightFailed("remote_validation_response_not_captured".into())
         })?;
+        (native, capture.resource_uri.clone())
+    };
     let graph = captured_remote_validation_graph(
         &native,
         &request.input,
@@ -6063,54 +6349,12 @@ async fn complete_owned_remote_validation(
             ));
         }
     };
-    let correlation = request
-        .correlation_id
-        .as_ref()
-        .map_or_else(|| request.id.to_string(), ToString::to_string);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let guard = OwnedLocalValidationCancelGuard(Arc::clone(&cancelled));
-    let (sender, receiver) = oneshot::channel();
-    let worker = std::thread::Builder::new()
-        .name("n8n-current-graph-validation".into())
-        .spawn(move || {
-            let result = (|| {
-                let provider = fcp_host::LocalMcpProvider::from_signed_current().map_err(|_| {
-                    HostError::PreflightFailed("remote_validation_signed_policy_unavailable".into())
-                })?;
-                let bound = provider.policy().max_request_bytes as usize;
-                let dispatcher =
-                    fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
-                let result = dispatcher
-                    .validate_current_graph(correlation, graph, profile, &cancelled, deadline)
-                    .map_err(|_| {
-                        HostError::PreflightFailed("remote_validation_local_provider_failed".into())
-                    })?;
-                if result.result.status != fcp_host::LocalMcpResultStatus::Completed
-                    || !result.result.startup.network_disabled
-                    || result.result.responses.len() != 1
-                    || result.result.teardown_error_code.is_some()
-                    || !result.result.shutdown.completion.reaped
-                    || !result.result.shutdown.completion.group_absent
-                {
-                    return Err(HostError::PreflightFailed(
-                        "remote_validation_teardown_incomplete".into(),
-                    ));
-                }
-                fcp_host::project_local_n8n_validation_call(&result.result.responses[0]).map_err(
-                    |_| HostError::PreflightFailed("remote_validation_result_invalid".into()),
-                )
-            })();
-            let _ = sender.send(result);
-        })
-        .map_err(|_| HostError::Internal("remote_validation_worker_unavailable".into()))?;
-    let result = receiver
-        .await
-        .map_err(|_| HostError::Internal("remote_validation_worker_result_unavailable".into()))?;
-    worker
-        .join()
-        .map_err(|_| HostError::Internal("remote_validation_worker_failed".into()))?;
-    drop(guard);
-    response.result = Some(result?);
+    let expected = OwnedLocalValidationBinding::from_request(request, &resource)?;
+    let verified = VerifiedOwnedLocalValidationJob {
+        job: OwnedLocalValidationJob::CurrentGraph(graph, profile),
+        binding: OwnedLocalValidationBinding::from_request(request, &resource)?,
+    };
+    response.result = Some(worker.complete(verified, expected, deadline).await?);
     Ok(response)
 }
 
@@ -6120,6 +6364,7 @@ async fn complete_owned_workflow_comparison(
     request: &InvokeRequest,
     mut response: InvokeResponse,
     deadline: Instant,
+    worker: OwnedLocalValidationWorker,
 ) -> HostResult<InvokeResponse> {
     if response.status != InvokeStatus::Ok || response.error.is_some() {
         return Ok(response);
@@ -6139,44 +6384,12 @@ async fn complete_owned_workflow_comparison(
         .as_mut()
         .ok_or_else(|| HostError::PreflightFailed("comparison result missing".into()))?;
     let graphs = captured_comparison_graphs(&native, &resource, &request.input, projected)?;
-    let correlation = request
-        .correlation_id
-        .as_ref()
-        .map_or_else(|| request.id.to_string(), ToString::to_string);
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let guard = OwnedLocalValidationCancelGuard(Arc::clone(&cancelled));
-    let (sender, receiver) = oneshot::channel();
-    // The owned blocking provider runs off the async executor. Cancellation
-    // of this invocation signals its supervised session; teardown stays in
-    // that session, even when the receiver is dropped.
-    let worker = std::thread::Builder::new()
-        .name("n8n-current-pair-validation".into())
-        .spawn(move || {
-            let result = (|| {
-                let provider = fcp_host::LocalMcpProvider::from_signed_current().map_err(|_| {
-                    HostError::PreflightFailed("comparison signed local policy unavailable".into())
-                })?;
-                let bound = provider.policy().max_request_bytes as usize;
-                let dispatcher =
-                    fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
-                let result = dispatcher
-                    .validate_current_pair(correlation, graphs, &cancelled, deadline)
-                    .map_err(|_| {
-                        HostError::PreflightFailed("comparison local validation failed".into())
-                    })?;
-                project_comparison_validation(&result)
-            })();
-            let _ = sender.send(result);
-        })
-        .map_err(|_| HostError::Internal("comparison validation worker unavailable".into()))?;
-    let result = receiver
-        .await
-        .map_err(|_| HostError::Internal("comparison validation result unavailable".into()))?;
-    worker
-        .join()
-        .map_err(|_| HostError::Internal("comparison validation worker failed".into()))?;
-    drop(guard);
-    projected["validationDelta"] = result?;
+    let expected = OwnedLocalValidationBinding::from_request(request, &resource)?;
+    let verified = VerifiedOwnedLocalValidationJob {
+        job: OwnedLocalValidationJob::CurrentPair(graphs),
+        binding: OwnedLocalValidationBinding::from_request(request, &resource)?,
+    };
+    projected["validationDelta"] = worker.complete(verified, expected, deadline).await?;
     Ok(response)
 }
 
@@ -6240,6 +6453,266 @@ fn owned_invocation_config(
 #[cfg(all(test, target_os = "linux"))]
 mod owned_per_invocation_unit_tests {
     use super::*;
+
+    fn local_worker_fixture_binding(correlation: &str) -> OwnedLocalValidationBinding {
+        OwnedLocalValidationBinding {
+            request_id: "fixture-request".into(),
+            operation: "n8n.validation.run".into(),
+            zone: "z:work".into(),
+            resource: "fwc-n8n://eec/workflows/one".into(),
+            correlation: correlation.into(),
+            input_digest: "fixture-current-published-digest".into(),
+        }
+    }
+
+    #[test]
+    fn early_local_validation_worker_owns_channel_cancel_and_join() {
+        let called = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&called);
+        let idle = OwnedLocalValidationWorker::prepare_bound(move |_, _, _, _| {
+            seen.store(true, Ordering::Release);
+            Ok(Value::Null)
+        })
+        .unwrap();
+        let idle_cancelled = Arc::clone(&idle.cancelled);
+        drop(idle);
+        assert!(idle_cancelled.load(Ordering::Acquire));
+        assert!(!called.load(Ordering::Acquire));
+
+        let slot = Arc::new(std::sync::Mutex::new(Some(
+            OwnedLocalValidationWorker::prepare_bound(|_, _, _, _| {
+                panic!("auth-denied/nonvalidation cleanup must not dispatch")
+            })
+            .unwrap(),
+        )));
+        let retained_registry_reference = Arc::clone(&slot);
+        drop(OwnedLocalValidationPreparationGuard(slot));
+        assert!(retained_registry_reference.lock().unwrap().is_none());
+
+        let worker = OwnedLocalValidationWorker::prepare_bound(|_, _, deadline, cancelled| {
+            while !cancelled.load(Ordering::Acquire) && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            Ok(json!({"valid":true}))
+        })
+        .unwrap();
+        let cancelled = Arc::clone(&worker.cancelled);
+        let (result, receiver) = oneshot::channel();
+        worker
+            .sender
+            .as_ref()
+            .unwrap()
+            .send(OwnedLocalValidationWork {
+                verified: VerifiedOwnedLocalValidationJob {
+                    job: OwnedLocalValidationJob::CurrentPair([json!({}), json!({})]),
+                    binding: local_worker_fixture_binding("cancelled-fixture"),
+                },
+                expected: local_worker_fixture_binding("cancelled-fixture"),
+                deadline: Instant::now() + Duration::from_secs(1),
+                result,
+            })
+            .unwrap();
+        drop(receiver);
+        drop(worker);
+        assert!(cancelled.load(Ordering::Acquire));
+
+        for cancelled_before_dispatch in [false, true] {
+            let invoked = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&invoked);
+            let worker = OwnedLocalValidationWorker::prepare_bound(move |_, _, _, _| {
+                seen.store(true, Ordering::Release);
+                Ok(Value::Null)
+            })
+            .unwrap();
+            worker
+                .cancelled
+                .store(cancelled_before_dispatch, Ordering::Release);
+            let deadline = if cancelled_before_dispatch {
+                Instant::now() + Duration::from_secs(1)
+            } else {
+                Instant::now()
+            };
+            let expected = local_worker_fixture_binding("closed-fixture");
+            let result = fcp_async_core::runtime::block_on_sync(worker.complete(
+                VerifiedOwnedLocalValidationJob {
+                    job: OwnedLocalValidationJob::CurrentPair([json!({}), json!({})]),
+                    binding: expected.clone(),
+                },
+                expected,
+                deadline,
+            ))
+            .unwrap();
+            assert!(result.is_err());
+            assert!(!invoked.load(Ordering::Acquire));
+        }
+
+        for field in [
+            "request",
+            "operation",
+            "zone",
+            "resource",
+            "correlation",
+            "input",
+        ] {
+            let invoked = Arc::new(AtomicBool::new(false));
+            let seen = Arc::clone(&invoked);
+            let worker = OwnedLocalValidationWorker::prepare_bound(move |_, _, _, _| {
+                seen.store(true, Ordering::Release);
+                Ok(Value::Null)
+            })
+            .unwrap();
+            let expected = local_worker_fixture_binding("binding-fixture");
+            let mut wrong = expected.clone();
+            match field {
+                "request" => wrong.request_id.push_str("other"),
+                "operation" => wrong.operation = "n8n.workflows.execute".into(),
+                "zone" => wrong.zone = "z:owner".into(),
+                "resource" => wrong.resource = "fwc-n8n://hetzner/workflows/other".into(),
+                "correlation" => wrong.correlation.push_str("other"),
+                "input" => wrong.input_digest.push_str("other-version"),
+                _ => unreachable!(),
+            }
+            let result = fcp_async_core::runtime::block_on_sync(worker.complete(
+                VerifiedOwnedLocalValidationJob {
+                    job: OwnedLocalValidationJob::CurrentPair([json!({}), json!({})]),
+                    binding: wrong,
+                },
+                expected,
+                Instant::now() + Duration::from_secs(1),
+            ))
+            .unwrap();
+            assert!(result.is_err(), "{field}");
+            assert!(!invoked.load(Ordering::Acquire));
+        }
+
+        assert!(
+            ensure_owned_local_validation_active(Instant::now(), &Arc::new(AtomicBool::new(false)))
+                .is_err()
+        );
+        assert!(
+            ensure_owned_local_validation_active(
+                Instant::now() + Duration::from_secs(1),
+                &Arc::new(AtomicBool::new(true))
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires retained static ELF; isolates irreversible per-thread Landlock in a test subprocess"]
+    fn early_local_validation_worker_landlock_process_qualification() {
+        let static_provider = std::env::var("FCP_N8N_STATIC_QUALIFICATION_PATH")
+            .expect("explicit retained static provider prerequisite");
+        let output = std::process::Command::new("/usr/bin/timeout")
+            .arg("25s")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "owned_per_invocation_unit_tests::early_local_validation_worker_landlock_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("FCP_N8N_STATIC_QUALIFICATION_PATH", static_provider)
+            .env("FCP_N8N_EARLY_WORKER_TEST_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated fixture qualification failed: {}",
+            String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(4096)])
+        );
+        assert!(
+            std::str::from_utf8(&output.stdout)
+                .unwrap()
+                .contains("EARLY_WORKER_PROCESS_QUALIFIED")
+        );
+    }
+
+    #[test]
+    #[ignore = "only invoked by fixed qualification parent, never an ordinary test-thread sandbox"]
+    fn early_local_validation_worker_landlock_child() {
+        assert_eq!(
+            std::env::var("FCP_N8N_EARLY_WORKER_TEST_CHILD").as_deref(),
+            Ok("1")
+        );
+        let static_provider =
+            PathBuf::from(std::env::var("FCP_N8N_STATIC_QUALIFICATION_PATH").unwrap());
+        // Open IO before the read-only boundary, as the real owned launcher
+        // does. Opening writable /dev/null afterwards is itself forbidden.
+        let null = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let mut static_command = std::process::Command::new(&static_provider);
+        static_command
+            .stdin(null.try_clone().unwrap())
+            .stdout(null.try_clone().unwrap())
+            .stderr(null);
+        let graph = json!({"nodes":[],"connections":{}});
+        let expected = graph.clone();
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+            &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json").unwrap(),
+        )
+        .unwrap();
+        assert!(policy.network_disabled);
+        // Existing controlled test factory only: the test executable is not
+        // admitted as signed current and production factory remains unchanged.
+        let fixture_provider = fcp_host::LocalMcpProvider::new(policy).unwrap();
+        let worker = OwnedLocalValidationWorker::prepare_bound(
+            move |job, correlation, deadline, cancelled| {
+                assert_eq!(correlation, "bound-process-fixture");
+                assert!(!cancelled.load(Ordering::Acquire));
+                let OwnedLocalValidationJob::CurrentGraph(ref actual, _) = job else {
+                    panic!("wrong typed fixture job")
+                };
+                assert_eq!(actual, &expected);
+                let status = std::process::Command::new("/usr/bin/true")
+                    .status()
+                    .map_err(|_| HostError::Internal("fixed fixture process refused".into()))?;
+                assert!(status.success());
+                run_owned_local_validation_with_provider(
+                    job,
+                    correlation,
+                    deadline,
+                    cancelled,
+                    fixture_provider,
+                )
+            },
+        )
+        .unwrap();
+        fcp_sandbox::apply_fixed_read_only_landlock_with_static_executable(&static_provider)
+            .unwrap();
+        assert!(
+            std::process::Command::new("/usr/bin/true")
+                .status()
+                .is_err()
+        );
+        let static_child = static_command.status();
+        assert!(
+            static_child.is_ok(),
+            "admitted static child must remain executable"
+        );
+        let result = fcp_async_core::runtime::block_on_sync(worker.complete(
+            VerifiedOwnedLocalValidationJob {
+                job: OwnedLocalValidationJob::CurrentGraph(
+                    graph,
+                    fcp_host::LocalN8nValidationProfile::Runtime,
+                ),
+                binding: local_worker_fixture_binding("bound-process-fixture"),
+            },
+            local_worker_fixture_binding("bound-process-fixture"),
+            Instant::now() + Duration::from_secs(15),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(result["valid"], true);
+        assert_eq!(result["errors"].as_array().unwrap().len(), 0);
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        // Real fixed local JSON validation/teardown, controlled policy factory;
+        // not signed-current admission of this test executable or installed CLI.
+        println!("EARLY_WORKER_PROCESS_QUALIFIED local_json_valid=true errors=0 warnings=1");
+    }
 
     #[test]
     fn remote_validation_capture_selects_exact_current_graph_and_denies_binding_drift() {
@@ -17106,6 +17579,7 @@ fn n8n_run_once_operation_class_allowed(
 async fn async_n8n_read_only_run_once(
     telemetry_config: TelemetryConfig,
     expected_write: Option<bool>,
+    #[cfg(target_os = "linux")] local_validation_worker: Option<OwnedLocalValidationWorker>,
 ) -> HostResult<InvokeResponse> {
     let high_level_input = read_n8n_read_only_run_once_input_from_stdin()
         .map_err(|_| n8n_run_once_stage_error(N8nRunOnceFailureStage::Input))?;
@@ -17222,6 +17696,13 @@ async fn async_n8n_read_only_run_once(
         emit_n8n_run_once_host_error_diagnostic(&error);
         n8n_run_once_stage_error(N8nRunOnceFailureStage::RuntimeState)
     })?;
+    #[cfg(target_os = "linux")]
+    let _local_validation_preparation_guard = {
+        *state.registry.local_validation_worker.lock().map_err(|_| {
+            HostError::Internal("local_validation_worker_lock_unavailable".into())
+        })? = local_validation_worker;
+        OwnedLocalValidationPreparationGuard(Arc::clone(&state.registry.local_validation_worker))
+    };
     let introspection = state
         .registry
         .get_introspection(&connector_id)
@@ -17622,6 +18103,8 @@ fn fixed_n8n_supervised_provider_executable(
 
 fn main() -> HostResult<()> {
     let action = parse_cli_action()?;
+    #[cfg(target_os = "linux")]
+    let mut local_validation_worker = None;
     match action {
         CliAction::Run => {}
         CliAction::RunOnce => {}
@@ -17646,6 +18129,12 @@ fn main() -> HostResult<()> {
     ) {
         if let Err(error) = run_n8n_supervisor_gate_before_telemetry() {
             return print_run_once_response(Err(error));
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(action, CliAction::N8nSupervisedReadOnlyRunOnce) {
+            // Signed host admission is already complete. This private worker
+            // predates main-thread Landlock; no provider is launched yet.
+            local_validation_worker = Some(OwnedLocalValidationWorker::prepare()?);
         }
         #[cfg(target_os = "linux")]
         {
@@ -17731,6 +18220,8 @@ fn main() -> HostResult<()> {
             let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
                 telemetry_config,
                 None,
+                #[cfg(target_os = "linux")]
+                None,
             )) {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
@@ -17743,6 +18234,8 @@ fn main() -> HostResult<()> {
             let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
                 telemetry_config,
                 Some(false),
+                #[cfg(target_os = "linux")]
+                local_validation_worker.take(),
             )) {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
@@ -17755,6 +18248,8 @@ fn main() -> HostResult<()> {
             let result = match fcp_async_core::runtime::block_on_sync(async_n8n_read_only_run_once(
                 telemetry_config,
                 Some(true),
+                #[cfg(target_os = "linux")]
+                None,
             )) {
                 Ok(result) => result,
                 Err(_) => Err(HostError::Internal(
@@ -26275,6 +26770,8 @@ deny_ptrace = true
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         };
 
         let introspection = registry
@@ -26446,6 +26943,8 @@ deny_ptrace = true
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -26472,6 +26971,8 @@ deny_ptrace = true
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -29507,6 +30008,265 @@ deny_ptrace = true
     #[cfg(all(feature = "n8n-test-support", target_os = "linux"))]
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     #[ignore = "requires the explicit original connector fixture executable"]
+    async fn workflows_original_child_same_snapshot_capture() {
+        let binary =
+            std::fs::canonicalize(std::env::var_os("FCP_N8N_CREDENTIAL_FIXTURE_BINARY").unwrap())
+                .unwrap();
+        let digest = blake3::hash(&std::fs::read(&binary).unwrap())
+            .to_hex()
+            .to_string();
+        let retained = tempfile::Builder::new()
+            .prefix("current-graph-child-")
+            .tempdir_in("/srv/dev-ssd/fcp/nqm81-35")
+            .unwrap()
+            .keep();
+        for server in ["eec", "hetzner"] {
+            for operation in [
+                "n8n.workflows.get",
+                "n8n.workflows.compare",
+                "n8n.validation.run",
+            ] {
+                let (mut plan, mut request, instance, _, signing) =
+                    credentials_bound_test_fixture("n8n.workflows.read");
+                plan.operation = operation.parse().unwrap();
+                request.operation = plan.operation.clone();
+                request.input = match operation {
+                    "n8n.workflows.get" => json!({"id":"one","version":"both","detail":"standard"}),
+                    "n8n.workflows.compare" => {
+                        json!({"id":"one","leftVersion":"draft","rightVersion":"published","detail":"standard"})
+                    }
+                    _ => {
+                        json!({"subject":"remote_workflow","id":"one","version":"published","profile":"runtime"})
+                    }
+                };
+                let server_id = if server == "eec" {
+                    N8nReadOnlyServerId::Eec
+                } else {
+                    N8nReadOnlyServerId::Hetzner
+                };
+                let resource =
+                    expected_n8n_read_only_resource_uri(server_id, operation, &request.input)
+                        .unwrap();
+                let credential = CredentialId::new();
+                let lifecycle = Arc::new(HostAdminStateStore::new());
+                let issued = lifecycle
+                    .issue_capability_token_for_instance(
+                        &fcp_host::CapabilityIssuanceRequest {
+                            connector_id: "fcp.n8n".into(),
+                            capability_id: "n8n.workflows.read".into(),
+                            zone_id: ZoneId::work().to_string(),
+                            principal_id: "principal:original".into(),
+                            operations: vec![operation.into()],
+                            ttl_secs: 60,
+                            not_before_delay_secs: None,
+                            holder_node: None,
+                            max_delegation_depth: 0,
+                            resource_allow: vec![resource],
+                            resource_deny: Vec::new(),
+                            max_calls: Some(1),
+                            max_bytes: Some(4 * 1024 * 1024),
+                            credential_allow: vec![credential],
+                            dry_run: false,
+                        },
+                        &signing,
+                        &instance,
+                    )
+                    .await
+                    .unwrap();
+                request.capability_token = capability_token_from_cbor_b64(
+                    issued.token_cbor_b64.as_deref().unwrap(),
+                    "controlled graph child",
+                )
+                .unwrap();
+                let host = if server == "eec" {
+                    "n8n.europeaneyecenter.com"
+                } else {
+                    "n8nhet.levilaser.com"
+                };
+                let mut managed = d9us6_loopback_constraints(443);
+                managed.host_allow = vec![host.into()];
+                managed.require_sni = true;
+                plan.network_constraints = managed.resolve(None).unwrap();
+                plan.configure_payload = Some(json!({"server_id":server,
+                    "base_url":format!("https://{host}/api/v1"),"credential_id":credential.to_string()}));
+                plan.state_root = Some(retained.join(server).join(operation));
+                let (host_endpoint, child_endpoint) = StdUnixStream::pair().unwrap();
+                let host_shutdown = host_endpoint.try_clone().unwrap();
+                let mut handle = OwnedInvocationHandle::launch(
+                    ProcessSpec {
+                        launcher_path: binary.clone(),
+                        launcher_digest: digest.clone(),
+                        runtime_executable: binary.clone(),
+                        expected_runtime_executable_digest: digest.clone(),
+                        fixed_args: Vec::new(),
+                        fixed_env: BTreeMap::from([
+                            ("FCP_HOST_EGRESS_TRANSPORT".into(), "inherited-fd-v1".into()),
+                            (
+                                "FCP_HOST_EGRESS_AUTH_TOKEN".into(),
+                                "graph-child-token".into(),
+                            ),
+                        ]),
+                        network_disabled: true,
+                    },
+                    child_endpoint,
+                    owned_invocation_config(&plan.connector_id, &plan.operation),
+                )
+                .await
+                .unwrap();
+                let introspection = owned_rpc(&mut handle, "introspect", json!({}))
+                    .await
+                    .unwrap();
+                let descriptor: Introspection =
+                    serde_json::from_value(introspection.clone()).unwrap();
+                plan.manifest_operation = descriptor
+                    .operations
+                    .into_iter()
+                    .find(|op| op.id == request.operation)
+                    .unwrap();
+                let mut policies = HashMap::new();
+                policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+                let state = dispatcher_app_state(
+                    owned_fixture_registry_with_introspection(
+                        "fcp.n8n",
+                        operation,
+                        managed,
+                        introspection,
+                    ),
+                    lifecycle,
+                    Some(signing.verifying_key()),
+                    policies,
+                );
+                let profile = AuthProfile::new(
+                    "controlled-graph-child",
+                    "n8n",
+                    AuthMethodKind::ApiKey(
+                        ApiKeyAuth::new("SYNTHETIC_GRAPH_KEY", "X-N8N-API-KEY", None::<String>)
+                            .unwrap(),
+                    ),
+                    "synthetic",
+                    0,
+                )
+                .unwrap();
+                state
+                    .credential_pools
+                    .lock()
+                    .await
+                    .add_credential(
+                        CredentialPoolKey::new(ProviderKey::new("n8n").unwrap(), ZoneId::work()),
+                        CredentialPoolStrategy::Priority,
+                        fcp_host::PooledCredential::new(
+                            credential,
+                            fcp_host::CredentialSource::Manual,
+                            0,
+                            "synthetic",
+                            CredentialPayload::auth_profile_with_allowed_hosts(profile, [host]),
+                        ),
+                        CredentialUpsertMode::RejectExisting,
+                    )
+                    .unwrap();
+                let native = json!({"id":"one","name":"Synthetic","active":true,"isArchived":false,
+                    "versionId":"draft-one","activeVersionId":"published-one",
+                    "nodes":[{"id":"set","name":"Set","type":"n8n-nodes-base.set","typeVersion":3.4,"position":[100,200],"parameters":{}}],
+                    "connections":{"Set":{"main":[[{"node":"Missing","type":"main","index":0}]]}},
+                    "activeVersion":{"versionId":"published-one","nodes":[],"connections":{}},
+                    "pinData":"CAPTURE_PRIVATE_CANARY","staticData":"CAPTURE_PRIVATE_CANARY"});
+                let fixture = Arc::new(std::sync::Mutex::new(OwnedCredentialHttpFixture {
+                    requests: Vec::new(),
+                    bad_schema: false,
+                    workflow_response: Some(native),
+                }));
+                let mut binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
+                let capture = binding.comparison_capture.clone();
+                binding.fixture_http = Some(Arc::clone(&fixture));
+                let wait_guard = OwnedReadWaitGuard(binding.read_wait.clone());
+                let activated = Arc::new(AtomicBool::new(false));
+                let shutting_down = Arc::new(AtomicBool::new(false));
+                host_endpoint.set_nonblocking(true).unwrap();
+                let codec = InheritedEgressCodec::new(
+                    fcp_async_core::net::UnixStream::from_std(host_endpoint).unwrap(),
+                    "graph-child-token",
+                )
+                .unwrap();
+                let egress = task::spawn(owned_egress_loop(
+                    state,
+                    codec,
+                    binding,
+                    Arc::clone(&activated),
+                    Arc::clone(&shutting_down),
+                ));
+                let response =
+                    owned_run_protocol(&mut handle, &plan, &request, &activated, None).await;
+                drop(wait_guard);
+                let response =
+                    owned_finalize(handle, host_shutdown, shutting_down, egress, response)
+                        .await
+                        .unwrap();
+                assert!(
+                    response.error.is_none(),
+                    "controlled graph child refused {server}/{operation}"
+                );
+                assert_eq!(fixture.lock().unwrap().requests.len(), 1);
+                let projected = response.result.as_ref().unwrap();
+                assert!(!projected.to_string().contains("CAPTURE_PRIVATE_CANARY"));
+                if let Some(capture) = capture {
+                    let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+                        &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json")
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    assert!(policy.network_disabled);
+                    let provider = fcp_host::LocalMcpProvider::new(policy).unwrap();
+                    let worker = OwnedLocalValidationWorker::prepare_bound(
+                        move |job, correlation, deadline, cancelled| {
+                            run_owned_local_validation_with_provider(
+                                job,
+                                correlation,
+                                deadline,
+                                cancelled,
+                                provider,
+                            )
+                        },
+                    )
+                    .unwrap();
+                    // Same production continuation and native JSON validator;
+                    // the test-only policy factory is explicitly controlled.
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    if operation == "n8n.workflows.compare" {
+                        assert_eq!(projected["semanticDiff"]["changed"], true);
+                        assert_eq!(projected["layoutDiff"]["changed"], true);
+                        let completed = complete_owned_workflow_comparison(
+                            capture, &request, response, deadline, worker,
+                        )
+                        .await
+                        .unwrap();
+                        let result = completed.result.unwrap();
+                        assert_eq!(result["validationDelta"]["status"], "collected");
+                        assert_eq!(result["validationDelta"]["changed"], true);
+                        assert!(!result.to_string().contains("CAPTURE_PRIVATE_CANARY"));
+                    } else {
+                        let completed = complete_owned_remote_validation(
+                            capture, &request, response, deadline, worker,
+                        )
+                        .await
+                        .unwrap();
+                        let result = completed.result.unwrap();
+                        assert_eq!(result["valid"], true);
+                        assert_eq!(result["errors"].as_array().unwrap().len(), 0);
+                        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+                        assert!(!result.to_string().contains("CAPTURE_PRIVATE_CANARY"));
+                    }
+                }
+                eprintln!(
+                    "controlled_original_graph_child server={server} operation={operation} http_calls=1 proxy_joined=true child_reaped_group_absent=true local_json_validation={} policy_factory=controlled_test installed_cli=false",
+                    operation != "n8n.workflows.get"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(feature = "n8n-test-support", target_os = "linux"))]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    #[ignore = "requires the explicit original connector fixture executable"]
     async fn workflows_original_child_pending_http_cancel_and_deadline() {
         let binary =
             std::fs::canonicalize(std::env::var_os("FCP_N8N_CREDENTIAL_FIXTURE_BINARY").unwrap())
@@ -30464,6 +31224,8 @@ deny_ptrace = true
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -35744,6 +36506,8 @@ done
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         });
         let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -36160,6 +36924,8 @@ done
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         });
         let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -39618,6 +40384,159 @@ done"#;
             "security": {"description_scan": "block"}
         }));
         config
+    }
+
+    #[fcp_async_core::runtime::test]
+    #[ignore = "requires explicit retained public inventories from the failed installed read release"]
+    async fn retained_official_read_inventories_validate_corrected_manifest_without_launch() {
+        let inventory_dir = std::env::var_os("FCP_N8N_READ_INVENTORY_DIR")
+            .map(PathBuf::from)
+            .expect("explicit retained public inventory directory is required");
+        let corrected_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../connectors/mcp-bridge/manifest.toml");
+        for server in ["eec", "hetzner"] {
+            let raw =
+                std::fs::read_to_string(inventory_dir.join(format!("{server}-official-mcp.json")))
+                    .expect("retained public producer inventory should be readable");
+            let mut configs: Vec<ConnectorConfig> =
+                serde_json::from_str(&raw).expect("native producer inventory should parse");
+            assert_eq!(configs.len(), 1);
+            assert_eq!(configs[0].id, "fcp.mcp-bridge");
+            assert_eq!(
+                configs[0].lifecycle_mode,
+                ConnectorLifecycleMode::PerInvocation
+            );
+            assert_eq!(configs[0].config.as_ref().unwrap()["server_id"], server);
+            assert!(
+                configs[0]
+                    .allowed_operations
+                    .iter()
+                    .any(|op| op == "mcp.n8n.read")
+            );
+            // A nonexistent executable makes any accidental provider launch fail.
+            // Only the test fixture's manifest path is rebound to the corrected source.
+            configs[0].binary = "/definitely/missing/read-manifest-no-launch".into();
+            let failure = SubprocessRegistry::from_configs(configs.clone(), None)
+                .await
+                .err()
+                .expect("the retained installed manifest must preserve its original refusal");
+            assert_eq!(
+                normalized_host_error_class(&failure),
+                "local.validation.manifest"
+            );
+            configs[0].manifest_path = Some(corrected_manifest.display().to_string());
+            let registry = SubprocessRegistry::from_configs(configs, None)
+                .await
+                .expect("both producer inventories should accept the corrected manifest");
+            let state = registry.state.read().await;
+            let entry = &state.connectors[&ConnectorId::from_static("fcp.mcp-bridge")];
+            assert!(matches!(
+                &entry.connector,
+                ConnectorRuntime::PerInvocation(_)
+            ));
+            let operations = &entry
+                .manifest_constraints
+                .introspection
+                .as_ref()
+                .unwrap()
+                .operations;
+            assert_eq!(operations.len(), 8);
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.id.as_str() == "mcp.n8n.read")
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires retained public inventories; runs only the existing pure producer and native policy resolver"]
+    fn retained_read_inventory_validation_network_matches_native_manifest() {
+        let inventory_dir = PathBuf::from(std::env::var_os("FCP_N8N_READ_INVENTORY_DIR").unwrap());
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/n8n_release_assembler.sh");
+        let code = r#"
+import json,pathlib,sys
+source=pathlib.Path(sys.argv[1]).read_text()
+body=source.split('search_read_policy() {',1)[1].split("<<'PY'\n",1)[1].split('\nPY\n}',1)[0]
+ns={'__name__':'retained_native_policy_fixture'}
+exec(compile(body,sys.argv[1],'exec'),ns)
+root=pathlib.Path(sys.argv[2]); server=sys.argv[3]
+official=json.loads((root/f'{server}-official-mcp.json').read_bytes())[0]
+common=json.loads((root/f'{server}.json').read_bytes())[0]
+# Reconstruct the four-tool input to the same normal producer, never mutate
+# the retained signed inventory or enroll a new production schema.
+tools=official['config']['capability_policy']['approved_tools']
+official['config']['capability_policy']['approved_tools']=[t for t in tools if t['name']!='search_workflows']
+for inventory,operations in ((official,('mcp.n8n.read',)),(common,('n8n.workflows.compare','n8n.validation.run'))):
+    for operation in operations:
+        inventory['allowed_operations']=[op for op in inventory['allowed_operations'] if op!=operation]
+        inventory['operation_network_constraints'].pop(operation,None)
+tool={'name':'search_workflows','class':'read','input_schema_digest':ns['INPUT_PIN'],
+    'output_schema_digest':ns['OUTPUT_PIN'],'input_schema_present':True,'output_schema_present':True}
+policy=ns['validate_read_policy'](json.dumps({'schema':'fwc.n8n.search-read-policy.v1',
+    'servers':{'eec':tool,'hetzner':tool}}).encode())
+_,produced=ns['add_read_inventory'](official,common,server,policy)
+print(json.dumps(produced))
+"#;
+        for server in ["eec", "hetzner"] {
+            let raw = std::fs::read(inventory_dir.join(format!("{server}.json"))).unwrap();
+            let old: Vec<ConnectorConfig> = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(old.len(), 1);
+            let catalog = load_manifest_operation_constraints(&old[0]).unwrap();
+            let operation = OperationId::from_static("n8n.validation.run");
+            let expected = &catalog.network_constraints[operation.as_str()];
+            assert_eq!(expected.cidr_deny.len(), 13);
+            assert!(
+                resolve_per_invocation_network_constraints(
+                    &old[0],
+                    &operation,
+                    &ZoneId::work(),
+                    expected
+                )
+                .is_err()
+            );
+            let output = std::process::Command::new("/usr/bin/python3")
+                .args(["-c", code])
+                .arg(&script)
+                .arg(&inventory_dir)
+                .arg(server)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "pure producer fixture refused");
+            let corrected: ConnectorConfig = serde_json::from_slice(&output.stdout).unwrap();
+            let resolved = resolve_per_invocation_network_constraints(
+                &corrected,
+                &operation,
+                &ZoneId::work(),
+                expected,
+            )
+            .unwrap();
+            assert_eq!(resolved.cidr_deny, expected.cidr_deny);
+            for drift in ["missing-denylist", "wrong-port", "wrong-host"] {
+                let mut wrong = corrected.clone();
+                let network = wrong
+                    .operation_network_constraints
+                    .get_mut(operation.as_str())
+                    .unwrap();
+                match drift {
+                    "missing-denylist" => network.cidr_deny.clear(),
+                    "wrong-port" => network.port_allow = vec![ManagedPortConstraint::Static(8443)],
+                    "wrong-host" => network.host_allow = vec!["unadmitted.invalid".into()],
+                    _ => unreachable!(),
+                }
+                assert!(
+                    resolve_per_invocation_network_constraints(
+                        &wrong,
+                        &operation,
+                        &ZoneId::work(),
+                        expected
+                    )
+                    .is_err(),
+                    "{server}/{drift}"
+                );
+            }
+        }
     }
 
     fn n8n_official_mcp_test_input() -> N8nReadOnlyRunOnceInput {
@@ -46034,6 +46953,8 @@ for server,host in [('eec','n8n.europeaneyecenter.com'),('hetzner','n8nhet.levil
             version: Arc::new(AtomicU64::new(version)),
             capability_verifying_key: None,
             rate_limiters: Arc::new(HostRateLimiterStore::default()),
+            #[cfg(target_os = "linux")]
+            local_validation_worker: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

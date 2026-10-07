@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:b0549f2b22d46077c0d3743e657d7bc0429d3fbee3141e19011619c92da3ae1a"
+interface_hash = "blake3-256:fcp.interface.v2:be35eedbc82878505f7e4ab7f47059e5f05242af98345a9c23c41ba7aec3d51d"
 
 [connector]
 id = "fcp.mcp-bridge"
@@ -344,6 +344,7 @@ description = "Closed typed n8n catalog, SDK validation and credential metadata 
 capability = "mcp.n8n.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
 

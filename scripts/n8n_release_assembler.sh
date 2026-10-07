@@ -871,19 +871,37 @@ def validate_read_policy(raw):
 
 def add_read_inventory(official, common, server, policy):
     official, common = copy.deepcopy(official), copy.deepcopy(common)
-    if (official["config"]["server_id"] != server
+    if (server not in ("eec", "hetzner") or official["config"]["server_id"] != server
         or common["config"]["server_id"] != server):
         raise ValueError("search read policy denied")
     tools = official["config"]["capability_policy"]["approved_tools"]
     selected = policy["servers"][server]
     if not isinstance(selected, list):
         selected = [selected]
+    required_names = {"publish_workflow", "unpublish_workflow", "archive_workflow", "execute_workflow"}
+    allowed_names = set(required_names)
+    allowed_names.update(tool["name"] for tool in selected)
+    if (not isinstance(tools, list) or any(not isinstance(tool, dict)
+        or not isinstance(tool.get("name"), str) or tool["name"] not in allowed_names for tool in tools)
+        or len({tool["name"] for tool in tools}) != len(tools)
+        or not required_names.issubset({tool["name"] for tool in tools})):
+        raise ValueError("search read policy denied")
     for selected_tool in selected:
-        if any(tool["name"] == selected_tool["name"] for tool in tools):
-            raise ValueError("search read policy denied")
         tool = dict(selected_tool)
         del tool["input_schema_present"], tool["output_schema_present"]
-        tools.append(tool)
+        existing = [entry for entry in tools if entry["name"] == tool["name"]]
+        if existing:
+            if existing != [tool]:
+                raise ValueError("search read policy denied")
+        else:
+            tools.append(tool)
+    host = "n8n.europeaneyecenter.com" if server == "eec" else "n8nhet.levilaser.com"
+    legacy_network = {"cidr_deny": [], "connect_timeout_ms": 5000,
+        "deny_ip_literals": True, "deny_localhost": True, "deny_private_ranges": True,
+        "deny_tailnet_ranges": True, "dns_max_ips": 4, "host_allow": [host], "ip_allow": [],
+        "max_redirects": 0, "max_response_bytes": 10485760, "port_allow": [443],
+        "require_host_canonicalization": True, "require_sni": True, "spki_pins": [],
+        "total_timeout_ms": 15000}
     for inventory, operation, source in (
         (official, "mcp.n8n.read", "mcp.tools.list"),
         (common, "n8n.workflows.compare", "n8n.workflows.get"),
@@ -892,19 +910,28 @@ def add_read_inventory(official, common, server, policy):
         network = inventory["operation_network_constraints"]
         if source not in inventory["allowed_operations"] or not isinstance(network.get(source), dict):
             raise ValueError("search read policy denied")
-        if operation in network and network[operation] != network[source]:
+        source_network = copy.deepcopy(legacy_network)
+        if inventory is official and server == "hetzner":
+            source_network["port_allow"] = [8443]
+        if network[source] != source_network:
             raise ValueError("search read policy denied")
-        if operation not in inventory["allowed_operations"]:
-            inventory["allowed_operations"].append(operation)
-        network[operation] = copy.deepcopy(network[source])
+        expected_network = copy.deepcopy(source_network)
         if operation == "n8n.validation.run":
             # Exact existing manifest denylist, not the looser GET policy.
-            network[operation]["cidr_deny"] = [
+            expected_network["cidr_deny"] = [
                 "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
                 "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16",
                 "224.0.0.0/4", "240.0.0.0/4", "::1/128", "fc00::/7",
                 "fe80::/10", "ff00::/8",
             ]
+        if operation in network and network[operation] != expected_network:
+            # Only the exact signed predecessor GET tuple is upgraded to the
+            # stricter validation tuple. No arbitrary old policy is normalized.
+            if operation != "n8n.validation.run" or network[operation] != source_network:
+                raise ValueError("search read policy denied")
+        if operation not in inventory["allowed_operations"]:
+            inventory["allowed_operations"].append(operation)
+        network[operation] = expected_network
     if "code_read" in policy:
         network = common["operation_network_constraints"]
         source = network.get("n8n.workflows.get")

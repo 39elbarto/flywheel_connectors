@@ -6118,17 +6118,33 @@ fn run_owned_local_validation_with_provider(
 ) -> HostResult<Value> {
     ensure_owned_local_validation_active(deadline, cancelled)?;
     let bound = provider.policy().max_request_bytes as usize;
+    let package_version = provider.policy().package_version.to_string();
+    let package_metadata_digest = provider.policy().package_metadata_digest.clone();
     let dispatcher = fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
     match job {
         OwnedLocalValidationJob::CurrentPair(graphs) => {
+            let contexts = graphs.each_ref().map(|graph| {
+                fcp_host::LocalN8nDiagnosticContext::from_graph(
+                    graph,
+                    fcp_host::LocalN8nValidationProfile::Runtime,
+                    &package_version,
+                    &package_metadata_digest,
+                )
+            });
             let result = dispatcher
                 .validate_current_pair(correlation.to_owned(), graphs, cancelled, deadline)
                 .map_err(|_| {
                     HostError::PreflightFailed("comparison_local_validation_failed".into())
                 })?;
-            project_comparison_validation(&result)
+            project_comparison_validation(&result, contexts.each_ref().map(Option::as_ref))
         }
         OwnedLocalValidationJob::CurrentGraph(graph, profile) => {
+            let context = fcp_host::LocalN8nDiagnosticContext::from_graph(
+                &graph,
+                profile,
+                &package_version,
+                &package_metadata_digest,
+            );
             let result = dispatcher
                 .validate_current_graph(correlation.to_owned(), graph, profile, cancelled, deadline)
                 .map_err(|_| {
@@ -6145,8 +6161,11 @@ fn run_owned_local_validation_with_provider(
                     "remote_validation_teardown_incomplete".into(),
                 ));
             }
-            fcp_host::project_local_n8n_validation_call(&result.result.responses[0])
-                .map_err(|_| HostError::PreflightFailed("remote_validation_result_invalid".into()))
+            fcp_host::project_local_n8n_validation_with_context(
+                &result.result.responses[0],
+                context.as_ref(),
+            )
+            .map_err(|_| HostError::PreflightFailed("remote_validation_result_invalid".into()))
         }
     }
 }
@@ -6220,7 +6239,10 @@ fn captured_comparison_graphs(
 }
 
 #[cfg(target_os = "linux")]
-fn project_comparison_validation(result: &fcp_host::LocalN8nDispatchResponse) -> HostResult<Value> {
+fn project_comparison_validation(
+    result: &fcp_host::LocalN8nDispatchResponse,
+    contexts: [Option<&fcp_host::LocalN8nDiagnosticContext>; 2],
+) -> HostResult<Value> {
     let refused = || HostError::PreflightFailed("comparison validation unavailable".into());
     if result.operation != fcp_host::LocalN8nOperationKind::ValidationRun
         || result.result.status != fcp_host::LocalMcpResultStatus::Completed
@@ -6232,12 +6254,27 @@ fn project_comparison_validation(result: &fcp_host::LocalN8nDispatchResponse) ->
     {
         return Err(refused());
     }
-    let left = fcp_host::project_local_n8n_validation_call(&result.result.responses[0])
-        .map_err(|_| refused())?;
-    let right = fcp_host::project_local_n8n_validation_call(&result.result.responses[1])
-        .map_err(|_| refused())?;
+    let left = fcp_host::project_local_n8n_validation_with_context(
+        &result.result.responses[0],
+        contexts[0],
+    )
+    .map_err(|_| refused())?;
+    let right = fcp_host::project_local_n8n_validation_with_context(
+        &result.result.responses[1],
+        contexts[1],
+    )
+    .map_err(|_| refused())?;
+    // Anonymous indexes are graph-local, not cross-version node identities.
+    let findings = |result: &Value, field: &str| {
+        result[field].as_array().map(|items| items.iter().map(|item|
+            json!({"code":item["code"],"classification":item["classification"],"field":item["field"]})
+        ).collect::<Vec<_>>())
+    };
+    let changed = left["valid"] != right["valid"]
+        || findings(&left, "errors") != findings(&right, "errors")
+        || findings(&left, "warnings") != findings(&right, "warnings");
     Ok(
-        json!({"status":"collected","changed":left != right,"left":left,"right":right,
+        json!({"status":"collected","changed":changed,"left":left,"right":right,
         "observationScope":"current_selected_graphs","networkDisabled":result.result.startup.network_disabled,
         "ownedStopped":true}),
     )
@@ -6354,7 +6391,21 @@ async fn complete_owned_remote_validation(
         job: OwnedLocalValidationJob::CurrentGraph(graph, profile),
         binding: OwnedLocalValidationBinding::from_request(request, &resource)?,
     };
-    response.result = Some(worker.complete(verified, expected, deadline).await?);
+    let version = response
+        .result
+        .as_ref()
+        .and_then(|result| result.get("versionId"))
+        .cloned();
+    let mut validation = worker.complete(verified, expected, deadline).await?;
+    if let (Some(binding), Some(version)) = (
+        validation
+            .get_mut("diagnosticBinding")
+            .and_then(Value::as_object_mut),
+        version,
+    ) {
+        binding.insert("versionId".into(), version);
+    }
+    response.result = Some(validation);
     Ok(response)
 }
 
@@ -6390,6 +6441,15 @@ async fn complete_owned_workflow_comparison(
         binding: OwnedLocalValidationBinding::from_request(request, &resource)?,
     };
     projected["validationDelta"] = worker.complete(verified, expected, deadline).await?;
+    for (side, version) in [("left", "leftVersionId"), ("right", "rightVersionId")] {
+        let version = projected[version].clone();
+        if let Some(binding) = projected["validationDelta"][side]
+            .get_mut("diagnosticBinding")
+            .and_then(Value::as_object_mut)
+        {
+            binding.insert("versionId".into(), version);
+        }
+    }
     Ok(response)
 }
 
@@ -6818,6 +6878,129 @@ mod owned_per_invocation_unit_tests {
                 .retain_response_body(200, &serde_json::to_vec(&baseline).unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    #[cfg(feature = "n8n-test-support")]
+    #[ignore = "synthetic graph only; existing fixed network-disabled local provider test seam"]
+    fn diagnostic_host_owned_remote_and_compare_native_process() {
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(
+            &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json").unwrap(),
+        )
+        .unwrap();
+        let graph = json!({"nodes":[{"id":"synthetic","name":"PRIVATE_NODE_CANARY",
+            "type":"n8n-nodes-base.noOp","typeVersion":1,"parameters":{},"position":[]}],"connections":{}});
+        let native = json!({"id":"one","versionId":"draft-one","nodes":graph["nodes"],
+            "connections":{},"activeVersion":{"versionId":"published-one","nodes":graph["nodes"],"connections":{}}});
+        let (semantic, layout) = fcp_host::n8n_comparison_graph_digests(
+            graph["nodes"].as_array().unwrap(),
+            &graph["connections"],
+        )
+        .unwrap();
+        let projection = json!({"status":"validation_required","id":"one","versionId":"draft-one",
+            "version":"draft","profile":"runtime","graphDigest":semantic});
+        let captured = captured_remote_validation_graph(
+            &native,
+            &json!({"subject":"remote_workflow","id":"one","version":"draft","profile":"runtime"}),
+            &projection,
+        )
+        .unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let remote = run_owned_local_validation_with_provider(
+            OwnedLocalValidationJob::CurrentGraph(
+                captured,
+                fcp_host::LocalN8nValidationProfile::Runtime,
+            ),
+            "synthetic-remote-diagnostics",
+            Instant::now() + Duration::from_secs(10),
+            &cancelled,
+            fcp_host::LocalMcpProvider::new(policy.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(remote["valid"], false);
+        assert!(
+            remote["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["code"] == "node_position_shape")
+        );
+        let projection = json!({"leftUri":"fwc-n8n://eec/workflows/one","rightUri":"fwc-n8n://eec/workflows/one",
+            "leftVersionId":"draft-one","rightVersionId":"published-one",
+            "semanticDiff":{"changed":false,"leftDigest":semantic,"rightDigest":semantic},
+            "layoutDiff":{"changed":false,"leftDigest":layout,"rightDigest":layout}});
+        let graphs = captured_comparison_graphs(
+            &native,
+            "fwc-n8n://eec/workflows/one",
+            &json!({"id":"one","leftVersion":"draft","rightVersion":"published"}),
+            &projection,
+        )
+        .unwrap();
+        let comparison = run_owned_local_validation_with_provider(
+            OwnedLocalValidationJob::CurrentPair(graphs),
+            "synthetic-compare-diagnostics",
+            Instant::now() + Duration::from_secs(10),
+            &cancelled,
+            fcp_host::LocalMcpProvider::new(policy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(comparison["status"], "collected");
+        assert_eq!(comparison["changed"], false);
+        assert_eq!(comparison["ownedStopped"], true);
+        assert!(!remote.to_string().contains("CANARY"));
+        assert!(!comparison.to_string().contains("CANARY"));
+        println!("synthetic_host_capture_remote_compare=true native_calls=3 owned_teardown=true");
+    }
+
+    #[test]
+    fn comparison_diagnostics_bind_each_graph_without_binding_only_validation_change() {
+        let left = json!({"nodes":[{"id":"one","name":"PRIVATE_CANARY","type":"n8n-nodes-base.noOp",
+            "typeVersion":9,"position":[0,0],"parameters":{}}],"connections":{}});
+        let mut right = left.clone();
+        right["nodes"][0]["position"] = json!([1, 0]);
+        right["nodes"].as_array_mut().unwrap().insert(
+            0,
+            json!({"id":"other","name":"OTHER_CANARY",
+            "type":"n8n-nodes-base.noOp","typeVersion":1,"position":[2,0],"parameters":{}}),
+        );
+        let contexts = [&left, &right].map(|graph| {
+            fcp_host::LocalN8nDiagnosticContext::from_graph(
+                graph,
+                fcp_host::LocalN8nValidationProfile::Runtime,
+                "2.91.0",
+                fcp_host::LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+            )
+            .unwrap()
+        });
+        let finding = json!({"valid":false,"errors":[{"node":"PRIVATE_CANARY",
+            "message":"typeVersion 9 exceeds maximum supported version 2"}],"warnings":[]});
+        let native = json!({"content":[{"type":"text","text":finding.to_string()}],"structuredContent":finding});
+        let memory = json!({"available":true,"process_count":0,"rss_bytes":0,"pss_bytes":0,"private_bytes":0});
+        // A serialized controlled lifecycle fixture, not an owned launch proof.
+        let mut result: fcp_host::LocalN8nDispatchResponse = serde_json::from_value(json!({
+            "operation":"validation_run","result":{"correlation_id":"synthetic-diagnostics",
+                "responses":[native.clone(),native],"startup":{"pid":1,"pgid":1,"session_id":1,
+                    "start_time_ticks":1,"launcher_digest":"synthetic","runtime_executable_digest":"synthetic",
+                    "network_disabled":true,"memory_before":memory.clone()},
+                "shutdown":{"reason":"Completed","term_sent":false,"kill_sent":false,"reaped":true,
+                    "group_absent":true,"stderr_bytes":0,"memory_after":memory},"memory_samples":[],
+                "status":"Completed","teardown_error_code":null,"result_code":"ok",
+                "telemetry":{"startup_latency_ms":0,"provider_latency_ms":0,"total_latency_ms":0,
+                    "shutdown_latency_ms":0,"request_bytes":0,"response_bytes":0}}})).unwrap();
+        let safe = project_comparison_validation(&result, contexts.each_ref().map(Some)).unwrap();
+        assert_eq!(safe["changed"], false);
+        assert_eq!(safe["left"]["errors"][0]["nodeIndex"], 0);
+        assert_eq!(safe["right"]["errors"][0]["nodeIndex"], 1);
+        assert_ne!(
+            safe["left"]["diagnosticBinding"]["layoutDigest"],
+            safe["right"]["diagnosticBinding"]["layoutDigest"]
+        );
+        assert!(!safe.to_string().contains("CANARY"));
+        result.result.shutdown.completion.reaped = false;
+        assert!(project_comparison_validation(&result, contexts.each_ref().map(Some)).is_err());
+        result.result.shutdown.completion.reaped = true;
+        result.result.startup.network_disabled = false;
+        assert!(project_comparison_validation(&result, contexts.each_ref().map(Some)).is_err());
     }
 
     #[test]

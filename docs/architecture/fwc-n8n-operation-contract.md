@@ -1588,7 +1588,7 @@ The table specifies the exact operation-specific `data` shape.
 | `runtime.status` | none | `correlationId` | `{idle,activeRuns,providers:[{provider,pid?,pgid?,rssBytes?,pssBytes?,privateBytes?,stopped?}]}` |
 | `knowledge.query` | `action`, action fields | `detail`, `limit` | discriminated result matching the action |
 | `node_resources.explore` | `target`, `nodeType`, `version`, `methodName`, `methodType`, `credentialId` | `filter`, `paginationToken`, `currentNodeParameters`, `legacyOptIn` | `{results:[{name,value,url?,description?}],paginationToken?,builderHint?}` |
-| `validation.run` | `subject`, subject payload | `profile`, `target`, `detail` | `{valid,errors:[{path,code,message}],warnings:[...],normalizedDigest?}` |
+| `validation.run` | `subject`, subject payload | `profile`, `target`, `detail` | `{valid,errors:[{path,code,message,classification?,nodeIndex?,field?}],warnings:[...],diagnosticBinding?,normalizedDigest?}` |
 | `structure.search` | `target.server`, `kind` | `query`, `projectId`, `parentFolderId`, `page` | `{items:[{resourceUri,id,name,type,parentUri?}]}` |
 | `workflows.search` | `target.server` | `query`, `projectId`, `folderId`, `tags`, `active`, `isArchived`, `page`, `sort` | `{workflows:[{resourceUri,id,name,description?,active,isArchived,updatedAt?,projectId?,availableInMcp?}]}` |
 | `workflows.get` | exact workflow target | `detail`, `version=draft|published|both`, `includeCode=false`; true requires the exact pins below and routes before admission to `get_code` | `{workflow: NormalizedWorkflowState,graph?: object,codeNodes?: [{name,digest}]}` for metadata; sensitive route uses the separate result below |
@@ -1626,6 +1626,45 @@ a cursor (or offset plus proven total), stable filter/snapshot semantics and
 corresponding original input/output schemas; REST fields cannot substitute for it.
 The new typed bridge/schema projection is source-only until separately admitted;
 installed RC43c does not acquire these capabilities through discovery.
+
+Validation diagnostic candidate (2026-10-08; local source, not installed): the
+shared local, remote-workflow and comparison projector preserves native `valid`
+and every error/warning count. For the pinned 2.91.0 package it recognizes only
+exact anchored position-shape/value, missing-type-version, empty selected Code
+parameter, disconnected no-op node and validator node-type/version-database-limit
+forms. Classification also requires the existing verified package metadata
+fingerprint `0428c7d49767df9eec57c26d27997021812a1b6faf55e0faef9c14498376e723`;
+a version string alone is insufficient. This preserves, rather than expands,
+the existing package/transitive trust boundary; metadata does not hash every
+transitive module. It emits fixed codes/messages and an
+allowlisted `field`; `nodeIndex` is zero-based and emitted only for a unique
+native node-name match in the original captured graph. The reserved native
+fallback name `workflow` always remains unclassified, even if a node has that
+name. No node names, native messages, details, parameters or source are returned.
+The index belongs to this
+graph/version, not a stable node identity. Unknown, ambiguous, missing-context
+or unsupported-package findings retain their count with `code` and
+`classification` equal to `unclassified` and no node index or field.
+
+`diagnosticBinding`, when available, contains `graphDigest`, `layoutDigest`,
+`profile`, `packageVersion` and `packageMetadataDigest`; host-owned
+remote/comparison results additionally bind the checked `versionId`.
+`graphDigest` covers the actual nodes excluding positions plus connections sent
+to validation; `layoutDigest` covers the ordered node IDs and positions.
+Diagnostic binding alone does not change comparison's
+`validationDelta.changed`; graph-local indexes are also excluded from that
+comparison, which compares valid and the ordered safe code/classification/field
+findings. `validator_support_limit` describes the validator's
+database, not a confirmed workflow defect. `input_shape` describes a checked
+input property, not a complete workflow assessment. Malformed, oversized and
+contradictory envelopes still fail closed. `validator_observation` describes
+a checked disconnected no-op node, not a business execution result. General
+parameter rules, expression diagnostics, global connection errors using the
+reserved fallback, dynamic suggestions and AI-specific diagnostics remain
+unclassified; their messages/details cannot be safely inferred by these rules.
+Installed RC3's historical generic diagnostics and observed counts remain
+unchanged; this candidate needs separate
+source and installed admission before ordinary CLI acceptance.
 
 Installed structure baseline (2026-10-04): the coordinator attempted
 `n8n.projects.list` with `{}` exactly once on each server through installed

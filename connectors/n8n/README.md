@@ -41,6 +41,16 @@ universal launcher or a general security-policy change.
 
 ## .35 source candidate — not installed
 
+The 2026-10-08 local diagnostic candidate adds closed safe validation rule codes,
+optional anonymous node indexes and graph/version binding to local validation,
+remote validation and comparison. Unknown findings remain explicitly
+unclassified with unchanged counts. Validator database limits are not confirmed
+workflow defects. Installed RC3/source `9e792356` remains unchanged and returns
+the historical generic diagnostics. See the single
+[validation contract](../../docs/architecture/fwc-n8n-operation-contract.md#51-exact-operation-inputs-and-outputs)
+for the projected fields and limits; no new package, profile or authority is
+admitted by this local source change.
+
 Task commit `537b845117d9144fbb3ebd8683fd9fa54834a4e2` adds typed read,
 knowledge and validation paths. It is not the installed RC43c runtime above;
 `.35` remains in progress. The single

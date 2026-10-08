@@ -1206,21 +1206,288 @@ pub fn n8n_comparison_graph_digests(
 /// # Errors
 /// Rejects malformed envelopes and contradictory validation outcomes.
 pub fn project_local_n8n_validation_call(native: &Value) -> Result<Value, LocalN8nDispatchError> {
+    project_local_n8n_validation_with_context(native, None)
+}
+
+/// Invocation-private metadata derived from the exact graph sent to the
+/// validator. It is neither caller-deserializable nor printable with Debug.
+pub struct LocalN8nDiagnosticContext {
+    nodes: Vec<Value>,
+    connections: Value,
+    graph_digest: String,
+    layout_digest: String,
+    profile: LocalN8nValidationProfile,
+}
+
+/// Existing admitted 2.91.0 package metadata fingerprint for these exact rules.
+pub const LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST: &str =
+    "0428c7d49767df9eec57c26d27997021812a1b6faf55e0faef9c14498376e723";
+
+impl LocalN8nDiagnosticContext {
+    /// Construct only from the retained invocation input and verified package
+    /// version. Unsupported packages or incomplete graphs remain unclassified.
+    #[must_use]
+    pub fn from_graph(
+        graph: &Value,
+        profile: LocalN8nValidationProfile,
+        package_version: &str,
+        package_metadata_digest: &str,
+    ) -> Option<Self> {
+        if package_version != "2.91.0"
+            || package_metadata_digest != LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST
+        {
+            return None;
+        }
+        let nodes = graph.get("nodes")?.as_array()?;
+        let (graph_digest, layout_digest) =
+            n8n_comparison_graph_digests(nodes, graph.get("connections")?).ok()?;
+        Some(Self {
+            nodes: nodes
+                .iter()
+                .map(|node| {
+                    let code_field = match node["parameters"]["language"].as_str() {
+                        None if node["parameters"]["language"].is_null() => Some("jsCode"),
+                        Some("javascript") => Some("jsCode"),
+                        Some("python" | "pythonNative") => Some("pythonCode"),
+                        _ => None,
+                    };
+                    let code_empty = code_field.is_some_and(|field| {
+                        let code = &node["parameters"][field];
+                        code.is_null() || code.as_str().is_some_and(|s| s.trim().is_empty())
+                    });
+                    json!({"name":node["name"],"type":node["type"],
+                "typeVersion":node["typeVersion"],"position":node["position"],
+                "disabled":node["disabled"],"codeField":code_field,"codeEmpty":code_empty})
+                })
+                .collect(),
+            connections: graph["connections"].clone(),
+            graph_digest,
+            layout_digest,
+            profile,
+        })
+    }
+
+    fn finding(&self, item: &Value, warning: bool) -> Option<Value> {
+        let name = item.get("node")?.as_str()?;
+        if name == "workflow"
+            || name.is_empty()
+            || name.len() > 256
+            || name.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let mut matches = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| node["name"].as_str() == Some(name));
+        let (index, node) = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        let message = item
+            .get("message")?
+            .as_str()
+            .filter(|text| !text.chars().any(char::is_control))?;
+        // Exact forms from pinned 2.91 workflow-validator.js. Native text is
+        // never reflected; dynamic parts must match this captured node.
+        let rule = Self::empty_code_rule(node, message, warning).or_else(|| {
+            if warning
+                && message == "Node is not connected to any other nodes"
+                && matches!(
+                    node["type"].as_str(),
+                    Some("n8n-nodes-base.noOp" | "nodes-base.noOp")
+                )
+                && node["disabled"] != true
+                && !self.node_has_connection(name)
+            {
+                Some((
+                    "node_disconnected",
+                    "connections",
+                    "validator_observation",
+                    "Node has no graph connections",
+                ))
+            } else if !warning
+                && message == "Node position must be an array with exactly 2 numbers [x, y]"
+                && node
+                    .get("position")
+                    .and_then(Value::as_array)
+                    .is_none_or(|p| p.len() != 2)
+            {
+                Some((
+                    "node_position_shape",
+                    "position",
+                    "input_shape",
+                    "Node position has an invalid shape",
+                ))
+            } else if !warning
+                && message == "Node position values must be finite numbers"
+                && node["position"].as_array().is_some_and(|p| {
+                    p.len() == 2 && p.iter().any(|v| v.as_f64().is_none_or(|n| !n.is_finite()))
+                })
+            {
+                Some((
+                    "node_position_values",
+                    "position",
+                    "input_shape",
+                    "Node position values are invalid",
+                ))
+            } else if !warning
+                && node.get("typeVersion").is_none_or(Value::is_null)
+                && message
+                    .strip_prefix("Missing required property 'typeVersion'. Add typeVersion: ")
+                    .is_some_and(native_version_number)
+            {
+                Some((
+                    "node_type_version_missing",
+                    "typeVersion",
+                    "input_shape",
+                    "Node type version is missing",
+                ))
+            } else {
+                Self::support_rule(node, message, warning)
+            }
+        })?;
+        Some(json!({"path":"graph","code":rule.0,"field":rule.1,
+            "classification":rule.2,"message":rule.3,"nodeIndex":index}))
+    }
+
+    fn empty_code_rule(
+        node: &Value,
+        message: &str,
+        warning: bool,
+    ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+        if warning
+            || message != "Code cannot be empty"
+            || node["codeEmpty"] != true
+            || !matches!(
+                node["type"].as_str(),
+                Some("n8n-nodes-base.code" | "nodes-base.code")
+            )
+        {
+            return None;
+        }
+        let field = match node["codeField"].as_str()? {
+            "jsCode" => "parameters.jsCode",
+            "pythonCode" => "parameters.pythonCode",
+            _ => return None,
+        };
+        Some((
+            "node_code_empty",
+            field,
+            "input_shape",
+            "Selected code parameter is empty",
+        ))
+    }
+
+    fn node_has_connection(&self, name: &str) -> bool {
+        self.connections.as_object().is_none_or(|sources| {
+            sources.iter().any(|(source, outputs)| {
+                outputs.as_object().is_none_or(|outputs| {
+                    outputs.values().any(|groups| {
+                        groups.as_array().is_none_or(|groups| {
+                            groups.iter().any(|group| {
+                                group.as_array().is_none_or(|edges| {
+                                    edges.iter().any(|edge| {
+                                        !edge.is_null() && (source == name || edge["node"] == name)
+                                    })
+                                })
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    fn support_rule(
+        node: &Value,
+        message: &str,
+        warning: bool,
+    ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+        let node_type = node.get("type")?.as_str()?;
+        if node_type.is_empty() || node_type.len() > 256 || node_type.chars().any(char::is_control)
+        {
+            return None;
+        }
+        let core = node_type.starts_with("n8n-nodes-base.")
+            || node_type.starts_with("nodes-base.")
+            || node_type.starts_with("@n8n/n8n-nodes-langchain.")
+            || node_type.starts_with("nodes-langchain.")
+            || node_type.starts_with("n8n-nodes-langchain.");
+        let suffix = if warning && !core && node_type.contains('.') {
+            " This looks like a community node that is not in this server's node database — the workflow can still run on an n8n instance where the package is installed."
+        } else if !warning && core {
+            " No similar nodes found. Node types must include the package prefix (e.g., \"n8n-nodes-base.webhook\")."
+        } else {
+            return None;
+        };
+        if message == format!("Unknown node type: \"{node_type}\".{suffix}") {
+            return Some((
+                "validator_node_type_unavailable",
+                "type",
+                "validator_support_limit",
+                "Node type is unavailable in the validator database",
+            ));
+        }
+        let version = node.get("typeVersion")?.as_f64()?;
+        if !version.is_finite() || version < 0.0 {
+            return None;
+        }
+        let prefix = format!("typeVersion {version} exceeds maximum supported version ");
+        let maximum = message.strip_prefix(&prefix)?;
+        let maximum = if warning && !core {
+            maximum.strip_suffix(" known to this server. The community package may be newer than this server's data — verify the version exists in your installed package.")?
+        } else if !warning && core {
+            maximum
+        } else {
+            return None;
+        };
+        if native_version_number(maximum) && maximum.parse::<f64>().ok()? < version {
+            return Some((
+                "validator_type_version_limit",
+                "typeVersion",
+                "validator_support_limit",
+                "Node type version exceeds the validator database limit",
+            ));
+        }
+        None
+    }
+}
+
+fn native_version_number(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 32
+        && text.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+        && text
+            .parse::<f64>()
+            .is_ok_and(|n| n.is_finite() && n >= 0.0 && n.to_string() == text)
+}
+
+/// Preserve native counts while projecting only closed diagnostics bound to
+/// the exact input graph. Missing/ambiguous context is explicitly unclassified.
+///
+/// # Errors
+/// Rejects the same malformed/oversized/contradictory envelopes as the unbound projector.
+pub fn project_local_n8n_validation_with_context(
+    native: &Value,
+    context: Option<&LocalN8nDiagnosticContext>,
+) -> Result<Value, LocalN8nDispatchError> {
     let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
     let is_error = match native.get("isError") {
         None => false,
         Some(Value::Bool(value)) => *value,
         _ => return Err(malformed()),
     };
-    let content = native["content"].as_array().ok_or_else(malformed)?;
-    if content.len() != 1 || content[0]["type"] != "text" {
+    let blocks = native["content"].as_array().ok_or_else(malformed)?;
+    if blocks.len() != 1 || blocks[0]["type"] != "text" {
         return Err(malformed());
     }
-    let text = content[0]["text"].as_str().ok_or_else(malformed)?;
+    let text = blocks[0]["text"].as_str().ok_or_else(malformed)?;
     if text.len() > 256 * 1024 {
         return Err(malformed());
     }
-    let typed: Value = serde_json::from_str(text).map_err(|_| malformed())?;
+    let typed = credential_metadata_unique_json(text.as_bytes()).map_err(|_| malformed())?;
     if native
         .get("structuredContent")
         .is_some_and(|structured| structured != &typed)
@@ -1243,15 +1510,26 @@ pub fn project_local_n8n_validation_call(native: &Value) -> Result<Value, LocalN
     {
         return Err(malformed());
     }
-    let project = |items: &[Value], code, message| {
-        items
-            .iter()
-            .map(|_| json!({"path":"graph","code":code,"message":message}))
-            .collect::<Vec<_>>()
-    };
-    Ok(json!({"valid":valid,
-        "errors":project(errors,"validation_error","Native validator reported an error"),
-        "warnings":project(warnings,"validation_warning","Native validator reported a warning")}))
+    let project =
+        |items: &[Value], warning| {
+            items
+                .iter()
+                .map(|item| {
+                    context.and_then(|ctx| ctx.finding(item, warning)).unwrap_or_else(||
+                json!({"path":"graph","code":"unclassified","classification":"unclassified",
+                    "message":"Native validator finding could not be safely classified"}))
+                })
+                .collect::<Vec<_>>()
+        };
+    let mut projected =
+        json!({"valid":valid,"errors":project(errors,false),"warnings":project(warnings,true)});
+    if let Some(context) = context {
+        projected["diagnosticBinding"] = json!({"graphDigest":context.graph_digest,
+            "layoutDigest":context.layout_digest,"profile":context.profile.as_str(),"packageVersion":"2.91.0"});
+        projected["diagnosticBinding"]["packageMetadataDigest"] =
+            json!(LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST);
+    }
+    Ok(projected)
 }
 
 /// One of the host-internal local n8n operation families.
@@ -2295,6 +2573,327 @@ const fn map_provider_error(error: &LocalMcpError) -> LocalN8nDispatchError {
 mod typed_batch_tests {
     use super::*;
 
+    fn diagnostic_graph() -> Value {
+        json!({"nodes":[{"id":"one","name":"PRIVATE_NODE_CANARY","type":"n8n-nodes-base.noOp",
+            "typeVersion":9,"parameters":{"token":"PARAMETER_CANARY"},"position":[0,0]}],"connections":{}})
+    }
+
+    fn diagnostic_native(errors: Value, warnings: Value) -> Value {
+        let mut typed = json!({"valid":errors.as_array().unwrap().is_empty()});
+        typed["errors"] = errors;
+        typed["warnings"] = warnings;
+        json!({"content":[{"type":"text","text":serde_json::to_string(&typed).unwrap()}],"structuredContent":typed})
+    }
+
+    #[test]
+    fn validation_diagnostics_classify_exact_version_support_and_preserve_counts() {
+        let graph = diagnostic_graph();
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([{"node":"PRIVATE_NODE_CANARY",
+            "message":"typeVersion 9 exceeds maximum supported version 2","details":"DETAIL_CANARY"}]),
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"UNKNOWN_WARNING_CANARY"}]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(result["valid"], false);
+        assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(result["errors"][0]["code"], "validator_type_version_limit");
+        assert_eq!(
+            result["errors"][0]["classification"],
+            "validator_support_limit"
+        );
+        assert_eq!(result["errors"][0]["nodeIndex"], 0);
+        assert_eq!(result["errors"][0]["field"], "typeVersion");
+        assert_eq!(result["warnings"][0]["code"], "unclassified");
+        assert!(!result.to_string().contains("CANARY"));
+        assert_eq!(result["diagnosticBinding"]["packageVersion"], "2.91.0");
+        let valid = project_local_n8n_validation_with_context(
+            &diagnostic_native(json!([]), json!([])),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(valid["valid"], true);
+        assert!(valid["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn validation_diagnostics_unknown_ambiguous_and_hostile_are_unclassified() {
+        let graph = diagnostic_graph();
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        for item in [
+            json!({"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 2 EXTRA_CANARY"}),
+            json!({"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 2\n"}),
+            json!({"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 20"}),
+            json!({"node":"PRIVATE_NODE_CANARY","message":"typeVersion 8 exceeds maximum supported version 2"}),
+            json!({"node":"OTHER_CANARY","message":"typeVersion 9 exceeds maximum supported version 2"}),
+            json!({"node":"PRIVATE_NODE_CANARY\n","message":"typeVersion 9 exceeds maximum supported version 2"}),
+            json!({"node":null,"message":"typeVersion 9 exceeds maximum supported version 2"}),
+            json!({"message":"typeVersion 9 exceeds maximum supported version 2"}),
+        ] {
+            let result = project_local_n8n_validation_with_context(
+                &diagnostic_native(json!([item]), json!([])),
+                Some(&context),
+            )
+            .unwrap();
+            assert_eq!(result["errors"][0]["code"], "unclassified");
+            assert!(result["errors"][0].get("nodeIndex").is_none());
+            assert!(!result.to_string().contains("CANARY"));
+        }
+        let native = diagnostic_native(
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 2"}]),
+            json!([]),
+        );
+        let mut duplicate = graph.clone();
+        duplicate["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(graph["nodes"][0].clone());
+        let duplicate_context = LocalN8nDiagnosticContext::from_graph(
+            &duplicate,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        for context in [None, Some(&duplicate_context)] {
+            let result = project_local_n8n_validation_with_context(&native, context).unwrap();
+            assert_eq!(result["errors"][0]["code"], "unclassified");
+        }
+        assert!(
+            LocalN8nDiagnosticContext::from_graph(
+                &graph,
+                LocalN8nValidationProfile::Runtime,
+                "2.90.0",
+                LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+            )
+            .is_none()
+        );
+        assert!(
+            LocalN8nDiagnosticContext::from_graph(
+                &json!({}),
+                LocalN8nValidationProfile::Runtime,
+                "2.91.0",
+                LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn validation_diagnostics_missing_version_position_and_community_forms() {
+        let mut graph = diagnostic_graph();
+        graph["nodes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("typeVersion");
+        graph["nodes"][0]["position"] = json!([]);
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([
+                {"node":"PRIVATE_NODE_CANARY","message":"Missing required property 'typeVersion'. Add typeVersion: 2"},
+                {"node":"PRIVATE_NODE_CANARY","message":"Node position must be an array with exactly 2 numbers [x, y]"}
+            ]),
+            json!([]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(result["errors"][0]["code"], "node_type_version_missing");
+        assert_eq!(result["errors"][1]["code"], "node_position_shape");
+        graph["nodes"][0]["type"] = json!("community.synthetic");
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([]),
+            json!([{"node":"PRIVATE_NODE_CANARY",
+            "message":"Unknown node type: \"community.synthetic\". This looks like a community node that is not in this server's node database — the workflow can still run on an n8n instance where the package is installed."}]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(
+            result["warnings"][0]["code"],
+            "validator_node_type_unavailable"
+        );
+        assert_eq!(result["valid"], true);
+    }
+
+    #[test]
+    fn validation_diagnostics_reserved_workflow_fingerprint_and_parameter_rules() {
+        let mut graph = diagnostic_graph();
+        graph["nodes"][0]["name"] = json!("workflow");
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([{"node":"workflow","message":"typeVersion 9 exceeds maximum supported version 2"}]),
+            json!([]),
+        );
+        let safe = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(safe["errors"][0]["code"], "unclassified");
+        assert!(safe["errors"][0].get("nodeIndex").is_none());
+        assert!(
+            LocalN8nDiagnosticContext::from_graph(
+                &graph,
+                LocalN8nValidationProfile::Runtime,
+                "2.91.0",
+                "altered"
+            )
+            .is_none()
+        );
+        graph["nodes"][0]["name"] = json!("PRIVATE_NODE_CANARY");
+        graph["nodes"][0]["type"] = json!("n8n-nodes-base.code");
+        graph["nodes"][0]["parameters"] =
+            json!({"language":"pythonNative","pythonCode":" ","jsCode":"INACTIVE_CODE_CANARY"});
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"Code cannot be empty"}]),
+            json!([]),
+        );
+        let safe = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(safe["errors"][0]["field"], "parameters.pythonCode");
+        assert!(!safe.to_string().contains("CANARY"));
+        graph["nodes"][0]["parameters"]["pythonCode"] = json!("NONEMPTY_CODE_CANARY");
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        assert_eq!(
+            project_local_n8n_validation_with_context(&native, Some(&context)).unwrap()["errors"]
+                [0]["code"],
+            "unclassified"
+        );
+        graph["nodes"][0]["type"] = json!("n8n-nodes-base.noOp");
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([]),
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"Node is not connected to any other nodes"}]),
+        );
+        assert_eq!(
+            project_local_n8n_validation_with_context(&native, Some(&context)).unwrap()["warnings"]
+                [0]["code"],
+            "node_disconnected"
+        );
+        graph["connections"] =
+            json!({"PRIVATE_NODE_CANARY":{"main":[[{"node":"other","type":"main","index":0}]]}});
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        assert_eq!(
+            project_local_n8n_validation_with_context(&native, Some(&context)).unwrap()["warnings"]
+                [0]["code"],
+            "unclassified"
+        );
+    }
+
+    #[test]
+    fn validation_diagnostics_indexes_are_graph_local_and_digest_bound() {
+        let mut graph = diagnostic_graph();
+        graph["nodes"].as_array_mut().unwrap().insert(
+            0,
+            json!({"id":"two","name":"OTHER_PRIVATE_CANARY",
+            "type":"n8n-nodes-base.noOp","typeVersion":1,"position":[1,0],"parameters":{}}),
+        );
+        let native = diagnostic_native(
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 2"}]),
+            json!([]),
+        );
+        let first = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let first = project_local_n8n_validation_with_context(&native, Some(&first)).unwrap();
+        assert_eq!(first["errors"][0]["nodeIndex"], 1);
+        graph["nodes"].as_array_mut().unwrap().swap(0, 1);
+        graph["nodes"][0]["parameters"] = json!({"changed":"PRIVATE_PARAMETER_CANARY"});
+        let second = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Strict,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let second = project_local_n8n_validation_with_context(&native, Some(&second)).unwrap();
+        assert_eq!(second["errors"][0]["nodeIndex"], 0);
+        assert_ne!(
+            first["diagnosticBinding"]["graphDigest"],
+            second["diagnosticBinding"]["graphDigest"]
+        );
+        assert_eq!(second["diagnosticBinding"]["profile"], "strict");
+        assert!(!second.to_string().contains("CANARY"));
+    }
+
+    #[test]
+    fn validation_diagnostics_keep_envelope_bounds_and_contradiction_guards() {
+        for text in [
+            r#"{"valid":true,"valid":false,"errors":[],"warnings":[]}"#,
+            r#"{"valid":false,"errors":[{"node":"one","node":"two","message":"x"}],"warnings":[]}"#,
+        ] {
+            assert!(
+                project_local_n8n_validation_with_context(
+                    &json!({"content":[{"type":"text","text":text}]}),
+                    None
+                )
+                .is_err()
+            );
+        }
+        let mut native = diagnostic_native(json!([{"message":"x"}]), json!([]));
+        native["structuredContent"]["valid"] = json!(true);
+        assert!(project_local_n8n_validation_call(&native).is_err());
+        let native = diagnostic_native(json!([{"message":"x".repeat(8193)}]), json!([]));
+        assert!(project_local_n8n_validation_call(&native).is_err());
+        let native = diagnostic_native(json!(vec![json!({"message":"x"}); 257]), json!([]));
+        assert!(project_local_n8n_validation_call(&native).is_err());
+        let native = json!({"content":[{"type":"text","text":"x".repeat(256*1024+1)}]});
+        assert!(project_local_n8n_validation_call(&native).is_err());
+    }
+
     #[test]
     fn credential_metadata_protocol_native_shapes_and_redaction() {
         let mapping: CredentialMetadataReadMapping = serde_json::from_value(json!({
@@ -2689,6 +3288,60 @@ mod typed_batch_tests {
                     )
             );
         }
+    }
+
+    #[test]
+    #[ignore = "requires the existing installed fixed network-disabled local catalog; run explicitly"]
+    fn installed_local_diagnostics_native_position_and_teardown() {
+        let bytes = std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json")
+            .expect("existing public installed policy");
+        let policy: fcp_manifest::LocalMcpPolicy = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(policy.package_version.to_string(), "2.91.0");
+        assert!(policy.network_disabled);
+        let graph = json!({"nodes":[{"id":"synthetic","name":"PRIVATE_NODE_CANARY",
+            "type":"n8n-nodes-base.noOp","typeVersion":1,"parameters":{},"position":[]}],"connections":{}});
+        let context = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            &policy.package_version.to_string(),
+            &policy.package_metadata_digest,
+        )
+        .unwrap();
+        let bound = policy.max_request_bytes as usize;
+        let dispatcher =
+            LocalN8nDispatcher::with_max_input_bytes(LocalMcpProvider::new(policy).unwrap(), bound);
+        let result = dispatcher
+            .validate_current_graph(
+                "synthetic-safe-diagnostics".into(),
+                graph,
+                LocalN8nValidationProfile::Runtime,
+                &Arc::new(AtomicBool::new(false)),
+                std::time::Instant::now() + std::time::Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(result.result.status, crate::LocalMcpResultStatus::Completed);
+        assert!(result.result.startup.network_disabled);
+        assert!(
+            result.result.shutdown.completion.reaped
+                && result.result.shutdown.completion.group_absent
+        );
+        assert!(result.result.teardown_error_code.is_none());
+        assert_eq!(result.result.responses.len(), 1);
+        let safe =
+            project_local_n8n_validation_with_context(&result.result.responses[0], Some(&context))
+                .unwrap();
+        assert_eq!(safe["valid"], false);
+        assert!(
+            safe["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["code"] == "node_position_shape" && item["nodeIndex"] == 0)
+        );
+        assert!(!safe.to_string().contains("CANARY"));
+        println!(
+            "synthetic_native_diagnostics=true network_disabled=true owned_reaped=true group_absent=true"
+        );
     }
 
     #[test]

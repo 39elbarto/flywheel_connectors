@@ -1900,6 +1900,7 @@ where
         .get("correlation_id")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
+    let diagnostic_input = public_validation.then(|| Value::Object(operation_input.clone()));
     let request = serde_json::from_value(json!({
         "operation": operation,
         "input": Value::Object(operation_input),
@@ -1908,7 +1909,7 @@ where
     let response = dispatch(request)
         .map_err(|error| error.with_correlation_id(request_correlation_id.clone()))?;
     if public_validation {
-        project_local_validation_result(&response)
+        project_local_validation_result_with_input(&response, diagnostic_input.as_ref())
             .map_err(|error| error.with_correlation_id(request_correlation_id))
     } else if public_local_knowledge {
         project_local_knowledge_result(&public_knowledge_binding, &response)
@@ -2868,7 +2869,15 @@ fn project_catalog_display_options(value: &Value) -> Result<Value, AppError> {
 
 /// Interpret a completed MCP validation result without exposing native text,
 /// node names, details, suggestions or transport lifecycle internals.
+#[cfg(test)]
 fn project_local_validation_result(envelope: &Value) -> Result<Value, AppError> {
+    project_local_validation_result_with_input(envelope, None)
+}
+
+fn project_local_validation_result_with_input(
+    envelope: &Value,
+    input: Option<&Value>,
+) -> Result<Value, AppError> {
     let malformed = || AppError::new("validation_provider_response_invalid");
     if envelope["schema"] != LOCAL_RUN_ONCE_SCHEMA
         || envelope["provider"] != "local_mcp"
@@ -2884,7 +2893,24 @@ fn project_local_validation_result(envelope: &Value) -> Result<Value, AppError> 
     if responses.len() != 1 {
         return Err(malformed());
     }
-    fcp_host::project_local_n8n_validation_call(&responses[0]).map_err(|_| malformed())
+    let context = input.and_then(|input| {
+        let workflow = &input["subject"]["workflow"];
+        let profile = match workflow["options"]["profile"].as_str()? {
+            "minimal" => fcp_host::LocalN8nValidationProfile::Minimal,
+            "runtime" => fcp_host::LocalN8nValidationProfile::Runtime,
+            "ai-friendly" => fcp_host::LocalN8nValidationProfile::AiFriendly,
+            "strict" => fcp_host::LocalN8nValidationProfile::Strict,
+            _ => return None,
+        };
+        fcp_host::LocalN8nDiagnosticContext::from_graph(
+            &workflow["workflow"],
+            profile,
+            envelope["package_version"].as_str()?,
+            envelope["package_metadata_digest"].as_str()?,
+        )
+    });
+    fcp_host::project_local_n8n_validation_with_context(&responses[0], context.as_ref())
+        .map_err(|_| malformed())
 }
 
 /// Translate the public graph contract into the fixed local JSON validator.
@@ -2924,6 +2950,8 @@ fn execute_local_run_once(request: LocalN8nDispatchRequest) -> Result<Value, App
         .map_err(|_| AppError::new("bundle_unavailable"))?;
     let provider = LocalMcpProvider::from_verified_signed_current(proof)
         .map_err(|_| AppError::new("local_provider_policy_invalid"))?;
+    let package_version = provider.policy().package_version.clone();
+    let package_metadata_digest = provider.policy().package_metadata_digest.clone();
     let dispatcher = LocalN8nDispatcher::new(provider);
     let response = dispatcher
         .dispatch(request, Arc::new(AtomicBool::new(false)))
@@ -2931,6 +2959,8 @@ fn execute_local_run_once(request: LocalN8nDispatchRequest) -> Result<Value, App
     Ok(json!({
         "schema": LOCAL_RUN_ONCE_SCHEMA,
         "provider": "local_mcp",
+        "package_version": package_version,
+        "package_metadata_digest": package_metadata_digest,
         "response": response,
     }))
 }
@@ -11264,6 +11294,49 @@ mod tests {
             project_local_validation_result(&failed).unwrap_err().code,
             "local_provider_failed"
         );
+    }
+
+    #[test]
+    fn public_graph_validation_binds_safe_diagnostics_to_normalized_input() {
+        let input = json!({"input":{"subject":"graph","profile":"runtime","graph":{
+            "nodes":[{"id":"synthetic","name":"PRIVATE_NODE_CANARY","type":"n8n-nodes-base.noOp",
+                "typeVersion":9,"position":[0,0],"parameters":{"token":"PRIVATE_PARAMETER_CANARY"}}],
+            "connections":{}}}});
+        for (package, fingerprint) in [
+            (
+                "2.91.0",
+                fcp_host::LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+            ),
+            (
+                "2.90.0",
+                fcp_host::LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+            ),
+            ("2.91.0", "altered"),
+        ] {
+            let result = run_local_once_from_bytes("n8n.validation.run", &serde_json::to_vec(&input).unwrap(), |request| {
+                let encoded = serde_json::to_value(request).unwrap();
+                assert_eq!(encoded["input"]["subject"]["workflow"]["workflow"], input["input"]["graph"]);
+                let native = json!({"valid":false,"errors":[{"node":"PRIVATE_NODE_CANARY",
+                    "message":"typeVersion 9 exceeds maximum supported version 2","details":{"secret":"PRIVATE_DETAILS_CANARY"}}],"warnings":[]});
+                Ok(json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp","package_version":package,
+                    "package_metadata_digest":fingerprint,
+                    "response":{"operation":"validation_run","result":{"status":"Completed","teardown_error_code":null,
+                        "responses":[{"content":[{"type":"text","text":native.to_string()}],"structuredContent":native}]}}}))
+            }).unwrap();
+            assert_eq!(result["valid"], false);
+            assert_eq!(result["errors"].as_array().unwrap().len(), 1);
+            assert!(!result.to_string().contains("CANARY"));
+            if package == "2.91.0"
+                && fingerprint == fcp_host::LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST
+            {
+                assert_eq!(result["errors"][0]["code"], "validator_type_version_limit");
+                assert_eq!(result["errors"][0]["nodeIndex"], 0);
+                assert_eq!(result["diagnosticBinding"]["profile"], "runtime");
+            } else {
+                assert_eq!(result["errors"][0]["code"], "unclassified");
+                assert!(result.get("diagnosticBinding").is_none());
+            }
+        }
     }
 
     #[test]

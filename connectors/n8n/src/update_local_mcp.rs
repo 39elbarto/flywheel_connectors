@@ -5207,7 +5207,11 @@ fn validate_registry_archive_listing(listing: &[u8]) -> Result<(), LocalMcpAdapt
 
 #[cfg(target_os = "linux")]
 fn read_registry_package_manifest(packed: &File) -> Result<Value, LocalMcpAdapterError> {
-    let receipt_path = proc_fd_path(packed);
+    use std::os::fd::AsRawFd;
+
+    // The confined archive descriptor stays CLOEXEC. Tar reads the held parent
+    // descriptor instead of looking for a closed descriptor in its own process.
+    let receipt_path = format!("/proc/{}/fd/{}", std::process::id(), packed.as_raw_fd());
     let listing = run_bounded_tar_listing(&receipt_path)?;
     validate_registry_archive_listing(&listing)?;
     let deadline = Instant::now() + Duration::from_millis(COMMAND_TIMEOUT_MS);
@@ -9572,6 +9576,46 @@ mod tests {
     fn archive_listing_accepts_only_bounded_regular_files_and_directories() {
         let valid = b"drwxr-xr-x 0/0 0 2026-08-19 00:00 package\n-rw-r--r-- 0/0 1 2026-08-19 00:00 package/file";
         assert!(validate_archive_listing(valid).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn registry_manifest_tar_uses_stable_parent_descriptor() {
+        // Public synthetic archive, retained without cleanup. File::open uses
+        // CLOEXEC, as does the production descriptor-confined stage reader.
+        let root = tempfile::tempdir().unwrap().keep();
+        let package = root.join("package");
+        fs::create_dir(&package).unwrap();
+        let manifest = json!({"name":"@scope/public-fixture","version":"1.0.0"});
+        fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let archive = root.join("public-fixture.tgz");
+        let status = fixed_tar_command()
+            .args(["--create", "--gzip", "--file"])
+            .arg(&archive)
+            .arg("--directory")
+            .arg(&root)
+            .arg("package")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let packed = File::open(&archive).unwrap();
+        assert!(matches!(
+            run_bounded_tar_listing(&proc_fd_path(&packed)),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "archive_listing_failed"
+            ))
+        ));
+        fs::rename(&archive, root.join("retained-public-fixture.tgz")).unwrap();
+        // A pathname replacement must not matter: the exact held descriptor
+        // is still the only source used for listing and manifest extraction.
+        assert_eq!(read_registry_package_manifest(&packed).unwrap(), manifest);
     }
 
     #[cfg(target_os = "linux")]

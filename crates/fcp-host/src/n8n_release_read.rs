@@ -923,6 +923,7 @@ fn verify_release_bundle(
     let (zone_policy_path, zone_policy_digest) = artifact("policy/zone-policies.json")?;
     let (local_mcp_policy_path, _) = artifact("policy/local-mcp.json")?;
     let local_mcp_policy = read_local_mcp_policy(&local_mcp_policy_path)?;
+    verify_local_mcp_release_binding(&local_mcp_policy, root)?;
     #[cfg(target_os = "linux")]
     fcp_sandbox::verify_fixed_static_executable(&fcp_n8n_path)
         .map_err(|_| BundleError::new(BundleErrorCode::RuntimeFormat))?;
@@ -987,6 +988,22 @@ fn verify_release_bundle(
         local_mcp_policy,
         credential_metadata_read_servers,
     })
+}
+
+fn verify_local_mcp_release_binding(
+    policy: &LocalMcpPolicy,
+    root: &Path,
+) -> Result<(), BundleError> {
+    if let Some(binding) = &policy.package_binding {
+        crate::local_mcp::verify_immutable_package(
+            binding,
+            root.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| BundleError::new(BundleErrorCode::ReleaseId))?,
+        )
+        .map_err(|_| BundleError::new(BundleErrorCode::LocalMcpPolicy))?;
+    }
+    Ok(())
 }
 
 fn inventory_metadata_read_admitted(path: &Path, server: &str) -> Result<bool, BundleError> {

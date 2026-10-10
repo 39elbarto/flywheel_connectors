@@ -11,6 +11,7 @@ use std::{
     fs::File,
     io,
     io::{Read, Write},
+    path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
@@ -18,7 +19,6 @@ use std::{
 #[cfg(test)]
 use std::{
     ffi::OsString,
-    path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
 };
 
@@ -181,6 +181,13 @@ enum Command {
         /// Local discovery preflight only; no provider or schema read.
         #[arg(long)]
         check_only: bool,
+        /// Fixed root-owned preparation DATA; local check-only, never discovery.
+        #[arg(long)]
+        package_binding_file: Option<PathBuf>,
+        #[arg(long)]
+        package_binding_sha256: Option<String>,
+        #[arg(long)]
+        release_id: Option<String>,
     },
     /// Verify the fixed installed current signed tree without mutation.
     #[command(name = "verify-current")]
@@ -765,11 +772,51 @@ fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
     }
 }
 
+fn execute_schema_export(
+    source: &str,
+    check_only: bool,
+    package_binding_file: Option<&std::path::Path>,
+    package_binding_sha256: Option<&str>,
+    release_id: Option<&str>,
+) -> Result<Value, AppError> {
+    if package_binding_file.is_some() || package_binding_sha256.is_some() || release_id.is_some() {
+        if source != "local" || !check_only {
+            return Err(AppError::new("schema_export_arguments_invalid"));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let binding = fcp_host::verify_immutable_package_preparation(
+                package_binding_file
+                    .ok_or_else(|| AppError::new("schema_export_arguments_invalid"))?,
+                package_binding_sha256
+                    .ok_or_else(|| AppError::new("schema_export_arguments_invalid"))?,
+                release_id.ok_or_else(|| AppError::new("schema_export_arguments_invalid"))?,
+            )
+            .map_err(|_| AppError::new("schema_export_package_preparation_denied"))?;
+            return Ok(json!({"schema":"fwc.n8n.package-preparation-check.v1",
+                "package_binding":binding,"productionAdmission":false}));
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(AppError::new("unsupported_platform"));
+    }
+    run_schema_export(SchemaExportSource::parse(source)?, check_only)
+}
+
 fn execute(cli: Cli) -> Result<Value, AppError> {
     match cli.command {
-        Command::ExportSchemas { source, check_only } => {
-            run_schema_export(SchemaExportSource::parse(&source)?, check_only)
-        }
+        Command::ExportSchemas {
+            source,
+            check_only,
+            package_binding_file,
+            package_binding_sha256,
+            release_id,
+        } => execute_schema_export(
+            &source,
+            check_only,
+            package_binding_file.as_deref(),
+            package_binding_sha256.as_deref(),
+            release_id.as_deref(),
+        ),
         Command::VerifyCurrent => {
             let proof = fwc_n8n_provision::verify_current().map_err(|error| {
                 AppError::with_diagnostic(
@@ -5938,16 +5985,20 @@ fn verify_local_schema_export_source() -> Result<Value, AppError> {
         .map_err(|_| AppError::new("schema_export_signature_denied"))?;
     fwc_n8n_bundle::verify_fixed_current_release_bundle()
         .map_err(|_| AppError::new("schema_export_bundle_denied"))?;
-    let policy: Value = serde_json::from_slice(
-        &std::fs::read("/usr/local/lib/fwc-n8n/current/policy/local-mcp.json")
-            .map_err(|_| AppError::new("schema_export_local_pin_denied"))?,
-    )
-    .map_err(|_| AppError::new("schema_export_local_pin_denied"))?;
+    // Same sealed signed-current and immutable-package guard as runtime.
+    let provider = LocalMcpProvider::from_signed_current()
+        .map_err(|_| AppError::new("schema_export_local_pin_denied"))?;
+    provider
+        .versioned_validation_source()
+        .map_err(|_| AppError::new("schema_export_local_pin_denied"))?;
+    let typed_policy = provider.policy();
+    let policy = serde_json::to_value(typed_policy)
+        .map_err(|_| AppError::new("schema_export_local_pin_denied"))?;
     let mut files = Vec::new();
     for (path, key) in [
-        ("/usr/bin/node", "launcher_digest"),
+        (typed_policy.launcher_path.as_str(), "launcher_digest"),
         (
-            "/usr/local/lib/node_modules/n8n-mcp/package.json",
+            typed_policy.package_metadata_path.as_str(),
             "package_metadata_digest",
         ),
     ] {
@@ -5959,6 +6010,9 @@ fn verify_local_schema_export_source() -> Result<Value, AppError> {
         }
         files.push(json!({"path":path,"blake3":digest}));
     }
+    provider
+        .versioned_validation_source()
+        .map_err(|_| AppError::new("schema_export_local_pin_denied"))?;
     Ok(
         json!({"signed_current":proof,"public_files":files,"input_origin":"caller_supplied",
         "capture":"unverified","package_version":policy["package_version"],"protocol_version":policy["protocol_version"]}),

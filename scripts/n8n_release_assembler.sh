@@ -52,6 +52,10 @@ readonly LOCAL_MCP_PACKAGE_ID="n8n-mcp"
 readonly LOCAL_MCP_NODE_PATH="/usr/bin/node"
 readonly LOCAL_MCP_PACKAGE_METADATA_PATH="/usr/local/lib/node_modules/n8n-mcp/package.json"
 readonly LOCAL_MCP_WRAPPER_PATH="/usr/local/lib/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
+readonly LOCAL_MCP_IMMUTABLE_ROOT="/var/lib/fwc-n8n/packages/n8n-mcp-2.91.0-fe77448f"
+readonly LOCAL_MCP_PREPARATION_PATH="/usr/local/lib/fwc-n8n/admissions/local-mcp-package.json"
+LOCAL_MCP_PACKAGE_INPUT=""
+LOCAL_MCP_PACKAGE_INPUT_SHA256=""
 readonly LOCAL_MCP_PROTOCOL_VERSION="2024-11-05"
 # Explicit reviewed baselines are optional; absent baselines retain raw-only
 # behavior. Never enroll ambient tools/list as reviewed compatibility policy.
@@ -589,13 +593,25 @@ write_local_mcp_policy() {
   local hash_helper="$2"
   local export_binary="${3:-}"
   local sequential_calls
+  local package_metadata_path="$LOCAL_MCP_PACKAGE_METADATA_PATH"
+  local wrapper_path="$LOCAL_MCP_WRAPPER_PATH"
+  if [[ -n "$LOCAL_MCP_PACKAGE_INPUT" ]]; then
+    package_metadata_path="$LOCAL_MCP_IMMUTABLE_ROOT/node_modules/n8n-mcp/package.json"
+    wrapper_path="$LOCAL_MCP_IMMUTABLE_ROOT/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"
+  fi
   sequential_calls="$(local_call_budget)"
   require_fixed_local_mcp_file "$LOCAL_MCP_NODE_PATH" 1
-  require_fixed_local_mcp_file "$LOCAL_MCP_PACKAGE_METADATA_PATH"
-  require_fixed_local_mcp_file "$LOCAL_MCP_WRAPPER_PATH" 1
+  require_fixed_local_mcp_file "$package_metadata_path"
+  if [[ -n "$LOCAL_MCP_PACKAGE_INPUT" ]]; then
+    # Node reads the immutable JS entry; its SOURCE mode0600 projects to0444.
+    require_fixed_local_mcp_file "$wrapper_path"
+  else
+    require_fixed_local_mcp_file "$wrapper_path" 1
+  fi
   python3 - "$stage_root" "$hash_helper" "$LOCAL_MCP_NODE_PATH" \
-    "$LOCAL_MCP_PACKAGE_METADATA_PATH" "$LOCAL_MCP_WRAPPER_PATH" \
+    "$package_metadata_path" "$wrapper_path" \
     "$LOCAL_MCP_PACKAGE_ID" "$LOCAL_MCP_PROTOCOL_VERSION" "${BASH_SOURCE[0]}" "$export_binary" "$sequential_calls" \
+    "$LOCAL_MCP_PACKAGE_INPUT" "$LOCAL_MCP_PACKAGE_INPUT_SHA256" "${RELEASE_ID:-}" "${TARGET_DIR:-}/release/fwc-n8n" \
     -- "${LOCAL_MCP_CATALOG_TOOLS[@]}" -- "${LOCAL_MCP_CATALOG_DIGESTS[@]}" <<'PY'
 import json
 import pathlib
@@ -621,6 +637,10 @@ second_separator = args.index("--", first_separator + 1)
     assembler_path,
     export_binary,
     sequential_calls,
+    package_input,
+    package_input_sha256,
+    release_id,
+    preparation_binary,
 ) = args[:first_separator]
 catalog_tools = args[first_separator + 1 : second_separator]
 catalog_digests = args[second_separator + 1 :]
@@ -628,7 +648,24 @@ catalog_digests = args[second_separator + 1 :]
 if len(catalog_tools) != 7 or len(catalog_digests) != len(catalog_tools):
     raise SystemExit("local n8n-mcp catalog pins are malformed")
 
-if export_binary:
+def verify_prepared_package():
+    if not package_input:
+        return None
+    checked = subprocess.run([preparation_binary, 'export-schemas', 'local', '--check-only',
+        '--package-binding-file', package_input, '--package-binding-sha256', package_input_sha256,
+        '--release-id', release_id], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    if checked.returncode != 0 or len(checked.stdout) > 16384:
+        raise SystemExit('immutable local package preparation denied')
+    result = json.loads(checked.stdout)
+    if result.get('schema') != 'fwc.n8n.package-preparation-check.v1' or result.get('productionAdmission') is not False:
+        raise SystemExit('immutable package verifier response denied')
+    binding = result.get('package_binding')
+    if not isinstance(binding, dict) or binding.get('release_id') != release_id:
+        raise SystemExit('immutable package release binding denied')
+    return binding
+
+package_binding = verify_prepared_package()
+if export_binary and not package_input:
     # Check signed fixed current and exact public Node/package pins BEFORE spawn.
     preflight = subprocess.run([export_binary, "export-schemas", "local", "--check-only"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -697,6 +734,7 @@ try:
             "--chdir",
             str(pathlib.Path(package_metadata_path).parent),
             node_path,
+            *(["--no-global-search-paths"] if package_binding is not None else []),
             wrapper_path,
         ],
         cwd=pathlib.Path(package_metadata_path).parent,
@@ -829,7 +867,7 @@ policy = {
     "package_metadata_path": package_metadata_path,
     "package_metadata_digest": blake3_bytes(package_metadata),
     "protocol_version": protocol_version,
-    "fixed_args": [wrapper_path],
+    "fixed_args": (["--no-global-search-paths"] if package_binding is not None else []) + [wrapper_path],
     "fixed_env": {"N8N_MCP_TELEMETRY_DISABLED": "true"},
     "allowed_methods": ["initialize", "notifications/initialized", "tools/list", "tools/call"],
     **bindings,
@@ -843,6 +881,10 @@ policy = {
     "idle_window_ms": 0,
     "network_disabled": True,
 }
+if package_binding is not None:
+    if verify_prepared_package() != package_binding:
+        raise SystemExit('immutable package changed during catalog discovery')
+    policy['package_binding'] = package_binding
 stage_policy.write_text(json.dumps(policy, indent=2) + "\n")
 PY
   if [[ -n "$export_binary" ]]; then
@@ -1652,6 +1694,8 @@ main() {
       --release-id) [[ $# -ge 2 ]] || die "--release-id requires a value"; release_id="$2"; shift 2 ;;
       --target-dir) [[ $# -ge 2 ]] || die "--target-dir requires a value"; TARGET_DIR="$2"; shift 2 ;;
       --repo-root) [[ $# -ge 2 && "$2" == /* ]] || die "--repo-root requires an absolute path"; explicit_repo_root="$2"; shift 2 ;;
+      --local-package-input) [[ $# -ge 2 && "$2" == "$LOCAL_MCP_PREPARATION_PATH" ]] || die "local package input must be the fixed protected DATA file"; LOCAL_MCP_PACKAGE_INPUT="$2"; shift 2 ;;
+      --local-package-input-sha256) [[ $# -ge 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || die "local package input SHA256 required"; LOCAL_MCP_PACKAGE_INPUT_SHA256="$2"; shift 2 ;;
       --help|-h) usage; return 0 ;;
       *) usage; die "unknown argument: $1" ;;
     esac
@@ -1672,6 +1716,14 @@ main() {
   [[ -f "$SSD_LAUNCHER" && ! -L "$SSD_LAUNCHER" ]] \
     || die "SSD launcher is missing or symlinked: $SSD_LAUNCHER"
   is_safe_release_id "$release_id" || die "invalid release id"
+  if [[ -n "$LOCAL_MCP_PACKAGE_INPUT" || -n "$LOCAL_MCP_PACKAGE_INPUT_SHA256" ]]; then
+    [[ -n "$LOCAL_MCP_PACKAGE_INPUT" && -n "$LOCAL_MCP_PACKAGE_INPUT_SHA256" ]] || die "local package input and hash must be paired"
+    [[ -f "$LOCAL_MCP_PACKAGE_INPUT" && ! -L "$LOCAL_MCP_PACKAGE_INPUT" \
+      && "$(stat -c '%u:%g:%a:%h' "$LOCAL_MCP_PACKAGE_INPUT")" == '0:0:600:1' ]] \
+      || die "local package preparation DATA identity denied"
+    [[ "$(sha256sum "$LOCAL_MCP_PACKAGE_INPUT" | cut -d' ' -f1)" == "$LOCAL_MCP_PACKAGE_INPUT_SHA256" ]] \
+      || die "local package preparation DATA hash denied"
+  fi
   for digest_name in \
     EEC_ARCHIVE_INPUT_SCHEMA_DIGEST \
     EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST \

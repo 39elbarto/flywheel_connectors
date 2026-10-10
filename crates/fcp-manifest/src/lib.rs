@@ -760,6 +760,55 @@ fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// The one qualified package recipe supported for immutable adoption.
+pub const LOCAL_MCP_IMMUTABLE_PACKAGE_ROOT: &str =
+    "/var/lib/fwc-n8n/packages/n8n-mcp-2.91.0-fe77448f";
+pub const LOCAL_MCP_SOURCE_TREE_SHA256: &str =
+    "fe77448fa85ebbd4672c6b58360a1e2ac594474e4d30ef5a9820a7ab3388f7ff";
+pub const LOCAL_MCP_DERIVED_RECEIPT_SHA256: &str =
+    "3b66658a0225763a713cd3c819ca41079dba0de2a703510fce344f33aa235914";
+pub const LOCAL_MCP_ORIGINAL_RECEIPT_SHA256: &str =
+    "58557ee2bba313aebc05cd7ac76bb566188c78d8a8b66c0ca294c296b63c8927";
+
+/// A signed release's adoption of the one qualified derived package recipe.
+/// Source and deployed mode-projected trees are deliberately distinct.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LocalMcpPackageBinding {
+    pub release_id: String,
+    pub package_root: String,
+    pub source_tree_sha256: String,
+    pub derived_receipt_sha256: String,
+    pub original_receipt_sha256: String,
+    pub deployed_tree_sha256: String,
+}
+
+impl LocalMcpPackageBinding {
+    /// Validate the closed recipe and its signed release identity.
+    /// # Errors
+    /// Rejects any other package, malformed release or digest.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.release_id.is_empty()
+            || self.release_id.len() > 128
+            || !self
+                .release_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || !self.release_id.as_bytes()[0].is_ascii_alphanumeric()
+            || self.package_root != LOCAL_MCP_IMMUTABLE_PACKAGE_ROOT
+            || self.source_tree_sha256 != LOCAL_MCP_SOURCE_TREE_SHA256
+            || self.derived_receipt_sha256 != LOCAL_MCP_DERIVED_RECEIPT_SHA256
+            || self.original_receipt_sha256 != LOCAL_MCP_ORIGINAL_RECEIPT_SHA256
+        {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.package_binding",
+                message: "must bind the fixed qualified recipe and exact release".into(),
+            });
+        }
+        validate_digest(&self.deployed_tree_sha256, "local_mcp.package_binding")
+    }
+}
+
 /// Signed, fixed policy for a request-scoped local MCP stdio provider.
 ///
 /// This section is intentionally separate from public connector operations.
@@ -776,6 +825,12 @@ pub struct LocalMcpPolicy {
     pub runtime_executable_digest: String,
     pub package_metadata_path: String,
     pub package_metadata_digest: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_package_binding"
+    )]
+    pub package_binding: Option<LocalMcpPackageBinding>,
     pub protocol_version: String,
     #[serde(default)]
     pub fixed_args: Vec<String>,
@@ -801,6 +856,15 @@ pub struct LocalMcpPolicy {
     pub network_disabled: bool,
 }
 
+fn deserialize_package_binding<'de, D>(
+    deserializer: D,
+) -> Result<Option<LocalMcpPackageBinding>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    LocalMcpPackageBinding::deserialize(deserializer).map(Some)
+}
+
 impl LocalMcpPolicy {
     /// Validate the immutable packet-one policy.
     ///
@@ -811,6 +875,43 @@ impl LocalMcpPolicy {
         reason = "the fixed local MCP policy is validated as one fail-closed contract"
     )]
     pub fn validate(&self) -> Result<(), ManifestError> {
+        if let Some(binding) = &self.package_binding {
+            binding.validate()?;
+            let root = &binding.package_root;
+            if self.package_id != "n8n-mcp"
+                || self.package_version != semver::Version::new(2, 91, 0)
+                || self.launcher_path != "/usr/bin/node"
+                || self.runtime_executable != "/usr/bin/node"
+                || self.package_metadata_path != format!("{root}/node_modules/n8n-mcp/package.json")
+                || self.fixed_args
+                    != [
+                        "--no-global-search-paths".to_owned(),
+                        format!("{root}/node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js"),
+                    ]
+                || self.fixed_env.len() != 1
+                || self
+                    .fixed_env
+                    .get("N8N_MCP_TELEMETRY_DISABLED")
+                    .map(String::as_str)
+                    != Some("true")
+            {
+                return Err(ManifestError::Invalid {
+                    field: "local_mcp.package_binding",
+                    message: "must bind metadata and fixed Node entry to the package root".into(),
+                });
+            }
+        } else if std::path::Path::new(&self.package_metadata_path)
+            .starts_with(LOCAL_MCP_IMMUTABLE_PACKAGE_ROOT)
+            || self
+                .fixed_args
+                .iter()
+                .any(|arg| std::path::Path::new(arg).starts_with(LOCAL_MCP_IMMUTABLE_PACKAGE_ROOT))
+        {
+            return Err(ManifestError::Invalid {
+                field: "local_mcp.package_binding",
+                message: "immutable package paths require the signed package binding".into(),
+            });
+        }
         for (name, digest) in &self.expected_output_catalog {
             if !self.expected_catalog.contains_key(name) {
                 return Err(ManifestError::Invalid {

@@ -397,6 +397,9 @@ impl LocalMcpProvider {
         policy
             .validate()
             .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        if policy.package_binding.is_some() {
+            return Err(LocalMcpError::InvalidPolicy);
+        }
         Ok(Self {
             policy,
             signed_current: None,
@@ -448,10 +451,20 @@ impl LocalMcpProvider {
     pub fn versioned_validation_source(
         &self,
     ) -> Result<Option<VerifiedVersionedValidationSource>, LocalMcpError> {
+        if let Some(proof) = &self.signed_current {
+            proof
+                .revalidate()
+                .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        }
         verify_package_metadata(&self.policy)?;
         let source = verify_derived_validation_source(&self.policy)?;
         if source.is_some() && self.signed_current.is_none() {
             return Err(LocalMcpError::PackageIdentity);
+        }
+        if let Some(proof) = &self.signed_current {
+            proof
+                .revalidate()
+                .map_err(|_| LocalMcpError::InvalidPolicy)?;
         }
         Ok(source)
     }
@@ -518,11 +531,7 @@ impl LocalMcpProvider {
         };
 
         let total_started = Instant::now();
-        if let Some(proof) = &self.signed_current {
-            proof
-                .revalidate()
-                .map_err(|_| LocalMcpError::InvalidPolicy)?;
-        }
+        self.revalidate_before_spawn()?;
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(LocalMcpError::RequestTimeout);
         }
@@ -594,6 +603,20 @@ impl LocalMcpProvider {
             result_code,
         })
     }
+    fn revalidate_before_spawn(&self) -> Result<(), LocalMcpError> {
+        if let Some(proof) = &self.signed_current {
+            proof
+                .revalidate()
+                .map_err(|_| LocalMcpError::InvalidPolicy)?;
+        }
+        // Recheck external immutable closure immediately before spawn, after
+        // signed-current revalidation; never fall back to the global package.
+        if self.policy.package_binding.is_some() {
+            verify_package_metadata(&self.policy)?;
+        }
+        Ok(())
+    }
+
     fn spawn_observed_process(&self, spec: &ProcessSpec) -> Result<OwnedProcess, LocalMcpError> {
         if let Some(observer) = &self.observer {
             observer
@@ -1395,6 +1418,9 @@ const fn unavailable_memory_sample() -> ProcessMemorySample {
 }
 
 fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError> {
+    if let Some(binding) = &policy.package_binding {
+        verify_immutable_package(binding, &binding.release_id)?;
+    }
     let path = Path::new(&policy.package_metadata_path);
     let bytes = read_package_metadata(path)?;
     let digest = blake3::hash(&bytes).to_hex().to_string();
@@ -1408,6 +1434,369 @@ fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError>
         return Err(LocalMcpError::PackageIdentity);
     }
     verify_derived_validation_metadata(&metadata, path)?;
+    Ok(())
+}
+
+/// Verify the fixed adopted package without launching it or granting authority.
+/// The caller must separately bind `release_id` to a verified release root.
+/// # Errors
+/// Rejects recipe, owner, path, closure, payload or deployed-mode drift.
+pub fn verify_immutable_package(
+    binding: &fcp_manifest::LocalMcpPackageBinding,
+    release_id: &str,
+) -> Result<(), LocalMcpError> {
+    use sha2::{Digest, Sha256};
+    binding
+        .validate()
+        .map_err(|_| LocalMcpError::InvalidPolicy)?;
+    if binding.release_id != release_id {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    let root = Path::new(&binding.package_root);
+    verify_derived_directory(root)?;
+    if hex::encode(Sha256::digest(read_derived_package_file(
+        Path::new("/usr/bin/node"),
+        128 * 1024 * 1024,
+    )?)) != "d0efb6fcb9d023ba4e2b160ec2384dc28fe4f17732141ef47f676828fa960505"
+    {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    for parent in root
+        .parent()
+        .ok_or(LocalMcpError::PackageIdentity)?
+        .ancestors()
+    {
+        match std::fs::symlink_metadata(parent.join("node_modules")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(LocalMcpError::PackageIdentity),
+        }
+    }
+    verify_immutable_package_at(root, binding, 0, 0)
+}
+
+/// Fixed protected preparation DATA; never a runtime/provider policy override.
+pub const IMMUTABLE_PACKAGE_PREPARATION_PATH: &str =
+    "/usr/local/lib/fwc-n8n/admissions/local-mcp-package.json";
+
+/// Read the one root-owned closed preparation input and verify its package.
+/// This performs no catalog discovery, process launch or signing/admission.
+/// # Errors
+/// Rejects any other path, input hash, recipe, release or package tree.
+#[cfg(target_os = "linux")]
+pub fn verify_immutable_package_preparation(
+    path: &Path,
+    sha256: &str,
+    release_id: &str,
+) -> Result<fcp_manifest::LocalMcpPackageBinding, LocalMcpError> {
+    use sha2::{Digest, Sha256};
+    if path != Path::new(IMMUTABLE_PACKAGE_PREPARATION_PATH) {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    verify_derived_directory(path.parent().ok_or(LocalMcpError::PackageIdentity)?)?;
+    let bytes = read_immutable_file(path, 0, 0, 0o600, 16 * 1024)?;
+    if hex::encode(Sha256::digest(&bytes)) != sha256 {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    let value = crate::credential_metadata_unique_json(&bytes)
+        .map_err(|_| LocalMcpError::PackageIdentity)?;
+    let binding = serde_json::from_value(value).map_err(|_| LocalMcpError::InvalidPolicy)?;
+    verify_immutable_package(&binding, release_id)?;
+    Ok(binding)
+}
+
+#[cfg(target_os = "linux")]
+fn read_immutable_file(
+    path: &Path,
+    owner: u32,
+    group: u32,
+    mode: u32,
+    limit: u64,
+) -> Result<Vec<u8>, LocalMcpError> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let invalid = || LocalMcpError::PackageIdentity;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|_| invalid())?;
+    let before = file.metadata().map_err(|_| invalid())?;
+    if !before.is_file()
+        || before.uid() != owner
+        || before.gid() != group
+        || before.mode() & 0o7777 != mode
+        || before.nlink() != 1
+        || before.len() > limit
+    {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if u64::try_from(bytes.len()).map_err(|_| invalid())? > limit
+        || metadata_identity(&before) != metadata_identity(&file.metadata().map_err(|_| invalid())?)
+        || metadata_identity(&before)
+            != metadata_identity(&std::fs::symlink_metadata(path).map_err(|_| invalid())?)
+    {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+
+fn immutable_mode(row: &Value) -> Result<u32, LocalMcpError> {
+    let mode = row["mode"]
+        .as_u64()
+        .filter(|mode| *mode <= 0o777 && mode & 0o022 == 0)
+        .ok_or(LocalMcpError::PackageIdentity)?;
+    match row["kind"].as_str() {
+        Some("directory") => Ok(0o555),
+        Some("file") => Ok(if mode & 0o111 == 0 { 0o444 } else { 0o555 }),
+        _ => Err(LocalMcpError::PackageIdentity),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_immutable_package_at(
+    root: &Path,
+    binding: &fcp_manifest::LocalMcpPackageBinding,
+    owner: u32,
+    group: u32,
+) -> Result<(), LocalMcpError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let invalid = || LocalMcpError::PackageIdentity;
+    let root_device = std::fs::symlink_metadata(root)
+        .map_err(|_| invalid())?
+        .dev();
+    for control in ["derived-provenance.json", "original-stage-receipt.json"] {
+        if std::fs::symlink_metadata(root.join(control))
+            .map_err(|_| invalid())?
+            .dev()
+            != root_device
+        {
+            return Err(invalid());
+        }
+    }
+    let derived_bytes = read_immutable_file(
+        &root.join("derived-provenance.json"),
+        owner,
+        group,
+        0o444,
+        16 * 1024 * 1024,
+    )?;
+    let original = read_immutable_file(
+        &root.join("original-stage-receipt.json"),
+        owner,
+        group,
+        0o444,
+        256 * 1024,
+    )?;
+    if hex::encode(Sha256::digest(&derived_bytes)) != binding.derived_receipt_sha256
+        || hex::encode(Sha256::digest(&original)) != binding.original_receipt_sha256
+    {
+        return Err(invalid());
+    }
+    let receipt = crate::credential_metadata_unique_json(&derived_bytes).map_err(|_| invalid())?;
+    let original = crate::credential_metadata_unique_json(&original).map_err(|_| invalid())?;
+    if receipt["schema"] != "fwc.n8n.derived-validator-preparation.v1"
+        || receipt["admitted"] != false
+        || receipt["installed"] != false
+        || receipt["patchSha256"]
+            != "391a6acf86de476e45a7a65ad286719dca569abe7d216c2a50eaae7efc1fd832"
+        || original["schema"] != "fwc.n8n.local-mcp-verification-receipt.v1"
+        || original["status"] != "verified"
+        || original["version"] != "2.91.0"
+        || original["registryIntegrity"] != receipt["registryTarballSha512"]
+        || receipt["registryTarballSha256"]
+            != "19aeb9c6654155e67026b1a2479a498a4c46d2f63b2cb9bbbabe3e9141ff6f41"
+        || receipt["upstreamTreeSha256"]
+            != "d69ab91b3fb36fc34f8ca0877f6a2598485c44487178d8d5495f57e3fe6e701c"
+    {
+        return Err(invalid());
+    }
+    verify_immutable_recipe_rows(&receipt)?;
+    verify_immutable_rows(root, &receipt, binding, owner, group)
+}
+
+fn verify_immutable_recipe_rows(receipt: &Value) -> Result<(), LocalMcpError> {
+    let rows = receipt["files"]
+        .as_array()
+        .ok_or(LocalMcpError::PackageIdentity)?;
+    for required in [
+        "package-lock.json",
+        "node_modules/n8n-mcp/package.json",
+        "node_modules/n8n-mcp/dist/mcp/stdio-wrapper.js",
+        "node_modules/n8n-mcp/data/nodes.db",
+    ] {
+        if rows
+            .iter()
+            .filter(|row| row["path"] == required && row["kind"] == "file")
+            .count()
+            != 1
+        {
+            return Err(LocalMcpError::PackageIdentity);
+        }
+    }
+    let lock = rows
+        .iter()
+        .find(|row| row["path"] == "package-lock.json")
+        .ok_or(LocalMcpError::PackageIdentity)?;
+    let metadata = rows
+        .iter()
+        .find(|row| row["path"] == "node_modules/n8n-mcp/package.json")
+        .ok_or(LocalMcpError::PackageIdentity)?;
+    if lock["sha256"] != "c544ba17dd05a966699d24511e3b836e84ca2b22cc9af9b9e59ea88a50ff7f66"
+        || metadata["sha256"] != receipt["packageMetadataSha256"]
+        || receipt["packageMetadataSha256"]
+            != "475c78c44a1f91a7db94672d229bee1ffc82d60b76a02f00d9b8ba2645b23739"
+    {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verify_immutable_package_at(
+    _root: &Path,
+    _binding: &fcp_manifest::LocalMcpPackageBinding,
+    _owner: u32,
+    _group: u32,
+) -> Result<(), LocalMcpError> {
+    Err(LocalMcpError::UnsupportedPlatform)
+}
+
+fn project_immutable_rows(
+    receipt: &Value,
+    binding: &fcp_manifest::LocalMcpPackageBinding,
+) -> Result<BTreeMap<String, Value>, LocalMcpError> {
+    use sha2::{Digest, Sha256};
+    let invalid = || LocalMcpError::PackageIdentity;
+    let rows = receipt["files"]
+        .as_array()
+        .filter(|rows| !rows.is_empty() && rows.len() <= 20_000)
+        .ok_or_else(invalid)?;
+    if hex::encode(Sha256::digest(
+        serde_json::to_vec(rows).map_err(|_| invalid())?,
+    )) != binding.source_tree_sha256
+        || receipt["resultTreeSha256"] != binding.source_tree_sha256
+    {
+        return Err(invalid());
+    }
+    let mut expected = BTreeMap::new();
+    let mut projected = Vec::with_capacity(rows.len());
+    let mut previous: Option<&str> = None;
+    for row in rows {
+        let path = row["path"].as_str().ok_or_else(invalid)?;
+        if !path.is_ascii()
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || matches!(part, "." | ".."))
+            || path.bytes().any(|byte| byte.is_ascii_control())
+            || previous.is_some_and(|previous| previous >= path)
+            || matches!(
+                path,
+                "derived-provenance.json" | "original-stage-receipt.json"
+            )
+        {
+            return Err(invalid());
+        }
+        previous = Some(path);
+        let mut deployed = row.clone();
+        deployed["mode"] = json!(immutable_mode(row)?);
+        projected.push(deployed.clone());
+        expected.insert(path.to_owned(), deployed);
+    }
+    if hex::encode(Sha256::digest(
+        serde_json::to_vec(&projected).map_err(|_| invalid())?,
+    )) != binding.deployed_tree_sha256
+    {
+        return Err(invalid());
+    }
+    Ok(expected)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_immutable_rows(
+    root: &Path,
+    receipt: &Value,
+    binding: &fcp_manifest::LocalMcpPackageBinding,
+    owner: u32,
+    group: u32,
+) -> Result<(), LocalMcpError> {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    let invalid = || LocalMcpError::PackageIdentity;
+    let expected = project_immutable_rows(receipt, binding)?;
+    let mut pending = vec![root.to_path_buf()];
+    let mut observed = std::collections::BTreeSet::new();
+    let mut total = 0_u64;
+    while let Some(directory) = pending.pop() {
+        let before = std::fs::symlink_metadata(&directory).map_err(|_| invalid())?;
+        if !before.is_dir()
+            || before.uid() != owner
+            || before.gid() != group
+            || before.mode() & 0o7777 != 0o555
+            || std::fs::canonicalize(&directory).map_err(|_| invalid())? != directory
+            || before.dev()
+                != std::fs::symlink_metadata(root)
+                    .map_err(|_| invalid())?
+                    .dev()
+        {
+            return Err(invalid());
+        }
+        for entry in std::fs::read_dir(&directory).map_err(|_| invalid())? {
+            let path = entry.map_err(|_| invalid())?.path();
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| invalid())?
+                .to_str()
+                .ok_or_else(invalid)?
+                .to_owned();
+            if matches!(
+                relative.as_str(),
+                "derived-provenance.json" | "original-stage-receipt.json"
+            ) {
+                continue;
+            }
+            let row = expected.get(&relative).ok_or_else(invalid)?;
+            let metadata = std::fs::symlink_metadata(&path).map_err(|_| invalid())?;
+            if !observed.insert(relative.clone()) || metadata.dev() != before.dev() {
+                return Err(invalid());
+            }
+            if row["kind"] == "directory" && row.as_object().is_some_and(|row| row.len() == 3) {
+                if !metadata.is_dir() {
+                    return Err(invalid());
+                }
+                pending.push(path);
+            } else if row["kind"] == "file" && row.as_object().is_some_and(|row| row.len() == 5) {
+                let bytes = read_immutable_file(
+                    &path,
+                    owner,
+                    group,
+                    immutable_mode(row)?,
+                    128 * 1024 * 1024,
+                )?;
+                total = total.checked_add(metadata.len()).ok_or_else(invalid)?;
+                if total > 512 * 1024 * 1024
+                    || row["size"].as_u64() != Some(metadata.len())
+                    || row["sha256"].as_str() != Some(hex::encode(Sha256::digest(&bytes)).as_str())
+                {
+                    return Err(invalid());
+                }
+            } else {
+                return Err(invalid());
+            }
+        }
+        if metadata_identity(&before)
+            != metadata_identity(&std::fs::symlink_metadata(&directory).map_err(|_| invalid())?)
+        {
+            return Err(invalid());
+        }
+    }
+    if observed.len() != expected.len() {
+        return Err(invalid());
+    }
     Ok(())
 }
 
@@ -2199,6 +2588,7 @@ mod tests {
             runtime_executable_digest: "0".repeat(64),
             package_metadata_path: "/usr/share/fcp/package.json".into(),
             package_metadata_digest: "0".repeat(64),
+            package_binding: None,
             protocol_version: LOCAL_MCP_PROTOCOL_VERSION.into(),
             fixed_args: Vec::new(),
             fixed_env: BTreeMap::new(),

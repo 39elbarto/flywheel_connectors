@@ -2278,11 +2278,22 @@ fn validate_unsigned_release_tree_with_schema_mode(
             validate_zone_policies(&value)?;
         } else if relative_path == "policy/local-mcp.json" {
             let value = read_value(&path, MAX_POLICY_BYTES)?;
-            validate_local_mcp_policy(&value)?;
+            validate_local_mcp_release_policy(value, release_id)?;
         } else if relative_path.starts_with("policy/") {
             let value = read_value(&path, MAX_POLICY_BYTES)?;
             reject_secret_keys(&value)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_local_mcp_release_policy(value: Value, release_id: &str) -> Result<(), ProvisionError> {
+    validate_local_mcp_policy(&value)?;
+    let policy: LocalMcpPolicy = serde_json::from_value(value)
+        .map_err(|_| ProvisionError::new(ProvisionErrorCode::Policy))?;
+    if let Some(binding) = &policy.package_binding {
+        fcp_host::verify_immutable_package(binding, release_id)
+            .map_err(|_| ProvisionError::new(ProvisionErrorCode::Policy))?;
     }
     Ok(())
 }

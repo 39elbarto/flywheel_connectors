@@ -436,7 +436,9 @@ def anchored(path, directory=True):
 def tree(root):
     rows = []
     total = 0
-    for path in sorted(root.rglob('*')):
+    # Match exported SHA rows and the rootless verifier's string-key ordering.
+    # Path component ordering differs for sibling names beside a directory.
+    for path in sorted(root.rglob('*'), key=lambda p: str(p.relative_to(root))):
         s = os.lstat(path)
         relative = str(path.relative_to(root))
         if stat.S_ISDIR(s.st_mode):
@@ -455,6 +457,8 @@ def tree(root):
             fail()
     return rows
 def write_new(path, data, mode=0o644):
+    if mode & 0o7022:
+        fail()
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
     try:
         view = memoryview(data)
@@ -463,6 +467,10 @@ def write_new(path, data, mode=0o644):
             if count <= 0:
                 fail()
             view = view[count:]
+        # umask stays private; restore only the verified mode on this new FD.
+        os.fchmod(fd, mode)
+        if stat.S_IMODE(os.fstat(fd).st_mode) != mode:
+            fail()
         os.fsync(fd)
     finally:
         os.close(fd)

@@ -1940,7 +1940,7 @@ fn validate_installed_package_manifest(
         ));
     }
     let scripts = object.get("scripts").cloned().unwrap_or_else(|| json!({}));
-    if !scripts.is_object() || canonical_digest(&scripts)? != metadata.lifecycle_scripts_digest {
+    if !registry_manifest_scripts_match(&scripts, &metadata.lifecycle_scripts_digest)? {
         return Err(LocalMcpAdapterError::StageMismatch(
             "package_scripts_mismatch",
         ));
@@ -4483,9 +4483,7 @@ fn validate_selected_registry_manifest(
         .filter(|value| !value.is_null())
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if !lifecycle_scripts.is_object()
-        || canonical_digest(&lifecycle_scripts)? != metadata.lifecycle_scripts_digest
-    {
+    if !registry_manifest_scripts_match(&lifecycle_scripts, &metadata.lifecycle_scripts_digest)? {
         return Err(LocalMcpAdapterError::StageMismatch(
             "registry_manifest_mismatch",
         ));
@@ -4508,6 +4506,34 @@ fn validate_selected_registry_manifest(
         }
     }
     Ok(())
+}
+
+fn registry_manifest_scripts_match(
+    scripts: &Value,
+    expected_digest: &str,
+) -> Result<bool, LocalMcpAdapterError> {
+    if !scripts.is_object() {
+        return Ok(false);
+    }
+    if canonical_digest(scripts)? == expected_digest {
+        return Ok(true);
+    }
+    // npm's publishing reader strips this literal leading executable path.
+    // Compare that representation only after the exact digest disagrees. Keep
+    // original metadata/archive bytes, keys, nonstrings and command tails;
+    // this never executes scripts or replaces the required artifact SRI proof.
+    let Some(mut normalized) = scripts.as_object().cloned() else {
+        return Ok(false);
+    };
+    for command in normalized.values_mut() {
+        if let Some(rest) = command
+            .as_str()
+            .and_then(|text| text.strip_prefix("./node_modules/.bin/"))
+        {
+            *command = Value::String(rest.to_string());
+        }
+    }
+    Ok(canonical_digest(&Value::Object(normalized))? == expected_digest)
 }
 
 fn cleanup_pre_activation_error<I: LocalMcpStageIo>(
@@ -7993,6 +8019,60 @@ mod tests {
     }
 
     #[test]
+    fn published_deep_extend_scripts_match_bound_archive_without_execution() {
+        // Reduced public metadata/manifest fields from SRI-verified 0.6.0.
+        // npm read-package-json 5.0.2 scriptpath_ strips this leading prefix
+        // when publishing metadata; the archived package.json stays original.
+        let registry = json!({
+            "version":"0.6.0",
+            "dist.integrity":"sha512-LOHxIOaPYdHlJRtCQfDIVZtfw/ufM8+rVj649RIHzcm/vGwQRXFt6OPqIFWsm2XEMrNIEtWR64sY1LEKD2vAOA==",
+            "dist.tarball":"https://registry.npmjs.org/deep-extend/-/deep-extend-0.6.0.tgz",
+            "engines":{"node":">=4.0.0"},"scripts":{"test":"mocha"}
+        });
+        let metadata = registry_package_metadata("deep-extend", &registry).unwrap();
+        let manifest = json!({
+            "name":"deep-extend","version":"0.6.0",
+            "engines":{"node":">=4.0.0"},
+            "scripts":{"test":"./node_modules/.bin/mocha"}
+        });
+        assert!(validate_selected_registry_manifest(&manifest, &metadata).is_ok());
+        assert_eq!(
+            metadata.lifecycle_scripts_digest,
+            canonical_digest(&registry["scripts"]).unwrap()
+        );
+        for command in [
+            "./node_modules/.bin/mocha --changed",
+            "echo ./node_modules/.bin/mocha",
+            "../node_modules/.bin/mocha",
+            "./node_modules/xbin/mocha",
+        ] {
+            let mut changed = manifest.clone();
+            changed["scripts"]["test"] = json!(command);
+            assert!(validate_selected_registry_manifest(&changed, &metadata).is_err());
+        }
+        let mut changed = manifest.clone();
+        changed["scripts"]["install"] = json!("./node_modules/.bin/mocha");
+        assert!(validate_selected_registry_manifest(&changed, &metadata).is_err());
+        changed = manifest.clone();
+        changed["scripts"]["test"] = json!(42);
+        assert!(validate_selected_registry_manifest(&changed, &metadata).is_err());
+        let mut unchanged = registry;
+        unchanged["name"] = json!("deep-extend");
+        assert!(validate_selected_registry_manifest(&unchanged, &metadata).is_ok());
+
+        let mut root_registry = metadata_value("2.91.0");
+        root_registry["scripts"] = json!({"test":"mocha"});
+        let root_metadata = parse_registry_metadata(&root_registry).unwrap();
+        let mut installed = root_registry;
+        installed["name"] = json!(PACKAGE_NAME);
+        installed["bin"] = json!({"n8n-mcp":"dist/mcp/index.js"});
+        installed["scripts"] = manifest["scripts"].clone();
+        assert!(validate_installed_package_manifest(&installed, &root_metadata, "2.91.0").is_ok());
+        installed["scripts"]["test"] = json!("./node_modules/.bin/mocha --changed");
+        assert!(validate_installed_package_manifest(&installed, &root_metadata, "2.91.0").is_err());
+    }
+
+    #[test]
     fn registry_manifest_disagreement_fails_before_install() {
         let metadata_value = metadata_value("2.69.2");
         let metadata = registry_package_metadata(PACKAGE_NAME, &metadata_value)
@@ -8900,6 +8980,43 @@ mod tests {
             runner.outputs.insert(request.clone(), bytes);
         }
         Ok((manifest, runner))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "explicit SHA-pinned public archive manifests; offline matcher only"]
+    fn registry_public_archive_manifest_replay() {
+        let text = std::env::var("FCP_N8N_PUBLIC_MANIFEST_REPLAY_INPUT")
+            .expect("explicit pinned public manifests");
+        assert!(text.len() <= 8192);
+        let input: OfflineCorpusInput = serde_json::from_str(&text).unwrap();
+        let bytes = offline_corpus_read(&input.manifest_path, &input.manifest_sha256).unwrap();
+        let files: BTreeMap<String, OfflineCorpusFile> = serde_json::from_slice(&bytes).unwrap();
+        assert!(!files.is_empty() && files.len() <= MAX_REGISTRY_CLOSURE_PACKAGES);
+        let parent = input.manifest_path.parent().unwrap();
+        let mut total = 0_usize;
+        for file in files.values() {
+            assert!(
+                Path::new(&file.file).components().count() == 1
+                    && matches!(
+                        Path::new(&file.file).components().next(),
+                        Some(std::path::Component::Normal(_))
+                    )
+            );
+            let bytes = offline_corpus_read(&parent.join(&file.file), &file.sha256).unwrap();
+            total = total.checked_add(bytes.len()).unwrap();
+            assert!(total <= 64 * 1024 * 1024);
+            let fixture: Value = serde_json::from_slice(&bytes).unwrap();
+            let name = fixture["selected"]["packageName"].as_str().unwrap();
+            let metadata = registry_package_metadata(name, &fixture["registry"]).unwrap();
+            assert_eq!(fixture["tarSRI"], metadata.integrity);
+            assert!(validate_selected_registry_manifest(&fixture["manifest"], &metadata).is_ok());
+        }
+        println!(
+            "{}",
+            json!({"scope":"offline_public_archive_manifests","checked":files.len(),
+                "matched":files.len(),"network":false,"commands":0,"staging":false})
+        );
     }
 
     #[test]

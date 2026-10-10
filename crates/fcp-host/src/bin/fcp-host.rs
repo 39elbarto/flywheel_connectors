@@ -3431,6 +3431,7 @@ impl SubprocessRegistry {
         }
         if plan.connector_id != request.connector_id
             || plan.operation != request.operation
+            || plan.manifest_operation.id != plan.operation
             || plan.zone_id != request.zone_id
             || plan.request_id != request.id
             || plan.request_correlation_id != request.correlation_id
@@ -4136,6 +4137,8 @@ struct OwnedPerInvocationBinding {
     correlation_id: Option<String>,
     capability_token_cbor_b64: String,
     network_constraints: NetworkConstraints,
+    manifest_capability: fcp_core::CapabilityId,
+    manifest_idempotency: IdempotencyClass,
     comparison_capture: Option<Arc<std::sync::Mutex<OwnedWorkflowComparisonCapture>>>,
     credentials_session: Option<Arc<std::sync::Mutex<OwnedCredentialsSession>>>,
     read_wait: Option<Arc<OwnedReadWait>>,
@@ -4721,6 +4724,7 @@ impl OwnedPerInvocationBinding {
         let capability_token_cbor_b64 = capability_token_b64(&request.capability_token)?;
         if plan.connector_id != request.connector_id
             || plan.operation != request.operation
+            || plan.manifest_operation.id != plan.operation
             || plan.zone_id != request.zone_id
             || plan.request_id != request.id
         {
@@ -4803,6 +4807,8 @@ impl OwnedPerInvocationBinding {
                 .map(std::string::ToString::to_string),
             capability_token_cbor_b64,
             network_constraints: plan.network_constraints.clone(),
+            manifest_capability: plan.manifest_operation.capability.clone(),
+            manifest_idempotency: plan.manifest_operation.idempotency,
             comparison_capture,
             #[cfg(test)]
             fixture_http: None,
@@ -5147,8 +5153,9 @@ async fn owned_perform_egress(
                     .admit_request(&request)?;
             }
             let started_at = Instant::now();
-            let mut authorized = authorize_host_egress_context(
+            let mut authorized = authorize_owned_host_egress_context(
                 state,
+                binding,
                 &request.context,
                 &request.context.resource_uri,
             )
@@ -5344,8 +5351,9 @@ async fn owned_perform_egress(
                 ));
             }
             let started_at = Instant::now();
-            let authorized = authorize_host_egress_context(
+            let authorized = authorize_owned_host_egress_context(
                 state,
+                binding,
                 &request.context,
                 &request.context.resource_uri,
             )
@@ -6120,16 +6128,27 @@ fn run_owned_local_validation_with_provider(
     let bound = provider.policy().max_request_bytes as usize;
     let package_version = provider.policy().package_version.to_string();
     let package_metadata_digest = provider.policy().package_metadata_digest.clone();
+    let versioned_source = provider
+        .versioned_validation_source()
+        .map_err(|_| HostError::PreflightFailed("versioned_validation_source_invalid".into()))?;
     let dispatcher = fcp_host::LocalN8nDispatcher::with_max_input_bytes(provider, bound);
     match job {
         OwnedLocalValidationJob::CurrentPair(graphs) => {
             let contexts = graphs.each_ref().map(|graph| {
-                fcp_host::LocalN8nDiagnosticContext::from_graph(
-                    graph,
-                    fcp_host::LocalN8nValidationProfile::Runtime,
-                    &package_version,
-                    &package_metadata_digest,
-                )
+                if let Some(source) = &versioned_source {
+                    fcp_host::LocalN8nDiagnosticContext::from_verified_versioned_source(
+                        graph,
+                        fcp_host::LocalN8nValidationProfile::Runtime,
+                        source,
+                    )
+                } else {
+                    fcp_host::LocalN8nDiagnosticContext::from_graph(
+                        graph,
+                        fcp_host::LocalN8nValidationProfile::Runtime,
+                        &package_version,
+                        &package_metadata_digest,
+                    )
+                }
             });
             let result = dispatcher
                 .validate_current_pair(correlation.to_owned(), graphs, cancelled, deadline)
@@ -6139,12 +6158,18 @@ fn run_owned_local_validation_with_provider(
             project_comparison_validation(&result, contexts.each_ref().map(Option::as_ref))
         }
         OwnedLocalValidationJob::CurrentGraph(graph, profile) => {
-            let context = fcp_host::LocalN8nDiagnosticContext::from_graph(
-                &graph,
-                profile,
-                &package_version,
-                &package_metadata_digest,
-            );
+            let context = if let Some(source) = &versioned_source {
+                fcp_host::LocalN8nDiagnosticContext::from_verified_versioned_source(
+                    &graph, profile, source,
+                )
+            } else {
+                fcp_host::LocalN8nDiagnosticContext::from_graph(
+                    &graph,
+                    profile,
+                    &package_version,
+                    &package_metadata_digest,
+                )
+            };
             let result = dispatcher
                 .validate_current_graph(correlation.to_owned(), graph, profile, cancelled, deadline)
                 .map_err(|_| {
@@ -6267,7 +6292,10 @@ fn project_comparison_validation(
     // Anonymous indexes are graph-local, not cross-version node identities.
     let findings = |result: &Value, field: &str| {
         result[field].as_array().map(|items| items.iter().map(|item|
-            json!({"code":item["code"],"classification":item["classification"],"field":item["field"]})
+            json!({"code":item["code"],"classification":item["classification"],"field":item["field"],
+                "expectedType":item["expectedType"],"actualType":item["actualType"],
+                "structureKind":item["structureKind"],"defaultApplied":item["defaultApplied"],
+                "apiVersion":item["apiVersion"]})
         ).collect::<Vec<_>>())
     };
     let changed = left["valid"] != right["valid"]
@@ -7341,6 +7369,8 @@ mod owned_per_invocation_unit_tests {
             correlation_id: Some("corr-1".to_string()),
             capability_token_cbor_b64: "secret-token".to_string(),
             network_constraints: constraints,
+            manifest_capability: fcp_core::CapabilityId::from_static("cap.test.egress"),
+            manifest_idempotency: IdempotencyClass::None,
             comparison_capture: None,
             credentials_session: None,
             read_wait: None,
@@ -22849,7 +22879,7 @@ async fn authorize_host_egress_context(
             "invalid host-egress canonical resource_uri".to_string(),
         ));
     }
-    let (connector_id, operation, zone_id) = parse_host_egress_context(context)?;
+    let (connector_id, operation, _) = parse_host_egress_context(context)?;
     let snapshot = state
         .registry
         .runtime_network_policy_snapshot(&connector_id, &operation)
@@ -22890,6 +22920,65 @@ async fn authorize_host_egress_context(
                 "connector `{connector_id}` does not expose operation `{operation}`"
             ))
         })?;
+    authorize_host_egress_with_metadata(
+        state,
+        context,
+        resource_uri,
+        constraints,
+        (&tool.capability, tool.idempotency),
+        capability_token,
+    )
+    .await
+}
+
+// Only the invocation-private binding supplies this metadata. The registry
+// generation remains read-locked by the registry invoke path until owned teardown;
+// reacquiring it here would deadlock behind a queued registry writer.
+#[cfg(target_os = "linux")]
+async fn authorize_owned_host_egress_context(
+    state: &AppState,
+    binding: &OwnedPerInvocationBinding,
+    context: &HostEgressContext,
+    resource_uri: &str,
+) -> HostResult<AuthorizedHostEgress> {
+    if !binding.matches_context(context) || resource_uri != context.resource_uri {
+        return Err(HostError::PreflightFailed(
+            "owned egress context binding denied".into(),
+        ));
+    }
+    let capability_token = capability_token_from_cbor_b64(
+        &context.capability_token_cbor_b64,
+        "host-egress capability_token_cbor_b64",
+    )?;
+    authorize_host_egress_with_metadata(
+        state,
+        context,
+        resource_uri,
+        binding.network_constraints.clone(),
+        (&binding.manifest_capability, binding.manifest_idempotency),
+        capability_token,
+    )
+    .await
+}
+
+async fn authorize_host_egress_with_metadata(
+    state: &AppState,
+    context: &HostEgressContext,
+    resource_uri: &str,
+    constraints: NetworkConstraints,
+    operation_metadata: (&fcp_core::CapabilityId, IdempotencyClass),
+    capability_token: fcp_core::CapabilityToken,
+) -> HostResult<AuthorizedHostEgress> {
+    if resource_uri.is_empty()
+        || resource_uri != resource_uri.trim()
+        || resource_uri.chars().any(char::is_control)
+    {
+        return Err(HostError::InvalidFilter(
+            "invalid host-egress canonical resource_uri".to_string(),
+        ));
+    }
+    let (connector_id, operation, zone_id) = parse_host_egress_context(context)?;
+    let (capability, idempotency) = operation_metadata;
     let capability_key = state.capability_verifying_key.as_ref().ok_or_else(|| {
         HostError::PreflightFailed(
             "FCP_HOST_CAPABILITY_PUBLIC_KEY[_FILE] is not configured, so host-egress auth checks cannot be verified"
@@ -22901,7 +22990,7 @@ async fn authorize_host_egress_context(
     let verified_token = verifier
         .verify_unbound(
             capability_token.clone(),
-            &tool.capability,
+            capability,
             &operation,
             &[resource_uri.to_string()],
         )
@@ -22952,7 +23041,7 @@ async fn authorize_host_egress_context(
         zone_id,
         request_id: context.request_id.clone(),
         correlation_id: context.correlation_id.clone(),
-        idempotency: tool.idempotency,
+        idempotency,
         constraints,
         credential_allow,
         #[cfg(all(test, target_os = "linux"))]
@@ -32724,6 +32813,170 @@ done
         (state, signing_key)
     }
 
+    #[cfg(target_os = "linux")]
+    fn pinned_egress_test_binding(
+        context: &HostEgressContext,
+        authorized: AuthorizedHostEgress,
+    ) -> OwnedPerInvocationBinding {
+        OwnedPerInvocationBinding {
+            connector_id: context.connector_id.clone(),
+            operation_id: context.operation_id.clone(),
+            zone_id: context.zone_id.clone(),
+            request_id: context.request_id.clone(),
+            correlation_id: context.correlation_id.clone(),
+            capability_token_cbor_b64: context.capability_token_cbor_b64.clone(),
+            network_constraints: authorized.constraints,
+            manifest_capability: CapabilityId::from_static("cap.test.egress"),
+            manifest_idempotency: authorized.idempotency,
+            comparison_capture: None,
+            credentials_session: None,
+            read_wait: None,
+            code_read: None,
+            fixture_http: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test]
+    async fn owned_pinned_auth_completes_with_registry_writer_pending() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let connector = "fcp.test.pinned-auth:utility:1.0.0";
+        let operation = "test.egress_http";
+        let resource = "fcp-test://pinned-auth/read";
+        let credential = CredentialId::parse("11111111-1111-1111-1111-111111111111").unwrap();
+        let (state, signing) = Box::pin(d9us6_host_egress_state(
+            connector,
+            operation,
+            443,
+            credential,
+            json!({"host_allow":["127.0.0.1"]}),
+        ))
+        .await;
+        let token = test_capability_token_with_constraints(
+            &signing,
+            "cap.test.egress",
+            operation,
+            ZoneId::work().as_str(),
+            &fcp_core::CapabilityConstraints {
+                resource_allow: vec![resource.into()],
+                ..Default::default()
+            },
+        );
+        let context = HostEgressContext {
+            connector_id: connector.into(),
+            operation_id: operation.into(),
+            zone_id: ZoneId::work().to_string(),
+            request_id: "pinned-auth-request".into(),
+            correlation_id: None,
+            resource_uri: resource.into(),
+            capability_token_cbor_b64: capability_token_b64(&token).unwrap(),
+        };
+        let initial = Box::pin(authorize_host_egress_context(&state, &context, resource))
+            .await
+            .unwrap();
+        let binding = pinned_egress_test_binding(&context, initial);
+        let generation = state.registry.state.read().await;
+        let mut writer = Box::pin(state.registry.state.write());
+        std::future::poll_fn(|cx| {
+            assert!(writer.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let mut fresh = Box::pin(authorize_host_egress_context(&state, &context, resource));
+        std::future::poll_fn(|cx| {
+            assert!(fresh.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(fresh);
+
+        let authorized = fcp_async_core::time::timeout(
+            Duration::from_millis(500),
+            Box::pin(authorize_owned_host_egress_context(
+                &state, &binding, &context, resource,
+            )),
+        )
+        .await
+        .expect("pinned authorization must not reread registry/discovery")
+        .unwrap();
+        assert_eq!(authorized.constraints, binding.network_constraints);
+        assert_eq!(authorized.idempotency, binding.manifest_idempotency);
+        assert_eq!(authorized.request_id, context.request_id);
+        fcp_async_core::time::timeout(
+            Duration::from_millis(500),
+            Box::pin(assert_pinned_auth_denials(&state, &binding, &context)),
+        )
+        .await
+        .expect("negative authorization must also avoid recursive registry reads");
+        std::future::poll_fn(|cx| {
+            assert!(writer.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(generation);
+        let _writer = fcp_async_core::time::timeout(Duration::from_millis(500), writer)
+            .await
+            .expect("writer must resume only after generation teardown");
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn assert_pinned_auth_denials(
+        state: &AppState,
+        binding: &OwnedPerInvocationBinding,
+        context: &HostEgressContext,
+    ) {
+        let mut substituted = context.clone();
+        substituted.capability_token_cbor_b64 = "untrusted-token".into();
+        assert!(
+            authorize_owned_host_egress_context(
+                state,
+                binding,
+                &substituted,
+                &context.resource_uri
+            )
+            .await
+            .is_err()
+        );
+        substituted = context.clone();
+        substituted.request_id = "another-invocation".into();
+        assert!(
+            authorize_owned_host_egress_context(
+                state,
+                binding,
+                &substituted,
+                &context.resource_uri
+            )
+            .await
+            .is_err()
+        );
+        substituted = context.clone();
+        substituted.resource_uri = "fcp-test://other-resource".into();
+        assert!(
+            authorize_owned_host_egress_context(
+                state,
+                binding,
+                &substituted,
+                &substituted.resource_uri,
+            )
+            .await
+            .is_err()
+        );
+        let mut wrong_capability = binding.clone();
+        wrong_capability.manifest_capability = CapabilityId::from_static("cap.test.other");
+        assert!(
+            authorize_owned_host_egress_context(
+                state,
+                &wrong_capability,
+                context,
+                &context.resource_uri,
+            )
+            .await
+            .is_err()
+        );
+    }
+
     async fn d9us6_one_shot_http_server(
         observed_request: Arc<StdMutex<Option<String>>>,
     ) -> (SocketAddr, JoinHandle<()>) {
@@ -34325,6 +34578,8 @@ done
                 correlation_id: None,
                 capability_token_cbor_b64: context.capability_token_cbor_b64.clone(),
                 network_constraints: authorized.constraints,
+                manifest_capability: CapabilityId::from_static("cap.test.egress"),
+                manifest_idempotency: authorized.idempotency,
                 comparison_capture: None,
                 credentials_session: None,
                 read_wait: Some(Arc::clone(&wait)),
@@ -43032,6 +43287,31 @@ print(json.dumps(produced))
 
     fn n8n_read_only_test_input(operation: &str) -> N8nReadOnlyRunOnceInput {
         let (resource_uri, input) = match operation {
+            "n8n.workflows.get_code" => (
+                concat!(
+                    "fwc-n8n://eec/workflows/workflow-1?codeVersion=draft",
+                    "&draftVersionId=version-1&draftGraphDigest=blake3-256:",
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ),
+                json!({
+                    "id": "workflow-1",
+                    "version": "draft",
+                    "pins": {"draft": {
+                        "versionId": "version-1",
+                        "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    }}
+                }),
+            ),
+            "n8n.validation.run" => (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                json!({"subject": "remote_workflow", "id": "workflow-1", "version": "draft", "profile": "runtime"}),
+            ),
+            "n8n.workflows.compare" => (
+                "fwc-n8n://eec/workflows/workflow%2D1",
+                json!({"id": "workflow-1", "leftVersion": "draft", "rightVersion": "published", "detail": "standard"}),
+            ),
+            "n8n.structure.search" => ("fwc-n8n://eec", json!({"kind": "projects"})),
+            "n8n.audit.inspect" => ("fwc-n8n://eec", json!({"categories": ["credentials"]})),
             "n8n.workflows.get" => (
                 "fwc-n8n://eec/workflows/workflow%2D1",
                 json!({"id": "workflow-1"}),
@@ -43809,9 +44089,8 @@ print(json.dumps(produced))
         symlink(&real, &alias).expect("runtime symlink");
         let owner_uid = std::fs::metadata(&real).expect("real metadata").uid();
 
-        let error = ensure_n8n_private_dir(&alias, owner_uid)
-            .err()
-            .expect("symlink must fail closed");
+        let error =
+            ensure_n8n_private_dir(&alias, owner_uid).expect_err("symlink must fail closed");
         assert!(error.to_string().contains("ownership or mode is invalid"));
     }
 
@@ -44178,21 +44457,37 @@ print(json.dumps(produced))
         assert!(parse_n8n_read_only_run_once_input(&trailing).is_err());
     }
 
+    fn n8n_read_only_contract_test_config() -> ManagedConnectorConfig {
+        let mut config = run_once_n8n_test_config();
+        let configured = config.config.as_mut().expect("synthetic connector config");
+        configured["base_url"] = json!("https://n8n.europeaneyecenter.com/api/v1");
+        configured["credential_metadata_read"] = json!({
+            "credential_id": "22222222-2222-4222-8222-222222222222",
+            "purpose": "n8n.credentials.metadata.read",
+            "tool": "list_credentials",
+            "class": "read",
+            "input_schema_digest": "sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest": "sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        });
+        config
+    }
+
     #[test]
     fn n8n_read_only_contract_has_a_closed_operation_and_server_surface() {
-        let config = run_once_n8n_test_config();
+        let config = n8n_read_only_contract_test_config();
         for operation in N8N_READ_ONLY_OPERATIONS {
             build_n8n_read_only_run_once_plan(n8n_read_only_test_input(operation), &config)
                 .expect("declared read-only operation must be admitted");
         }
 
-        for operation in ["n8n.workflows.delete"] {
-            assert!(
-                build_n8n_read_only_run_once_plan(n8n_read_only_test_input(operation), &config)
-                    .is_err(),
-                "write or unknown operation must be denied"
-            );
-        }
+        assert!(
+            build_n8n_read_only_run_once_plan(
+                n8n_read_only_test_input("n8n.workflows.delete"),
+                &config,
+            )
+            .is_err(),
+            "write or unknown operation must be denied"
+        );
 
         let legacy = json!({
             "schema": N8N_READ_ONLY_RUN_ONCE_SCHEMA,

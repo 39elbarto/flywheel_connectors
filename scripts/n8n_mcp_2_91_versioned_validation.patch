@@ -1,0 +1,329 @@
+diff --git a/original/dist/mcp/server.js b/patched/dist/mcp/server.js
+index 5b300a1..9434ca4 100644
+--- a/original/dist/mcp/server.js
++++ b/patched/dist/mcp/server.js
+@@ -3383,6 +3383,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
+             const result = await validator.validateWorkflow(workflow, options);
+             const response = {
+                 valid: result.valid,
++                fwcValidation: result.fwcValidation,
+                 summary: {
+                     totalNodes: result.statistics.totalNodes,
+                     enabledNodes: result.statistics.enabledNodes,
+@@ -3395,11 +3396,14 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
+                 },
+                 errors: result.errors.map(e => ({
+                     node: e.nodeName || 'workflow',
++                    fwcDiagnostic: e.fwcDiagnostic,
+                     message: e.message,
+                     details: e.details
+                 })),
+                 warnings: result.warnings.map(w => ({
+                     node: w.nodeName || 'workflow',
++                    fwcDiagnostic: w.fwcDiagnostic,
++                    fwcWarning: w.fwcWarning,
+                     message: w.message,
+                     details: w.details
+                 }))
+@@ -3506,4 +3510,4 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
+     }
+ }
+ exports.N8NDocumentationMCPServer = N8NDocumentationMCPServer;
+-//# sourceMappingURL=server.js.map
+\ No newline at end of file
++//# sourceMappingURL=server.js.map
+diff --git a/original/dist/services/config-validator.js b/patched/dist/services/config-validator.js
+index f92b7d7..a88f8d8 100644
+--- a/original/dist/services/config-validator.js
++++ b/patched/dist/services/config-validator.js
+@@ -47,6 +47,7 @@ class ConfigValidator {
+                     errors.push({
+                         type: 'missing_required',
+                         property: prop.name,
++                        fwcDiagnostic: { code: 'required_absent', propertyOrdinal: properties.indexOf(prop) },
+                         message: `Required property '${prop.displayName || prop.name}' is missing`,
+                         fix: `Add ${prop.name} to your configuration`
+                     });
+@@ -55,6 +56,7 @@ class ConfigValidator {
+                     errors.push({
+                         type: 'invalid_type',
+                         property: prop.name,
++                        fwcDiagnostic: { code: 'required_null', propertyOrdinal: properties.indexOf(prop) },
+                         message: `Required property '${prop.displayName || prop.name}' cannot be null or undefined`,
+                         fix: `Provide a valid value for ${prop.name}`
+                     });
+@@ -63,6 +65,7 @@ class ConfigValidator {
+                     errors.push({
+                         type: 'missing_required',
+                         property: prop.name,
++                        fwcDiagnostic: { code: 'required_trim_empty', propertyOrdinal: properties.indexOf(prop) },
+                         message: `Required property '${prop.displayName || prop.name}' cannot be empty`,
+                         fix: `Provide a valid value for ${prop.name}`
+                     });
+@@ -689,4 +692,4 @@ class ConfigValidator {
+ }
+ exports.ConfigValidator = ConfigValidator;
+ ConfigValidator.UI_ONLY_TYPES = ['notice', 'callout', 'infoBox', 'info'];
+-//# sourceMappingURL=config-validator.js.map
+\ No newline at end of file
++//# sourceMappingURL=config-validator.js.map
+diff --git a/original/dist/services/enhanced-config-validator.js b/patched/dist/services/enhanced-config-validator.js
+index 4fbf8f5..28bfc25 100644
+--- a/original/dist/services/enhanced-config-validator.js
++++ b/patched/dist/services/enhanced-config-validator.js
+@@ -15,7 +15,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+         this.operationSimilarityService = new operation_similarity_service_1.OperationSimilarityService(repository);
+         this.resourceSimilarityService = new resource_similarity_service_1.ResourceSimilarityService(repository);
+     }
+-    static validateWithMode(nodeType, config, properties, mode = 'operation', profile = 'ai-friendly') {
++    static validateWithMode(nodeType, config, properties, mode = 'operation', profile = 'ai-friendly', exactVersionSchema = false) {
+         if (typeof nodeType !== 'string') {
+             throw new Error(`Invalid nodeType: expected string, got ${typeof nodeType}`);
+         }
+@@ -35,6 +35,18 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+         const userProvidedKeys = new Set(Object.keys(config));
+         const { properties: filteredProperties, configWithDefaults } = this.filterPropertiesByMode(properties, config, mode, operationContext);
+         const baseResult = super.validate(nodeType, configWithDefaults, filteredProperties, userProvidedKeys);
++        for (const issue of baseResult.errors) {
++            const diagnostic = issue.fwcDiagnostic;
++            const property = diagnostic && filteredProperties[diagnostic.propertyOrdinal];
++            if (!property || filteredProperties.filter(p => p.name === property.name).length !== 1) {
++                delete issue.fwcDiagnostic;
++                continue;
++            }
++            issue.fwcDiagnostic = { ...diagnostic, originalOrdinal: properties.indexOf(property),
++                defaultApplied: config[property.name] === undefined && property.default !== undefined,
++                apiVersion: [1, 2, 3].includes(configWithDefaults.version) ? configWithDefaults.version : null,
++                expectedType: null, actualType: null, structureKind: null };
++        }
+         const enhancedResult = {
+             ...baseResult,
+             mode,
+@@ -47,7 +59,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+             suggestions: baseResult.suggestions || []
+         };
+         this.applyProfileFilters(enhancedResult, profile);
+-        this.addOperationSpecificEnhancements(nodeType, config, filteredProperties, enhancedResult);
++        this.addOperationSpecificEnhancements(nodeType, config, filteredProperties, enhancedResult, exactVersionSchema);
+         this.filterWarningsByProfile(enhancedResult, profile);
+         enhancedResult.errors = this.deduplicateErrors(enhancedResult.errors);
+         enhancedResult.nextSteps = this.generateNextSteps(enhancedResult);
+@@ -126,7 +138,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+         }
+         return true;
+     }
+-    static addOperationSpecificEnhancements(nodeType, config, properties, result) {
++    static addOperationSpecificEnhancements(nodeType, config, properties, result, exactVersionSchema = false) {
+         if (typeof nodeType !== 'string') {
+             result.errors.push({
+                 type: 'invalid_type',
+@@ -136,7 +148,11 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+             });
+             return;
+         }
+-        this.validateResourceAndOperation(nodeType, config, result);
++        // ConfigValidator already checks options against the selected visible
++        // properties. The repository enhancement replaces these errors using
++        // CURRENT-row options, which cannot override an exact-version schema.
++        if (!exactVersionSchema)
++            this.validateResourceAndOperation(nodeType, config, result);
+         this.validateSpecialTypeStructures(config, properties, result);
+         this.validateFixedCollectionStructures(nodeType, config, result);
+         const context = {
+@@ -665,10 +681,17 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
+             }
+             const validationResult = type_structure_service_1.TypeStructureService.validateTypeCompatibility(value, structureType);
+             if (!validationResult.valid) {
+-                for (const error of validationResult.errors) {
++                for (const [errorIndex, error] of validationResult.errors.entries()) {
++                    const origin = validationResult.fwcDiagnostics?.find(d => d.errorIndex === errorIndex);
++                    const ordinal = properties.indexOf(propDef);
+                     result.errors.push({
+                         type: 'invalid_configuration',
+                         property: key,
++                        fwcDiagnostic: origin && properties.filter(p => p.name === key).length === 1
++                            ? { code: origin.code, expectedType: origin.expectedType,
++                                actualType: origin.actualType, structureKind: origin.structureKind,
++                                propertyOrdinal: ordinal, originalOrdinal: null,
++                                defaultApplied: null, apiVersion: [1, 2, 3].includes(config.version) ? config.version : null } : undefined,
+                         message: error,
+                         fix: `Ensure ${key} follows the expected structure for ${structureType} type. Example: ${JSON.stringify(structure.example)}`
+                     });
+@@ -864,4 +887,4 @@ exports.EnhancedConfigValidator = EnhancedConfigValidator;
+ EnhancedConfigValidator.operationSimilarityService = null;
+ EnhancedConfigValidator.resourceSimilarityService = null;
+ EnhancedConfigValidator.nodeRepository = null;
+-//# sourceMappingURL=enhanced-config-validator.js.map
+\ No newline at end of file
++//# sourceMappingURL=enhanced-config-validator.js.map
+diff --git a/original/dist/services/type-structure-service.js b/patched/dist/services/type-structure-service.js
+index 6af008b..e603fad 100644
+--- a/original/dist/services/type-structure-service.js
++++ b/patched/dist/services/type-structure-service.js
+@@ -49,11 +49,14 @@ class TypeStructureService {
+         }
+         const errors = [];
+         const warnings = [];
++        const fwcDiagnostics = [];
+         if (value === null || value === undefined) {
+             if (!structure.validation?.allowEmpty) {
+                 errors.push(`Value is required for type ${type}`);
++                fwcDiagnostics.push({ errorIndex: errors.length - 1, code: 'special_null_required',
++                    expectedType: structure.jsType, actualType: value === null ? 'null' : 'undefined', structureKind: type });
+             }
+-            return { valid: errors.length === 0, errors, warnings };
++            return { valid: errors.length === 0, errors, warnings, fwcDiagnostics };
+         }
+         const actualType = Array.isArray(value) ? 'array' : typeof value;
+         const expectedType = structure.jsType;
+@@ -64,6 +67,8 @@ class TypeStructureService {
+             }
+             else {
+                 errors.push(`Expected ${expectedType} but got ${actualType}`);
++                fwcDiagnostics.push({ errorIndex: errors.length - 1, code: 'special_type_mismatch',
++                    expectedType, actualType, structureKind: type });
+             }
+         }
+         if (type === 'dateTime' && typeof value === 'string') {
+@@ -90,6 +95,7 @@ class TypeStructureService {
+             valid: errors.length === 0,
+             errors,
+             warnings,
++            fwcDiagnostics,
+         };
+     }
+     static getDescription(type) {
+@@ -106,4 +112,4 @@ class TypeStructureService {
+     }
+ }
+ exports.TypeStructureService = TypeStructureService;
+-//# sourceMappingURL=type-structure-service.js.map
+\ No newline at end of file
++//# sourceMappingURL=type-structure-service.js.map
+diff --git a/original/dist/services/workflow-validator.js b/patched/dist/services/workflow-validator.js
+index b47d019..3f0f694 100644
+--- a/original/dist/services/workflow-validator.js
++++ b/patched/dist/services/workflow-validator.js
+@@ -135,7 +135,15 @@ class WorkflowValidator {
+                 invalidConnections: 0,
+                 expressionsValidated: 0,
+             },
+-            suggestions: []
++            suggestions: [],
++            fwcValidation: {
++                schema: 'fwc.n8n.versioned-validation.v1', profile,
++                graphNodes: Array.isArray(workflow?.nodes) ? workflow.nodes.length : 0,
++                schemas: Array.isArray(workflow?.nodes) ? workflow.nodes.map((node, index) => ({
++                    index, typeVersion: Number.isFinite(node?.typeVersion) && node.typeVersion >= 0 ? node.typeVersion : null,
++                    status: 'not_collected', schemaVersion: null, schemaSha256: null, propertyCount: null
++                })) : []
++            }
+         };
+         try {
+             if (!workflow) {
+@@ -197,6 +205,10 @@ class WorkflowValidator {
+             });
+         }
+         result.valid = result.errors.length === 0;
++        result.fwcValidation.errorCount = result.errors.length;
++        result.fwcValidation.warningCount = result.warnings.length;
++        result.fwcValidation.schemaCoverageComplete = validateNodes && result.fwcValidation.schemas.every(
++            s => ['validated', 'disabled', 'non_executable'].includes(s.status));
+         return result;
+     }
+     validateAINodes(workflow, result) {
+@@ -344,8 +356,12 @@ class WorkflowValidator {
+     }
+     async validateAllNodes(workflow, result, profile) {
+         for (const node of workflow.nodes) {
+-            if (node.disabled || (0, node_classification_1.isNonExecutableNode)(node.type))
++            const nodeIndex = workflow.nodes.indexOf(node);
++            const selection = result.fwcValidation.schemas[nodeIndex];
++            if (node.disabled || (0, node_classification_1.isNonExecutableNode)(node.type)) {
++                selection.status = node.disabled ? 'disabled' : 'non_executable';
+                 continue;
++            }
+             try {
+                 if (node.name && node.name.length > 255) {
+                     result.warnings.push({
+@@ -496,16 +512,42 @@ class WorkflowValidator {
+                 if (nodeInfo.isInferred) {
+                     continue;
+                 }
++                // Exact version properties, not the repository's current/max row.
++                // No fallback across versions; unresolved metadata remains explicit.
++                const exact = Number.isFinite(node.typeVersion) && node.typeVersion >= 0
++                    ? this.nodeRepository.getNodeVersion(normalizedType, node.typeVersion) : null;
++                let properties = exact && (0, typeversion_1.parseTypeVersion)(exact.version) === node.typeVersion
++                    ? exact.propertiesSchema : null;
++                if (!exact && !nodeInfo.isVersioned && !this.nodeRepository.hasVersionMetadata(normalizedType)
++                    && (0, typeversion_1.parseTypeVersion)(nodeInfo.version) === node.typeVersion) {
++                    properties = nodeInfo.properties;
++                }
++                if (!Array.isArray(properties)) {
++                    selection.status = 'unsupported_version';
++                    result.errors.push({ type: 'error', nodeId: node.id, nodeName: node.name,
++                        message: 'Exact node-version schema is unavailable',
++                        fwcDiagnostic: { code: 'schema_version_unavailable', nodeIndex,
++                            typeVersion: selection.typeVersion, propertyOrdinal: null,
++                            originalOrdinal: null, defaultApplied: null, apiVersion: null,
++                            expectedType: null, actualType: null, structureKind: null } });
++                    continue;
++                }
++                selection.status = 'validated';
++                selection.schemaVersion = node.typeVersion;
++                selection.propertyCount = properties.length;
++                selection.schemaSha256 = crypto_1.default.createHash('sha256').update(JSON.stringify(properties)).digest('hex');
+                 const paramsWithVersion = {
+-                    '@version': node.typeVersion || 1,
+-                    ...node.parameters
++                    ...node.parameters,
++                    '@version': node.typeVersion
+                 };
+-                const nodeValidation = this.nodeValidator.validateWithMode(node.type, paramsWithVersion, nodeInfo.properties || [], 'operation', profile);
++                const nodeValidation = this.nodeValidator.validateWithMode(node.type, paramsWithVersion, properties, 'operation', profile, true);
+                 nodeValidation.errors.forEach((error) => {
+                     result.errors.push({
+                         type: 'error',
+                         nodeId: node.id,
+                         nodeName: node.name,
++                        fwcDiagnostic: error.fwcDiagnostic ? { ...error.fwcDiagnostic,
++                            nodeIndex, typeVersion: node.typeVersion } : undefined,
+                         message: typeof error === 'string' ? error : error.message || String(error)
+                     });
+                 });
+@@ -671,6 +713,7 @@ class WorkflowValidator {
+                 else if (targetNode.disabled) {
+                     result.warnings.push({
+                         type: 'warning',
++                        fwcWarning: { code: 'connection_disabled_target', nodeIndex: null },
+                         message: `Connection to disabled node: "${connection.node}" from "${sourceName}"`
+                     });
+                 }
+@@ -1124,7 +1167,8 @@ class WorkflowValidator {
+                     type: 'warning',
+                     nodeId: node.id,
+                     nodeName: node.name,
+-                    message: 'Node is not reachable from any trigger node'
++                    message: 'Node is not reachable from any trigger node',
++                    fwcWarning: { code: 'node_unreachable', nodeIndex: workflow.nodes.indexOf(node) }
+                 });
+             }
+         }
+@@ -1539,7 +1583,8 @@ class WorkflowValidator {
+                     type: 'warning',
+                     nodeId: node.id,
+                     nodeName: node.name,
+-                    message: 'Using deprecated "continueOnFail: true". Use "onError: \'continueRegularOutput\'" instead for better control and UI compatibility.'
++                    message: 'Using deprecated "continueOnFail: true". Use "onError: \'continueRegularOutput\'" instead for better control and UI compatibility.',
++                    fwcWarning: { code: 'node_legacy_continue_on_fail', nodeIndex: workflow.nodes.indexOf(node) }
+                 });
+             }
+         }
+@@ -1835,4 +1880,4 @@ class WorkflowValidator {
+     }
+ }
+ exports.WorkflowValidator = WorkflowValidator;
+-//# sourceMappingURL=workflow-validator.js.map
+\ No newline at end of file
++//# sourceMappingURL=workflow-validator.js.map

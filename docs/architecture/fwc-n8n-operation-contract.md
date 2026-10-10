@@ -1588,7 +1588,7 @@ The table specifies the exact operation-specific `data` shape.
 | `runtime.status` | none | `correlationId` | `{idle,activeRuns,providers:[{provider,pid?,pgid?,rssBytes?,pssBytes?,privateBytes?,stopped?}]}` |
 | `knowledge.query` | `action`, action fields | `detail`, `limit` | discriminated result matching the action |
 | `node_resources.explore` | `target`, `nodeType`, `version`, `methodName`, `methodType`, `credentialId` | `filter`, `paginationToken`, `currentNodeParameters`, `legacyOptIn` | `{results:[{name,value,url?,description?}],paginationToken?,builderHint?}` |
-| `validation.run` | `subject`, subject payload | `profile`, `target`, `detail` | `{valid,errors:[{path,code,message,classification?,nodeIndex?,field?}],warnings:[...],diagnosticBinding?,normalizedDigest?}` |
+| `validation.run` | `subject`, subject payload | `profile`, `target`, `detail` | `{valid,nativeValid,overallStatus,errors:[{path,code,message,classification?,scope?,nodeIndex?,field?,nativePropertyOrdinal?,schemaPropertyOrdinal?,defaultApplied?,apiVersion?,nodeTypeVersion?,expectedType?,actualType?,structureKind?,unknownReason?,diagnosticStage?,diagnosticSource?,sourceVersion?,binding?,nextDiagnostic?}],warnings:[...],diagnosticBinding?,validationCoverage?,normalizedDigest?}` |
 | `structure.search` | `target.server`, `kind` | `query`, `projectId`, `parentFolderId`, `page` | `{items:[{resourceUri,id,name,type,parentUri?}]}` |
 | `workflows.search` | `target.server` | `query`, `projectId`, `folderId`, `tags`, `active`, `isArchived`, `page`, `sort` | `{workflows:[{resourceUri,id,name,description?,active,isArchived,updatedAt?,projectId?,availableInMcp?}]}` |
 | `workflows.get` | exact workflow target | `detail`, `version=draft|published|both`, `includeCode=false`; true requires the exact pins below and routes before admission to `get_code` | `{workflow: NormalizedWorkflowState,graph?: object,codeNodes?: [{name,digest}]}` for metadata; sensitive route uses the separate result below |
@@ -1637,10 +1637,11 @@ fingerprint `0428c7d49767df9eec57c26d27997021812a1b6faf55e0faef9c14498376e723`;
 a version string alone is insufficient. This preserves, rather than expands,
 the existing package/transitive trust boundary; metadata does not hash every
 transitive module. It emits fixed codes/messages and an
-allowlisted `field`; `nodeIndex` is zero-based and emitted only for a unique
-native node-name match in the original captured graph. The reserved native
-fallback name `workflow` always remains unclassified, even if a node has that
-name. No node names, native messages, details, parameters or source are returned.
+allowlisted `field`; legacy `nodeIndex` is zero-based and emitted only for a
+unique native node-name match in the original captured graph. A node named
+`workflow` remains unclassified even if a node has that name; the separately
+verified derived graph-warning origin described below has no node identity.
+No node names, native messages, details, parameters or source are returned.
 The index belongs to this
 graph/version, not a stable node identity. Unknown, ambiguous, missing-context
 or unsupported-package findings retain their count with `code` and
@@ -1665,6 +1666,79 @@ unclassified; their messages/details cannot be safely inferred by these rules.
 Installed RC3's historical generic diagnostics and observed counts remain
 unchanged; this candidate needs separate
 source and installed admission before ordinary CLI acceptance.
+
+Versioned native producer candidate (2026-10-09; preparation only): the existing
+assembler's explicit rootless `--prepare-derived-local-validator INPUT_FILE`
+mode makes a new, separately identified 2.91.0 package from an exact registry
+tarball and the reviewed fixed dist patch. Every published package file must
+match its tar member before patching; the registry updater and ordinary release
+mode are unchanged. `fwcDerivedValidation` records the original metadata/tar
+identity, patch SHA and complete derived package-file hashes. These are derived
+bytes, not upstream registry SRI. Its preparation receipt has `admitted:false`.
+Borrowed dependency copies are permitted only for controlled offline tests;
+they are neither registry-attested nor production admission.
+
+The native validator selects the exact `node_versions` row for each graph
+`typeVersion`, including catalog aliases 1/2/3 for the NocoDB V1 schema. It never
+substitutes the latest descriptor. API parameter `version` is a separate
+selector; caller `parameters['@version']` cannot override graph `typeVersion`.
+Missing exact schemas retain counts and `unsupported_version`/incomplete
+coverage. Selected visible resource/operation options use that same schema;
+the current-row enhancement cannot replace its result. This pins the native
+database's contract, not a physically deployed n8n descriptor or business result.
+
+After ordinary signed-current/package admission, a sealed provider proof gates
+structured diagnostics in local graph validation, host remote validation and
+both comparison graphs. It binds actual metadata, fixed patch and complete
+root-package file map, verifies root-owned non-writable directories/files with
+bounded no-follow stable reads, and rechecks before launch. It does not attest
+unrelated transitive dependencies. No native response marker or caller JSON can
+construct this proof, and no unsigned diagnostic CLI trust override exists.
+
+`required_absent`, `required_null` and `required_trim_empty` emit closed native
+origins at their actual error slot. Safe results expose anonymous `nodeIndex`,
+`nativePropertyOrdinal`, `schemaPropertyOrdinal`, `defaultApplied`, `apiVersion`
+and `nodeTypeVersion`. Special type predicates additionally expose closed
+`expectedType`, `actualType` and `structureKind` (for example object versus
+string for resourceLocator), never values or native text. These remain
+`validator_observation`, not confirmed workflow defects. Unknown native rules,
+missing origins and the reserved `workflow` node name preserve findings without
+invented node indexes. Verified derived origins bind the actual emitted slot
+and checked graph index/version before any legacy name lookup; repeated names
+at distinct indexes do not erase their causes. Legacy untrusted text still
+requires a unique name match. Graph-scoped disabled-target warnings emit the
+fixed `graph_connection_disabled_target` code/message and `field:connections`,
+without endpoint names or a node index; their origin keeps a null index.
+Unreachable-node and legacy-error-handling origins bind actual graph indexes
+separately. Unrecognized warnings retain their count.
+
+Every unclassified fallback includes a closed `unknownReason`,
+`diagnosticStage`, `diagnosticSource`, `sourceVersion`, and `binding` (null when
+unavailable). Reasons distinguish missing context/origin, reserved workflow
+scope, unavailable/ambiguous node binding, unrecognized legacy form and
+unsupported native rule. The binding contains graph/layout digests, profile
+and verified package metadata digest, never names or raw native content.
+`nextDiagnostic:authorized_graph_bound_native_diagnostic_required` identifies
+a future authorized diagnostic path; it grants no execution authority.
+
+Optional `validationCoverage` contains per-node index/version/schema SHA/status,
+native source bindings, warning origins, `schemaCoverageComplete`,
+`unclassifiedErrors`, `unclassifiedWarnings` and `assessmentComplete`. A true
+native `valid` with incomplete coverage is not a complete assessment:
+`nativeValid` preserves the same native boolean as `valid`, while
+`overallStatus` is explicitly `incomplete`. It is `complete` only when verified
+versioned coverage and all finding classifications are complete; legacy and
+unbound results remain `incomplete`. This status describes assessment coverage,
+not workflow correctness. An invalid
+zero-error result is accepted only as explicitly incomplete. Count, shape,
+version, profile, ordinal, package and envelope contradictions fail closed.
+Existing public operation identifiers, capabilities, profiles, transport and
+graph/response limits remain unchanged. The new producer/native/typed tests are
+prepared for coordinator execution; no new installed result is claimed here.
+For versioned diagnostics, comparison's finding signature also includes closed
+expected/actual type, structure kind, default-applied and API-version facts.
+It continues to exclude node indexes, schema ordinals and graph/source bindings
+from cross-version identity; counts and full per-side observations are retained.
 
 Installed structure baseline (2026-10-04): the coordinator attempted
 `n8n.projects.list` with `{}` exactly once on each server through installed

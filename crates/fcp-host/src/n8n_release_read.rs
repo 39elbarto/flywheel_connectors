@@ -1603,6 +1603,10 @@ fn verify_release_bundle(
 
 #[cfg(test)]
 #[allow(dead_code)]
+/// Verify a retained fixture with an explicit expected owner.
+///
+/// # Errors
+/// Returns the same layout, ownership, integrity and binding errors as the bundle verifier.
 pub fn verify_release_bundle_for_owner(
     executable: &Path,
     expected_owner: u32,
@@ -1877,7 +1881,7 @@ mod tests {
         let payload = crate::n8n_release_signing_payload(
             &receipt,
             &hash_file(&fixture.root.join("receipt.json")).expect("receipt hash"),
-            &blake3::hash(&unsigned).to_hex().to_string(),
+            blake3::hash(&unsigned).to_hex().as_ref(),
         );
         receipt.signature.signature = hex::encode(
             key.sign_with_context(b"fwc-n8n immutable release v1", &payload)
@@ -1947,73 +1951,88 @@ mod tests {
                 })
             };
             observe().expect("ordinary synthetic signed bundle accepted");
-            if !search {
-                let path = fixture.root.join("inventory/eec-official-mcp.json");
-                let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                value[0]["allowed_operations"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(serde_json::json!("mcp.n8n.read"));
-                value[0]["operation_network_constraints"]["mcp.n8n.read"] =
-                    value[0]["operation_network_constraints"]["mcp.tools.list"].clone();
-                fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
-                fixture.write_receipt(None);
-                sign_retained_local_fixture(&fixture);
-                assert!(
-                    observe().is_err(),
-                    "four-tool mode cannot gain search authority"
-                );
-            }
-            if search {
-                let path = fixture.root.join("inventory/eec-official-mcp.json");
-                let baseline: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-                for case in [
-                    "class",
-                    "duplicate",
-                    "pin",
-                    "missing_output",
-                    "network",
-                    "capability",
-                ] {
-                    let mut value = baseline.clone();
-                    match case {
-                        "class" => {
-                            value[0]["config"]["capability_policy"]["approved_tools"][4]["class"] =
-                                serde_json::json!("write")
-                        }
-                        "duplicate" => {
-                            let tool = value[0]["config"]["capability_policy"]["approved_tools"][4]
-                                .clone();
-                            value[0]["config"]["capability_policy"]["approved_tools"]
-                                .as_array_mut()
-                                .unwrap()
-                                .push(tool);
-                        }
-                        "pin" => {
-                            value[0]["config"]["capability_policy"]["approved_tools"][4]["input_schema_digest"] =
-                                serde_json::json!("unknown")
-                        }
-                        "missing_output" => {
-                            value[0]["config"]["capability_policy"]["approved_tools"][4]
-                                .as_object_mut()
-                                .unwrap()
-                                .remove("output_schema_digest");
-                        }
-                        "network" => {
-                            value[0]["operation_network_constraints"]["mcp.n8n.read"]["max_redirects"] =
-                                serde_json::json!(1)
-                        }
-                        "capability" => value[0]["allowed_operations"]
+            assert_search_mode_refuses_inconsistent_inventory(
+                &fixture,
+                &public_key,
+                search,
+                observe,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_search_mode_refuses_inconsistent_inventory(
+        fixture: &ReleaseFixture,
+        public_key: &str,
+        search: bool,
+        observe: impl Fn() -> Result<VerifiedSignedLocalProvider, BundleError>,
+    ) {
+        if !search {
+            let path = fixture.root.join("inventory/eec-official-mcp.json");
+            let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            value[0]["allowed_operations"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!("mcp.n8n.read"));
+            value[0]["operation_network_constraints"]["mcp.n8n.read"] =
+                value[0]["operation_network_constraints"]["mcp.tools.list"].clone();
+            fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+            fixture.write_receipt(None);
+            sign_retained_local_fixture(fixture);
+            assert!(
+                observe().is_err(),
+                "four-tool mode cannot gain search authority"
+            );
+        }
+        if search {
+            let path = fixture.root.join("inventory/eec-official-mcp.json");
+            let baseline: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            for case in [
+                "class",
+                "duplicate",
+                "pin",
+                "missing_output",
+                "network",
+                "capability",
+            ] {
+                let mut value = baseline.clone();
+                match case {
+                    "class" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["class"] =
+                            serde_json::json!("write");
+                    }
+                    "duplicate" => {
+                        let tool =
+                            value[0]["config"]["capability_policy"]["approved_tools"][4].clone();
+                        value[0]["config"]["capability_policy"]["approved_tools"]
                             .as_array_mut()
                             .unwrap()
-                            .retain(|value| value != "mcp.n8n.read"),
-                        _ => unreachable!(),
+                            .push(tool);
                     }
-                    fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
-                    fixture.write_receipt(None);
-                    assert_eq!(sign_retained_local_fixture(&fixture), public_key);
-                    assert!(observe().is_err(), "{case}");
+                    "pin" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]["input_schema_digest"] =
+                            serde_json::json!("unknown");
+                    }
+                    "missing_output" => {
+                        value[0]["config"]["capability_policy"]["approved_tools"][4]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("output_schema_digest");
+                    }
+                    "network" => {
+                        value[0]["operation_network_constraints"]["mcp.n8n.read"]["max_redirects"] =
+                            serde_json::json!(1);
+                    }
+                    "capability" => value[0]["allowed_operations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .retain(|value| value != "mcp.n8n.read"),
+                    _ => unreachable!(),
                 }
+                fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                fixture.write_receipt(None);
+                assert_eq!(sign_retained_local_fixture(fixture), public_key);
+                assert!(observe().is_err(), "{case}");
             }
         }
     }
@@ -2114,7 +2133,7 @@ mod tests {
     impl ReleaseFixture {
         fn new() -> Self {
             let parent = fs::canonicalize(std::env::temp_dir()).expect("canonical temp dir");
-            Self::new_in(parent)
+            Self::new_in(&parent)
         }
 
         fn new_isolated() -> Self {
@@ -2128,10 +2147,10 @@ mod tests {
             fs::create_dir(&parent).expect("exclusive retained releases parent");
             fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
                 .expect("restrict retained releases parent");
-            Self::new_in(parent)
+            Self::new_in(&parent)
         }
 
-        fn new_in(parent: PathBuf) -> Self {
+        fn new_in(parent: &Path) -> Self {
             let root = loop {
                 let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
                 let release_id = format!("fwc-n8n-test-{}-{sequence}", std::process::id());
@@ -2364,8 +2383,16 @@ mod tests {
         bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
         bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
         bytes[32..40].copy_from_slice(&(HEADER_BYTES as u64).to_le_bytes());
-        bytes[52..54].copy_from_slice(&(HEADER_BYTES as u16).to_le_bytes());
-        bytes[54..56].copy_from_slice(&(PROGRAM_HEADER_BYTES as u16).to_le_bytes());
+        bytes[52..54].copy_from_slice(
+            &u16::try_from(HEADER_BYTES)
+                .expect("ELF header size")
+                .to_le_bytes(),
+        );
+        bytes[54..56].copy_from_slice(
+            &u16::try_from(PROGRAM_HEADER_BYTES)
+                .expect("ELF program header size")
+                .to_le_bytes(),
+        );
         bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
         bytes[HEADER_BYTES..HEADER_BYTES + 4].copy_from_slice(&1_u32.to_le_bytes());
         bytes
@@ -2523,7 +2550,13 @@ mod tests {
                 .code(),
             BundleErrorCode::Digest
         );
+        assert_release_inventory_layout_tampering();
+        assert_release_policy_digest_tampering();
+        assert_release_execute_policy_tampering();
+    }
 
+    #[cfg(unix)]
+    fn assert_release_inventory_layout_tampering() {
         let stale_inventory = ReleaseFixture::new();
         let inventory_path = stale_inventory.artifact("inventory/eec.json");
         let mut inventory: Value =
@@ -2587,7 +2620,10 @@ mod tests {
                 .code(),
             BundleErrorCode::InventoryBinding
         );
+    }
 
+    #[cfg(unix)]
+    fn assert_release_policy_digest_tampering() {
         let wrong_policy_digest = ReleaseFixture::new();
         let inventory_path = wrong_policy_digest.artifact("inventory/hetzner-official-mcp.json");
         let mut inventory: Value =
@@ -2659,7 +2695,10 @@ mod tests {
             .code(),
             BundleErrorCode::InventoryBinding
         );
+    }
 
+    #[cfg(unix)]
+    fn assert_release_execute_policy_tampering() {
         let wrong_execute_digest = ReleaseFixture::new();
         let inventory_path = wrong_execute_digest.artifact("inventory/eec-official-mcp.json");
         let mut inventory: Value =
@@ -2713,6 +2752,11 @@ mod tests {
             BundleErrorCode::InventoryBinding
         );
 
+        assert_release_execute_server_and_sentinel();
+    }
+
+    #[cfg(unix)]
+    fn assert_release_execute_server_and_sentinel() {
         let wrong_execute_server = ReleaseFixture::new();
         let inventory_path = wrong_execute_server.artifact("inventory/eec-official-mcp.json");
         let mut inventory: Value =
@@ -2888,7 +2932,7 @@ mod tests {
                 .retain_mut(|tool| {
                     let keep = matches!(
                         tool.get("name").and_then(Value::as_str),
-                        Some("publish_workflow") | Some("unpublish_workflow")
+                        Some("publish_workflow" | "unpublish_workflow")
                     );
                     if keep {
                         let Some(tool) = tool.as_object_mut() else {
@@ -3072,6 +3116,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn release_metadata_tampering_fails_closed() {
+        assert_release_permission_tampering();
+        assert_release_link_and_owner_tampering();
+    }
+
+    #[cfg(unix)]
+    fn assert_release_permission_tampering() {
         let writable = ReleaseFixture::new();
         fs::set_permissions(
             writable.artifact("bin/fcp-host"),
@@ -3123,7 +3173,10 @@ mod tests {
                 .code(),
             BundleErrorCode::Permissions
         );
+    }
 
+    #[cfg(unix)]
+    fn assert_release_link_and_owner_tampering() {
         let linked = ReleaseFixture::new();
         fs::rename(
             linked.artifact("bin/fcp-host"),

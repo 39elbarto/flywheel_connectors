@@ -1619,10 +1619,10 @@ mod tests {
         );
 
         let replay = ledger.begin(&binding).expect("replay");
-        assert_eq!(replay, McpAccessLedgerBegin::Replayed(receipt.clone()));
+        assert_eq!(replay, McpAccessLedgerBegin::Replayed(receipt));
 
         let collision = McpAccessLedgerBinding {
-            key_digest: binding.key_digest.clone(),
+            key_digest: binding.key_digest,
             binding_digest: mcp_binding("different-binding").binding_digest,
         };
         assert_eq!(
@@ -1991,8 +1991,11 @@ mod tests {
             DurableDecisionLedger::for_test(root.path().to_path_buf(), owner).expect("ledger");
         let decision_id = Uuid::new_v4().to_string();
         let record_path = root.path().join(format!("{decision_id}.json"));
-        fs::write(&record_path, vec![b'x'; MAX_RECORD_BYTES as usize + 1])
-            .expect("oversized record");
+        fs::write(
+            &record_path,
+            vec![b'x'; usize::try_from(MAX_RECORD_BYTES).expect("record bound fits usize") + 1],
+        )
+        .expect("oversized record");
         fs::set_permissions(&record_path, fs::Permissions::from_mode(0o600))
             .expect("private record");
 

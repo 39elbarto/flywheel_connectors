@@ -13,7 +13,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{LocalMcpCall, LocalMcpError, LocalMcpProvider, LocalMcpRequest, LocalMcpResult};
+use crate::{
+    LocalMcpCall, LocalMcpError, LocalMcpProvider, LocalMcpRequest, LocalMcpResult,
+    credential_metadata_unique_json,
+};
 
 /// Maximum serialized size of one host-internal local n8n dispatch request.
 pub const DEFAULT_LOCAL_N8N_INPUT_MAX_BYTES: usize = 16 * 1024;
@@ -541,71 +544,6 @@ fn credential_metadata_rpc_json(bytes: &[u8]) -> Result<Value, &'static str> {
         data.ok_or("credential_metadata_response_denied")?
             .as_bytes(),
     )
-}
-
-// Duplicate keys must not acquire authority through serde_json's last-value
-// semantics. The parser's normal recursion limit remains enabled.
-fn credential_metadata_unique_json(bytes: &[u8]) -> Result<Value, &'static str> {
-    struct Unique(Value);
-    impl<'de> Deserialize<'de> for Unique {
-        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-            struct Visitor;
-            impl<'de> serde::de::Visitor<'de> for Visitor {
-                type Value = Unique;
-                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    f.write_str("unique-key JSON")
-                }
-                fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique, E> {
-                    Ok(Unique(Value::Bool(v)))
-                }
-                fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique, E> {
-                    Ok(Unique(v.into()))
-                }
-                fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique, E> {
-                    Ok(Unique(v.into()))
-                }
-                fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Unique, E> {
-                    serde_json::Number::from_f64(v)
-                        .map(|v| Unique(Value::Number(v)))
-                        .ok_or_else(|| E::custom("invalid number"))
-                }
-                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique, E> {
-                    Ok(Unique(Value::String(v.into())))
-                }
-                fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
-                    Ok(Unique(Value::Null))
-                }
-                fn visit_seq<A: serde::de::SeqAccess<'de>>(
-                    self,
-                    mut seq: A,
-                ) -> Result<Unique, A::Error> {
-                    let mut values = Vec::new();
-                    while let Some(Unique(value)) = seq.next_element()? {
-                        values.push(value);
-                    }
-                    Ok(Unique(Value::Array(values)))
-                }
-                fn visit_map<A: serde::de::MapAccess<'de>>(
-                    self,
-                    mut map: A,
-                ) -> Result<Unique, A::Error> {
-                    let mut values = serde_json::Map::new();
-                    while let Some(key) = map.next_key::<String>()? {
-                        if values.contains_key(&key) {
-                            return Err(serde::de::Error::custom("duplicate key"));
-                        }
-                        let Unique(value) = map.next_value()?;
-                        values.insert(key, value);
-                    }
-                    Ok(Unique(Value::Object(values)))
-                }
-            }
-            deserializer.deserialize_any(Visitor)
-        }
-    }
-    serde_json::from_slice::<Unique>(bytes)
-        .map(|value| value.0)
-        .map_err(|_| "credential_metadata_response_denied")
 }
 
 fn credential_metadata_schema_digest(value: &Value) -> Result<String, &'static str> {
@@ -1200,6 +1138,68 @@ pub fn n8n_comparison_graph_digests(
     ))
 }
 
+fn unknown_validation_finding(
+    context: Option<&LocalN8nDiagnosticContext>,
+    item: &Value,
+    warning: bool,
+) -> Value {
+    let (source, stage, version) = match context {
+        Some(ctx) if ctx.versioned_source.is_some() => (
+            "verified_derived_native",
+            "native_origin_projection",
+            json!("2.91.0"),
+        ),
+        Some(_) => (
+            "pinned_legacy_native",
+            "legacy_text_projection",
+            json!("2.91.0"),
+        ),
+        None => ("unbound_native", "context_binding", Value::Null),
+    };
+    let reason = match context {
+        None => "missing_context",
+        Some(_) if item["node"] == "workflow" => "reserved_workflow_scope",
+        Some(ctx) if ctx.versioned_source.is_some() => {
+            let origin = if warning {
+                "fwcWarning"
+            } else {
+                "fwcDiagnostic"
+            };
+            if item.get(origin).is_some() {
+                "unsupported_native_rule"
+            } else {
+                "missing_origin"
+            }
+        }
+        Some(ctx) => {
+            let matches = item["node"].as_str().map_or(0, |name| {
+                ctx.nodes
+                    .iter()
+                    .filter(|node| node["name"].as_str() == Some(name))
+                    .count()
+            });
+            match matches {
+                0 => "node_binding_unavailable",
+                1 => "unrecognized_native_form",
+                _ => "ambiguous_node_binding",
+            }
+        }
+    };
+    let binding = context.map_or(Value::Null, |ctx| {
+        let metadata = ctx.versioned_source.as_ref().map_or_else(
+            || json!(LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST),
+            |source| source["packageMetadataDigest"].clone(),
+        );
+        json!({"graphDigest":ctx.graph_digest,"layoutDigest":ctx.layout_digest,
+            "profile":ctx.profile.as_str(),"packageMetadataDigest":metadata})
+    });
+    json!({"path":"graph","code":"unclassified","classification":"unclassified",
+        "unknownReason":reason,"diagnosticStage":stage,"diagnosticSource":source,
+        "sourceVersion":version,"binding":binding,
+        "nextDiagnostic":"authorized_graph_bound_native_diagnostic_required",
+        "message":"Native validator finding could not be safely classified"})
+}
+
 /// Project one native local validator result without native messages, node
 /// names, suggestions, or provider transport fields.
 ///
@@ -1217,6 +1217,7 @@ pub struct LocalN8nDiagnosticContext {
     graph_digest: String,
     layout_digest: String,
     profile: LocalN8nValidationProfile,
+    versioned_source: Option<Value>,
 }
 
 /// Existing admitted 2.91.0 package metadata fingerprint for these exact rules.
@@ -1224,6 +1225,30 @@ pub const LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST: &str =
     "0428c7d49767df9eec57c26d27997021812a1b6faf55e0faef9c14498376e723";
 
 impl LocalN8nDiagnosticContext {
+    /// Enable structured native origin only with a sealed, verified derived
+    /// package proof. Caller/native JSON and a version string are insufficient.
+    #[must_use]
+    pub fn from_verified_versioned_source(
+        graph: &Value,
+        profile: LocalN8nValidationProfile,
+        source: &crate::VerifiedVersionedValidationSource,
+    ) -> Option<Self> {
+        let mut context = Self::from_graph(
+            graph,
+            profile,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )?;
+        context.versioned_source = Some(json!({
+            "contract":"fwc.n8n.versioned-validation.v1",
+            "packageMetadataDigest":source.metadata_digest(),
+            "patchSha256":source.patch_digest(),
+            "packageTreeSha256":source.package_tree_digest(),
+            "schemaAuthority":"pinned_native_database_not_deployed_descriptor"
+        }));
+        Some(context)
+    }
+
     /// Construct only from the retained invocation input and verified package
     /// version. Unsupported packages or incomplete graphs remain unclassified.
     #[must_use]
@@ -1257,17 +1282,71 @@ impl LocalN8nDiagnosticContext {
                     });
                     json!({"name":node["name"],"type":node["type"],
                 "typeVersion":node["typeVersion"],"position":node["position"],
-                "disabled":node["disabled"],"codeField":code_field,"codeEmpty":code_empty})
+                "disabled":node["disabled"],"continueOnFail":node["continueOnFail"],
+                "codeField":code_field,"codeEmpty":code_empty})
                 })
                 .collect(),
             connections: graph["connections"].clone(),
             graph_digest,
             layout_digest,
             profile,
+            versioned_source: None,
         })
     }
 
     fn finding(&self, item: &Value, warning: bool) -> Option<Value> {
+        if self.versioned_source.is_some()
+            && ((!warning && item.get("fwcDiagnostic").is_some())
+                || (warning && item.get("fwcWarning").is_some()))
+        {
+            return self.derived_finding(item, warning);
+        }
+        self.legacy_finding(item, warning)
+    }
+
+    fn derived_finding(&self, item: &Value, warning: bool) -> Option<Value> {
+        // Scope validation has already checked the actual emitted slot,
+        // captured graph, version and closed shape. Duplicate names cannot
+        // erase this stronger binding. Legacy text never acquires it.
+        if !warning {
+            let index = usize::try_from(item["fwcDiagnostic"]["nodeIndex"].as_u64()?).ok()?;
+            let node = self.nodes.get(index)?;
+            if item["node"] == "workflow" {
+                return None;
+            }
+            return Self::versioned_finding(item, index, node);
+        }
+        let origin = &item["fwcWarning"];
+        if origin["code"] == "connection_disabled_target" {
+            return Some(json!({"path":"graph","scope":"graph","field":"connections",
+                "code":"graph_connection_disabled_target","classification":"validator_observation",
+                "message":"Native validator reports a connection to a disabled node"}));
+        }
+        if item["node"] == "workflow" {
+            return None;
+        }
+        let index = usize::try_from(origin["nodeIndex"].as_u64()?).ok()?;
+        let node = self.nodes.get(index)?;
+        let (code, field, message) = match origin["code"].as_str()? {
+            "node_unreachable" if node["disabled"] != true => (
+                "node_unreachable",
+                "connections",
+                "Native validator reports no trigger path to this node",
+            ),
+            "node_legacy_continue_on_fail" if node["continueOnFail"] == true => (
+                "node_legacy_continue_on_fail",
+                "continueOnFail",
+                "Native validator reports legacy error handling",
+            ),
+            _ => return None,
+        };
+        Some(
+            json!({"path":"graph","nodeIndex":index,"code":code,"field":field,
+            "classification":"validator_observation","message":message}),
+        )
+    }
+
+    fn legacy_finding(&self, item: &Value, warning: bool) -> Option<Value> {
         let name = item.get("node")?.as_str()?;
         if name == "workflow"
             || name.is_empty()
@@ -1350,6 +1429,349 @@ impl LocalN8nDiagnosticContext {
         })?;
         Some(json!({"path":"graph","code":rule.0,"field":rule.1,
             "classification":rule.2,"message":rule.3,"nodeIndex":index}))
+    }
+
+    fn versioned_finding(item: &Value, index: usize, node: &Value) -> Option<Value> {
+        let diagnostic = item.get("fwcDiagnostic")?;
+        if diagnostic["nodeIndex"].as_u64()? != index as u64
+            || diagnostic["typeVersion"] != node["typeVersion"]
+        {
+            return None;
+        }
+        let (code, message, classification) = match diagnostic["code"].as_str()? {
+            "required_absent" => (
+                "configuration_required_absent",
+                "Required parameter is absent",
+                "validator_observation",
+            ),
+            "required_null" => (
+                "configuration_required_null",
+                "Required parameter is null",
+                "validator_observation",
+            ),
+            "required_trim_empty" => (
+                "configuration_required_empty",
+                "Required parameter is empty after native defaults",
+                "validator_observation",
+            ),
+            "special_type_mismatch" => (
+                "configuration_special_type_mismatch",
+                "Parameter does not match the native schema type",
+                "validator_observation",
+            ),
+            "special_null_required" => (
+                "configuration_special_null_required",
+                "Native structured parameter requires a value",
+                "validator_observation",
+            ),
+            "schema_version_unavailable" => (
+                "validator_node_version_schema_unavailable",
+                "Exact node-version schema is unavailable",
+                "validator_support_limit",
+            ),
+            _ => return None,
+        };
+        Some(
+            json!({"path":"graph","code":code,"field":"parameters","classification":classification,
+            "message":message,"nodeIndex":index,"nativePropertyOrdinal":diagnostic["propertyOrdinal"],
+            "schemaPropertyOrdinal":diagnostic["originalOrdinal"],"defaultApplied":diagnostic["defaultApplied"],
+            "apiVersion":diagnostic["apiVersion"],"nodeTypeVersion":node["typeVersion"],
+            "expectedType":diagnostic["expectedType"],"actualType":diagnostic["actualType"],
+            "structureKind":diagnostic["structureKind"]}),
+        )
+    }
+
+    fn versioned_scope(&self, typed: &Value) -> Result<Option<Value>, LocalN8nDispatchError> {
+        let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+        let Some(source) = &self.versioned_source else {
+            return if typed.get("fwcValidation").is_some() {
+                Err(malformed())
+            } else {
+                Ok(None)
+            };
+        };
+        let scope = typed.get("fwcValidation").ok_or_else(malformed)?;
+        let keys = [
+            "schema",
+            "profile",
+            "graphNodes",
+            "schemas",
+            "errorCount",
+            "warningCount",
+            "schemaCoverageComplete",
+        ];
+        if scope
+            .as_object()
+            .is_none_or(|o| o.len() != keys.len() || o.keys().any(|k| !keys.contains(&k.as_str())))
+            || scope["schema"] != "fwc.n8n.versioned-validation.v1"
+            || scope["profile"] != self.profile.as_str()
+            || scope["graphNodes"].as_u64() != Some(self.nodes.len() as u64)
+            || scope["errorCount"].as_u64() != typed["errors"].as_array().map(|a| a.len() as u64)
+            || scope["warningCount"].as_u64()
+                != typed["warnings"].as_array().map(|a| a.len() as u64)
+        {
+            return Err(malformed());
+        }
+        let schemas = scope["schemas"]
+            .as_array()
+            .filter(|a| a.len() == self.nodes.len())
+            .ok_or_else(malformed)?;
+        let complete = self.validate_versioned_schemas(schemas)?;
+        if scope["schemaCoverageComplete"].as_bool() != Some(complete) {
+            return Err(malformed());
+        }
+        self.validate_versioned_findings(typed, schemas)?;
+        let warning_origins = self.versioned_warning_origins(typed)?;
+        Ok(Some(
+            json!({"schemaCoverageComplete":complete,"graphNodes":self.nodes.len(),
+            "schemas":schemas,"nativeSource":source,"warningOrigins":warning_origins}),
+        ))
+    }
+
+    fn validate_versioned_schemas(&self, schemas: &[Value]) -> Result<bool, LocalN8nDispatchError> {
+        let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+        let schema_keys = [
+            "index",
+            "typeVersion",
+            "status",
+            "schemaVersion",
+            "schemaSha256",
+            "propertyCount",
+        ];
+        let mut complete = true;
+        for (index, selection) in schemas.iter().enumerate() {
+            let version = self.nodes[index]["typeVersion"]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v >= 0.0);
+            if selection.as_object().is_none_or(|o| {
+                o.len() != schema_keys.len() || o.keys().any(|k| !schema_keys.contains(&k.as_str()))
+            }) || selection["index"].as_u64() != Some(index as u64)
+                || selection["typeVersion"].as_f64() != version
+                || (version.is_none() && !selection["typeVersion"].is_null())
+            {
+                return Err(malformed());
+            }
+            match selection["status"].as_str() {
+                Some("validated")
+                    if version.is_some()
+                        && selection["schemaVersion"].as_f64() == version
+                        && selection["schemaSha256"].as_str().is_some_and(sha256_hex)
+                        && selection["propertyCount"]
+                            .as_u64()
+                            .is_some_and(|n| n <= 4096) => {}
+                Some("disabled") if self.nodes[index]["disabled"] == true => {}
+                Some("non_executable")
+                    if matches!(
+                        self.nodes[index]["type"].as_str(),
+                        Some("n8n-nodes-base.stickyNote" | "nodes-base.stickyNote")
+                    ) => {}
+                Some("unsupported_version" | "not_collected") => complete = false,
+                _ => return Err(malformed()),
+            }
+            if selection["status"] != "validated"
+                && (!selection["schemaVersion"].is_null()
+                    || !selection["schemaSha256"].is_null()
+                    || !selection["propertyCount"].is_null())
+            {
+                return Err(malformed());
+            }
+        }
+        Ok(complete)
+    }
+
+    fn validate_versioned_findings(
+        &self,
+        typed: &Value,
+        schemas: &[Value],
+    ) -> Result<(), LocalN8nDispatchError> {
+        let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+        let fields = [
+            "code",
+            "nodeIndex",
+            "typeVersion",
+            "propertyOrdinal",
+            "originalOrdinal",
+            "defaultApplied",
+            "apiVersion",
+            "expectedType",
+            "actualType",
+            "structureKind",
+        ];
+        for item in typed["errors"]
+            .as_array()
+            .ok_or_else(malformed)?
+            .iter()
+            .chain(typed["warnings"].as_array().ok_or_else(malformed)?)
+        {
+            let Some(diagnostic) = item.get("fwcDiagnostic") else {
+                continue;
+            };
+            let index = diagnostic["nodeIndex"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .filter(|n| *n < self.nodes.len())
+                .ok_or_else(malformed)?;
+            if diagnostic.as_object().is_none_or(|o| {
+                o.len() != fields.len() || o.keys().any(|k| !fields.contains(&k.as_str()))
+            }) || diagnostic["code"]
+                .as_str()
+                .is_none_or(|s| s.is_empty() || s.len() > 128 || s.chars().any(char::is_control))
+                || diagnostic["typeVersion"] != schemas[index]["typeVersion"]
+                || item["node"] != self.nodes[index]["name"]
+                || ["propertyOrdinal", "originalOrdinal"].iter().any(|k| {
+                    !diagnostic[*k].is_null()
+                        && diagnostic[*k].as_u64().is_none_or(|n| {
+                            n >= 4096
+                                || schemas[index]["propertyCount"]
+                                    .as_u64()
+                                    .is_none_or(|count| n >= count)
+                        })
+                })
+                || !(diagnostic["defaultApplied"].is_null()
+                    || diagnostic["defaultApplied"].is_boolean())
+                || !(diagnostic["apiVersion"].is_null()
+                    || matches!(diagnostic["apiVersion"].as_u64(), Some(1..=3)))
+                || (diagnostic["code"] == "schema_version_unavailable")
+                    != (schemas[index]["status"] == "unsupported_version")
+            {
+                return Err(malformed());
+            }
+            Self::validate_versioned_type_predicates(diagnostic)?;
+            if diagnostic["code"] != "schema_version_unavailable"
+                && schemas[index]["status"] != "validated"
+            {
+                return Err(malformed());
+            }
+            if matches!(
+                diagnostic["code"].as_str(),
+                Some("required_absent" | "required_null" | "required_trim_empty")
+            ) && (diagnostic["propertyOrdinal"].is_null()
+                || diagnostic["originalOrdinal"].is_null()
+                || !diagnostic["defaultApplied"].is_boolean())
+            {
+                return Err(malformed());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_versioned_type_predicates(diagnostic: &Value) -> Result<(), LocalN8nDispatchError> {
+        let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+        let special = matches!(
+            diagnostic["code"].as_str(),
+            Some("special_type_mismatch" | "special_null_required")
+        );
+        if special {
+            if !matches!(
+                diagnostic["expectedType"].as_str(),
+                Some("object" | "string" | "number" | "boolean" | "array" | "any")
+            ) || !matches!(
+                diagnostic["actualType"].as_str(),
+                Some("object" | "string" | "number" | "boolean" | "array" | "null" | "undefined")
+            ) || !matches!(
+                diagnostic["structureKind"].as_str(),
+                Some(
+                    "string"
+                        | "number"
+                        | "boolean"
+                        | "dateTime"
+                        | "color"
+                        | "json"
+                        | "options"
+                        | "multiOptions"
+                        | "collection"
+                        | "fixedCollection"
+                        | "resourceLocator"
+                        | "resourceMapper"
+                        | "filter"
+                        | "assignmentCollection"
+                        | "credentials"
+                        | "credentialsSelect"
+                        | "hidden"
+                        | "button"
+                        | "callout"
+                        | "notice"
+                        | "workflowSelector"
+                        | "agentSelector"
+                        | "curlImport"
+                        | "icon"
+                )
+            ) || diagnostic["propertyOrdinal"].is_null()
+                || diagnostic["code"] == "special_type_mismatch"
+                    && diagnostic["expectedType"] == diagnostic["actualType"]
+                || diagnostic["code"] == "special_null_required"
+                    && !matches!(
+                        diagnostic["actualType"].as_str(),
+                        Some("null" | "undefined")
+                    )
+            {
+                return Err(malformed());
+            }
+        } else if !diagnostic["expectedType"].is_null()
+            || !diagnostic["actualType"].is_null()
+            || !diagnostic["structureKind"].is_null()
+        {
+            return Err(malformed());
+        }
+        Ok(())
+    }
+
+    fn versioned_warning_origins(
+        &self,
+        typed: &Value,
+    ) -> Result<Vec<Value>, LocalN8nDispatchError> {
+        let malformed = || LocalN8nDispatchError::new(LocalN8nDispatchErrorCode::ProviderError);
+        let mut warning_origins = Vec::new();
+        for (finding_index, warning) in typed["warnings"]
+            .as_array()
+            .ok_or_else(malformed)?
+            .iter()
+            .enumerate()
+        {
+            let Some(origin) = warning.get("fwcWarning") else {
+                continue;
+            };
+            if origin.as_object().is_none_or(|o| {
+                o.len() != 2
+                    || o.keys()
+                        .any(|k| !matches!(k.as_str(), "code" | "nodeIndex"))
+            }) {
+                return Err(malformed());
+            }
+            let code = origin["code"].as_str().ok_or_else(malformed)?;
+            if code == "connection_disabled_target" {
+                if !origin["nodeIndex"].is_null()
+                    || warning["node"] != "workflow"
+                    || !self.nodes.iter().any(|node| {
+                        node["disabled"] == true
+                            && node["name"]
+                                .as_str()
+                                .is_some_and(|name| self.node_has_connection(name))
+                    })
+                {
+                    return Err(malformed());
+                }
+                // Reserved native workflow scope NEVER invents a node index.
+                warning_origins.push(json!({"findingIndex":finding_index,"code":code,"scope":"graph","nodeIndex":null}));
+            } else if matches!(code, "node_unreachable" | "node_legacy_continue_on_fail") {
+                let index = origin["nodeIndex"]
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|n| *n < self.nodes.len())
+                    .ok_or_else(malformed)?;
+                if warning["node"] != self.nodes[index]["name"]
+                    || code == "node_legacy_continue_on_fail"
+                        && self.nodes[index]["continueOnFail"] != true
+                {
+                    return Err(malformed());
+                }
+                warning_origins.push(json!({"findingIndex":finding_index,"code":code,"scope":"node",
+                    "nodeIndex":if warning["node"] == "workflow" { Value::Null } else { json!(index) }}));
+            } else {
+                return Err(malformed());
+            }
+        }
+        Ok(warning_origins)
     }
 
     fn empty_code_rule(
@@ -1464,6 +1886,13 @@ fn native_version_number(text: &str) -> bool {
             .is_ok_and(|n| n.is_finite() && n >= 0.0 && n.to_string() == text)
 }
 
+fn sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Preserve native counts while projecting only closed diagnostics bound to
 /// the exact input graph. Missing/ambiguous context is explicitly unclassified.
 ///
@@ -1497,10 +1926,19 @@ pub fn project_local_n8n_validation_with_context(
     let valid = typed["valid"].as_bool().ok_or_else(malformed)?;
     let errors = typed["errors"].as_array().ok_or_else(malformed)?;
     let warnings = typed["warnings"].as_array().ok_or_else(malformed)?;
+    let versioned_scope = match context {
+        Some(context) => context.versioned_scope(&typed)?,
+        None if typed.get("fwcValidation").is_some() => return Err(malformed()),
+        None => None,
+    };
     if errors.len() > 256
         || warnings.len() > 256
         || valid && (!errors.is_empty() || is_error)
-        || !valid && errors.is_empty()
+        || !valid
+            && errors.is_empty()
+            && versioned_scope
+                .as_ref()
+                .is_none_or(|s| s["schemaCoverageComplete"] != false)
         || errors.iter().chain(warnings).any(|item| {
             !item.is_object()
                 || item["message"]
@@ -1510,24 +1948,51 @@ pub fn project_local_n8n_validation_with_context(
     {
         return Err(malformed());
     }
-    let project =
-        |items: &[Value], warning| {
-            items
-                .iter()
-                .map(|item| {
-                    context.and_then(|ctx| ctx.finding(item, warning)).unwrap_or_else(||
-                json!({"path":"graph","code":"unclassified","classification":"unclassified",
-                    "message":"Native validator finding could not be safely classified"}))
-                })
-                .collect::<Vec<_>>()
-        };
-    let mut projected =
-        json!({"valid":valid,"errors":project(errors,false),"warnings":project(warnings,true)});
+    let project = |items: &[Value], warning| {
+        items
+            .iter()
+            .map(|item| {
+                context
+                    .and_then(|ctx| ctx.finding(item, warning))
+                    .unwrap_or_else(|| unknown_validation_finding(context, item, warning))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut projected = json!({"valid":valid,"nativeValid":valid,"overallStatus":"incomplete",
+            "errors":project(errors,false),"warnings":project(warnings,true)});
     if let Some(context) = context {
         projected["diagnosticBinding"] = json!({"graphDigest":context.graph_digest,
             "layoutDigest":context.layout_digest,"profile":context.profile.as_str(),"packageVersion":"2.91.0"});
         projected["diagnosticBinding"]["packageMetadataDigest"] =
-            json!(LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST);
+            context.versioned_source.as_ref().map_or_else(
+                || json!(LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST),
+                |source| source["packageMetadataDigest"].clone(),
+            );
+    }
+    if let Some(mut scope) = versioned_scope {
+        let unclassified_errors = projected["errors"]
+            .as_array()
+            .ok_or_else(malformed)?
+            .iter()
+            .filter(|item| item["classification"] == "unclassified")
+            .count();
+        let unclassified_warnings = projected["warnings"]
+            .as_array()
+            .ok_or_else(malformed)?
+            .iter()
+            .filter(|item| item["classification"] == "unclassified")
+            .count();
+        scope["unclassifiedErrors"] = json!(unclassified_errors);
+        scope["unclassifiedWarnings"] = json!(unclassified_warnings);
+        scope["assessmentComplete"] = json!(
+            scope["schemaCoverageComplete"] == true
+                && unclassified_errors == 0
+                && unclassified_warnings == 0
+        );
+        if scope["assessmentComplete"] == true {
+            projected["overallStatus"] = json!("complete");
+        }
+        projected["validationCoverage"] = scope;
     }
     Ok(projected)
 }
@@ -2585,6 +3050,355 @@ mod typed_batch_tests {
         json!({"content":[{"type":"text","text":serde_json::to_string(&typed).unwrap()}],"structuredContent":typed})
     }
 
+    fn versioned_native(errors: Value, warnings: Value) -> Value {
+        let scope = json!({"schema":"fwc.n8n.versioned-validation.v1","profile":"runtime","graphNodes":1,
+            "schemas":[{"index":0,"typeVersion":9,"status":"validated","schemaVersion":9,
+                "schemaSha256":"2".repeat(64),"propertyCount":30}],
+            "errorCount":errors.as_array().unwrap().len(),"warningCount":warnings.as_array().unwrap().len(),
+            "schemaCoverageComplete":true});
+        let mut typed =
+            json!({"valid":errors.as_array().unwrap().is_empty(),"fwcValidation":scope});
+        typed["errors"] = errors;
+        typed["warnings"] = warnings;
+        json!({"content":[{"type":"text","text":typed.to_string()}],"structuredContent":typed})
+    }
+
+    fn versioned_required() -> Value {
+        json!({"node":"PRIVATE_NODE_CANARY","message":"MESSAGE_CANARY\nCONTROL","details":"DETAIL_CANARY",
+            "fwcDiagnostic":{"code":"required_trim_empty","nodeIndex":0,"typeVersion":9,
+                "propertyOrdinal":7,"originalOrdinal":21,"defaultApplied":true,"apiVersion":3,
+                "expectedType":null,"actualType":null,"structureKind":null}})
+    }
+
+    fn versioned_context(graph: &Value) -> LocalN8nDiagnosticContext {
+        LocalN8nDiagnosticContext::from_verified_versioned_source(
+            graph,
+            LocalN8nValidationProfile::Runtime,
+            &crate::local_mcp::VerifiedVersionedValidationSource::synthetic_fixture(),
+        )
+        .unwrap()
+    }
+
+    fn repack_versioned(typed: Value) -> Value {
+        let mut envelope = json!({"content":[{"type":"text","text":typed.to_string()}]});
+        envelope["structuredContent"] = typed;
+        envelope
+    }
+
+    #[test]
+    fn versioned_validation_default_and_type_predicates_are_safe_and_counted() {
+        let context = versioned_context(&diagnostic_graph());
+        let mut special = versioned_required();
+        special["fwcDiagnostic"]["code"] = json!("special_type_mismatch");
+        special["fwcDiagnostic"]["originalOrdinal"] = Value::Null;
+        special["fwcDiagnostic"]["defaultApplied"] = Value::Null;
+        special["fwcDiagnostic"]["expectedType"] = json!("object");
+        special["fwcDiagnostic"]["actualType"] = json!("string");
+        special["fwcDiagnostic"]["structureKind"] = json!("resourceLocator");
+        let native = versioned_native(
+            json!([versioned_required(), special]),
+            json!([{"node":"workflow","message":"UNKNOWN_WARNING_CANARY"}]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        assert_eq!(result["errors"].as_array().unwrap().len(), 2);
+        assert_eq!(result["errors"][0]["defaultApplied"], true);
+        assert_eq!(result["errors"][0]["apiVersion"], 3);
+        assert_eq!(result["errors"][0]["schemaPropertyOrdinal"], 21);
+        assert_eq!(result["errors"][1]["expectedType"], "object");
+        assert_eq!(result["errors"][1]["actualType"], "string");
+        assert_eq!(result["validationCoverage"]["unclassifiedWarnings"], 1);
+        assert_eq!(result["validationCoverage"]["assessmentComplete"], false);
+        assert!(!result.to_string().contains("CANARY"));
+        assert_eq!(
+            result["diagnosticBinding"]["packageMetadataDigest"],
+            "0".repeat(64)
+        );
+        assert!(project_local_n8n_validation_with_context(&native, None).is_err());
+        let old = LocalN8nDiagnosticContext::from_graph(
+            &diagnostic_graph(),
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        assert!(project_local_n8n_validation_with_context(&native, Some(&old)).is_err());
+    }
+
+    #[test]
+    fn versioned_validation_substitution_shape_bounds_and_counts_fail_closed() {
+        let context = versioned_context(&diagnostic_graph());
+        let base =
+            versioned_native(json!([versioned_required()]), json!([]))["structuredContent"].clone();
+        let substitutions = [
+            ("/fwcValidation/profile", json!("strict")),
+            ("/fwcValidation/graphNodes", json!(2)),
+            ("/fwcValidation/errorCount", json!(0)),
+            ("/fwcValidation/schemaCoverageComplete", json!(false)),
+            ("/fwcValidation/schemas/0/index", json!(1)),
+            ("/fwcValidation/schemas/0/typeVersion", json!(8)),
+            ("/fwcValidation/schemas/0/schemaVersion", json!(8)),
+            (
+                "/fwcValidation/schemas/0/schemaSha256",
+                json!("HASH_CANARY"),
+            ),
+            ("/errors/0/node", json!("WRONG_NODE_CANARY")),
+            ("/errors/0/fwcDiagnostic/nodeIndex", json!(1)),
+            ("/errors/0/fwcDiagnostic/typeVersion", json!(8)),
+            ("/errors/0/fwcDiagnostic/propertyOrdinal", json!(4096)),
+            ("/errors/0/fwcDiagnostic/originalOrdinal", json!(30)),
+            ("/errors/0/fwcDiagnostic/apiVersion", json!(4)),
+            (
+                "/errors/0/fwcDiagnostic/defaultApplied",
+                json!("FLAG_CANARY"),
+            ),
+            ("/errors/0/fwcDiagnostic/expectedType", json!("TYPE_CANARY")),
+            ("/errors/0/message", json!("x".repeat(8193))),
+            ("/valid", json!(true)),
+        ];
+        for (path, value) in substitutions {
+            let mut changed = base.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(
+                project_local_n8n_validation_with_context(
+                    &repack_versioned(changed),
+                    Some(&context)
+                )
+                .is_err()
+            );
+        }
+        let mut extra = base;
+        extra["errors"][0]["fwcDiagnostic"]["RAW_CANARY"] = json!("secret");
+        assert!(
+            project_local_n8n_validation_with_context(&repack_versioned(extra), Some(&context))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn versioned_validation_unknown_rule_reserved_name_and_incomplete_are_honest() {
+        let mut error = versioned_required();
+        error["fwcDiagnostic"]["code"] = json!("UNKNOWN_RULE_CANARY");
+        let context = versioned_context(&diagnostic_graph());
+        let result = project_local_n8n_validation_with_context(
+            &versioned_native(json!([error]), json!([])),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(
+            result["errors"][0]["unknownReason"],
+            "unsupported_native_rule"
+        );
+        assert_eq!(result["validationCoverage"]["unclassifiedErrors"], 1);
+        assert!(!result.to_string().contains("CANARY"));
+        let mut graph = diagnostic_graph();
+        graph["nodes"][0]["name"] = json!("workflow");
+        let mut reserved = versioned_required();
+        reserved["node"] = json!("workflow");
+        let result = project_local_n8n_validation_with_context(
+            &versioned_native(json!([reserved]), json!([])),
+            Some(&versioned_context(&graph)),
+        )
+        .unwrap();
+        assert_eq!(result["errors"][0]["code"], "unclassified");
+        assert_eq!(
+            result["errors"][0]["unknownReason"],
+            "reserved_workflow_scope"
+        );
+        assert!(result["errors"][0].get("nodeIndex").is_none());
+        let mut missing = versioned_native(json!([]), json!([]))["structuredContent"].clone();
+        missing["valid"] = json!(false);
+        missing["fwcValidation"]["schemaCoverageComplete"] = json!(false);
+        missing["fwcValidation"]["schemas"][0] = json!({"index":0,"typeVersion":9,"status":"unsupported_version",
+            "schemaVersion":null,"schemaSha256":null,"propertyCount":null});
+        let result =
+            project_local_n8n_validation_with_context(&repack_versioned(missing), Some(&context))
+                .unwrap();
+        assert_eq!(result["valid"], false);
+        assert_eq!(
+            result["validationCoverage"]["schemaCoverageComplete"],
+            false
+        );
+        assert_eq!(result["validationCoverage"]["assessmentComplete"], false);
+    }
+
+    #[test]
+    fn versioned_warning_origins_bind_nodes_and_preserve_safe_graph_scope() {
+        let mut graph = diagnostic_graph();
+        graph["nodes"][0]["continueOnFail"] = json!(true);
+        let warning = json!({"node":"PRIVATE_NODE_CANARY","message":"WARNING_CANARY",
+            "fwcWarning":{"code":"node_legacy_continue_on_fail","nodeIndex":0}});
+        let native = versioned_native(
+            json!([]),
+            json!([warning,
+            {"node":"workflow","message":"UNKNOWN_CANARY"}]),
+        );
+        let result =
+            project_local_n8n_validation_with_context(&native, Some(&versioned_context(&graph)))
+                .unwrap();
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 2);
+        assert_eq!(result["warnings"][0]["nodeIndex"], 0);
+        assert_eq!(result["warnings"][0]["field"], "continueOnFail");
+        assert_eq!(result["validationCoverage"]["unclassifiedWarnings"], 1);
+        assert!(!result.to_string().contains("CANARY"));
+        for index in [json!(1), Value::Null] {
+            let mut changed = warning.clone();
+            changed["fwcWarning"]["nodeIndex"] = index;
+            assert!(
+                project_local_n8n_validation_with_context(
+                    &versioned_native(json!([]), json!([changed])),
+                    Some(&versioned_context(&graph))
+                )
+                .is_err()
+            );
+        }
+        graph["nodes"][0]["continueOnFail"] = json!(false);
+        assert!(
+            project_local_n8n_validation_with_context(&native, Some(&versioned_context(&graph)))
+                .is_err()
+        );
+        graph["nodes"][0]["disabled"] = json!(true);
+        graph["connections"] = json!({"PRIVATE_NODE_CANARY":{"main":[[{"node":"PRIVATE_NODE_CANARY","type":"main","index":0}]]}});
+        let mut scoped = versioned_native(
+            json!([]),
+            json!([{"node":"workflow","message":"GRAPH_CANARY",
+            "fwcWarning":{"code":"connection_disabled_target","nodeIndex":null}}]),
+        )["structuredContent"]
+            .clone();
+        scoped["fwcValidation"]["schemas"][0] = json!({"index":0,"typeVersion":9,"status":"disabled",
+            "schemaVersion":null,"schemaSha256":null,"propertyCount":null});
+        let result = project_local_n8n_validation_with_context(
+            &repack_versioned(scoped),
+            Some(&versioned_context(&graph)),
+        )
+        .unwrap();
+        assert_eq!(
+            result["warnings"][0]["code"],
+            "graph_connection_disabled_target"
+        );
+        assert_eq!(result["warnings"][0]["scope"], "graph");
+        assert_eq!(result["warnings"][0]["field"], "connections");
+        assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
+        assert!(!result.to_string().contains("CANARY"));
+        assert!(result["warnings"][0].get("nodeIndex").is_none());
+        assert!(result["validationCoverage"]["warningOrigins"][0]["nodeIndex"].is_null());
+        assert_eq!(
+            result["validationCoverage"]["warningOrigins"][0]["scope"],
+            "graph"
+        );
+    }
+
+    #[test]
+    fn versioned_duplicate_names_use_verified_slots_not_legacy_name_identity() {
+        let mut graph = diagnostic_graph();
+        let mut second = graph["nodes"][0].clone();
+        second["id"] = json!("two");
+        second["typeVersion"] = json!(10);
+        graph["nodes"].as_array_mut().unwrap().push(second);
+        let context = versioned_context(&graph);
+        let mut second_error = versioned_required();
+        second_error["fwcDiagnostic"]["nodeIndex"] = json!(1);
+        second_error["fwcDiagnostic"]["typeVersion"] = json!(10);
+        let mut typed = versioned_native(json!([versioned_required(), second_error]), json!([]))["structuredContent"].clone();
+        typed["fwcValidation"]["graphNodes"] = json!(2);
+        let mut schema = typed["fwcValidation"]["schemas"][0].clone();
+        schema["index"] = json!(1);
+        schema["typeVersion"] = json!(10);
+        schema["schemaVersion"] = json!(10);
+        typed["fwcValidation"]["schemas"]
+            .as_array_mut()
+            .unwrap()
+            .push(schema);
+        let result = project_local_n8n_validation_with_context(
+            &repack_versioned(typed.clone()),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(result["errors"].as_array().unwrap().len(), 2);
+        for index in 0..2 {
+            assert_eq!(result["errors"][index]["nodeIndex"], index);
+            assert_ne!(result["errors"][index]["code"], "unclassified");
+        }
+        assert!(!result.to_string().contains("CANARY"));
+        for (index, version) in [(1, 9), (0, 10), (2, 9)] {
+            let mut substituted = typed.clone();
+            substituted["errors"][0]["fwcDiagnostic"]["nodeIndex"] = json!(index);
+            substituted["errors"][0]["fwcDiagnostic"]["typeVersion"] = json!(version);
+            assert!(
+                project_local_n8n_validation_with_context(
+                    &repack_versioned(substituted),
+                    Some(&context)
+                )
+                .is_err()
+            );
+        }
+        let legacy = LocalN8nDiagnosticContext::from_graph(
+            &graph,
+            LocalN8nValidationProfile::Runtime,
+            "2.91.0",
+            LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST,
+        )
+        .unwrap();
+        let native = diagnostic_native(
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"UNKNOWN_CANARY"}]),
+            json!([]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&legacy)).unwrap();
+        assert_eq!(
+            result["errors"][0]["unknownReason"],
+            "ambiguous_node_binding"
+        );
+        assert!(result["errors"][0].get("nodeIndex").is_none());
+    }
+
+    #[test]
+    fn validation_unknown_fallback_and_zero_error_incomplete_have_closed_status() {
+        let context = versioned_context(&diagnostic_graph());
+        let native = versioned_native(
+            json!([{"node":"PRIVATE_NODE_CANARY","message":"UNKNOWN_CANARY"}]),
+            json!([]),
+        );
+        let result = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
+        let finding = &result["errors"][0];
+        assert_eq!(finding["unknownReason"], "missing_origin");
+        assert_eq!(finding["diagnosticStage"], "native_origin_projection");
+        assert_eq!(finding["diagnosticSource"], "verified_derived_native");
+        assert_eq!(finding["sourceVersion"], "2.91.0");
+        assert_eq!(finding["binding"]["profile"], "runtime");
+        assert!(finding["binding"]["graphDigest"].is_string());
+        assert_eq!(
+            finding["nextDiagnostic"],
+            "authorized_graph_bound_native_diagnostic_required"
+        );
+        assert!(!result.to_string().contains("CANARY"));
+        let unbound = project_local_n8n_validation_call(&diagnostic_native(
+            json!([{"message":"UNKNOWN_CANARY"}]),
+            json!([]),
+        ))
+        .unwrap();
+        assert_eq!(unbound["errors"][0]["unknownReason"], "missing_context");
+        assert!(unbound["errors"][0]["binding"].is_null());
+        assert!(unbound["errors"][0]["sourceVersion"].is_null());
+        let mut typed = versioned_native(json!([]), json!([]))["structuredContent"].clone();
+        typed["fwcValidation"]["schemaCoverageComplete"] = json!(false);
+        typed["fwcValidation"]["schemas"][0] = json!({"index":0,"typeVersion":9,"status":"unsupported_version",
+            "schemaVersion":null,"schemaSha256":null,"propertyCount":null});
+        let result =
+            project_local_n8n_validation_with_context(&repack_versioned(typed), Some(&context))
+                .unwrap();
+        assert_eq!(result["valid"], true);
+        assert_eq!(result["nativeValid"], true);
+        assert_eq!(result["overallStatus"], "incomplete");
+        assert_eq!(result["validationCoverage"]["assessmentComplete"], false);
+        assert!(result["errors"].as_array().unwrap().is_empty());
+        assert!(result["warnings"].as_array().unwrap().is_empty());
+        let complete = project_local_n8n_validation_with_context(
+            &versioned_native(json!([]), json!([])),
+            Some(&context),
+        )
+        .unwrap();
+        assert_eq!(complete["overallStatus"], "complete");
+    }
+
     #[test]
     fn validation_diagnostics_classify_exact_version_support_and_preserve_counts() {
         let graph = diagnostic_graph();
@@ -2994,6 +3808,26 @@ mod typed_batch_tests {
             "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
             "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"})).unwrap();
         let schema = json!({"type":"object"});
+        assert_credential_catalog_defects(&mapping, &schema);
+        assert!(
+            credential_metadata_call_value(
+                &json!({"isError":true,"content":[{"type":"text","text":"SECRET_CANARY"}]})
+            )
+            .is_err()
+        );
+        assert!(credential_metadata_call_value(&json!({"structuredContent":{"data":[],"count":0},"content":[{"type":"text","text":"{}"}]})).is_err());
+        assert!(CredentialMetadataReadMapping::endpoint("legacy").is_err());
+        assert_eq!(
+            CredentialMetadataReadMapping::api_origin("hetzner").unwrap(),
+            "https://n8nhet.levilaser.com"
+        );
+        assert_eq!(
+            CredentialMetadataReadMapping::endpoint("hetzner").unwrap(),
+            "https://n8nhet.levilaser.com:8443/mcp-server/http"
+        );
+    }
+
+    fn assert_credential_catalog_defects(mapping: &CredentialMetadataReadMapping, schema: &Value) {
         for defect in [
             "input_drift",
             "missing_output",
@@ -3016,8 +3850,8 @@ mod typed_batch_tests {
                 "hetzner",
                 "negative",
                 json!({"limit":3}),
-                &schema,
-                &schema,
+                schema,
+                schema,
             )
             .unwrap();
             let initialize = protocol.request().unwrap();
@@ -3085,28 +3919,12 @@ mod typed_batch_tests {
             assert!(protocol.request().is_err());
             assert!(protocol.projection().is_err());
         }
-        assert!(
-            credential_metadata_call_value(
-                &json!({"isError":true,"content":[{"type":"text","text":"SECRET_CANARY"}]})
-            )
-            .is_err()
-        );
-        assert!(credential_metadata_call_value(&json!({"structuredContent":{"data":[],"count":0},"content":[{"type":"text","text":"{}"}]})).is_err());
-        assert!(CredentialMetadataReadMapping::endpoint("legacy").is_err());
-        assert_eq!(
-            CredentialMetadataReadMapping::api_origin("hetzner").unwrap(),
-            "https://n8nhet.levilaser.com"
-        );
-        assert_eq!(
-            CredentialMetadataReadMapping::endpoint("hetzner").unwrap(),
-            "https://n8nhet.levilaser.com:8443/mcp-server/http"
-        );
     }
 
     #[test]
     fn credential_metadata_protocol_real_loopback_transport() {
         use std::io::{Read, Write};
-        use std::net::{TcpListener, TcpStream};
+        use std::net::TcpListener;
         use std::time::Duration;
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -3136,19 +3954,7 @@ mod typed_batch_tests {
                 "tools/call",
             ];
             for (phase, method) in methods.into_iter().enumerate() {
-                let deadline = std::time::Instant::now() + Duration::from_secs(3);
-                let (mut stream, _) = loop {
-                    match listener.accept() {
-                        Ok(stream) => break stream,
-                        Err(error)
-                            if error.kind() == std::io::ErrorKind::WouldBlock
-                                && std::time::Instant::now() < deadline =>
-                        {
-                            std::thread::sleep(Duration::from_millis(5))
-                        }
-                        Err(_) => panic!("bounded synthetic transport accept failed"),
-                    }
-                };
+                let mut stream = accept_credential_loopback_stream(&listener);
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -3202,6 +4008,40 @@ mod typed_batch_tests {
         });
         // This is a native HTTP/protocol fixture, not the production TLS,
         // credential injection, capability or installed-admission proof.
+        drive_credential_loopback_requests(&mut protocol, address);
+        server.join().unwrap();
+        assert!(protocol.completed());
+        assert_eq!(protocol.projection().unwrap()["credentials"], json!([]));
+    }
+
+    fn accept_credential_loopback_stream(listener: &std::net::TcpListener) -> std::net::TcpStream {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let (stream, _) = loop {
+            match listener.accept() {
+                Ok(stream) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!(
+                    "bounded synthetic transport accept failed: {:?}",
+                    error.kind()
+                ),
+            }
+        };
+        stream
+    }
+
+    fn drive_credential_loopback_requests(
+        protocol: &mut CredentialMetadataReadProtocol,
+        address: std::net::SocketAddr,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
         for _ in 0..4 {
             let request = protocol.request().unwrap();
             let body = serde_json::to_vec(&request).unwrap();
@@ -3223,9 +4063,6 @@ mod typed_batch_tests {
                 .accept_response(200, None, &response[start..])
                 .unwrap();
         }
-        server.join().unwrap();
-        assert!(protocol.completed());
-        assert_eq!(protocol.projection().unwrap()["credentials"], json!([]));
     }
 
     #[test]

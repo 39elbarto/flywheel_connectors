@@ -3339,7 +3339,7 @@ impl HostAdminStateStore {
             .observer_authority
             .as_ref()
             .ok_or_else(observer_refused)?;
-        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false)?;
+        let ((), snapshot) = authority.locked_snapshot(|_| Ok(()), false)?;
         let observer = snapshot.runtime_observer.ok_or_else(observer_refused)?;
         let active = observer
             .sessions
@@ -6137,7 +6137,7 @@ mod tests {
                 .unwrap();
         }
         let authority = first.observer_authority.as_ref().unwrap();
-        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
+        let ((), snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
         assert_eq!(
             snapshot.next_event_sequence, 3,
             "reload prevents stale-cache lost update"
@@ -6384,6 +6384,17 @@ mod tests {
                 .unwrap(),
             1
         );
+        assert_observer_query_scope_limits(&store, binding, token, public);
+        drop(pending);
+    }
+
+    #[cfg(unix)]
+    fn assert_observer_query_scope_limits(
+        store: &HostAdminStateStore,
+        binding: ObserverFixtureQueryBinding,
+        token: impl Fn(bool, bool) -> CapabilityToken,
+        public: [u8; 32],
+    ) {
         for case in [
             "principal",
             "zone",
@@ -6440,7 +6451,6 @@ mod tests {
             (None, 1),
             "empty scoped result does not establish global idle"
         );
-        drop(pending);
     }
 
     #[cfg(unix)]
@@ -6539,7 +6549,7 @@ mod tests {
             assert!(child.wait().unwrap().success());
         }
         let authority = store.observer_authority.as_ref().unwrap();
-        let (_, snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
+        let ((), snapshot) = authority.locked_snapshot(|_| Ok(()), false).unwrap();
         assert_eq!(snapshot.next_event_sequence, 25);
         assert_eq!(store.observer_fixture_status().unwrap(), (None, 0));
     }
@@ -12002,7 +12012,7 @@ mod tests {
         let config = serde_json::from_value::<ManagedConnectorConfig>(serde_json::json!({
             "id": "test-connector",
             "binary": "/opt/fcp/connectors/test",
-            "launch_binding": binding.clone(),
+            "launch_binding": binding,
         }))
         .expect("explicit launch binding should deserialize");
         assert_eq!(config.launch_binding, Some(binding));

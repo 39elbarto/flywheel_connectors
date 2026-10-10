@@ -2333,9 +2333,9 @@ mod tests {
             Some(&OsString::new())
         );
         assert!(
-            spec.fixed_env
-                .get(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE"))
-                .is_none()
+            !spec
+                .fixed_env
+                .contains_key(&OsString::from("FCP_HOST_APPROVAL_PUBLIC_KEY_FILE"))
         );
         assert!(!spec.network_disabled);
         assert_eq!(
@@ -2359,8 +2359,18 @@ mod tests {
             Some(&OsString::from("/release/inventory/hetzner.json"))
         );
 
+        assert_fixed_create_and_activate_controls(&bundle);
+        assert_fixed_update_delete_unarchive_controls(&bundle);
+        assert_fixed_lifecycle_archive_controls(&bundle);
+        assert_fixed_execute_access_and_catalog_controls(&bundle);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_fixed_create_and_activate_controls(bundle: &VerifiedBundle) {
+        use std::ffi::OsString;
+
         let write = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Hetzner,
                 HostRunOnceOperation::WorkflowsCreateDraft,
@@ -2399,7 +2409,7 @@ mod tests {
         assert_eq!(admission["operation"], "n8n.workflows.create_draft");
 
         let activate = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsActivate,
@@ -2436,9 +2446,14 @@ mod tests {
         assert_eq!(activation_admission["zone_id"], "z:work");
         assert_eq!(activation_admission["connector_id"], "fcp.n8n");
         assert_eq!(activation_admission["operation"], "n8n.workflows.activate");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_fixed_update_delete_unarchive_controls(bundle: &VerifiedBundle) {
+        use std::ffi::OsString;
 
         let update = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsUpdateDraft,
@@ -2454,7 +2469,7 @@ mod tests {
         );
 
         let delete_disposable = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsDeleteDisposable,
@@ -2476,7 +2491,7 @@ mod tests {
         );
 
         let unarchive = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsUnarchive,
@@ -2497,9 +2512,14 @@ mod tests {
                 .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION")),
             Some(&OsString::from(WORKFLOWS_UNARCHIVE_OWNER_ADMISSION))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_fixed_lifecycle_archive_controls(bundle: &VerifiedBundle) {
+        use std::ffi::OsString;
 
         let lifecycle = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsLifecycle,
@@ -2532,7 +2552,7 @@ mod tests {
         assert_eq!(lifecycle_admission["operation"], "mcp.tools.call");
 
         let archive = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsArchive,
@@ -2563,9 +2583,14 @@ mod tests {
         assert_eq!(archive_admission["zone_id"], "z:work");
         assert_eq!(archive_admission["connector_id"], "fcp.mcp-bridge");
         assert_eq!(archive_admission["operation"], "mcp.tools.call");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_fixed_execute_access_and_catalog_controls(bundle: &VerifiedBundle) {
+        use std::ffi::OsString;
 
         let execute = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::WorkflowsExecute,
@@ -2581,7 +2606,7 @@ mod tests {
         );
 
         let mcp_access = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::McpAccessReconcile,
@@ -2601,7 +2626,7 @@ mod tests {
         );
 
         let mcp_access_dry_run = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::McpAccessReconcile,
@@ -2621,7 +2646,7 @@ mod tests {
         );
 
         let official = process_spec(
-            &bundle,
+            bundle,
             &test_envelope(
                 HostRunOnceServerId::Eec,
                 HostRunOnceOperation::CapabilitiesInspect,
@@ -2646,10 +2671,9 @@ mod tests {
             Some(&OsString::from("n8n.capabilities.inspect"))
         );
         assert!(
-            official
+            !official
                 .fixed_env
-                .get(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION"))
-                .is_none()
+                .contains_key(&OsString::from("FCP_HOST_OWNER_SINGLE_HOST_ADMISSION"))
         );
     }
 
@@ -2812,7 +2836,7 @@ mod tests {
             br#"{"type":"error","error":{"code":"PRIVATE","code":"preflight_denied"}}"#,
             br#"{"type":"response","type":"error","error":{"code":"preflight_denied"}}"#,
             br#"{"type":"error","error":{"code":"PRIVATE"},"error":{"code":"preflight_denied"}}"#,
-            br#"not-json"#,
+            br"not-json",
         ] {
             assert_eq!(child_failure_code(encoded).as_str(), "child_failed");
         }

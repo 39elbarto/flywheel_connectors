@@ -392,11 +392,11 @@ fn activation_input(id: &str, active: bool, state_digest: String) -> Value {
                 "versionId": "draft-v1",
                 "activeVersionId": null,
                 "active": false,
-                "isArchived": false,
-                "stateDigest": state_digest
+                "isArchived": false
             }
         }
     });
+    input["guard"]["precondition"]["stateDigest"] = Value::String(state_digest);
     if active {
         input["versionId"] = json!("published-v1");
     }

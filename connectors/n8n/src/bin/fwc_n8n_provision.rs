@@ -390,12 +390,15 @@ impl OwnerVerificationConfig {
 
     #[cfg(test)]
     fn for_test(public_key_hex: String) -> Self {
+        let public_key_hex = public_key_hex.into_boxed_str();
         Self::from_immutable_public_keys(Some(&public_key_hex), None)
             .expect("valid test public key")
     }
 
     #[cfg(test)]
     fn for_test_with_previous(active: String, previous: String) -> Self {
+        let active = active.into_boxed_str();
+        let previous = previous.into_boxed_str();
         Self::from_immutable_public_keys(Some(&active), Some(&previous))
             .expect("valid dual test public keys")
     }
@@ -487,9 +490,9 @@ impl ProvisionRequest {
         bindings: Vec<OfficialMcpBinding>,
         owner_verification: OwnerVerificationConfig,
         expected_owner: u32,
-        current_path: PathBuf,
-        releases_root: PathBuf,
+        install_paths: (PathBuf, PathBuf),
     ) -> Self {
+        let (current_path, releases_root) = install_paths;
         let staging_root = stage_root
             .parent()
             .expect("test staging root")
@@ -4007,6 +4010,14 @@ mod tests {
                 .code(),
             ProvisionErrorCode::Signature
         );
+        assert_independent_predecessor_substitution(&root, surface, &trust);
+    }
+
+    fn assert_independent_predecessor_substitution(
+        root: &Path,
+        surface: ReleaseSurface<'_>,
+        trust: &OwnerVerificationConfig,
+    ) {
         let fixture = Fixture::retained();
         let retained_root = &fixture.stage;
         let public_receipt = fs::read(root.join(PROVISION_RECEIPT_FILE)).expect("public receipt");
@@ -4024,7 +4035,7 @@ mod tests {
             ..surface
         };
         assert_eq!(
-            validate_independent_read_predecessor(copied_surface, fixture.owner, &trust)
+            validate_independent_read_predecessor(copied_surface, fixture.owner, trust)
                 .expect_err("exact receipt cannot authenticate a substituted artifact tree")
                 .code(),
             ProvisionErrorCode::Digest
@@ -4034,7 +4045,7 @@ mod tests {
         fs::write(retained_root.join(PROVISION_RECEIPT_FILE), changed_receipt)
             .expect("retained changed receipt fixture");
         assert_eq!(
-            validate_independent_read_predecessor(copied_surface, fixture.owner, &trust)
+            validate_independent_read_predecessor(copied_surface, fixture.owner, trust)
                 .expect_err(
                     "even valid JSON with changed signed bytes is not the pinned predecessor"
                 )
@@ -4222,8 +4233,8 @@ mod tests {
                 let bytes = match path {
                     "inventory/eec.json" => self.common_inventory("eec"),
                     "inventory/hetzner.json" => self.common_inventory("hetzner"),
-                    "policy/zone-policies.json" => self.zone_policies(),
-                    "policy/local-mcp.json" => self.local_mcp_policy(),
+                    "policy/zone-policies.json" => Self::zone_policies(),
+                    "policy/local-mcp.json" => Self::local_mcp_policy(),
                     _ => path.as_bytes().to_vec(),
                 };
                 fs::write(&file, bytes).expect("artifact");
@@ -4331,8 +4342,8 @@ mod tests {
                     let max_response_bytes = match operation {
                         "n8n.workflows.activate"
                         | "n8n.workflows.delete_disposable"
-                        | "n8n.workflows.unarchive" => 1048576,
-                        _ => 10485760,
+                        | "n8n.workflows.unarchive" => 1_048_576,
+                        _ => 10_485_760,
                     };
                     (
                         operation.to_owned(),
@@ -4366,7 +4377,7 @@ mod tests {
             .expect("common inventory json")
         }
 
-        fn local_mcp_policy(&self) -> Vec<u8> {
+        fn local_mcp_policy() -> Vec<u8> {
             // Synthetic policy hashes test signed-tree validation, not a live provider.
             serde_json::to_vec(&serde_json::json!({
                 "package_id": "n8n-mcp",
@@ -4391,9 +4402,9 @@ mod tests {
                     "validate_workflow": "0".repeat(64),
                 },
                 "callable_tools": ["tools_documentation", "search_nodes", "get_node", "validate_node", "get_template", "search_templates", "validate_workflow"],
-                "max_frame_bytes": 262144,
+                "max_frame_bytes": 262_144,
                 "max_request_bytes": 65536,
-                "max_result_bytes": 262144,
+                "max_result_bytes": 262_144,
                 "max_sequential_calls": 7,
                 "startup_timeout_ms": 30000,
                 "request_timeout_ms": 30000,
@@ -4404,7 +4415,7 @@ mod tests {
             .expect("local MCP policy json")
         }
 
-        fn zone_policies(&self) -> Vec<u8> {
+        fn zone_policies() -> Vec<u8> {
             serde_json::to_vec(&serde_json::json!({
                 "z:work": {
                     "header": {
@@ -4431,14 +4442,14 @@ mod tests {
         }
 
         fn receipt(&self) -> Vec<u8> {
-            self.receipt_for(&self.stage, &self.release_id)
+            Self::receipt_for(&self.stage, &self.release_id)
         }
 
         fn provision_receipt(&self) -> Vec<u8> {
-            self.provision_receipt_for(&self.stage, &self.release_id)
+            Self::provision_receipt_for(&self.stage, &self.release_id)
         }
 
-        fn receipt_for(&self, root: &Path, release_id: &str) -> Vec<u8> {
+        fn receipt_for(root: &Path, release_id: &str) -> Vec<u8> {
             let artifacts = ARTIFACTS
                 .iter()
                 .map(|path| {
@@ -4456,31 +4467,27 @@ mod tests {
             .expect("receipt json")
         }
 
-        fn provision_receipt_for(&self, root: &Path, release_id: &str) -> Vec<u8> {
-            self.provision_receipt_for_with_execute(root, release_id, false)
+        fn provision_receipt_for(root: &Path, release_id: &str) -> Vec<u8> {
+            Self::provision_receipt_for_with_execute(root, release_id, false)
         }
 
-        fn predecessor_provision_receipt_for(&self, root: &Path, release_id: &str) -> Vec<u8> {
-            self.provision_receipt_for_with_execute(root, release_id, true)
+        fn predecessor_provision_receipt_for(root: &Path, release_id: &str) -> Vec<u8> {
+            Self::provision_receipt_for_with_execute(root, release_id, true)
         }
 
         fn provision_receipt_for_with_execute(
-            &self,
             root: &Path,
             release_id: &str,
             predecessor_execute: bool,
         ) -> Vec<u8> {
             let mut paths = ARTIFACTS.to_vec();
             paths.extend([RECEIPT_FILE, PROVENANCE_FILE]);
-            let artifacts = paths
-                .iter()
-                .map(|path| {
-                    serde_json::json!({
-                        "path": path,
-                        "digest": hash_file(&root.join(path)).expect("provision digest")
-                    })
+            let artifacts = paths.iter().map(|path| {
+                serde_json::json!({
+                    "path": path,
+                    "digest": hash_file(&root.join(path)).expect("provision digest")
                 })
-                .collect::<Vec<_>>();
+            });
             let git_revision: String = serde_json::from_slice::<Value>(
                 &fs::read(root.join(PROVENANCE_FILE)).expect("provenance bytes"),
             )
@@ -4526,7 +4533,6 @@ mod tests {
                 },
             ];
             let artifacts = artifacts
-                .into_iter()
                 .map(|artifact| serde_json::from_value::<Artifact>(artifact).expect("artifact"))
                 .collect::<Vec<_>>();
             let signing_receipt = ProvisionReceipt {
@@ -4565,7 +4571,7 @@ mod tests {
             .expect("provision receipt json")
         }
 
-        fn set_previous_eec_policy(&self, root: &Path, release_id: &str) {
+        fn set_previous_eec_policy(root: &Path, release_id: &str) {
             let path = root.join("inventory/eec-official-mcp.json");
             let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
                 .expect("inventory JSON");
@@ -4584,16 +4590,16 @@ mod tests {
             }
             fs::write(&path, serde_json::to_vec(&value).expect("inventory JSON"))
                 .expect("previous EEC inventory");
-            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+            fs::write(root.join(RECEIPT_FILE), Self::receipt_for(root, release_id))
                 .expect("previous EEC receipt");
             fs::write(
                 root.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(root, release_id),
+                Self::predecessor_provision_receipt_for(root, release_id),
             )
             .expect("previous EEC signed receipt");
         }
 
-        fn set_previous_generation_lifecycle_schemas(&self, root: &Path, release_id: &str) {
+        fn set_previous_generation_lifecycle_schemas(root: &Path, release_id: &str) {
             for (server, publish, unpublish) in [
                 (
                     "eec",
@@ -4641,11 +4647,11 @@ mod tests {
             value["package_version"] = json!("2.69.2");
             fs::write(path, serde_json::to_vec(&value).expect("policy JSON"))
                 .expect("previous local policy");
-            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+            fs::write(root.join(RECEIPT_FILE), Self::receipt_for(root, release_id))
                 .expect("previous receipt");
             fs::write(
                 root.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(root, release_id),
+                Self::predecessor_provision_receipt_for(root, release_id),
             )
             .expect("previous signed receipt");
         }
@@ -4692,8 +4698,8 @@ mod tests {
                 )
                 .expect("previous artifact mode");
             }
-            self.set_rc42_publish_policy(&previous);
-            self.set_predecessor_execute_policy(&previous);
+            Self::set_rc42_publish_policy(&previous);
+            Self::set_predecessor_execute_policy(&previous);
             fs::write(
                 previous.join(PROVENANCE_FILE),
                 serde_json::json!({
@@ -4706,13 +4712,13 @@ mod tests {
             .expect("previous provenance");
             fs::write(
                 previous.join(RECEIPT_FILE),
-                self.receipt_for(&previous, "previous"),
+                Self::receipt_for(&previous, "previous"),
             )
             .expect("previous receipt");
             if include_provision_receipt {
                 fs::write(
                     previous.join(PROVISION_RECEIPT_FILE),
-                    self.predecessor_provision_receipt_for(&previous, "previous"),
+                    Self::predecessor_provision_receipt_for(&previous, "previous"),
                 )
                 .expect("previous provision receipt");
             }
@@ -4726,7 +4732,7 @@ mod tests {
             }
         }
 
-        fn set_rc42_publish_policy(&self, root: &Path) {
+        fn set_rc42_publish_policy(root: &Path) {
             for server in ["eec", "hetzner"] {
                 let path = root.join(format!("inventory/{server}-official-mcp.json"));
                 let mut value: Value = serde_json::from_slice(&fs::read(&path).expect("inventory"))
@@ -4743,8 +4749,8 @@ mod tests {
             }
         }
 
-        fn set_signed_rc42(&self, root: &Path, release_id: &str) {
-            self.set_rc42_publish_policy(root);
+        fn set_signed_rc42(root: &Path, release_id: &str) {
+            Self::set_rc42_publish_policy(root);
             for (server, input, output) in [
                 ("eec", EEC_EXECUTE_INPUT, EEC_EXECUTE_OUTPUT),
                 ("hetzner", HETZNER_EXECUTE_INPUT, HETZNER_EXECUTE_OUTPUT),
@@ -4766,16 +4772,16 @@ mod tests {
                 fs::write(path, serde_json::to_vec(&value).expect("inventory JSON"))
                     .expect("RC42 execute policy");
             }
-            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+            fs::write(root.join(RECEIPT_FILE), Self::receipt_for(root, release_id))
                 .expect("RC42 receipt");
             fs::write(
                 root.join(PROVISION_RECEIPT_FILE),
-                self.provision_receipt_for(root, release_id),
+                Self::provision_receipt_for(root, release_id),
             )
             .expect("RC42 signed receipt");
         }
 
-        fn set_predecessor_execute_policy(&self, root: &Path) {
+        fn set_predecessor_execute_policy(root: &Path) {
             for (server, input, output) in [
                 (
                     "eec",
@@ -4844,30 +4850,30 @@ mod tests {
                 )
                 .expect("write legacy fixture inventory");
             }
-            self.set_legacy_common_operations(root);
-            fs::write(root.join(RECEIPT_FILE), self.receipt_for(root, release_id))
+            Self::set_legacy_common_operations(root);
+            fs::write(root.join(RECEIPT_FILE), Self::receipt_for(root, release_id))
                 .expect("rewrite legacy fixture receipt");
             let receipt = if root == self.releases.join("previous") {
-                self.set_predecessor_execute_policy(root);
-                self.predecessor_provision_receipt_for(root, release_id)
+                Self::set_predecessor_execute_policy(root);
+                Self::predecessor_provision_receipt_for(root, release_id)
             } else {
-                self.provision_receipt_for(root, release_id)
+                Self::provision_receipt_for(root, release_id)
             };
             fs::write(root.join(PROVISION_RECEIPT_FILE), receipt)
                 .expect("rewrite legacy fixture provision receipt");
         }
 
-        fn set_legacy_common_operations(&self, root: &Path) {
-            self.remove_common_operation(root, "n8n.workflows.delete_disposable");
-            self.remove_common_operation(root, "n8n.workflows.unarchive");
+        fn set_legacy_common_operations(root: &Path) {
+            Self::remove_common_operation(root, "n8n.workflows.delete_disposable");
+            Self::remove_common_operation(root, "n8n.workflows.unarchive");
         }
 
-        fn set_legacy_disposable_common_operations(&self, root: &Path) {
-            self.remove_common_operation(root, "n8n.executions.diagnostics");
-            self.remove_common_operation(root, "n8n.workflows.unarchive");
+        fn set_legacy_disposable_common_operations(root: &Path) {
+            Self::remove_common_operation(root, "n8n.executions.diagnostics");
+            Self::remove_common_operation(root, "n8n.workflows.unarchive");
         }
 
-        fn remove_common_operation(&self, root: &Path, operation_name: &str) {
+        fn remove_common_operation(root: &Path, operation_name: &str) {
             for server in ["eec", "hetzner"] {
                 let path = root.join(format!("inventory/{server}.json"));
                 let mut value: Value = serde_json::from_slice(
@@ -4896,45 +4902,45 @@ mod tests {
 
         fn set_previous_legacy_common_inventory(&self) {
             let previous = self.releases.join("previous");
-            self.set_legacy_common_operations(&previous);
+            Self::set_legacy_common_operations(&previous);
             fs::write(
                 previous.join(RECEIPT_FILE),
-                self.receipt_for(&previous, "previous"),
+                Self::receipt_for(&previous, "previous"),
             )
             .expect("rewrite mixed-schema fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(&previous, "previous"),
+                Self::predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite mixed-schema fixture provision receipt");
         }
 
         fn set_previous_pre_unarchive_common_inventory(&self) {
             let previous = self.releases.join("previous");
-            self.remove_common_operation(&previous, "n8n.workflows.unarchive");
+            Self::remove_common_operation(&previous, "n8n.workflows.unarchive");
             fs::write(
                 previous.join(RECEIPT_FILE),
-                self.receipt_for(&previous, "previous"),
+                Self::receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-unarchive fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(&previous, "previous"),
+                Self::predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-unarchive fixture provision receipt");
         }
 
         fn set_previous_legacy_disposable_common_inventory(&self) {
             let previous = self.releases.join("previous");
-            self.set_legacy_disposable_common_operations(&previous);
+            Self::set_legacy_disposable_common_operations(&previous);
             fs::write(
                 previous.join(RECEIPT_FILE),
-                self.receipt_for(&previous, "previous"),
+                Self::receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-diagnostics fixture receipt");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(&previous, "previous"),
+                Self::predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("rewrite pre-diagnostics fixture provision receipt");
         }
@@ -4958,7 +4964,7 @@ mod tests {
             .expect("previous provenance revision");
             fs::write(
                 previous.join(PROVISION_RECEIPT_FILE),
-                self.predecessor_provision_receipt_for(&previous, "previous"),
+                Self::predecessor_provision_receipt_for(&previous, "previous"),
             )
             .expect("previous provision revision");
         }
@@ -4967,7 +4973,7 @@ mod tests {
             ProvisionRequest::for_test(self.stage.clone(), self.release_id.clone(), "0123456789abcdef0123456789abcdef01234567".to_owned(), vec![
                 OfficialMcpBinding { server:ServerId::Eec, archive_input_schema_digest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(), archive_output_schema_digest:"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned(), execute_input_schema_digest:EEC_EXECUTE_INPUT.to_owned(), execute_output_schema_digest:EEC_EXECUTE_OUTPUT.to_owned() },
                 OfficialMcpBinding { server:ServerId::Hetzner, archive_input_schema_digest:"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(), archive_output_schema_digest:"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd".to_owned(), execute_input_schema_digest:HETZNER_EXECUTE_INPUT.to_owned(), execute_output_schema_digest:HETZNER_EXECUTE_OUTPUT.to_owned() },
-            ], test_owner_verification(), self.owner, self.current.clone(), self.releases.clone())
+            ], test_owner_verification(), self.owner, (self.current.clone(), self.releases.clone()))
         }
 
         fn enable_search_read_from_pure_producer(&self) {
@@ -5293,7 +5299,7 @@ else: raise AssertionError('reader suppressed open refusal')
                 match case {
                     "network" => {
                         changed[0]["operation_network_constraints"]["n8n.workflows.get_code"]["port_allow"] =
-                            json!([8443])
+                            json!([8443]);
                     }
                     "duplicate" => changed[0]["allowed_operations"]
                         .as_array_mut()
@@ -5365,7 +5371,7 @@ else: raise AssertionError('reader suppressed open refusal')
                     "input" => {
                         tools[5]["input_schema_digest"] = json!(
                             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        )
+                        );
                     }
                     "output" => {
                         tools[5]
@@ -5381,11 +5387,11 @@ else: raise AssertionError('reader suppressed open refusal')
                     "extra" => tools[5]["unreviewed"] = json!(true),
                     "network" => {
                         altered[0]["operation_network_constraints"]["mcp.n8n.read"]["port_allow"] =
-                            json!([9443])
+                            json!([9443]);
                     }
                     "capability" => {
                         altered[0]["allowed_operations"] =
-                            json!(["mcp.tools.list", "mcp.tools.call"])
+                            json!(["mcp.tools.list", "mcp.tools.call"]);
                     }
                     _ => unreachable!(),
                 }
@@ -5454,10 +5460,11 @@ else: raise AssertionError('reader suppressed open refusal')
                                 .push(json!("198.18.0.0/15")),
                             "wrong" => {
                                 network["n8n.validation.run"]["cidr_deny"][0] =
-                                    json!("198.18.0.0/15")
+                                    json!("198.18.0.0/15");
                             }
                             "get-policy" => {
-                                network["n8n.validation.run"] = network["n8n.workflows.get"].clone()
+                                network["n8n.validation.run"] =
+                                    network["n8n.workflows.get"].clone();
                             }
                             _ => unreachable!(),
                         }
@@ -5542,25 +5549,25 @@ else: raise AssertionError('reader suppressed open refusal')
                         match case {
                             "network_union" => {
                                 changed[0]["operation_network_constraints"]["n8n.credentials.list"]
-                                    ["port_allow"] = serde_json::json!([443, 8443])
+                                    ["port_allow"] = serde_json::json!([443, 8443]);
                             }
                             "wrong_port" => {
                                 changed[0]["operation_network_constraints"]["n8n.credentials.list"]
-                                    ["port_allow"] = serde_json::json!([9443])
+                                    ["port_allow"] = serde_json::json!([9443]);
                             }
                             "other_operation" => {
-                                changed[0]["operation_network_constraints"]["n8n.workflows.get"]["port_allow"] =
-                                    serde_json::json!([8443])
+                                changed[0]["operation_network_constraints"]["n8n.workflows.get"]
+                                    ["port_allow"] = serde_json::json!([8443]);
                             }
                             "server" => {
-                                changed[0]["config"]["server_id"] = serde_json::json!("local")
+                                changed[0]["config"]["server_id"] = serde_json::json!("local");
                             }
                             "null" => {
-                                changed[0]["config"]["credential_metadata_read"] = Value::Null
+                                changed[0]["config"]["credential_metadata_read"] = Value::Null;
                             }
                             "purpose" => {
                                 changed[0]["config"]["credential_metadata_read"]["purpose"] =
-                                    serde_json::json!("n8n.workflows.execute")
+                                    serde_json::json!("n8n.workflows.execute");
                             }
                             "missing_output" => {
                                 changed[0]["config"]["credential_metadata_read"]
@@ -5570,7 +5577,7 @@ else: raise AssertionError('reader suppressed open refusal')
                             }
                             "unknown" => {
                                 changed[0]["config"]["credential_metadata_read"]["unknown"] =
-                                    serde_json::json!(true)
+                                    serde_json::json!(true);
                             }
                             _ => unreachable!(),
                         }
@@ -5618,21 +5625,21 @@ else: raise AssertionError('reader suppressed open refusal')
                     }
                     "unknown" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]["name"] =
-                            json!("other")
+                            json!("other");
                     }
                     "class" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]["class"] =
-                            json!("write")
+                            json!("write");
                     }
                     "input" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]["input_schema_digest"] = json!(
                             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                        )
+                        );
                     }
                     "output" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]["output_schema_digest"] = json!(
                             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-                        )
+                        );
                     }
                     "missing_output" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]
@@ -5642,7 +5649,7 @@ else: raise AssertionError('reader suppressed open refusal')
                     }
                     "extra_field" => {
                         value[0]["config"]["capability_policy"]["approved_tools"][4]["extra"] =
-                            json!(true)
+                            json!(true);
                     }
                     "missing_capability" => value[0]["allowed_operations"]
                         .as_array_mut()
@@ -5650,14 +5657,14 @@ else: raise AssertionError('reader suppressed open refusal')
                         .retain(|operation| operation != "mcp.n8n.read"),
                     "network" => {
                         value[0]["operation_network_constraints"]["mcp.n8n.read"]["max_redirects"] =
-                            json!(1)
+                            json!(1);
                     }
                     "extra_operation" => value[0]["allowed_operations"]
                         .as_array_mut()
                         .unwrap()
                         .push(json!("mcp.other.read")),
                     "common_mismatch" => {
-                        fixture.remove_common_operation(&fixture.stage, "n8n.validation.run")
+                        Fixture::remove_common_operation(&fixture.stage, "n8n.validation.run");
                     }
                     _ => unreachable!(),
                 }
@@ -5674,6 +5681,10 @@ else: raise AssertionError('reader suppressed open refusal')
                 );
             }
         }
+        assert_search_read_damaged_signature();
+    }
+
+    fn assert_search_read_damaged_signature() {
         let fixture = Fixture::retained();
         fixture.enable_search_read_from_pure_producer();
         let path = fixture.stage.join(PROVISION_RECEIPT_FILE);
@@ -6136,7 +6147,7 @@ else: raise AssertionError('reader suppressed open refusal')
     fn retained_rc42_lifecycle_preflight_and_exact_pinned_recovery() {
         let fixture = Fixture::retained();
         let previous = fixture.releases.join("previous");
-        fixture.set_signed_rc42(&previous, "previous");
+        Fixture::set_signed_rc42(&previous, "previous");
         let old_pin = signed_current_sample(&fixture.current, &fixture.releases, fixture.owner)
             .expect("RC42 signed receipt pin")
             .1;
@@ -6184,21 +6195,21 @@ else: raise AssertionError('reader suppressed open refusal')
     fn retained_rc42_revalidation_never_widens_to_previous_execute() {
         let fixture = Fixture::retained();
         let previous = fixture.releases.join("previous");
-        fixture.set_signed_rc42(&previous, "previous");
+        Fixture::set_signed_rc42(&previous, "previous");
         let plan = fixture.request().validate().expect("RC42 preflight");
         assert_eq!(
             plan.current_validation,
             CurrentValidationMode::SignedProvisionReceiptRc42Lifecycle
         );
-        fixture.set_predecessor_execute_policy(&previous);
+        Fixture::set_predecessor_execute_policy(&previous);
         fs::write(
             previous.join(RECEIPT_FILE),
-            fixture.receipt_for(&previous, "previous"),
+            Fixture::receipt_for(&previous, "previous"),
         )
         .expect("predecessor receipt");
         fs::write(
             previous.join(PROVISION_RECEIPT_FILE),
-            fixture.predecessor_provision_receipt_for(&previous, "previous"),
+            Fixture::predecessor_provision_receipt_for(&previous, "previous"),
         )
         .expect("predecessor signed receipt");
         assert!(
@@ -6272,7 +6283,7 @@ else: raise AssertionError('reader suppressed open refusal')
     fn retained_rc42_predecessor_never_falls_back_after_bad_signature() {
         let fixture = Fixture::retained();
         let previous = fixture.releases.join("previous");
-        fixture.set_signed_rc42(&previous, "previous");
+        Fixture::set_signed_rc42(&previous, "previous");
         let path = previous.join(PROVISION_RECEIPT_FILE);
         let mut receipt: Value = serde_json::from_slice(&fs::read(&path).expect("signed receipt"))
             .expect("signed receipt JSON");
@@ -6312,10 +6323,10 @@ else: raise AssertionError('reader suppressed open refusal')
                 match denial {
                     "unknown_output" => {
                         publish["output_schema_digest"] =
-                            json!(format!("sha256:{}", "00".repeat(32)))
+                            json!(format!("sha256:{}", "00".repeat(32)));
                     }
                     "malformed_profile" => {
-                        publish["reviewed_schemas"] = json!({"unexpected": true})
+                        publish["reviewed_schemas"] = json!({"unexpected": true});
                     }
                     "damaged_signature" => {}
                     _ => unreachable!(),
@@ -6352,7 +6363,7 @@ else: raise AssertionError('reader suppressed open refusal')
     fn signed_previous_lifecycle_is_accepted_only_as_predecessor() {
         let fixture = Fixture::new();
         let previous = fixture.releases.join("previous");
-        fixture.set_previous_generation_lifecycle_schemas(&previous, "previous");
+        Fixture::set_previous_generation_lifecycle_schemas(&previous, "previous");
         let plan = fixture
             .request()
             .validate()
@@ -6372,7 +6383,7 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("signed previous lifecycle rollback target");
 
         let fixture = Fixture::new();
-        fixture.set_previous_generation_lifecycle_schemas(&fixture.stage, &fixture.release_id);
+        Fixture::set_previous_generation_lifecycle_schemas(&fixture.stage, &fixture.release_id);
         assert_eq!(
             fixture
                 .request()
@@ -6388,7 +6399,7 @@ else: raise AssertionError('reader suppressed open refusal')
     fn full_previous_eec_policy_accepts_owner_cutover_only() {
         let fixture = Fixture::new();
         let previous = fixture.releases.join("previous");
-        fixture.set_previous_eec_policy(&previous, "previous");
+        Fixture::set_previous_eec_policy(&previous, "previous");
         let plan = fixture
             .request()
             .validate()
@@ -6406,7 +6417,7 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("full previous EEC policy remains a signed rollback target");
 
         let fixture = Fixture::new();
-        fixture.set_previous_eec_policy(&fixture.stage, &fixture.release_id);
+        Fixture::set_previous_eec_policy(&fixture.stage, &fixture.release_id);
         assert_eq!(
             fixture
                 .request()
@@ -6441,15 +6452,15 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("pre-unarchive rollback target remains valid");
 
         let fixture = Fixture::new();
-        fixture.remove_common_operation(&fixture.stage, "n8n.workflows.unarchive");
+        Fixture::remove_common_operation(&fixture.stage, "n8n.workflows.unarchive");
         fs::write(
             fixture.stage.join(RECEIPT_FILE),
-            fixture.receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite pre-unarchive stage receipt");
         fs::write(
             fixture.stage.join(PROVISION_RECEIPT_FILE),
-            fixture.provision_receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::provision_receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite pre-unarchive stage provision receipt");
         assert_eq!(
@@ -6467,7 +6478,7 @@ else: raise AssertionError('reader suppressed open refusal')
     fn signed_previous_lifecycle_still_requires_valid_signature() {
         let fixture = Fixture::new();
         let previous = fixture.releases.join("previous");
-        fixture.set_previous_generation_lifecycle_schemas(&previous, "previous");
+        Fixture::set_previous_generation_lifecycle_schemas(&previous, "previous");
         let path = previous.join(PROVISION_RECEIPT_FILE);
         let mut receipt: Value =
             serde_json::from_slice(&fs::read(&path).expect("receipt")).expect("receipt JSON");
@@ -6541,15 +6552,15 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("mixed-schema rollback target remains valid");
 
         let fixture = Fixture::new();
-        fixture.set_legacy_common_operations(&fixture.stage);
+        Fixture::set_legacy_common_operations(&fixture.stage);
         fs::write(
             fixture.stage.join(RECEIPT_FILE),
-            fixture.receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite mixed-schema stage receipt");
         fs::write(
             fixture.stage.join(PROVISION_RECEIPT_FILE),
-            fixture.provision_receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::provision_receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite mixed-schema stage provision receipt");
         assert_eq!(
@@ -6586,15 +6597,15 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("pre-diagnostics predecessor remains a valid rollback target");
 
         let fixture = Fixture::new();
-        fixture.set_legacy_disposable_common_operations(&fixture.stage);
+        Fixture::set_legacy_disposable_common_operations(&fixture.stage);
         fs::write(
             fixture.stage.join(RECEIPT_FILE),
-            fixture.receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite pre-diagnostics stage receipt");
         fs::write(
             fixture.stage.join(PROVISION_RECEIPT_FILE),
-            fixture.provision_receipt_for(&fixture.stage, &fixture.release_id),
+            Fixture::provision_receipt_for(&fixture.stage, &fixture.release_id),
         )
         .expect("rewrite pre-diagnostics stage provision receipt");
         assert_eq!(
@@ -6674,13 +6685,15 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("write mixed schema inventory");
         fs::write(
             fixture.releases.join("previous/receipt.json"),
-            fixture.receipt_for(&fixture.releases.join("previous"), "previous"),
+            Fixture::receipt_for(&fixture.releases.join("previous"), "previous"),
         )
         .expect("rewrite mixed schema receipt");
         fs::write(
             fixture.releases.join("previous/provision-receipt.json"),
-            fixture
-                .predecessor_provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+            Fixture::predecessor_provision_receipt_for(
+                &fixture.releases.join("previous"),
+                "previous",
+            ),
         )
         .expect("rewrite mixed schema provision receipt");
         assert!(fixture.request().validate().is_err());
@@ -6704,13 +6717,15 @@ else: raise AssertionError('reader suppressed open refusal')
         .expect("write drifted inventory");
         fs::write(
             fixture.releases.join("previous/receipt.json"),
-            fixture.receipt_for(&fixture.releases.join("previous"), "previous"),
+            Fixture::receipt_for(&fixture.releases.join("previous"), "previous"),
         )
         .expect("rewrite drifted receipt");
         fs::write(
             fixture.releases.join("previous/provision-receipt.json"),
-            fixture
-                .predecessor_provision_receipt_for(&fixture.releases.join("previous"), "previous"),
+            Fixture::predecessor_provision_receipt_for(
+                &fixture.releases.join("previous"),
+                "previous",
+            ),
         )
         .expect("rewrite drifted provision receipt");
         assert_eq!(

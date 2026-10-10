@@ -1804,7 +1804,10 @@ mod tests {
             exact,
             "blake3-256:4f4ac6bc303e584c55aac3bb5f4d5a98ee334cbb31ea7e3935f4c5470edbb2fa"
         );
+        assert_official_plan_field_substitutions(binding, &exact);
+    }
 
+    fn assert_official_plan_field_substitutions(binding: N8nApprovalInputBinding<'_>, exact: &str) {
         let changed_payload =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let cases = [
@@ -1862,8 +1865,15 @@ mod tests {
         assert!(
             cases
                 .into_iter()
-                .all(|candidate| candidate.as_deref() != Some(exact.as_str()))
+                .all(|candidate| candidate.as_deref() != Some(exact))
         );
+        assert_official_plan_tool_expiry_resource(binding, exact);
+    }
+
+    fn assert_official_plan_tool_expiry_resource(
+        binding: N8nApprovalInputBinding<'_>,
+        exact: &str,
+    ) {
         assert!(
             n8n_typed_approval_plan_digest(
                 "eec",
@@ -2081,6 +2091,10 @@ mod tests {
         token.signature = Some(vec![1]);
         assert!(validate_issued_token_shape(&token, &plan, NOW).is_ok());
 
+        assert_execute_request_substitutions(request);
+    }
+
+    fn assert_execute_request_substitutions(request: N8nApprovalIssueRequest) {
         let mut changed_trigger = request.clone();
         changed_trigger.input["triggerNodeName"] = json!("Other Trigger");
         assert!(build_unsigned_n8n_approval_token(&changed_trigger, NOW).is_err());
@@ -2353,29 +2367,7 @@ mod tests {
             ),
             N8nLifecycleOperation::UpdateDraft => (
                 "workflow-1".to_owned(),
-                json!({
-                    "id": "workflow-1",
-                    "name": "Updated draft",
-                    "project_id": "project-1",
-                    "parent_folder_id": "folder-1",
-                    "graph": {
-                        "nodes": [{"name": "node-1"}],
-                        "connections": {},
-                        "staticData": {"key": "value"},
-                        "pinData": {"node-1": {"json": {"value": 1}}}
-                    },
-                    "guard": {
-                        "approvalRef": "approval-update",
-                        "idempotencyKey": "00000000-0000-4000-8000-000000000005",
-                        "precondition": {
-                            "versionId": "version-1",
-                            "activeVersionId": null,
-                            "active": false,
-                            "isArchived": false,
-                            "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        }
-                    }
-                }),
+                direct_rest_update_draft_fixture_input(),
             ),
             N8nLifecycleOperation::Unarchive => (
                 "workflow-1".to_owned(),
@@ -2418,6 +2410,44 @@ mod tests {
                 ));
             }
         };
+        Ok(bind_direct_rest_fixture_request(
+            operation,
+            workflow_id,
+            input,
+        ))
+    }
+
+    fn direct_rest_update_draft_fixture_input() -> Value {
+        json!({
+            "id": "workflow-1",
+            "name": "Updated draft",
+            "project_id": "project-1",
+            "parent_folder_id": "folder-1",
+            "graph": {
+                "nodes": [{"name": "node-1"}],
+                "connections": {},
+                "staticData": {"key": "value"},
+                "pinData": {"node-1": {"json": {"value": 1}}}
+            },
+            "guard": {
+                "approvalRef": "approval-update",
+                "idempotencyKey": "00000000-0000-4000-8000-000000000005",
+                "precondition": {
+                    "versionId": "version-1",
+                    "activeVersionId": null,
+                    "active": false,
+                    "isArchived": false,
+                    "stateDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }
+        })
+    }
+
+    fn bind_direct_rest_fixture_request(
+        operation: N8nLifecycleOperation,
+        workflow_id: String,
+        input: Value,
+    ) -> N8nApprovalIssueRequest {
         let mut request = N8nApprovalIssueRequest {
             schema: APPROVAL_REQUEST_SCHEMA.to_owned(),
             server: N8nApprovalServer::Eec,
@@ -2439,11 +2469,11 @@ mod tests {
             "server_id": "eec",
             "resource_uri": resource_uri,
             "operation": operation.operation_id(),
-            "input": request.input.clone(),
+            "input": request.input,
         }))
         .expect("canonical direct REST binding");
         request.parent_binding_sha256 = hex::encode(blake3::hash(&canonical_binding).as_bytes());
-        Ok(request)
+        request
     }
 
     fn recompute_direct_rest_parent_binding(request: &mut N8nApprovalIssueRequest) {
@@ -2635,9 +2665,8 @@ mod tests {
         let mut token = build_unsigned_n8n_approval_token(&request, NOW)
             .expect("direct REST unsigned approval");
         assert!(matches!(token.scope, ApprovalScope::Execution(_)));
-        let scope = match &mut token.scope {
-            ApprovalScope::Execution(scope) => scope,
-            _ => return,
+        let ApprovalScope::Execution(scope) = &mut token.scope else {
+            return;
         };
         scope.input_hash = Some([0_u8; 32]);
         let plan = N8nApprovalPlan::from_official_mcp(

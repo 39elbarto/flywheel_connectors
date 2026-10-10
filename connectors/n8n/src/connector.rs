@@ -7204,7 +7204,7 @@ mod tests {
             )
             .is_err()
         );
-        let mut changed_current = graph.clone();
+        let mut changed_current = graph;
         changed_current["versionId"] = json!("version-two");
         assert!(
             invoke(
@@ -7409,7 +7409,7 @@ mod tests {
         }
         let mut oversized = workflow.clone();
         oversized.nodes[0]["parameters"]["jsCode"] = json!("S".repeat(300_001));
-        let mut read = read.clone();
+        let mut read = read;
         read.pins.get_mut("draft").unwrap().graph_digest =
             workflow_graph_digest(&oversized.nodes, &oversized.connections).unwrap();
         assert!(project_workflow_code(&oversized, &read).is_err());
@@ -7462,7 +7462,7 @@ mod tests {
             })
             .collect();
         assert!(project(excessive).is_err());
-        let mut escaped = workflow.clone();
+        let mut escaped = workflow;
         escaped.nodes[0]["parameters"]["jsCode"] = json!("\u{0000}".repeat(300_000));
         let first = escaped.nodes[0].clone();
         let mut second = first;
@@ -8236,7 +8236,7 @@ mod tests {
         assert!(encoded.contains("resourceDigest"));
         assert!(encoded.len() <= MAX_MCP_ACCESS_RECEIPT_BYTES);
 
-        let mut oversized = first_receipt.clone();
+        let mut oversized = first_receipt;
         oversized.items[0].outcome = "x".repeat(MAX_MCP_ACCESS_RECEIPT_BYTES);
         assert!(oversized.validate().is_err());
 
@@ -8640,6 +8640,9 @@ mod tests {
         let ops = operations_info();
         for op in &ops {
             let cap = op.capability.as_ref();
+            if op.id.as_ref() == "n8n.workflows.get_code" {
+                assert_eq!(cap, "n8n.workflows.code.read");
+            }
             #[allow(clippy::case_sensitive_file_extension_comparisons)]
             if cap.ends_with(".read") {
                 assert_eq!(
@@ -8650,12 +8653,12 @@ mod tests {
                 );
                 assert_eq!(
                     op.risk_level,
-                    if op.id.as_ref() == "n8n.audit.inspect" {
-                        RiskLevel::High
-                    } else {
-                        RiskLevel::Low
+                    match op.id.as_ref() {
+                        "n8n.audit.inspect" => RiskLevel::High,
+                        "n8n.workflows.get_code" => RiskLevel::Medium,
+                        _ => RiskLevel::Low,
                     },
-                    "read op {} should be low risk",
+                    "read op {} should have its declared risk",
                     op.id.as_ref()
                 );
             }
@@ -10067,7 +10070,7 @@ mod tests {
             "id": "1001",
             "active": true,
             "versionId": "published-v1",
-            "guard": guard.clone()
+            "guard": guard
         }))
         .expect("activation input");
         assert!(activate.active);
@@ -10076,7 +10079,7 @@ mod tests {
         let deactivate = parse_workflow_activation_input(&json!({
             "id": "1001",
             "active": false,
-            "guard": guard.clone()
+            "guard": guard
         }))
         .expect("deactivation input");
         assert!(!deactivate.active);
@@ -10087,7 +10090,7 @@ mod tests {
                 "id": "1001",
                 "active": false,
                 "versionId": "published-v1",
-                "guard": guard.clone()
+                "guard": guard
             }))
             .is_err()
         );

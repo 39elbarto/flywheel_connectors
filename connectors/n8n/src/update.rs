@@ -1028,7 +1028,7 @@ mod tests {
             "1.0.0",
             vec![tool("reviewed", ToolImpact::Write).with_reviewed_schemas(original)],
         );
-        let mut metadata_input = input.clone();
+        let mut metadata_input = input;
         metadata_input["description"] = serde_json::json!("new");
         let mut metadata_output = output.clone();
         metadata_output["description"] = serde_json::json!("new");

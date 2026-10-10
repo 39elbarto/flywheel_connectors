@@ -49,7 +49,24 @@ workflow defects. Installed RC3/source `9e792356` remains unchanged and returns
 the historical generic diagnostics. See the single
 [validation contract](../../docs/architecture/fwc-n8n-operation-contract.md#51-exact-operation-inputs-and-outputs)
 for the projected fields and limits; no new package, profile or authority is
-admitted by this local source change.
+admitted by this local source change. This paragraph preserves the original
+2026-10-08 candidate checkpoint; the later installed diagnostic release is
+source `ae5ef942`, recorded in the retained acceptance evidence.
+
+The 2026-10-09 versioned-native candidate selects an exact catalog schema for
+each node version and returns safe native predicates (expected/actual type,
+native property ordinal, default and API-selector evidence), with explicit
+incomplete/unknown counts. Its managed dist patch is packaged separately from
+upstream 2.91.0 with complete root-package file binding. Rootless preparation
+and borrowed offline-test dependencies do not admit or install a new provider.
+Verified emitted indexes preserve causes even when node names repeat; legacy
+name-based binding remains conservative. Disabled-target graph warnings use a
+fixed safe code without endpoint names. Unknown findings carry closed reasons
+and source/binding metadata. `nativeValid` preserves the native result;
+`overallStatus:incomplete` explicitly marks incomplete assessment without
+changing error or warning counts.
+The single validation contract above defines the new fields and remaining
+native-database-versus-deployed-descriptor limitation.
 
 Task commit `537b845117d9144fbb3ebd8683fd9fa54834a4e2` adds typed read,
 knowledge and validation paths. It is not the installed RC43c runtime above;

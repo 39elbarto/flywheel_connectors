@@ -211,7 +211,11 @@ fn encode_run_once_n8n_credential_frame(secret: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(fcp_crypto::credential_frame::HEADER_BYTES + secret.len());
     frame.extend_from_slice(b"FCPK");
     frame.push(1);
-    frame.extend_from_slice(&(secret.len() as u32).to_be_bytes());
+    frame.extend_from_slice(
+        &u32::try_from(secret.len())
+            .expect("bounded fixture secret")
+            .to_be_bytes(),
+    );
     frame.extend_from_slice(secret);
     frame
 }
@@ -2333,7 +2337,7 @@ mod tests {
             server_id: "hetzner".to_string(),
             kind: RunOnceCredentialKind::RestApiKey,
         };
-        let canary = [b'c', b'a', b'n', b'a', b'r', b'y'];
+        let canary = *b"canary";
         let mut bad_magic = encode_run_once_n8n_credential_frame(&canary);
         bad_magic[0] = b'X';
         assert_eq!(

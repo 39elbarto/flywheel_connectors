@@ -24,6 +24,37 @@ use serde_json::{Value, json};
 const CLIENT_NAME: &str = "fcp-local-provider";
 const CLIENT_VERSION: &str = "0.1.0";
 
+/// Proof derived only from the provider's already-admitted metadata digest and
+/// fixed changed files. It cannot be deserialized from a caller/native reply.
+pub struct VerifiedVersionedValidationSource {
+    metadata: String,
+    patch: String,
+    package_tree: String,
+}
+
+impl VerifiedVersionedValidationSource {
+    pub(crate) fn metadata_digest(&self) -> &str {
+        &self.metadata
+    }
+
+    pub(crate) fn patch_digest(&self) -> &str {
+        &self.patch
+    }
+
+    pub(crate) fn package_tree_digest(&self) -> &str {
+        &self.package_tree
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_fixture() -> Self {
+        Self {
+            metadata: "0".repeat(64),
+            patch: "391a6acf86de476e45a7a65ad286719dca569abe7d216c2a50eaae7efc1fd832".to_owned(),
+            package_tree: "1".repeat(64),
+        }
+    }
+}
+
 /// Closed server binding in the existing signed n8n release receipt.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -407,6 +438,22 @@ impl LocalMcpProvider {
     #[must_use]
     pub const fn policy(&self) -> &LocalMcpPolicy {
         &self.policy
+    }
+
+    /// Inspect a derived package only under the existing signed-current proof.
+    /// This grants no launch/admission and performs no process/provider call.
+    ///
+    /// # Errors
+    /// Refuses changed metadata/files, malformed provenance or unsigned policy.
+    pub fn versioned_validation_source(
+        &self,
+    ) -> Result<Option<VerifiedVersionedValidationSource>, LocalMcpError> {
+        verify_package_metadata(&self.policy)?;
+        let source = verify_derived_validation_source(&self.policy)?;
+        if source.is_some() && self.signed_current.is_none() {
+            return Err(LocalMcpError::PackageIdentity);
+        }
+        Ok(source)
     }
 
     /// Run one bounded provider request and always execute the teardown path.
@@ -1349,22 +1396,460 @@ const fn unavailable_memory_sample() -> ProcessMemorySample {
 
 fn verify_package_metadata(policy: &LocalMcpPolicy) -> Result<(), LocalMcpError> {
     let path = Path::new(&policy.package_metadata_path);
-    let bytes = std::fs::read(path).map_err(|_| LocalMcpError::PackageIdentity)?;
+    let bytes = read_package_metadata(path)?;
     let digest = blake3::hash(&bytes).to_hex().to_string();
     if digest != policy.package_metadata_digest {
         return Err(LocalMcpError::PackageIdentity);
     }
-    let metadata: Value =
-        serde_json::from_slice(&bytes).map_err(|_| LocalMcpError::PackageIdentity)?;
+    let metadata = crate::credential_metadata_unique_json(&bytes)
+        .map_err(|_| LocalMcpError::PackageIdentity)?;
     let name = metadata.get("name").and_then(Value::as_str);
     if name != Some(policy.package_id.as_str()) {
         return Err(LocalMcpError::PackageIdentity);
     }
+    verify_derived_validation_metadata(&metadata, path)?;
     Ok(())
+}
+
+fn verify_derived_validation_source(
+    policy: &LocalMcpPolicy,
+) -> Result<Option<VerifiedVersionedValidationSource>, LocalMcpError> {
+    use sha2::{Digest, Sha256};
+
+    let path = Path::new(&policy.package_metadata_path);
+    let bytes = read_package_metadata(path)?;
+    if blake3::hash(&bytes).to_hex().as_str() != policy.package_metadata_digest {
+        return Err(LocalMcpError::PackageIdentity);
+    }
+    let metadata = crate::credential_metadata_unique_json(&bytes)
+        .map_err(|_| LocalMcpError::PackageIdentity)?;
+    let Some(patch_digest) = verify_derived_validation_metadata(&metadata, path)? else {
+        return Ok(None);
+    };
+    let package_tree_digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(&metadata["fwcDerivedValidation"]["packageFiles"])
+            .map_err(|_| LocalMcpError::PackageIdentity)?,
+    ));
+    Ok(Some(VerifiedVersionedValidationSource {
+        metadata: policy.package_metadata_digest.clone(),
+        patch: patch_digest,
+        package_tree: package_tree_digest,
+    }))
+}
+
+fn verify_derived_validation_metadata(
+    metadata: &Value,
+    path: &Path,
+) -> Result<Option<String>, LocalMcpError> {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+
+    const PATCH: &str = "391a6acf86de476e45a7a65ad286719dca569abe7d216c2a50eaae7efc1fd832";
+    const FILES: [&str; 5] = [
+        "dist/mcp/server.js",
+        "dist/services/workflow-validator.js",
+        "dist/services/config-validator.js",
+        "dist/services/enhanced-config-validator.js",
+        "dist/services/type-structure-service.js",
+    ];
+    let Some(derived) = metadata.get("fwcDerivedValidation") else {
+        return Ok(None);
+    };
+    let invalid = || LocalMcpError::PackageIdentity;
+    let fields = [
+        "schema",
+        "upstreamVersion",
+        "upstreamMetadataSha256",
+        "patchSha256",
+        "registryTarballSha256",
+        "registryTarballSha512",
+        "files",
+        "packageFiles",
+    ];
+    let object = derived.as_object().ok_or_else(invalid)?;
+    if metadata["name"] != "n8n-mcp"
+        || metadata["version"] != "2.91.0"
+        || object.len() != fields.len()
+        || object.keys().any(|key| !fields.contains(&key.as_str()))
+        || derived["schema"] != "fwc.n8n.derived-validator.v1"
+        || derived["upstreamVersion"] != "2.91.0"
+        || derived["patchSha256"] != PATCH
+        || ["upstreamMetadataSha256", "registryTarballSha256"]
+            .iter()
+            .any(|key| {
+                derived[*key].as_str().is_none_or(|s| {
+                    s.len() != 64
+                        || !s
+                            .bytes()
+                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                })
+            })
+        || derived["registryTarballSha512"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("sha512-"))
+            .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+            .is_none_or(|bytes| bytes.len() != 64)
+    {
+        return Err(invalid());
+    }
+    let files = derived["files"].as_object().ok_or_else(invalid)?;
+    if files.len() != FILES.len() || files.keys().any(|key| !FILES.contains(&key.as_str())) {
+        return Err(invalid());
+    }
+    let root = path.parent().ok_or_else(invalid)?;
+    let strict_metadata = read_derived_package_file(path, 4 * 1024 * 1024)?;
+    if crate::credential_metadata_unique_json(&strict_metadata).map_err(|_| invalid())? != *metadata
+    {
+        return Err(invalid());
+    }
+    let package_files = derived["packageFiles"].as_object().ok_or_else(invalid)?;
+    verify_derived_package_tree(root, package_files)?;
+    for relative in FILES {
+        let file = root.join(relative);
+        let identity = std::fs::symlink_metadata(&file).map_err(|_| invalid())?;
+        if !identity.is_file() || identity.len() > 8 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let bytes = read_derived_package_file(&file, 8 * 1024 * 1024)?;
+        if hex::encode(Sha256::digest(&bytes)) != files[relative].as_str().ok_or_else(invalid)? {
+            return Err(invalid());
+        }
+    }
+    Ok(Some(PATCH.to_owned()))
+}
+
+fn verify_derived_package_tree(
+    root: &Path,
+    package_files: &serde_json::Map<String, Value>,
+) -> Result<(), LocalMcpError> {
+    use sha2::{Digest, Sha256};
+
+    let invalid = || LocalMcpError::PackageIdentity;
+    if package_files.is_empty() || package_files.len() > 20_000 {
+        return Err(invalid());
+    }
+    let mut pending = vec![root.to_path_buf()];
+    let mut observed = std::collections::BTreeSet::new();
+    let mut total = 0_u64;
+    let mut visited = 0_usize;
+    while let Some(directory) = pending.pop() {
+        verify_derived_directory(&directory)?;
+        let before = std::fs::symlink_metadata(&directory).map_err(|_| invalid())?;
+        for entry in std::fs::read_dir(&directory).map_err(|_| invalid())? {
+            let entry = entry.map_err(|_| invalid())?;
+            visited += 1;
+            if visited > 20_000 {
+                return Err(invalid());
+            }
+            let file = entry.path();
+            let identity = std::fs::symlink_metadata(&file).map_err(|_| invalid())?;
+            if identity.is_dir() {
+                verify_derived_directory(&file)?;
+                pending.push(file);
+                continue;
+            }
+            if !identity.is_file() {
+                return Err(invalid());
+            }
+            let relative = file
+                .strip_prefix(root)
+                .map_err(|_| invalid())?
+                .to_str()
+                .ok_or_else(invalid)?
+                .to_owned();
+            if relative == "package.json" {
+                continue;
+            }
+            let expected = package_files
+                .get(&relative)
+                .and_then(Value::as_str)
+                .ok_or_else(invalid)?;
+            total = total.checked_add(identity.len()).ok_or_else(invalid)?;
+            if total > 512 * 1024 * 1024 || !observed.insert(relative) {
+                return Err(invalid());
+            }
+            let bytes = read_derived_package_file(&file, 128 * 1024 * 1024)?;
+            if hex::encode(Sha256::digest(&bytes)) != expected {
+                return Err(invalid());
+            }
+        }
+        if metadata_identity(&before)
+            != metadata_identity(&std::fs::symlink_metadata(&directory).map_err(|_| invalid())?)
+        {
+            return Err(invalid());
+        }
+    }
+    if observed.len() != package_files.len() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+type PackageFileIdentity = (u64, u64, u32, u32, u32, u64, u64, i64, i64, i64, i64);
+
+#[cfg(target_os = "linux")]
+fn metadata_identity(m: &std::fs::Metadata) -> PackageFileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    (
+        m.dev(),
+        m.ino(),
+        m.uid(),
+        m.gid(),
+        m.mode(),
+        m.nlink(),
+        m.len(),
+        m.mtime(),
+        m.mtime_nsec(),
+        m.ctime(),
+        m.ctime_nsec(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn metadata_identity(m: &std::fs::Metadata) -> (u64, bool) {
+    (m.len(), m.is_dir())
+}
+
+fn verify_derived_directory(path: &Path) -> Result<(), LocalMcpError> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for parent in path.ancestors() {
+            let m =
+                std::fs::symlink_metadata(parent).map_err(|_| LocalMcpError::PackageIdentity)?;
+            if !m.is_dir() || m.uid() != 0 || m.gid() != 0 || m.mode() & 0o7022 != 0 {
+                return Err(LocalMcpError::PackageIdentity);
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(LocalMcpError::UnsupportedPlatform)
+    }
+}
+
+fn read_package_metadata(path: &Path) -> Result<Vec<u8>, LocalMcpError> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let invalid = || LocalMcpError::PackageIdentity;
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| invalid())?;
+        let before = file.metadata().map_err(|_| invalid())?;
+        if !before.is_file() || before.len() > 4 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(4 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid())?;
+        if bytes.len() > 4 * 1024 * 1024
+            || metadata_identity(&before)
+                != metadata_identity(&file.metadata().map_err(|_| invalid())?)
+            || metadata_identity(&before)
+                != metadata_identity(&std::fs::symlink_metadata(path).map_err(|_| invalid())?)
+        {
+            return Err(invalid());
+        }
+        Ok(bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Err(LocalMcpError::UnsupportedPlatform)
+    }
+}
+
+fn read_derived_package_file(path: &Path, limit: u64) -> Result<Vec<u8>, LocalMcpError> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+        let invalid = || LocalMcpError::PackageIdentity;
+        verify_derived_directory(path.parent().ok_or_else(invalid)?)?;
+        if std::fs::canonicalize(path).map_err(|_| invalid())? != path {
+            return Err(invalid());
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .map_err(|_| invalid())?;
+        let before = file.metadata().map_err(|_| invalid())?;
+        if !before.is_file()
+            || before.uid() != 0
+            || before.gid() != 0
+            || before.mode() & 0o7022 != 0
+            || before.nlink() != 1
+            || before.len() > limit
+        {
+            return Err(invalid());
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| invalid())?;
+        let identity = |m: &std::fs::Metadata| {
+            (
+                m.dev(),
+                m.ino(),
+                m.uid(),
+                m.gid(),
+                m.mode(),
+                m.nlink(),
+                m.len(),
+                m.mtime(),
+                m.mtime_nsec(),
+                m.ctime(),
+                m.ctime_nsec(),
+            )
+        };
+        if bytes.len() as u64 > limit
+            || identity(&before) != identity(&file.metadata().map_err(|_| invalid())?)
+            || identity(&before)
+                != identity(&std::fs::symlink_metadata(path).map_err(|_| invalid())?)
+        {
+            return Err(invalid());
+        }
+        Ok(bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, limit);
+        Err(LocalMcpError::UnsupportedPlatform)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires an exact rootless derived2.91 candidate; controlled native component, not signed/installed acceptance"]
+    fn derived_validator_owned_native_to_public_projector() {
+        let root = std::env::var("FCP_N8N_DERIVED_VALIDATOR_TEST_ROOT")
+            .expect("explicit retained derived package fixture required");
+        let script = std::fs::canonicalize(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts/tests/n8n_versioned_validation_native.js"),
+        )
+        .unwrap();
+        assert_eq!(
+            blake3::hash(&std::fs::read(&script).unwrap()),
+            blake3::hash(include_bytes!(
+                "../../../scripts/tests/n8n_versioned_validation_native.js"
+            ))
+        );
+        let node = PathBuf::from("/usr/bin/node");
+        let digest = blake3::hash(&std::fs::read(&node).unwrap())
+            .to_hex()
+            .to_string();
+        let spec = ProcessSpec {
+            launcher_path: node.clone(), launcher_digest: digest.clone(),
+            runtime_executable: std::fs::canonicalize(node).unwrap(),
+            expected_runtime_executable_digest: digest,
+            fixed_args: vec![script.into_os_string(), root.into()],
+            fixed_env: BTreeMap::from([
+                ("N8N_MCP_TELEMETRY_DISABLED".into(), "true".into()),
+                ("DISABLE_CONSOLE_OUTPUT".into(), "true".into()),
+                ("NODE_ENV".into(), "test".into()),
+                ("NODE_PATH".into(), "/srv/dev-ssd/fcp/nqm81-35/versioned-validation-candidate-20261009-1/borrowed-dependencies".into()),
+            ]),
+            network_disabled: true,
+        };
+        let process = OwnedProcess::spawn(&spec).expect("owned controlled native launch");
+        let mut session = LocalMcpSession::new(process, 256 * 1024);
+        let frame = session.frames.recv_timeout(Duration::from_secs(30));
+        // Teardown and IO joins happen BEFORE any result assertion/decoding.
+        let (shutdown, _, error) =
+            session.finish(&test_policy(), LocalMcpShutdownReason::Completed);
+        let completion = json!({"errorCode":error.as_ref().map(LocalMcpError::code),
+            "reaped":shutdown.completion.reaped,"groupAbsent":shutdown.completion.group_absent,
+            "workersJoined":session.workers_joined});
+        assert!(error.is_none(), "{completion}");
+        assert!(
+            shutdown.completion.reaped
+                && shutdown.completion.group_absent
+                && session.workers_joined,
+            "{completion}"
+        );
+        let frame = frame
+            .ok()
+            .and_then(Result::ok)
+            .expect("bounded synthetic native result");
+        let result: Value = serde_json::from_slice(&frame).expect("closed synthetic result JSON");
+        assert!(
+            result["status"] == "native_fixture_pass"
+                && result["checks"].as_u64().is_some_and(|n| n >= 12)
+        );
+        let graph = json!({"nodes":[{"id":"synthetic-0","name":"SYNTHETIC_CANARY_0",
+            "type":"n8n-nodes-base.nocoDb","typeVersion":4,"position":[0,0],
+            "parameters":{"projectId":"p","table":"t","resource":"row","operation":"update","version":3}}],"connections":{}});
+        let context = crate::LocalN8nDiagnosticContext::from_verified_versioned_source(
+            &graph,
+            crate::LocalN8nValidationProfile::Runtime,
+            &VerifiedVersionedValidationSource::synthetic_fixture(),
+        )
+        .unwrap();
+        let native = json!({"content":[{"type":"text","text":result["nativeResponse"].to_string()}],
+            "structuredContent":result["nativeResponse"]});
+        let projected = crate::project_local_n8n_validation_with_context(&native, Some(&context))
+            .expect("actual native serialization through actual public projector");
+        assert!(
+            projected["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["code"] == "configuration_special_type_mismatch")
+        );
+        assert!(!projected.to_string().contains("CANARY"));
+        assert_eq!(
+            projected["errors"].as_array().unwrap().len(),
+            result["nativeResponse"]["errors"].as_array().unwrap().len()
+        );
+        assert_eq!(
+            projected["warnings"].as_array().unwrap().len(),
+            result["nativeResponse"]["warnings"]
+                .as_array()
+                .unwrap()
+                .len()
+        );
+    }
+
+    #[test]
+    fn derived_metadata_is_closed_and_never_implicit_upstream_admission() {
+        let path = Path::new("/nonexistent/package.json");
+        assert!(
+            verify_derived_validation_metadata(&json!({"name":"n8n-mcp","version":"2.91.0"}), path)
+                .unwrap()
+                .is_none()
+        );
+        for derived in [
+            Value::Null,
+            json!({}),
+            json!({"schema":"fwc.n8n.derived-validator.v1",
+            "upstreamVersion":"2.91.0","upstreamMetadataSha256":"0".repeat(64),
+            "patchSha256":"0".repeat(64),"registryTarballSha256":"0".repeat(64),
+            "registryTarballSha512":"sha512-invalid","files":{},"packageFiles":{}}),
+        ] {
+            assert!(
+                verify_derived_validation_metadata(
+                    &json!({"name":"n8n-mcp","version":"2.91.0",
+                "fwcDerivedValidation":derived}),
+                    path
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn invocation_deadline_only_tightens_native_time_bounds() {
         let now = Instant::now();

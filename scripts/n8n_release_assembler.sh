@@ -353,6 +353,229 @@ print(json.dumps({"status": "reviewed_official_baselines_verified", "tools": len
 PY
 }
 
+# Offline candidate preparation only. This NEVER changes the installed package,
+# the registry updater, a signed policy, or admission. Published dist bytes are
+# patched deterministically; their output is NOT the upstream registry artifact.
+prepare_derived_local_validator() {
+  [[ "$EUID" -ne 0 && "${FCP_SSD_ACTIVE:-}" == 1 ]] || die "derived preparation requires rootless SSD launcher"
+  python3 - "$1" "$(dirname "${BASH_SOURCE[0]}")/n8n_mcp_2_91_versioned_validation.patch" <<'PY'
+import base64
+import hashlib
+import io
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+import tarfile
+
+FIXED = {
+    'dist/mcp/server.js': 'a4dfc41f48282423a610ee9ac45c0374357b7409cdaa4858e11ba58a32b2128c',
+    'dist/services/workflow-validator.js': 'c0072e5cdd9169a573aa86a659915f7877a71657f304538496f72d723c38a055',
+    'dist/services/config-validator.js': '14221eae947f330ab4e5729306b174d8e137c5c860656b69c91502f569d7c19c',
+    'dist/services/enhanced-config-validator.js': '98672564f2f18a554be3b1bc2c9e15d41827ed0819e67724294758715c77d0ad',
+    'dist/services/type-structure-service.js': '95cbe356946a59d3a3fcef4822a9e1f5cb9db2d0cb767905619d8853efc70eb1',
+}
+EXPECTED_PATCH = '391a6acf86de476e45a7a65ad286719dca569abe7d216c2a50eaae7efc1fd832'
+BASE = pathlib.Path('/srv/dev-ssd/fcp/nqm81-35')
+def fail():
+    raise SystemExit('derived_validator_input_or_provenance_invalid')
+def identity(s):
+    return (s.st_dev, s.st_ino, s.st_uid, s.st_gid, s.st_mode, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+def read_file(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid not in (0, os.getuid()) or before.st_mode & 0o022 or before.st_nlink != 1 or before.st_size > limit:
+            fail()
+        chunks = []
+        count = 0
+        while True:
+            chunk = os.read(fd, min(1048576, limit + 1 - count))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            count += len(chunk)
+            if count > limit:
+                fail()
+        if identity(before) != identity(os.fstat(fd)) or identity(before) != identity(os.lstat(path)):
+            fail()
+        return b''.join(chunks), stat.S_IMODE(before.st_mode)
+    finally:
+        os.close(fd)
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            fail()
+        result[key] = value
+    return result
+def loads(data):
+    return json.loads(data, object_pairs_hook=unique)
+def canonical(data):
+    return json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+def anchored(path, directory=True):
+    path = pathlib.Path(path)
+    if not path.is_absolute() or path.resolve() != path or not path.is_relative_to(BASE) or path == BASE:
+        fail()
+    for parent in [BASE, *reversed(path.parents[:-len(BASE.parents)])]:
+        if parent == path:
+            continue
+        s = os.lstat(parent)
+        if not stat.S_ISDIR(s.st_mode) or s.st_uid not in (0, os.getuid()) or s.st_mode & 0o022:
+            fail()
+    if directory:
+        s = os.lstat(path)
+        if not stat.S_ISDIR(s.st_mode) or s.st_uid != os.getuid() or s.st_mode & 0o022:
+            fail()
+    return path
+def tree(root):
+    rows = []
+    total = 0
+    for path in sorted(root.rglob('*')):
+        s = os.lstat(path)
+        relative = str(path.relative_to(root))
+        if stat.S_ISDIR(s.st_mode):
+            if s.st_uid != os.getuid() or s.st_mode & 0o022:
+                fail()
+            rows.append({'path': relative, 'kind': 'directory', 'mode': stat.S_IMODE(s.st_mode)})
+        elif stat.S_ISREG(s.st_mode):
+            data, mode = read_file(path, 134217728)
+            total += len(data)
+            if total > 536870912:
+                fail()
+            rows.append({'path': relative, 'kind': 'file', 'mode': mode, 'size': len(data), 'sha256': digest(data)})
+        else:
+            fail()
+        if len(rows) > 20000:
+            fail()
+    return rows
+def write_new(path, data, mode=0o644):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
+    try:
+        view = memoryview(data)
+        while view:
+            count = os.write(fd, view)
+            if count <= 0:
+                fail()
+            view = view[count:]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+try:
+    request = loads(read_file(sys.argv[1], 16384)[0])
+    keys = {'schema', 'version', 'upstreamRoot', 'upstreamTreeSha256', 'registryTarball', 'registryTarballSha256', 'registryTarballSha512', 'patchSha256', 'outputRoot'}
+    if not isinstance(request, dict) or set(request) != keys or request['schema'] != 'fwc.n8n.derived-validator-input.v1' or request['version'] != '2.91.0':
+        fail()
+    if any(not isinstance(request[k], str) or not re.fullmatch('[0-9a-f]{64}', request[k]) for k in ('upstreamTreeSha256', 'registryTarballSha256', 'patchSha256')):
+        fail()
+    source = anchored(request['upstreamRoot'])
+    output = pathlib.Path(request['outputRoot'])
+    if not re.fullmatch('derived-n8n-mcp-2[.]91-[0-9a-f]{32}', output.name) or output.parent != BASE:
+        fail()
+    anchored(output.parent / 'unused', False)  # Validate parent only; no creation.
+    if os.path.lexists(output):
+        fail()
+    tar_path = anchored(request['registryTarball'], False)
+    tar_bytes = read_file(tar_path, 134217728)[0]
+    sri = 'sha512-' + base64.b64encode(hashlib.sha512(tar_bytes).digest()).decode()
+    if digest(tar_bytes) != request['registryTarballSha256'] or sri != request['registryTarballSha512']:
+        fail()
+    patch = read_file(sys.argv[2], 262144)[0]
+    if digest(patch) != EXPECTED_PATCH or request['patchSha256'] != EXPECTED_PATCH:
+        fail()
+    package = source / 'node_modules/n8n-mcp'
+    metadata = loads(read_file(package / 'package.json', 65536)[0])
+    if metadata.get('name') != 'n8n-mcp' or metadata.get('version') != '2.91.0' or 'fwcDerivedValidation' in metadata:
+        fail()
+    # Bind ALL published root-package bytes to the exact verified tarball,
+    # rather than treating an independent tree digest as registry provenance.
+    members = {}
+    expanded = 0
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:gz') as archive:
+        for member in archive:
+            parts = tuple(member.name.rstrip('/').split('/'))
+            if not parts or parts[0] != 'package' or any(p in ('', '.', '..') for p in parts):
+                fail()
+            relative = '/'.join(parts[1:])
+            if member.isdir():
+                continue
+            if not member.isfile() or not relative or relative in members or member.size > 134217728:
+                fail()
+            expanded += member.size
+            if expanded > 536870912 or len(members) >= 20000:
+                fail()
+            stream = archive.extractfile(member)
+            if stream is None:
+                fail()
+            content = stream.read(member.size + 1)
+            if len(content) != member.size or digest(read_file(package / relative, 134217728)[0]) != digest(content):
+                fail()
+            members[relative] = digest(content)
+    published_files = {str(p.relative_to(package)) for p in package.rglob('*')
+        if p.is_file() and 'node_modules' not in p.relative_to(package).parts}
+    if published_files != set(members):
+        fail()
+    for relative, expected in FIXED.items():
+        if digest(read_file(package / relative, 8388608)[0]) != expected:
+            fail()
+    original = tree(source)
+    if digest(canonical(original)) != request['upstreamTreeSha256']:
+        fail()
+    os.mkdir(output, 0o700)
+    for row in original:
+        destination = output / row['path']
+        if row['kind'] == 'directory':
+            os.mkdir(destination, row['mode'])
+        else:
+            data = read_file(source / row['path'], 134217728)[0]
+            if digest(data) != row['sha256']:
+                fail()
+            write_new(destination, data, row['mode'])
+    target = output / 'node_modules/n8n-mcp'
+    completed = subprocess.run(['/usr/bin/patch', '--batch', '--forward', '--fuzz=0', '--no-backup-if-mismatch', '-p2', '-d', str(target)],
+        input=patch, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+    if completed.returncode != 0 or len(completed.stdout) + len(completed.stderr) > 16384:
+        fail()
+    changed = {relative: digest(read_file(target / relative, 8388608)[0]) for relative in FIXED}
+    package_files = {r['path']: r['sha256'] for r in tree(target)
+        if r['kind'] == 'file' and r['path'] != 'package.json'}
+    before_metadata = digest(read_file(target / 'package.json', 65536)[0])
+    metadata['fwcDerivedValidation'] = {'schema': 'fwc.n8n.derived-validator.v1', 'upstreamVersion': '2.91.0',
+        'upstreamMetadataSha256': before_metadata, 'patchSha256': EXPECTED_PATCH,
+        'registryTarballSha256': request['registryTarballSha256'], 'registryTarballSha512': sri,
+        'files': changed, 'packageFiles': package_files}
+    # Only this NEW candidate metadata is replaced; installed/upstream bytes stay immutable.
+    with open(target / 'package.json', 'wb') as stream:
+        stream.write(canonical(metadata) + b'\n')
+        stream.flush()
+        os.fsync(stream.fileno())
+    if tree(source) != original:
+        fail()
+    result = tree(output)
+    original_map = {r['path']: r for r in original}
+    result_map = {r['path']: r for r in result}
+    allowed = {'node_modules/n8n-mcp/' + p for p in FIXED} | {'node_modules/n8n-mcp/package.json'}
+    if set(original_map) != set(result_map) or any(original_map[p] != result_map[p] for p in original_map if p not in allowed):
+        fail()
+    receipt = {'schema': 'fwc.n8n.derived-validator-preparation.v1', 'sourceKind': 'derived_dist_patch',
+        'upstreamTreeSha256': request['upstreamTreeSha256'], 'registryTarballSha256': request['registryTarballSha256'],
+        'registryTarballSha512': sri, 'patchSha256': EXPECTED_PATCH, 'resultTreeSha256': digest(canonical(result)),
+        'packageMetadataSha256': digest(read_file(target / 'package.json', 4194304)[0]), 'files': result,
+        'admitted': False, 'installed': False, 'dependencyClosureAuthority': 'requires_existing_registry_stage_verification'}
+    write_new(output / 'derived-provenance.json', canonical(receipt) + b'\n', 0o600)
+    print(json.dumps({'status': 'derived_candidate_prepared', 'admitted': False,
+        'resultTreeSha256': receipt['resultTreeSha256'], 'patchSha256': EXPECTED_PATCH}))
+except (OSError, ValueError, KeyError, TypeError, tarfile.TarError, subprocess.SubprocessError):
+    fail()
+PY
+}
+
 write_local_mcp_policy() {
   local stage_root="$1"
   local hash_helper="$2"
@@ -1382,6 +1605,11 @@ PY
 }
 
 main() {
+  if [[ "${1:-}" == "--prepare-derived-local-validator" ]]; then
+    [[ "$#" == 2 ]] || die "derived preparation requires one closed input FILE"
+    prepare_derived_local_validator "$2"
+    return $?
+  fi
   if [[ "${1:-}" == "--check-release-metadata" || "${1:-}" == "--emit-release-provenance" ]]; then
     [[ "$#" == 3 ]] || die "release metadata check requires exact release id and git revision"
     if [[ "$1" == "--check-release-metadata" ]]; then

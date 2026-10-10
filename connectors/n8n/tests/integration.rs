@@ -572,9 +572,9 @@ fn activation_input(
         "guard": {
             "approvalRef": "approval-test",
             "idempotencyKey": "00000000-0000-4000-8000-000000000101",
-            "precondition": precondition,
         }
     });
+    input["guard"]["precondition"] = precondition;
     if let Some(version_id) = version_id {
         input["versionId"] = json!(version_id);
     }
@@ -1031,6 +1031,7 @@ impl Respond for DisposableDeleteResponse {
         let mut calls = self.calls.lock().expect("delete response sequence lock");
         let call = *calls;
         *calls = calls.saturating_add(1);
+        drop(calls);
         if call == 0 {
             ResponseTemplate::new(200).set_body_json(self.baseline.clone())
         } else if call == 1 {
@@ -2660,7 +2661,13 @@ async fn mediated_draft_credential_change_invalidates_prior_approval_without_raw
 
     let proxy = MockServer::start().await;
     let c = setup_mediated_connector(&proxy.uri()).await;
-    let result = invoke_with_approval(&c, "n8n.workflows.create_draft", changed, approval).await;
+    let result = Box::pin(invoke_with_approval(
+        &c,
+        "n8n.workflows.create_draft",
+        changed,
+        approval,
+    ))
+    .await;
     assert!(matches!(result, Err(FcpError::CapabilityDenied { .. })));
     assert!(
         proxy.received_requests().await.unwrap().is_empty(),
@@ -6110,12 +6117,12 @@ async fn workflows_unarchive_rejects_approval_mismatch_without_provider_call() {
     if let ApprovalScope::Execution(scope) = &mut mismatched_approval.scope {
         scope.connector_id = "fcp.other".into();
     }
-    let error = invoke_with_approval(
+    let error = Box::pin(invoke_with_approval(
         &c,
         "n8n.workflows.unarchive",
         input.clone(),
         mismatched_approval,
-    )
+    ))
     .await
     .expect_err("mismatched approval must fail closed");
     assert!(matches!(error, FcpError::CapabilityDenied { .. }));
@@ -7400,7 +7407,7 @@ fn fwc_n8n_run_once_execute_error_is_safely_projected_and_persisted() {
         status: "error".to_owned(),
         code: code_canary.to_owned(),
         diagnostic: Some(diagnostic_canary.to_owned()),
-        correlation_id: envelope.correlation_id.clone(),
+        correlation_id: envelope.correlation_id,
     };
     let redacted_projection =
         safe_fwc_n8n_cli_error_projection(&untrusted_envelope, requested_correlation_id);

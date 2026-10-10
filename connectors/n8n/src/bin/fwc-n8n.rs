@@ -2893,6 +2893,26 @@ fn project_local_validation_result_with_input(
     if responses.len() != 1 {
         return Err(malformed());
     }
+    // A native marker is not authority. Reconstruct only the fixed signed
+    // provider proof and bind it to the actual completed response metadata.
+    let native_has_versioned_scope = responses[0]["content"][0]["text"]
+        .as_str()
+        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        .is_some_and(|typed| typed.get("fwcValidation").is_some());
+    let versioned_source = if native_has_versioned_scope {
+        let provider = LocalMcpProvider::from_signed_current()
+            .map_err(|_| AppError::new("versioned_validation_source_invalid"))?;
+        if envelope["package_version"] != provider.policy().package_version.to_string()
+            || envelope["package_metadata_digest"] != provider.policy().package_metadata_digest
+        {
+            return Err(malformed());
+        }
+        provider
+            .versioned_validation_source()
+            .map_err(|_| AppError::new("versioned_validation_source_invalid"))?
+    } else {
+        None
+    };
     let context = input.and_then(|input| {
         let workflow = &input["subject"]["workflow"];
         let profile = match workflow["options"]["profile"].as_str()? {
@@ -2902,12 +2922,20 @@ fn project_local_validation_result_with_input(
             "strict" => fcp_host::LocalN8nValidationProfile::Strict,
             _ => return None,
         };
-        fcp_host::LocalN8nDiagnosticContext::from_graph(
-            &workflow["workflow"],
-            profile,
-            envelope["package_version"].as_str()?,
-            envelope["package_metadata_digest"].as_str()?,
-        )
+        if let Some(source) = &versioned_source {
+            fcp_host::LocalN8nDiagnosticContext::from_verified_versioned_source(
+                &workflow["workflow"],
+                profile,
+                source,
+            )
+        } else {
+            fcp_host::LocalN8nDiagnosticContext::from_graph(
+                &workflow["workflow"],
+                profile,
+                envelope["package_version"].as_str()?,
+                envelope["package_metadata_digest"].as_str()?,
+            )
+        }
     });
     fcp_host::project_local_n8n_validation_with_context(&responses[0], context.as_ref())
         .map_err(|_| malformed())
@@ -3536,7 +3564,7 @@ mod keyring_test_support {
     use super::*;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) struct FixedSecretMapping {
+    pub struct FixedSecretMapping {
         service: &'static str,
         field: &'static str,
     }
@@ -3568,7 +3596,7 @@ mod keyring_test_support {
     }
 
     #[derive(Debug, Clone)]
-    pub(super) struct SecretGetProcessSpec {
+    pub struct SecretGetProcessSpec {
         pub(super) executable: PathBuf,
         pub(super) args: Vec<OsString>,
         pub(super) environment: BTreeMap<OsString, OsString>,
@@ -3593,7 +3621,7 @@ mod keyring_test_support {
         }
     }
 
-    pub(super) struct SecretGetStdout {
+    pub struct SecretGetStdout {
         pub(super) bytes: Vec<u8>,
         #[cfg(test)]
         zeroized: Option<Arc<AtomicBool>>,
@@ -3647,7 +3675,7 @@ mod keyring_test_support {
                 .debug_struct("SecretGetStdout")
                 .field("bytes", &"<redacted>")
                 .field("len", &self.bytes.len())
-                .finish()
+                .finish_non_exhaustive()
         }
     }
 
@@ -3668,20 +3696,20 @@ mod keyring_test_support {
     }
 
     #[derive(Debug)]
-    pub(super) struct SecretGetProcessOutput {
+    pub struct SecretGetProcessOutput {
         pub(super) success: bool,
         pub(super) stdout: SecretGetStdout,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) enum SecretGetProcessError {
+    pub enum SecretGetProcessError {
         Spawn,
         Wait,
         Output,
         Timeout,
     }
 
-    pub(super) trait SecretGetProcess {
+    pub trait SecretGetProcess {
         fn run(
             &self,
             spec: &SecretGetProcessSpec,
@@ -3689,7 +3717,7 @@ mod keyring_test_support {
         ) -> Result<SecretGetProcessOutput, SecretGetProcessError>;
     }
 
-    pub(super) struct SystemSecretGetProcess;
+    pub struct SystemSecretGetProcess;
 
     fn terminate_and_reap_secret_get_child(child: &mut std::process::Child) {
         #[cfg(unix)]
@@ -3703,7 +3731,7 @@ mod keyring_test_support {
         let _ = child.wait();
     }
 
-    pub(super) fn fail_secret_get_process(
+    pub fn fail_secret_get_process(
         mut stdout: SecretGetStdout,
         error: SecretGetProcessError,
     ) -> Result<SecretGetProcessOutput, SecretGetProcessError> {
@@ -3822,7 +3850,7 @@ mod keyring_test_support {
         }
     }
 
-    pub(super) trait CredentialResolver {
+    pub trait CredentialResolver {
         fn resolve(
             &self,
             server_id: HostRunOnceServerId,
@@ -3831,7 +3859,7 @@ mod keyring_test_support {
         ) -> Result<ZeroizingSecret, AppError>;
     }
 
-    pub(super) struct KeyringOnlyCredentialResolver<P> {
+    pub struct KeyringOnlyCredentialResolver<P> {
         pub(super) process: P,
     }
 
@@ -3857,7 +3885,7 @@ mod keyring_test_support {
         }
     }
 
-    pub(super) fn parse_secret_get_output(
+    pub fn parse_secret_get_output(
         mut output: SecretGetProcessOutput,
         max_stdout_bytes: usize,
     ) -> Result<ZeroizingSecret, AppError> {
@@ -3887,7 +3915,7 @@ mod keyring_test_support {
         Ok(ZeroizingSecret::from(&output.stdout[..secret_len]))
     }
 
-    pub(super) fn credential_for_with_resolver<R: CredentialResolver>(
+    pub fn credential_for_with_resolver<R: CredentialResolver>(
         resolver: &R,
         server_id: HostRunOnceServerId,
         purpose: BrokerCredentialPurpose,
@@ -7597,6 +7625,10 @@ mod tests {
                     .contains("PRIVATE_LOCAL_KNOWLEDGE_CANARY")
             );
         }
+        assert_invalid_public_knowledge_inputs();
+    }
+
+    fn assert_invalid_public_knowledge_inputs() {
         for input in [
             json!({"action":"tool_documentation","toolName":"execute_workflow"}),
             json!({"action":"search_nodes","queries":[]}),
@@ -8297,7 +8329,9 @@ mod tests {
             assert!(
                 public_targets_resolve_with_reads(
                     &input,
-                    started - Duration::from_secs(31),
+                    started
+                        .checked_sub(Duration::from_secs(31))
+                        .expect("fixture clock range"),
                     |_, _| panic!("expired target must not dispatch")
                 )
                 .is_err()
@@ -8383,7 +8417,9 @@ mod tests {
         assert!(
             public_targets_resolve_with_reads(
                 bytes,
-                Instant::now() - Duration::from_secs(31),
+                Instant::now()
+                    .checked_sub(Duration::from_secs(31))
+                    .expect("fixture clock range"),
                 |_, _| {
                     calls += 1;
                     Ok(json!({"status":"ok"}))
@@ -8481,6 +8517,10 @@ mod tests {
             assert!(!called);
             assert_eq!(error.code, "native_workflow_code_effect_admission_pending");
         }
+        assert_official_sdk_projection_and_input_bounds();
+    }
+
+    fn assert_official_sdk_projection_and_input_bounds() {
         let input = json!({"subject":"workflow_code","code":"synthetic"});
         let invalid = json!({"valid":false,"errors":["HOSTILE_PROVIDER_CANARY"],"warnings":[]});
         let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"workflow_code","code":"synthetic"}),"eec",&json!({"isError":true,"structuredContent":invalid,"content":[{"type":"text","text":invalid.to_string()}]})).unwrap();
@@ -8531,6 +8571,10 @@ mod tests {
             .unwrap()["result"]["data"]["section"],
             "rules"
         );
+        assert_official_sdk_node_projection_and_bounds();
+    }
+
+    fn assert_official_sdk_node_projection_and_bounds() {
         let input = json!({"subject":"nodes","nodes":[{"name":"Synthetic","type":"n8n-nodes-base.set","typeVersion":3.4,"parameters":{}}]});
         let native = json!({"valid":false,"results":[{"index":0,"name":"Synthetic","type":"n8n-nodes-base.set","valid":false,"errors":[{"path":"HOSTILE_PATH_CANARY","message":"HOSTILE_NODE_CANARY"}]}]});
         let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"nodes","nodes":input["nodes"]}),"eec",&json!({"structuredContent":native,"content":[{"type":"text","text":native.to_string()}]})).unwrap();
@@ -8823,7 +8867,10 @@ mod tests {
                 .iter()
                 .enumerate()
             {
-                assert!(row["input_schema"] == response["result"]["tools"][index]["inputSchema"]);
+                assert_eq!(
+                    row["input_schema"],
+                    response["result"]["tools"][index]["inputSchema"]
+                );
                 let reviewed = fcp_manifest::ReviewedMcpSchemas::from_reviewed(
                     row["input_schema"].clone(),
                     Some(row["output_schema"].clone()),
@@ -8836,21 +8883,40 @@ mod tests {
                 } else {
                     reviewed.binds_sha256(input, output)
                 });
-                assert!(row["output_schema_present"] == true);
+                assert_eq!(row["output_schema_present"], true);
             }
         }
     }
 
     #[test]
     fn read_parity_schema_evidence_is_closed_and_does_not_enroll_tools() {
+        let expected_tools = [
+            "get_workflow_sdk_reference",
+            "get_workflow_best_practices",
+            "validate_workflow",
+            "validate_node_config",
+            "search_projects",
+            "search_folders",
+            "list_workflow_tags",
+            "search_workflows",
+            "list_credentials",
+            "get_workflow_versions_diff",
+        ];
         for source in [
             SchemaExportSource::EecReadParity,
             SchemaExportSource::HetznerReadParity,
         ] {
+            assert_eq!(source.tools(), expected_tools);
             let response = schema_export_fixture(source);
             let packet = project_schema_originals(source, &response).unwrap();
             assert_eq!(packet["source"], source.name());
-            assert_eq!(packet["tools"].as_array().unwrap().len(), 9);
+            let tools = packet["tools"].as_array().expect("projected tools");
+            assert_eq!(tools.len(), 10);
+            let projected_names: Vec<&str> = tools
+                .iter()
+                .map(|tool| tool["tool"].as_str().expect("projected tool name"))
+                .collect();
+            assert_eq!(projected_names, expected_tools);
             assert!(packet.get("authority").is_none());
             assert_eq!(packet["reviewed"], false);
             let mut missing = response.clone();
@@ -8874,7 +8940,7 @@ mod tests {
             .remove("outputSchema");
         let packet =
             project_schema_originals(SchemaExportSource::Local, &response).expect("absent output");
-        assert!(packet["tools"][0]["output_schema_present"] == false);
+        assert_eq!(packet["tools"][0]["output_schema_present"], false);
         assert!(packet["tools"][0]["output_schema"].is_null());
         response["result"]["tools"][0]["outputSchema"] = Value::Null;
         assert_eq!(
@@ -8928,11 +8994,12 @@ mod tests {
             "name":"new_unknown_tool","inputSchema":{},"injection_findings":[]}));
         let packet = project_schema_originals(SchemaExportSource::Eec, &response)
             .expect("unreviewed originals");
-        assert!(
-            packet["tools"][0]["input_schema"]["futureKeyword"] == json!({"default":"retained"})
+        assert_eq!(
+            packet["tools"][0]["input_schema"]["futureKeyword"],
+            json!({"default":"retained"})
         );
         assert_eq!(packet["tools"].as_array().expect("tools").len(), 4);
-        assert!(packet["reviewed"] == false);
+        assert_eq!(packet["reviewed"], false);
     }
 
     #[test]
@@ -9049,7 +9116,7 @@ mod tests {
         let (success, error) = run("local", &malformed_unrelated);
         assert!(!success);
         assert_eq!(error["code"], "schema_export_schema_invalid");
-        let mut absent = original.clone();
+        let mut absent = original;
         absent["result"]["tools"][0]
             .as_object_mut()
             .expect("tool")
@@ -9178,7 +9245,7 @@ mod tests {
         json!({
             "status": "ok",
             "result": {
-                "structuredContent": output.clone(),
+                "structuredContent": output,
                 "content": [{
                     "type": "text",
                     "text": serde_json::to_string(&output).expect("provider output text")
@@ -9236,8 +9303,7 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn execute_fixture_proves_preflight_single_provider_and_independent_readback() {
+    fn execute_fixture_probe_and_bytes() -> (ExecuteSequenceProbe, Vec<u8>) {
         let baseline = json!({
             "id": "kXVmpnLGECl1aHLy",
             "versionId": "32385eab-f3ad-4bab-a545-62104f95f42c",
@@ -9253,7 +9319,7 @@ mod tests {
             serde_json::to_string(output).expect("provider output text")
         };
         provider["result"]["content"][0]["text"] = json!(provider_text);
-        let mut probe = ExecuteSequenceProbe {
+        let probe = ExecuteSequenceProbe {
             calls: Vec::new(),
             responses: [
                 Ok(json!({"status": "ok", "result": baseline})),
@@ -9305,6 +9371,13 @@ mod tests {
             "correlation_id": "5fbf08c4-511d-4dd7-b217-3aa5bd22d1aa"
         });
         let bytes = serde_json::to_vec(&input).expect("run-once input JSON");
+        (probe, bytes)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn execute_fixture_proves_preflight_single_provider_and_independent_readback() {
+        let (mut probe, bytes) = execute_fixture_probe_and_bytes();
         let receipt_root = tempfile::tempdir().expect("execute receipt root").keep();
         let receipts_directory = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
         let filesystem_root = File::open(&receipt_root).expect("open execute receipt root");
@@ -9344,6 +9417,16 @@ mod tests {
         )
         .expect("fixture execution path");
 
+        assert_execute_fixture_result_and_receipt(&result, &receipt_root, &receipts_directory);
+        assert_execute_fixture_provider_sequence(&probe);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_execute_fixture_result_and_receipt(
+        result: &Value,
+        receipt_root: &std::path::Path,
+        receipts_directory: &std::path::Path,
+    ) {
         assert_eq!(result["status"], "verified");
         assert_eq!(result["executionStatus"], "success");
         assert_eq!(result["initialStatus"], "accepted");
@@ -9352,10 +9435,10 @@ mod tests {
         assert_eq!(result["versionId"], "32385eab-f3ad-4bab-a545-62104f95f42c");
         assert_eq!(result["readback"], "independent_execution_get");
         let mut stdout_bytes = Vec::new();
-        write_success_output(&mut stdout_bytes, &result).expect("actual success stdout writer");
+        write_success_output(&mut stdout_bytes, result).expect("actual success stdout writer");
         assert_eq!(stdout_bytes.last(), Some(&b'\n'));
         let stdout_result: Value = serde_json::from_slice(&stdout_bytes).expect("stdout JSON");
-        assert_eq!(stdout_result, result);
+        assert_eq!(&stdout_result, result);
         assert_eq!(stdout_result["status"], "verified");
         assert_eq!(stdout_result["executionId"], "execution-1");
         assert_eq!(stdout_result["workflowId"], "kXVmpnLGECl1aHLy");
@@ -9397,6 +9480,9 @@ mod tests {
             "started_readback_stdout_sha256={}",
             hex::encode(Sha256::digest(&stdout_bytes))
         );
+    }
+
+    fn assert_execute_fixture_provider_sequence(probe: &ExecuteSequenceProbe) {
         assert_eq!(
             probe
                 .calls
@@ -9839,6 +9925,25 @@ mod tests {
         assert_eq!(valid_receipt["requestCorrelationId"], valid_correlation_id);
         println!("trigger_dispatch_receipt={}", valid_receipt_path.display());
 
+        assert_invalid_trigger_and_webhook_inputs(
+            &filesystem_root,
+            &receipts_directory_path,
+            invalid_correlation_id,
+            &build_input,
+            &make_bytes,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_invalid_trigger_and_webhook_inputs(
+        filesystem_root: &File,
+        receipts_directory_path: &std::path::Path,
+        invalid_correlation_id: &str,
+        build_input: &impl Fn(&str, &str) -> Value,
+        make_bytes: &impl Fn(&str, Value) -> Vec<u8>,
+    ) {
+        use std::cell::Cell;
+
         let invalid_bytes = make_bytes(
             invalid_correlation_id,
             build_input(invalid_correlation_id, " FWC Acceptance Webhook"),
@@ -9848,7 +9953,7 @@ mod tests {
             "n8n.workflows.execute",
             &invalid_bytes,
             Instant::now(),
-            Some(&filesystem_root),
+            Some(filesystem_root),
             |_, _| {
                 invalid_dispatch_count.set(invalid_dispatch_count.get() + 1);
                 Ok(json!({"status": "verified"}))
@@ -9867,6 +9972,17 @@ mod tests {
         assert_eq!(invalid_receipt["phase"], "wrapper_input_rejected");
         assert_eq!(invalid_receipt["code"], "invalid_operation_input");
         println!("invalid_trigger_receipt={}", invalid_receipt_path.display());
+
+        assert_rejected_webhook_input_cases(filesystem_root, build_input, make_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_rejected_webhook_input_cases(
+        filesystem_root: &File,
+        build_input: &impl Fn(&str, &str) -> Value,
+        make_bytes: &impl Fn(&str, Value) -> Vec<u8>,
+    ) {
+        use std::cell::Cell;
 
         let rejected_inputs = [
             (
@@ -9911,7 +10027,7 @@ mod tests {
                 "n8n.workflows.execute",
                 &invalid_bytes,
                 Instant::now(),
-                Some(&filesystem_root),
+                Some(filesystem_root),
                 |_, _| {
                     dispatch_count.set(dispatch_count.get() + 1);
                     Ok(json!({"status": "verified"}))
@@ -10024,6 +10140,21 @@ mod tests {
         assert!(!persisted_text.contains("inputs"));
         println!("early_execute_receipt={}", receipt_path.display());
 
+        assert_invalid_deadline_execute_receipt(
+            &filesystem_root,
+            &receipts_directory_path,
+            &dispatch_count,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_invalid_deadline_execute_receipt(
+        filesystem_root: &File,
+        receipts_directory_path: &std::path::Path,
+        dispatch_count: &std::cell::Cell<usize>,
+    ) {
+        use std::fs;
+
         let deadline_correlation_id = "66666666-7777-4888-8999-aaaaaaaaaaaa";
         let deadline_bytes = serde_json::to_vec(&json!({
             "server_id": "eec",
@@ -10036,7 +10167,7 @@ mod tests {
             "n8n.workflows.execute",
             &deadline_bytes,
             Instant::now(),
-            Some(&filesystem_root),
+            Some(filesystem_root),
             |_, _| {
                 dispatch_count.set(dispatch_count.get() + 1);
                 Ok(json!({"status": "verified"}))
@@ -10078,7 +10209,7 @@ mod tests {
 
         let receipt_root = retained_test_directory("receipt test directory");
         let receipt_path = prepare_execute_receipt_tree(receipt_root.path(), 0o700, false);
-        let receipts_directory_path = receipt_path.clone();
+        let receipts_directory_path = receipt_path;
         let filesystem_root =
             File::open(receipt_root.path()).expect("open fixture filesystem root");
         let receipt_directory = open_execute_wrapper_receipt_directory_at(
@@ -10154,6 +10285,24 @@ mod tests {
         assert!(!persisted_text.contains(payload_canary));
         assert!(!persisted_text.contains(diagnostic_canary));
 
+        assert_arbitrary_execute_error_redaction(&filesystem_root, &receipts_directory_path);
+        assert_execute_receipt_replay(
+            &filesystem_root,
+            &bytes,
+            &dispatch_count,
+            &receipt_path,
+            &persisted,
+        );
+        assert_execute_receipt_persistence_failure();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_arbitrary_execute_error_redaction(
+        filesystem_root: &File,
+        receipts_directory_path: &std::path::Path,
+    ) {
+        use std::fs;
+
         let code_canary = "PRIVATE-EXECUTE-CODE-CANARY";
         let code_diagnostic_canary = "PRIVATE-EXECUTE-DIAGNOSTIC-CANARY";
         let code_canary_correlation_id = "33333333-4444-4555-8666-777777777777";
@@ -10168,7 +10317,7 @@ mod tests {
             "n8n.workflows.execute",
             &code_canary_bytes,
             Instant::now(),
-            Some(&filesystem_root),
+            Some(filesystem_root),
             |_, _| {
                 Err(AppError::with_diagnostic(
                     code_canary,
@@ -10190,12 +10339,23 @@ mod tests {
             String::from_utf8(code_canary_receipt).expect("arbitrary-code receipt UTF-8");
         assert!(!code_canary_receipt_text.contains(code_canary));
         assert!(!code_canary_receipt_text.contains(code_diagnostic_canary));
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_execute_receipt_replay(
+        filesystem_root: &File,
+        bytes: &[u8],
+        dispatch_count: &std::cell::Cell<usize>,
+        receipt_path: &std::path::Path,
+        persisted: &[u8],
+    ) {
+        use std::fs;
 
         let replay_error = run_once_from_bytes_at_with_receipt_io(
             "n8n.workflows.execute",
-            &bytes,
+            bytes,
             Instant::now(),
-            Some(&filesystem_root),
+            Some(filesystem_root),
             |_, _| {
                 dispatch_count.set(dispatch_count.get() + 1);
                 Ok(json!({"status": "verified"}))
@@ -10206,9 +10366,14 @@ mod tests {
         assert_eq!(replay_error.code, "execute_receipt_already_exists");
         assert_eq!(dispatch_count.get(), 1, "existing receipt prevents retry");
         assert_eq!(
-            fs::read(&receipt_path).expect("receipt remains unchanged"),
+            fs::read(receipt_path).expect("receipt remains unchanged"),
             persisted
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_execute_receipt_persistence_failure() {
+        use std::cell::Cell;
 
         let failed_root = retained_test_directory("persistence failure directory");
         prepare_execute_receipt_tree(failed_root.path(), 0o700, false);
@@ -10264,8 +10429,6 @@ mod tests {
     #[test]
     #[ignore = "consumes the retained host marker produced from the MCP Bridge mock fixture"]
     fn execute_workflow_rpc_provenance_survives_terminal_cli_projection_and_receipt() {
-        use std::{cell::Cell, fs, io::Write, os::unix::fs::OpenOptionsExt};
-
         for (phase, expected_label, expected_code, request_correlation_id, source_correlation_id) in [
             (
                 "DISCOVERY",
@@ -10282,196 +10445,255 @@ mod tests {
                 "708d1cf7-284d-4972-82c0-64a16f726a01",
             ),
         ] {
-            let marker_path = std::env::var_os(format!("FCP_MCP_RPC_HOST_{phase}_FIXTURE"))
-                .expect("explicit retained host marker fixture path");
-            let output_path = std::env::var_os(format!("FCP_MCP_RPC_WRAPPER_{phase}_FIXTURE"))
-                .expect("explicit retained wrapper evidence path");
-            let marker =
-                fs::read_to_string(marker_path).expect("read exact host diagnostic marker");
-            assert_eq!(
-                marker,
-                format!(
-                    "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {expected_label} rpc_code={expected_code}\n"
-                )
+            let case = (
+                phase,
+                expected_label,
+                expected_code,
+                request_correlation_id,
+                source_correlation_id,
             );
-            let stdout = serde_json::to_vec(&json!({
-                "schema": "fwc.n8n.error.v1",
-                "status": "error",
-                "code": "host_n8n_invoke_failed",
-                "diagnostic": "invoke_unknown",
-                "correlationId": source_correlation_id
-            }))
-            .expect("bounded synthetic host error envelope");
-            let bridge_error =
-                fwc_n8n_bridge::child_failure_with_stderr(&stdout, marker.as_bytes(), None);
-            let app_error = map_host_bridge_error(bridge_error, true);
-            assert_eq!(app_error.code, "unknown_outcome");
-            assert_eq!(app_error.diagnostic, Some(expected_label));
-            assert_eq!(
-                app_error.correlation_id.as_deref(),
-                Some(source_correlation_id)
-            );
-            let (expected_phase, _) = match expected_label {
-                "external.mcp.discovery_jsonrpc_error" => ("discovery", "jsonrpc_error"),
-                "external.mcp.execute_call_jsonrpc_error" => ("execute_call", "jsonrpc_error"),
-                _ => unreachable!("the two fixed external labels above are exhaustive"),
-            };
-            assert_eq!(app_error.rpc_phase, Some(expected_phase));
-            assert_eq!(app_error.rpc_code, Some(expected_code));
-
-            let receipt_root = tempfile::tempdir().expect("retained receipt root").keep();
-            let receipts_directory_path = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
-            let filesystem_root = File::open(&receipt_root).expect("open receipt root");
-            let bytes = serde_json::to_vec(&json!({
-                "server_id": "eec",
-                "input": execute_input_fixture(),
-                "deadline_ms": 5000,
-                "correlation_id": request_correlation_id
-            }))
-            .expect("bounded synthetic execute request with valid precondition");
-            let outer_dispatch_count = Cell::new(0);
-            let mut official_mcp_bridge_attempts = 0;
-            let mut execution_get_calls = 0;
-            let mut bridge_operations = Vec::new();
-            let mut mapped_error = Some(app_error);
-            let baseline = json!({
-                "id": "workflow-1",
-                "versionId": "version-1",
-                "activeVersionId": null,
-                "active": false,
-                "isArchived": false,
-                "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
-            });
-            let error = run_once_from_bytes_at_with_receipt_io(
-                "n8n.workflows.execute",
-                &bytes,
-                Instant::now(),
-                Some(&filesystem_root),
-                |envelope, deadline| {
-                    outer_dispatch_count.set(outer_dispatch_count.get() + 1);
-                    execute_workflow_execute_with_bridge(
-                        &envelope,
-                        deadline,
-                        |request, purpose, _| {
-                            let purpose_label = match purpose {
-                                BrokerCredentialPurpose::RestApi => "rest",
-                                BrokerCredentialPurpose::OfficialMcp => "official_mcp",
-                            };
-                            bridge_operations
-                                .push((purpose_label, request.operation.as_str().to_owned()));
-                            match purpose {
-                                BrokerCredentialPurpose::RestApi
-                                    if request.operation == HostRunOnceOperation::WorkflowsGet =>
-                                {
-                                    Ok(json!({"status": "ok", "result": baseline}))
-                                }
-                                BrokerCredentialPurpose::RestApi => {
-                                    if request.operation == HostRunOnceOperation::ExecutionsGet {
-                                        execution_get_calls += 1;
-                                    }
-                                    Err(AppError::new("unexpected_readback_call"))
-                                }
-                                BrokerCredentialPurpose::OfficialMcp => {
-                                    official_mcp_bridge_attempts += 1;
-                                    assert_eq!(
-                                        request.operation,
-                                        HostRunOnceOperation::WorkflowsExecute
-                                    );
-                                    Err(mapped_error
-                                        .take()
-                                        .expect("one injected mapped MCP bridge error"))
-                                }
-                            }
-                        },
-                    )
-                },
-                persist_execute_wrapper_receipt,
-            )
-            .expect_err("terminally mapped execute bridge error remains unknown");
-            assert_eq!(
-                outer_dispatch_count.get(),
-                1,
-                "one outer dispatch; no retry"
-            );
-            assert_eq!(
-                official_mcp_bridge_attempts, 1,
-                "one execute bridge attempt"
-            );
-            assert_eq!(
-                execution_get_calls, 0,
-                "failed execute never reads executions"
-            );
-            assert_eq!(
-                bridge_operations,
-                vec![
-                    ("rest", "n8n.workflows.get".to_owned()),
-                    ("official_mcp", "n8n.workflows.execute".to_owned()),
-                ],
-                "valid baseline precedes one failing execute call"
-            );
-            assert_eq!(error.code, "unknown_outcome");
-            assert_eq!(error.diagnostic, Some(expected_label));
-            assert_eq!(error.rpc_phase, Some(expected_phase));
-            assert_eq!(error.rpc_code, Some(expected_code));
-            assert_eq!(error.correlation_id.as_deref(), Some(source_correlation_id));
-            let error_json = serde_json::to_value(error_envelope(&error, request_correlation_id))
-                .expect("safe CLI error projection");
-            assert_eq!(error_json["code"], "unknown_outcome");
-            assert_eq!(error_json["diagnostic"], expected_label);
-            assert_eq!(error_json["rpcPhase"], expected_phase);
-            assert_eq!(error_json["rpcCode"], expected_code);
-            assert_eq!(error_json["correlationId"], source_correlation_id);
-
-            let receipt_path = receipts_directory_path
-                .join(format!("wrapper-{request_correlation_id}.receipt.json"));
-            let receipt_bytes = fs::read(&receipt_path).expect("read persisted CLI receipt");
-            let receipt: Value = serde_json::from_slice(&receipt_bytes).expect("safe receipt JSON");
-            assert_eq!(receipt["providerAttemptClassification"], "unknown");
-            assert_eq!(receipt["status"], "error");
-            assert_eq!(receipt["rpcPhase"], expected_phase);
-            assert_eq!(receipt["rpcCode"], expected_code);
-            assert_eq!(receipt["diagnostic"], expected_label);
-            assert_eq!(receipt["observedCorrelationId"], source_correlation_id);
-            assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
-
-            let mut stdout_bytes = Vec::new();
-            write_error_output(&mut stdout_bytes, &error, request_correlation_id)
-                .expect("production main error writer");
-            assert!(stdout_bytes.ends_with(b"\n"));
-            assert!(
-                !stdout_bytes
-                    .windows(b"SECRET-CANARY".len())
-                    .any(|window| { window == b"SECRET-CANARY" })
-            );
-            let error_json: Value =
-                serde_json::from_slice(&stdout_bytes).expect("production CLI stdout envelope");
-            assert_eq!(error_json["code"], "unknown_outcome");
-            assert_eq!(error_json["diagnostic"], expected_label);
-            assert_eq!(error_json["rpcPhase"], expected_phase);
-            assert_eq!(error_json["rpcCode"], expected_code);
-            assert_eq!(error_json["correlationId"], source_correlation_id);
-            let stdout_text =
-                String::from_utf8(stdout_bytes.clone()).expect("CLI stdout is UTF-8 JSON");
-            assert_eq!(stdout_text.as_bytes(), stdout_bytes.as_slice());
-
-            let artifact = serde_json::to_vec(&json!({
-                "stdoutBytes": stdout_text,
-                "executeReceipt": receipt,
-                "outerDispatchCount": outer_dispatch_count.get(),
-                "officialMcpBridgeAttempts": official_mcp_bridge_attempts,
-                "executionGetCalls": execution_get_calls,
-                "receiptPath": receipt_path
-            }))
-            .expect("wrapper-only offline evidence");
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true).mode(0o600);
-            let mut output = options
-                .open(output_path)
-                .expect("create retained wrapper artifact without overwrite");
-            output.write_all(&artifact).expect("write wrapper evidence");
-            output.sync_all().expect("sync wrapper evidence");
-            println!("mcp_rpc_wrapper_evidence={}", receipt_path.display());
+            let app_error = assert_rpc_host_marker_mapping(case);
+            let observation = assert_rpc_execute_once(case, app_error);
+            assert_rpc_cli_projection_and_receipt(case, &observation);
         }
+    }
+
+    type RpcProvenanceCase = (&'static str, &'static str, i32, &'static str, &'static str);
+
+    struct RpcProvenanceObservation {
+        error: AppError,
+        receipts_directory: PathBuf,
+        outer_dispatch_count: usize,
+        official_mcp_bridge_attempts: usize,
+        execution_get_calls: usize,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_rpc_host_marker_mapping(case: RpcProvenanceCase) -> AppError {
+        use std::fs;
+        let (phase, expected_label, expected_code, _, source_correlation_id) = case;
+
+        let marker_path = std::env::var_os(format!("FCP_MCP_RPC_HOST_{phase}_FIXTURE"))
+            .expect("explicit retained host marker fixture path");
+        let marker = fs::read_to_string(marker_path).expect("read exact host diagnostic marker");
+        assert_eq!(
+            marker,
+            format!(
+                "FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 {expected_label} rpc_code={expected_code}\n"
+            )
+        );
+        let stdout = serde_json::to_vec(&json!({
+            "schema": "fwc.n8n.error.v1",
+            "status": "error",
+            "code": "host_n8n_invoke_failed",
+            "diagnostic": "invoke_unknown",
+            "correlationId": source_correlation_id
+        }))
+        .expect("bounded synthetic host error envelope");
+        let bridge_error =
+            fwc_n8n_bridge::child_failure_with_stderr(&stdout, marker.as_bytes(), None);
+        let app_error = map_host_bridge_error(bridge_error, true);
+        assert_eq!(app_error.code, "unknown_outcome");
+        assert_eq!(app_error.diagnostic, Some(expected_label));
+        assert_eq!(
+            app_error.correlation_id.as_deref(),
+            Some(source_correlation_id)
+        );
+        let (expected_phase, _) = match expected_label {
+            "external.mcp.discovery_jsonrpc_error" => ("discovery", "jsonrpc_error"),
+            "external.mcp.execute_call_jsonrpc_error" => ("execute_call", "jsonrpc_error"),
+            _ => unreachable!("the two fixed external labels above are exhaustive"),
+        };
+        assert_eq!(app_error.rpc_phase, Some(expected_phase));
+        assert_eq!(app_error.rpc_code, Some(expected_code));
+        app_error
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_rpc_execute_once(
+        case: RpcProvenanceCase,
+        app_error: AppError,
+    ) -> RpcProvenanceObservation {
+        use std::cell::Cell;
+        let (_, expected_label, expected_code, request_correlation_id, source_correlation_id) =
+            case;
+        let expected_phase = app_error.rpc_phase.expect("mapped RPC phase");
+
+        let receipt_root = tempfile::tempdir().expect("retained receipt root").keep();
+        let receipts_directory_path = prepare_execute_receipt_tree(&receipt_root, 0o700, false);
+        let filesystem_root = File::open(&receipt_root).expect("open receipt root");
+        let bytes = serde_json::to_vec(&json!({
+            "server_id": "eec",
+            "input": execute_input_fixture(),
+            "deadline_ms": 5000,
+            "correlation_id": request_correlation_id
+        }))
+        .expect("bounded synthetic execute request with valid precondition");
+        let outer_dispatch_count = Cell::new(0);
+        let mut official_mcp_bridge_attempts = 0;
+        let mut execution_get_calls = 0;
+        let mut bridge_operations = Vec::new();
+        let mut mapped_error = Some(app_error);
+        let baseline = rpc_execute_baseline();
+        let error = run_once_from_bytes_at_with_receipt_io(
+            "n8n.workflows.execute",
+            &bytes,
+            Instant::now(),
+            Some(&filesystem_root),
+            |envelope, deadline| {
+                outer_dispatch_count.set(outer_dispatch_count.get() + 1);
+                execute_workflow_execute_with_bridge(&envelope, deadline, |request, purpose, _| {
+                    let purpose_label = match purpose {
+                        BrokerCredentialPurpose::RestApi => "rest",
+                        BrokerCredentialPurpose::OfficialMcp => "official_mcp",
+                    };
+                    bridge_operations.push((purpose_label, request.operation.as_str().to_owned()));
+                    match purpose {
+                        BrokerCredentialPurpose::RestApi
+                            if request.operation == HostRunOnceOperation::WorkflowsGet =>
+                        {
+                            Ok(json!({"status": "ok", "result": baseline}))
+                        }
+                        BrokerCredentialPurpose::RestApi => {
+                            if request.operation == HostRunOnceOperation::ExecutionsGet {
+                                execution_get_calls += 1;
+                            }
+                            Err(AppError::new("unexpected_readback_call"))
+                        }
+                        BrokerCredentialPurpose::OfficialMcp => {
+                            official_mcp_bridge_attempts += 1;
+                            assert_eq!(request.operation, HostRunOnceOperation::WorkflowsExecute);
+                            Err(mapped_error
+                                .take()
+                                .expect("one injected mapped MCP bridge error"))
+                        }
+                    }
+                })
+            },
+            persist_execute_wrapper_receipt,
+        )
+        .expect_err("terminally mapped execute bridge error remains unknown");
+        assert_eq!(
+            outer_dispatch_count.get(),
+            1,
+            "one outer dispatch; no retry"
+        );
+        assert_eq!(
+            official_mcp_bridge_attempts, 1,
+            "one execute bridge attempt"
+        );
+        assert_eq!(
+            execution_get_calls, 0,
+            "failed execute never reads executions"
+        );
+        assert_rpc_bridge_sequence(&bridge_operations);
+        assert_eq!(error.code, "unknown_outcome");
+        assert_eq!(error.diagnostic, Some(expected_label));
+        assert_eq!(error.rpc_phase, Some(expected_phase));
+        assert_eq!(error.rpc_code, Some(expected_code));
+        assert_eq!(error.correlation_id.as_deref(), Some(source_correlation_id));
+        RpcProvenanceObservation {
+            error,
+            receipts_directory: receipts_directory_path,
+            outer_dispatch_count: outer_dispatch_count.get(),
+            official_mcp_bridge_attempts,
+            execution_get_calls,
+        }
+    }
+
+    fn rpc_execute_baseline() -> Value {
+        json!({
+            "id": "workflow-1",
+            "versionId": "version-1",
+            "activeVersionId": null,
+            "active": false,
+            "isArchived": false,
+            "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000"
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_rpc_bridge_sequence(bridge_operations: &[(&str, String)]) {
+        assert_eq!(
+            bridge_operations,
+            [
+                ("rest", "n8n.workflows.get".to_owned()),
+                ("official_mcp", "n8n.workflows.execute".to_owned()),
+            ],
+            "valid baseline precedes one failing execute call"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_rpc_cli_projection_and_receipt(
+        case: RpcProvenanceCase,
+        observation: &RpcProvenanceObservation,
+    ) {
+        use std::{fs, io::Write, os::unix::fs::OpenOptionsExt};
+        let (phase, expected_label, expected_code, request_correlation_id, source_correlation_id) =
+            case;
+        let error = &observation.error;
+        let expected_phase = error.rpc_phase.expect("retained RPC phase");
+        let receipts_directory_path = &observation.receipts_directory;
+        let output_path = std::env::var_os(format!("FCP_MCP_RPC_WRAPPER_{phase}_FIXTURE"))
+            .expect("explicit retained wrapper evidence path");
+        let error_json = serde_json::to_value(error_envelope(error, request_correlation_id))
+            .expect("safe CLI error projection");
+        assert_eq!(error_json["code"], "unknown_outcome");
+        assert_eq!(error_json["diagnostic"], expected_label);
+        assert_eq!(error_json["rpcPhase"], expected_phase);
+        assert_eq!(error_json["rpcCode"], expected_code);
+        assert_eq!(error_json["correlationId"], source_correlation_id);
+
+        let receipt_path =
+            receipts_directory_path.join(format!("wrapper-{request_correlation_id}.receipt.json"));
+        let receipt_bytes = fs::read(&receipt_path).expect("read persisted CLI receipt");
+        let receipt: Value = serde_json::from_slice(&receipt_bytes).expect("safe receipt JSON");
+        assert_eq!(receipt["providerAttemptClassification"], "unknown");
+        assert_eq!(receipt["status"], "error");
+        assert_eq!(receipt["rpcPhase"], expected_phase);
+        assert_eq!(receipt["rpcCode"], expected_code);
+        assert_eq!(receipt["diagnostic"], expected_label);
+        assert_eq!(receipt["observedCorrelationId"], source_correlation_id);
+        assert_eq!(receipt["requestCorrelationId"], request_correlation_id);
+
+        let mut stdout_bytes = Vec::new();
+        write_error_output(&mut stdout_bytes, error, request_correlation_id)
+            .expect("production main error writer");
+        assert!(stdout_bytes.ends_with(b"\n"));
+        assert!(
+            !stdout_bytes
+                .windows(b"SECRET-CANARY".len())
+                .any(|window| { window == b"SECRET-CANARY" })
+        );
+        let error_json: Value =
+            serde_json::from_slice(&stdout_bytes).expect("production CLI stdout envelope");
+        assert_eq!(error_json["code"], "unknown_outcome");
+        assert_eq!(error_json["diagnostic"], expected_label);
+        assert_eq!(error_json["rpcPhase"], expected_phase);
+        assert_eq!(error_json["rpcCode"], expected_code);
+        assert_eq!(error_json["correlationId"], source_correlation_id);
+        let stdout_text =
+            String::from_utf8(stdout_bytes.clone()).expect("CLI stdout is UTF-8 JSON");
+        assert_eq!(stdout_text.as_bytes(), stdout_bytes.as_slice());
+
+        let artifact = serde_json::to_vec(&json!({
+            "stdoutBytes": stdout_text,
+            "executeReceipt": receipt,
+            "outerDispatchCount": observation.outer_dispatch_count,
+            "officialMcpBridgeAttempts": observation.official_mcp_bridge_attempts,
+            "executionGetCalls": observation.execution_get_calls,
+            "receiptPath": receipt_path
+        }))
+        .expect("wrapper-only offline evidence");
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        let mut output = options
+            .open(output_path)
+            .expect("create retained wrapper artifact without overwrite");
+        output.write_all(&artifact).expect("write wrapper evidence");
+        output.sync_all().expect("sync wrapper evidence");
+        println!("mcp_rpc_wrapper_evidence={}", receipt_path.display());
     }
 
     #[cfg(target_os = "linux")]
@@ -10643,6 +10865,11 @@ mod tests {
 
         let serialized = serde_json::to_vec(&result).expect("serialized execute response");
         let response: Value = serde_json::from_slice(&serialized).expect("execute response JSON");
+        assert_execute_manifest_output_contract();
+        assert_terminal_failure_response(&response, &probe);
+    }
+
+    fn assert_execute_manifest_output_contract() {
         let manifest = include_str!("../../manifest.toml");
         assert!(manifest.contains(
             "required = [\"status\", \"operation\", \"provider\", \"workflowId\", \"mode\", \"versionId\", \"executionId\", \"initialStatus\", \"executionStatus\", \"retry\", \"readback\"]"
@@ -10657,6 +10884,9 @@ mod tests {
         assert!(manifest.contains("const = \"manual\""));
         assert!(manifest.contains("const = \"never_automatic\""));
         assert!(manifest.contains("const = \"independent_execution_get\""));
+    }
+
+    fn assert_terminal_failure_response(response: &Value, probe: &ExecuteSequenceProbe) {
         let required = [
             "status",
             "operation",
@@ -10731,7 +10961,7 @@ mod tests {
         let provider = json!({
             "status": "ok",
             "result": {
-                "structuredContent": provider_output.clone(),
+                "structuredContent": provider_output,
                 "content": [{
                     "type": "text",
                     "text": serde_json::to_string(&provider_output).expect("provider output text")
@@ -10795,6 +11025,21 @@ mod tests {
                 .iter()
                 .any(|(_, operation, _)| operation == "n8n.executions.get")
         );
+        assert_null_id_error_receipt_and_stdout(
+            &error,
+            &receipt_root,
+            &receipts_directory,
+            correlation_id,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_null_id_error_receipt_and_stdout(
+        error: &AppError,
+        receipt_root: &std::path::Path,
+        receipts_directory: &std::path::Path,
+        correlation_id: &str,
+    ) {
         let receipt_path =
             receipts_directory.join(format!("wrapper-{correlation_id}.receipt.json"));
         let receipt_bytes = std::fs::read(&receipt_path).expect("persisted native error receipt");
@@ -10803,7 +11048,7 @@ mod tests {
         assert_eq!(receipt["code"], "unknown_outcome");
         assert_eq!(receipt["diagnostic"], "lifecycle_response_shape");
         let mut stdout_bytes = Vec::new();
-        write_error_output(&mut stdout_bytes, &error, correlation_id)
+        write_error_output(&mut stdout_bytes, error, correlation_id)
             .expect("actual error stdout writer");
         let response: Value = serde_json::from_slice(&stdout_bytes).expect("error JSON");
         assert_eq!(response["schema"], ERROR_ENVELOPE_SCHEMA);
@@ -11047,64 +11292,68 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn fake_child_control_handshake() -> Result<std::os::unix::net::UnixStream, ()> {
+        let control_fd = std::env::var(FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD)
+            .map_err(|_| ())?
+            .parse::<i32>()
+            .map_err(|_| ())?;
+        if control_fd < 3 {
+            return Err(());
+        }
+        let mut control = claim_inherited_host_egress_channel(control_fd).map_err(|_| ())?;
+        let mut start = [0_u8; SUPERVISOR_START_PREFIX.len() + 4];
+        control.read_exact(&mut start).map_err(|_| ())?;
+        if &start[..SUPERVISOR_START_PREFIX.len()] != SUPERVISOR_START_PREFIX {
+            return Err(());
+        }
+        let budget = u32::from_be_bytes(
+            start[SUPERVISOR_START_PREFIX.len()..]
+                .try_into()
+                .map_err(|_| ())?,
+        );
+        if !(1..=SUPERVISOR_MAX_BUDGET_MS).contains(&budget) {
+            return Err(());
+        }
+        control.set_nonblocking(true).map_err(|_| ())?;
+        let mut extra = [0_u8; 1];
+        let start_probe = control.read(&mut extra);
+        let start_restore = control.set_nonblocking(false);
+        let start_has_extra = match start_probe {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Ok(_) | Err(_) => true,
+        };
+        if start_restore.is_err() || start_has_extra {
+            return Err(());
+        }
+        control.write_all(SUPERVISOR_READY_FRAME).map_err(|_| ())?;
+        let mut decision = [0_u8; SUPERVISOR_GO_FRAME.len()];
+        control.read_exact(&mut decision).map_err(|_| ())?;
+        if decision != SUPERVISOR_GO_FRAME {
+            return Err(());
+        }
+        control.set_nonblocking(true).map_err(|_| ())?;
+        let mut trailing = [0_u8; 1];
+        let decision_probe = control.read(&mut trailing);
+        let decision_restore = control.set_nonblocking(false);
+        let decision_has_extra = match decision_probe {
+            Ok(0) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Ok(_) | Err(_) => true,
+        };
+        if decision_restore.is_err() || decision_has_extra {
+            return Err(());
+        }
+        Ok(control)
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn run_once_bridge_child_probe() {
         if std::env::var_os(FAKE_CHILD_ENV).is_none() {
             return;
         }
         let result = (|| -> Result<(), ()> {
-            let control_fd = std::env::var(FCP_HOST_RUN_ONCE_SUPERVISOR_CONTROL_FD)
-                .map_err(|_| ())?
-                .parse::<i32>()
-                .map_err(|_| ())?;
-            if control_fd < 3 {
-                return Err(());
-            }
-            let mut control = claim_inherited_host_egress_channel(control_fd).map_err(|_| ())?;
-            let mut start = [0_u8; SUPERVISOR_START_PREFIX.len() + 4];
-            control.read_exact(&mut start).map_err(|_| ())?;
-            if &start[..SUPERVISOR_START_PREFIX.len()] != SUPERVISOR_START_PREFIX {
-                return Err(());
-            }
-            let budget = u32::from_be_bytes(
-                start[SUPERVISOR_START_PREFIX.len()..]
-                    .try_into()
-                    .map_err(|_| ())?,
-            );
-            if !(1..=SUPERVISOR_MAX_BUDGET_MS).contains(&budget) {
-                return Err(());
-            }
-            control.set_nonblocking(true).map_err(|_| ())?;
-            let mut extra = [0_u8; 1];
-            let start_probe = control.read(&mut extra);
-            let start_restore = control.set_nonblocking(false);
-            let start_has_extra = match start_probe {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-                Err(_) => true,
-            };
-            if start_restore.is_err() || start_has_extra {
-                return Err(());
-            }
-            control.write_all(SUPERVISOR_READY_FRAME).map_err(|_| ())?;
-            let mut decision = [0_u8; SUPERVISOR_GO_FRAME.len()];
-            control.read_exact(&mut decision).map_err(|_| ())?;
-            if decision != SUPERVISOR_GO_FRAME {
-                return Err(());
-            }
-            control.set_nonblocking(true).map_err(|_| ())?;
-            let mut trailing = [0_u8; 1];
-            let decision_probe = control.read(&mut trailing);
-            let decision_restore = control.set_nonblocking(false);
-            let decision_has_extra = match decision_probe {
-                Ok(0) => false,
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-                Err(_) => true,
-            };
-            if decision_restore.is_err() || decision_has_extra {
-                return Err(());
-            }
+            let _control = fake_child_control_handshake()?;
             let mut stdin = std::io::stdin().lock();
             let envelope = read_bounded_child_input(&mut stdin, MAX_INPUT_BYTES)?;
             drop(stdin);
@@ -11480,7 +11729,7 @@ mod tests {
     impl LifecycleBridgeProbe {
         fn dispatch(
             &mut self,
-            envelope: HostRunOnceEnvelope,
+            envelope: &HostRunOnceEnvelope,
             _deadline: Instant,
         ) -> Result<Value, AppError> {
             assert_eq!(envelope.operation, HostRunOnceOperation::WorkflowsLifecycle);
@@ -11503,14 +11752,12 @@ mod tests {
             self.requests
                 .push("child:GET /api/v1/workflows/1001".to_owned());
             let call = if action == "publish" {
-                match envelope.input.get("versionId").and_then(Value::as_str) {
-                    Some(version_id) => format!(
+                envelope.input.get("versionId").and_then(Value::as_str).map_or_else(
+                    || "child:MCP tools/call publish_workflow {\"workflowId\":\"1001\"}".to_owned(),
+                    |version_id| format!(
                         "child:MCP tools/call publish_workflow {{\"workflowId\":\"1001\",\"versionId\":\"{version_id}\"}}"
                     ),
-                    None => {
-                        "child:MCP tools/call publish_workflow {\"workflowId\":\"1001\"}".to_owned()
-                    }
-                }
+                )
             } else {
                 "child:MCP tools/call unpublish_workflow {\"workflowId\":\"1001\"}".to_owned()
             };
@@ -11666,7 +11913,9 @@ mod tests {
     }
 
     fn lifecycle_response(result: Value) -> Value {
-        json!({"status": "ok", "result": result})
+        let mut response = json!({"status": "ok"});
+        response["result"] = result;
+        response
     }
 
     fn lifecycle_test_deadline() -> Instant {
@@ -11691,7 +11940,7 @@ mod tests {
             "n8n.workflows.lifecycle",
             &lifecycle_host_input(),
             Instant::now(),
-            |envelope, deadline| bridge.dispatch(envelope, deadline),
+            |envelope, deadline| bridge.dispatch(&envelope, deadline),
         )
         .expect("validated lifecycle envelope should reach bridge seam");
         assert_eq!(value["status"], "ok");
@@ -11866,7 +12115,7 @@ mod tests {
                 "n8n.workflows.lifecycle",
                 &lifecycle_host_input_for_version(server_id, action, version_id),
                 Instant::now(),
-                |envelope, deadline| bridge.dispatch(envelope, deadline),
+                |envelope, deadline| bridge.dispatch(&envelope, deadline),
             )
             .expect("validated lifecycle envelope should reach bridge seam");
             assert_eq!(value["status"], "ok");
@@ -11900,7 +12149,7 @@ mod tests {
             "n8n.workflows.lifecycle",
             &lifecycle_host_input(),
             Instant::now(),
-            |envelope, deadline| bridge.dispatch(envelope, deadline),
+            |envelope, deadline| bridge.dispatch(&envelope, deadline),
         )
         .expect_err("readback mismatch must fail closed");
         assert_eq!(error.code, "lifecycle_readback_mismatch");
@@ -12510,14 +12759,13 @@ mod tests {
     }
 
     fn lifecycle_state(active: bool, active_version_id: Value, is_archived: bool) -> Value {
-        json!({
+        let mut state = json!({
             "id": "1001",
             "name": null,
             "projectId": null,
             "folderId": null,
             "versionId": "version-1",
             "active": active,
-            "activeVersionId": active_version_id,
             "isArchived": is_archived,
             "draft": {"versionId": "draft-v1", "graphDigest": "blake3-256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
             "published": if active {
@@ -12527,7 +12775,9 @@ mod tests {
             },
             "stateDigest": "blake3-256:0000000000000000000000000000000000000000000000000000000000000000",
             "updatedAt": null,
-        })
+        });
+        state["activeVersionId"] = active_version_id;
+        state
     }
 
     #[test]
@@ -13358,7 +13608,9 @@ mod tests {
 
     #[test]
     fn run_once_deadline_includes_time_before_dispatch() {
-        let started = Instant::now() - std::time::Duration::from_millis(10);
+        let started = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(10))
+            .expect("fixture clock range");
         let error = run_once_from_bytes_at(
             "n8n.workflows.list",
             br#"{"server_id":"eec","input":{},"deadline_ms":1}"#,
@@ -13634,19 +13886,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn host_run_once_maps_allowed_operations_to_canonical_resources() {
-        let cases = [
+    fn host_read_resource_cases() -> Vec<(&'static str, Value, &'static str)> {
+        vec![
             (
                 "n8n.capabilities.inspect",
                 json!({}),
                 "fwc-mcp-bridge://eec",
             ),
-            (
-                "n8n.credentials.list",
-                json!({}),
-                "fwc-mcp-bridge://eec/tools/list%5Fcredentials",
-            ),
+            ("n8n.credentials.list", json!({}), "fwc-n8n://eec"),
             (
                 "n8n.executions.get",
                 json!({"workflow_id": "workflow-1", "id": "execution-1"}),
@@ -13675,6 +13922,11 @@ mod tests {
                 json!({"id": "workflow-1"}),
                 "fwc-n8n://eec/workflows/workflow%2D1",
             ),
+        ]
+    }
+
+    fn host_write_resource_cases() -> Vec<(&'static str, Value, &'static str)> {
+        vec![
             (
                 "n8n.workflows.lifecycle",
                 json!({
@@ -13761,9 +14013,15 @@ mod tests {
                 }),
                 "fwc-n8n://eec/workflows/workflow%2D1",
             ),
-        ];
+        ]
+    }
 
-        for (operation, input, resource_uri) in cases {
+    #[test]
+    fn host_run_once_maps_allowed_operations_to_canonical_resources() {
+        for (operation, input, resource_uri) in host_read_resource_cases()
+            .into_iter()
+            .chain(host_write_resource_cases())
+        {
             let operation = HostRunOnceOperation::parse(operation).expect("closed operation");
             let envelope = build_host_run_once_envelope(
                 operation,
@@ -13901,6 +14159,7 @@ mod tests {
                 ])
             );
             assert_eq!(spec.max_stdout_bytes, SECRET_GET_MAX_STDOUT_BYTES);
+            drop(calls);
         }
     }
 
@@ -14038,7 +14297,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn system_secret_process_kills_descendant_holding_stdout_after_child_exit() {
-        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let pid_file = tempfile::NamedTempFile::new()
+            .expect("pid file")
+            .into_temp_path()
+            .keep()
+            .expect("retain pid file");
         let mut spec = injected_process_spec(
             "/usr/bin/bash",
             &[
@@ -14047,10 +14310,8 @@ mod tests {
             ],
             32,
         );
-        spec.environment.insert(
-            OsString::from("PID_FILE"),
-            pid_file.path().as_os_str().to_owned(),
-        );
+        spec.environment
+            .insert(OsString::from("PID_FILE"), pid_file.as_os_str().to_owned());
         let started = Instant::now();
 
         assert!(matches!(
@@ -14062,7 +14323,7 @@ mod tests {
             "collection must remain bounded after the direct child exits"
         );
 
-        let descendant_pid = std::fs::read_to_string(pid_file.path())
+        let descendant_pid = std::fs::read_to_string(&pid_file)
             .expect("descendant pid")
             .parse::<i32>()
             .expect("numeric descendant pid");
@@ -14328,6 +14589,11 @@ mod tests {
             .is_err()
         );
 
+        assert_unsafe_host_resource_and_input_cases();
+        assert_host_write_precondition_rejections();
+    }
+
+    fn assert_unsafe_host_resource_and_input_cases() {
         for (operation, input) in [
             ("n8n.workflows.get", json!({"id": "id/../admin"})),
             (
@@ -14379,7 +14645,9 @@ mod tests {
             .expect_err("unknown, secret, missing, or out-of-range input must be denied");
             assert_eq!(error.code, "invalid_operation_input");
         }
+    }
 
+    fn assert_host_write_precondition_rejections() {
         let create_with_id = json!({
             "id": "workflow-1",
             "name": "Draft",

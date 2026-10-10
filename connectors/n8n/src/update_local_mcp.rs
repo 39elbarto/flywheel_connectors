@@ -382,11 +382,25 @@ pub enum LocalMcpAdapterError {
     StageBounds,
     StageMismatch(&'static str),
     StageIo,
+    StageCleanup {
+        primary_code: &'static str,
+        cleanup_code: &'static str,
+    },
     Snapshot(UpdateError),
 }
 
 impl std::fmt::Display for LocalMcpAdapterError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Self::StageCleanup {
+            primary_code,
+            cleanup_code,
+        } = self
+        {
+            return write!(
+                formatter,
+                "local n8n-mcp update adapter failed: {primary_code}; cleanup: {cleanup_code}"
+            );
+        }
         let code = match self {
             Self::InvalidVersion => "invalid_version",
             Self::InvalidMetadata(code) => code,
@@ -396,6 +410,7 @@ impl std::fmt::Display for LocalMcpAdapterError {
             Self::StageBounds => "stage_bounds_exceeded",
             Self::StageMismatch(code) => code,
             Self::StageIo => "stage_io_failed",
+            Self::StageCleanup { primary_code, .. } => primary_code,
             Self::Snapshot(_) => "snapshot_invalid",
         };
         write!(formatter, "local n8n-mcp update adapter failed: {code}")
@@ -414,6 +429,7 @@ impl LocalMcpAdapterError {
             Self::StagePermissions => "stage_permissions_invalid",
             Self::StageBounds => "stage_bounds_exceeded",
             Self::StageIo => "stage_io_failed",
+            Self::StageCleanup { primary_code, .. } => primary_code,
             Self::Snapshot(_) => "snapshot_invalid",
         }
     }
@@ -1314,6 +1330,7 @@ fn spawn_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalM
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let owned_group = child.id();
     let mut stdout = child.stdout.take().ok_or(LocalMcpAdapterError::StageIo)?;
     let mut stderr = child.stderr.take().ok_or(LocalMcpAdapterError::StageIo)?;
     let (stdout_sender, stdout_receiver) = std::sync::mpsc::sync_channel(1);
@@ -1356,9 +1373,12 @@ fn spawn_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalM
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    if stdout_reader.join().is_err() || stderr_reader.join().is_err() {
+    let stdout_joined = stdout_reader.join().is_ok();
+    let stderr_joined = stderr_reader.join().is_ok();
+    if !stdout_joined || !stderr_joined {
         return Err(LocalMcpAdapterError::StageIo);
     }
+    verify_npm_group_absent(owned_group)?;
     let stdout = match stdout_result.expect("stdout reader completed") {
         Ok(bytes) => bytes,
         Err(NpmOutputError::TooLarge) => return Err(LocalMcpAdapterError::StageBounds),
@@ -1373,6 +1393,37 @@ fn spawn_fixed_npm_command(command: &FixedCommandSpec) -> Result<Vec<u8>, LocalM
         return Err(LocalMcpAdapterError::StageMismatch("npm_command_failed"));
     }
     Ok(stdout)
+}
+
+#[cfg(unix)]
+fn verify_npm_group_absent(group: u32) -> Result<(), LocalMcpAdapterError> {
+    let raw = i32::try_from(group).map_err(|_| LocalMcpAdapterError::StageIo)?;
+    let pid = rustix::process::Pid::from_raw(raw).ok_or(LocalMcpAdapterError::StageIo)?;
+    // Signal zero only: an extant or reused group refuses materialization. No
+    // new termination signal is sent to a group after its leader was reaped.
+    classify_npm_group_absence(rustix::process::test_kill_process_group(pid))
+}
+
+#[cfg(unix)]
+const fn classify_npm_group_absence(
+    result: Result<(), rustix::io::Errno>,
+) -> Result<(), LocalMcpAdapterError> {
+    match result {
+        Err(rustix::io::Errno::SRCH) => Ok(()),
+        Ok(()) => Err(LocalMcpAdapterError::StageMismatch(
+            "npm_group_still_present",
+        )),
+        Err(_) => Err(LocalMcpAdapterError::StageMismatch(
+            "npm_group_absence_unknown",
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn verify_npm_group_absent(_group: u32) -> Result<(), LocalMcpAdapterError> {
+    Err(LocalMcpAdapterError::StageMismatch(
+        "npm_group_absence_unknown",
+    ))
 }
 
 fn preflight_npm_command_with_global_config(
@@ -1543,7 +1594,7 @@ pub fn stage_exact_local_mcp(
     return Err(LocalMcpAdapterError::StageLayout);
 
     let mut command_runner = FixedNpmCommandRunner;
-    let mut stage_io = FixedFilesystemLocalMcpStageIo;
+    let mut stage_io = FixedFilesystemLocalMcpStageIo::default();
     stage_exact_local_mcp_with(version, &mut command_runner, &mut stage_io)
 }
 
@@ -1569,11 +1620,28 @@ where
     // ambiguous contexts and source/graph features npm could reinterpret.
     let closure = resolve_registry_dependency_closure(command_runner, &root_value, &metadata)?;
     stage_io.create_empty_stage(&plan)?;
-    let cleanup =
-        |stage_io: &mut I, error: LocalMcpAdapterError| match stage_io.discard_stage(&plan) {
+    let cleanup = |stage_io: &mut I, error: LocalMcpAdapterError| {
+        if matches!(
+            error.code(),
+            "npm_group_still_present"
+                | "npm_group_absence_unknown"
+                | "stage_io_failed"
+                | "npm_command_timeout"
+                | "archive_listing_timeout"
+                | "registry_manifest_timeout"
+                | "artifact_extract_timeout"
+        ) {
+            // The newly created UUID must remain intact while writers may live.
+            return error;
+        }
+        match stage_io.discard_stage(&plan) {
             Ok(()) => error,
-            Err(cleanup_error) => cleanup_error,
-        };
+            Err(cleanup_error) => LocalMcpAdapterError::StageCleanup {
+                primary_code: error.code(),
+                cleanup_code: cleanup_error.code(),
+            },
+        }
+    };
     // Pack each selected exact package into the stage-owned cache, verify its
     // bytes against the selected registry SRI, and only then add it to the
     // same isolated npm cache used by the offline install.
@@ -1655,6 +1723,9 @@ where
         return Err(cleanup(stage_io, error));
     }
     if let Err(error) = command_runner.run(plan.install()) {
+        return Err(cleanup(stage_io, error));
+    }
+    if let Err(error) = stage_io.normalize_new_materialization(&plan) {
         return Err(cleanup(stage_io, error));
     }
     let verified = match stage_io.reverify_with_closure(&plan, &metadata, &closure, Vec::new()) {
@@ -3564,6 +3635,149 @@ impl StageTreeDigest {
 }
 
 #[cfg(target_os = "linux")]
+type MaterializationEntry = (PathBuf, File, Metadata);
+
+#[cfg(target_os = "linux")]
+fn open_materialization_entry(root: &File, relative: &Path) -> Result<File, LocalMcpAdapterError> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
+
+    if relative
+        .components()
+        .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    openat2(
+        root,
+        relative,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_XDEV,
+    )
+    .map(File::from)
+    .map_err(|_| LocalMcpAdapterError::StageLayout)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_materialization_metadata(
+    metadata: &Metadata,
+    root: &Metadata,
+    directory_owner: u32,
+) -> Result<(), LocalMcpAdapterError> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.dev() != root.dev() {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    if metadata.is_dir() {
+        verify_stage_directory_metadata(metadata, directory_owner)?;
+        if metadata.gid() != root.gid() {
+            return Err(LocalMcpAdapterError::StagePermissions);
+        }
+    } else if metadata.is_file() {
+        // Only ownership may differ after npm's SRI-verified extraction.
+        verify_stage_file_metadata(metadata, metadata.uid())?;
+        if metadata.len() > MAX_STAGE_FILE_BYTES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+    } else {
+        return Err(LocalMcpAdapterError::StageLayout);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+const fn validate_materialization_budget(
+    count: usize,
+    total: u64,
+) -> Result<(), LocalMcpAdapterError> {
+    if count > MAX_STAGE_ENTRIES || total > MAX_STAGE_BYTES {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn collect_new_materialization(
+    root: &File,
+    directory_owner: u32,
+) -> Result<Vec<MaterializationEntry>, LocalMcpAdapterError> {
+    use rustix::fs::RawDir;
+    use std::ffi::OsStr;
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root_metadata = root.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+    verify_stage_directory_metadata(&root_metadata, directory_owner)?;
+    let mut pending = vec![PathBuf::new()];
+    let mut entries = Vec::new();
+    let mut total = 0_u64;
+    while let Some(relative) = pending.pop() {
+        let directory = if relative.as_os_str().is_empty() {
+            root.try_clone()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?
+        } else {
+            open_materialization_entry(root, &relative)?
+        };
+        let before = directory
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let mut buffer = [MaybeUninit::uninit(); 4096];
+        let mut listing = RawDir::new(&directory, &mut buffer);
+        while let Some(entry) = listing.next() {
+            let entry = entry.map_err(|_| LocalMcpAdapterError::StageIo)?;
+            let name = entry.file_name().to_bytes();
+            if matches!(name, b"." | b"..") {
+                continue;
+            }
+            let child_path = relative.join(OsStr::from_bytes(name));
+            let child = open_materialization_entry(root, &child_path)?;
+            let metadata = child
+                .metadata()
+                .map_err(|_| LocalMcpAdapterError::StageIo)?;
+            validate_materialization_metadata(&metadata, &root_metadata, directory_owner)?;
+            if metadata.is_dir() {
+                pending.push(child_path.clone());
+            } else {
+                total = total
+                    .checked_add(metadata.len())
+                    .ok_or(LocalMcpAdapterError::StageBounds)?;
+            }
+            entries.push((child_path, child, metadata));
+            validate_materialization_budget(entries.len(), total)?;
+        }
+        let after = directory
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if directory_metadata_changed(&before, &after) {
+            return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+        }
+    }
+    let after = root.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+    if directory_metadata_changed(&root_metadata, &after) {
+        return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+    }
+    Ok(entries)
+}
+
+#[cfg(target_os = "linux")]
+fn verify_materialization_identity(
+    root: &File,
+    relative: &Path,
+    held: &File,
+    before: &Metadata,
+) -> Result<(), LocalMcpAdapterError> {
+    let rebound = open_materialization_entry(root, relative)?;
+    for file in [held, &rebound] {
+        let after = file.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if directory_metadata_changed(before, &after) {
+            return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn hash_stage_tree(
     stage_root: &Path,
     stage_fd: &File,
@@ -4265,6 +4479,20 @@ pub trait LocalMcpStageIo {
 
     fn discard_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError>;
 
+    /// Test adapters have no physical materialization. Fixed production IO overrides this.
+    fn normalize_new_materialization(
+        &mut self,
+        _plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError> {
+        if cfg!(test) {
+            Ok(())
+        } else {
+            Err(LocalMcpAdapterError::StageMismatch(
+                "materialization_hook_missing",
+            ))
+        }
+    }
+
     fn materialize_exact_artifact(
         &mut self,
         plan: &LocalMcpStagePlan,
@@ -4651,7 +4879,9 @@ where
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
-pub struct FixedFilesystemLocalMcpStageIo;
+pub struct FixedFilesystemLocalMcpStageIo {
+    created_stage: Option<(String, File)>,
+}
 
 #[cfg(target_os = "linux")]
 fn fixed_tar_environment() -> BTreeMap<&'static str, &'static str> {
@@ -5341,6 +5571,9 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
         use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
 
         validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        if self.created_stage.is_some() {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
         let staging_fd = open_stage_root(Path::new(STAGING_ROOT), 0)?;
         let version_fd = if let Ok(fd) = openat2(
             &staging_fd,
@@ -5401,7 +5634,83 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
             registry_package_key(PACKAGE_NAME)?,
             Mode::from_raw_mode(0o700),
         )
-        .map_err(|_| LocalMcpAdapterError::StageLayout)
+        .map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        self.created_stage = Some((plan.stage_id().to_string(), stage_fd));
+        Ok(())
+    }
+
+    fn normalize_new_materialization(
+        &mut self,
+        plan: &LocalMcpStagePlan,
+    ) -> Result<(), LocalMcpAdapterError> {
+        use rustix::fs::fchown;
+        use rustix::process::{Gid, Uid};
+        use std::os::unix::fs::MetadataExt;
+
+        validate_fixed_stage_plan(plan).map_err(|_| LocalMcpAdapterError::StageLayout)?;
+        let (stage_id, held) = self
+            .created_stage
+            .as_ref()
+            .ok_or(LocalMcpAdapterError::StageLayout)?;
+        if stage_id != plan.stage_id() {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        let version = open_fixed_version_directory(plan)?;
+        if version
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?
+            .gid()
+            != 0
+        {
+            return Err(LocalMcpAdapterError::StagePermissions);
+        }
+        let current = open_materialization_entry(&version, Path::new(plan.stage_id()))?;
+        let original = held.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let metadata = current
+            .metadata()
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if original.dev() != metadata.dev()
+            || original.ino() != metadata.ino()
+            || metadata.gid() != 0
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+        }
+        let entries = collect_new_materialization(held, 0)?;
+        // Complete validation precedes the first ownership change. Each held file
+        // is also rebound through the same root immediately before mutation.
+        for (relative, file, before) in &entries {
+            verify_materialization_identity(held, relative, file, before)?;
+        }
+        for (relative, file, before) in &entries {
+            verify_materialization_identity(held, relative, file, before)?;
+            if before.is_file() && (before.uid() != 0 || before.gid() != 0) {
+                let rebound_root =
+                    open_materialization_entry(&version, Path::new(plan.stage_id()))?;
+                let rebound_metadata = rebound_root
+                    .metadata()
+                    .map_err(|_| LocalMcpAdapterError::StageIo)?;
+                if directory_metadata_changed(&metadata, &rebound_metadata) {
+                    return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+                }
+                fchown(file, Some(Uid::ROOT), Some(Gid::ROOT))
+                    .map_err(|_| LocalMcpAdapterError::StagePermissions)?;
+                let after = file.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?;
+                verify_stage_file_metadata(&after, 0)?;
+                if after.gid() != 0
+                    || before.dev() != after.dev()
+                    || before.ino() != after.ino()
+                    || before.mode() != after.mode()
+                    || before.len() != after.len()
+                    || before.mtime() != after.mtime()
+                    || before.mtime_nsec() != after.mtime_nsec()
+                {
+                    return Err(LocalMcpAdapterError::StageMismatch("stage_changed"));
+                }
+            }
+        }
+        self.created_stage = None;
+        Ok(())
     }
 
     fn discard_stage(&mut self, plan: &LocalMcpStagePlan) -> Result<(), LocalMcpAdapterError> {
@@ -7912,6 +8221,57 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn staged_npm_live_or_unknown_group_never_discards_new_uuid() {
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+
+        let bytes = b"bounded test tarball bytes".to_vec();
+        let mut raw = metadata_value("2.69.2");
+        raw["dist.integrity"] = json!(format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha512::digest(&bytes))
+        ));
+        let mut manifest = raw.clone();
+        manifest["name"] = json!(PACKAGE_NAME);
+        for code in [
+            "npm_group_still_present",
+            "npm_group_absence_unknown",
+            "stage_io_failed",
+            "npm_command_timeout",
+            "archive_listing_timeout",
+            "registry_manifest_timeout",
+            "artifact_extract_timeout",
+        ] {
+            // Calls1/2 resolve metadata before creation. Calls3..7 are both
+            // selected pack/cache pairs and ci, all after UUID creation.
+            for call in 3..=7 {
+                let mut runner = MockCommandRunner {
+                    metadata: serde_json::to_vec(&raw).unwrap(),
+                    failure: Some((call, code)),
+                    ..MockCommandRunner::default()
+                };
+                let mut io = MockStageIo {
+                    packed_artifact: Some(TrustedLocalMcpArtifact {
+                        version: "2.69.2".to_string(),
+                        bytes: bytes.clone(),
+                        manifest: Some(manifest.clone()),
+                    }),
+                    ..MockStageIo::default()
+                };
+                let error = stage_exact_local_mcp_with("2.69.2", &mut runner, &mut io)
+                    .expect_err("unsettled npm group must refuse stage completion");
+                assert_eq!(error.code(), code, "call {call}");
+                assert_eq!(runner.calls.len(), call);
+                assert_eq!(io.calls.first(), Some(&"create"));
+                assert!(!io.calls.contains(&"discard"), "{code} call {call}");
+                assert!(!io.calls.contains(&"reverify"));
+                assert!(io.persisted_receipt.is_none());
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn staged_plan_returns_redacted_receipt_through_command_and_stage_seams() {
         use base64::Engine;
         use sha2::{Digest, Sha512};
@@ -8372,6 +8732,135 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn materialization_collection_retains_identity_and_strict_directory_control() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let path = tempfile::tempdir().unwrap().keep();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(path.join("file"), b"synthetic materialization").unwrap();
+        fs::set_permissions(path.join("file"), fs::Permissions::from_mode(0o600)).unwrap();
+        let root = File::open(&path).unwrap();
+        let owner = root.metadata().unwrap().uid();
+        let entries = collect_new_materialization(&root, owner).unwrap();
+        assert_eq!(entries.len(), 1);
+        let (relative, held, before) = &entries[0];
+        verify_materialization_identity(&root, relative, held, before).unwrap();
+        assert!(collect_new_materialization(&root, owner.wrapping_add(1)).is_err());
+        assert!(verify_stage_file_metadata(before, owner.wrapping_add(1)).is_err());
+        // Collection deliberately permits a file's extraction owner; production
+        // mutation is not exercised here and still requires the sealed created stage.
+        validate_materialization_metadata(before, &root.metadata().unwrap(), owner).unwrap();
+        fs::write(path.join("file"), b"changed materialization").unwrap();
+        assert!(verify_materialization_identity(&root, relative, held, before).is_err());
+        let changed = held.metadata().unwrap();
+        fs::rename(path.join("file"), path.join("retained-original-file")).unwrap();
+        fs::write(path.join("file"), b"replacement materialization").unwrap();
+        assert!(verify_materialization_identity(&root, relative, held, &changed).is_err());
+        let mut io = FixedFilesystemLocalMcpStageIo::default();
+        let plan = local_mcp_stage_plan("2.91.0").unwrap();
+        assert!(io.normalize_new_materialization(&plan).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn materialization_collection_refuses_links_modes_mounts_and_file_bounds() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let path = tempfile::tempdir().unwrap().keep();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(path.join("file"), b"synthetic").unwrap();
+        fs::set_permissions(path.join("file"), fs::Permissions::from_mode(0o600)).unwrap();
+        let root = File::open(&path).unwrap();
+        let owner = root.metadata().unwrap().uid();
+        symlink("file", path.join("symlink")).unwrap();
+        assert!(open_materialization_entry(&root, Path::new("symlink")).is_err());
+        assert!(
+            validate_materialization_metadata(
+                &fs::symlink_metadata(path.join("symlink")).unwrap(),
+                &root.metadata().unwrap(),
+                owner,
+            )
+            .is_err()
+        );
+        assert!(open_materialization_entry(&root, Path::new("../outside")).is_err());
+        assert!(collect_new_materialization(&root, owner).is_err());
+        fs::hard_link(path.join("file"), path.join("hardlink")).unwrap();
+        let linked = File::open(path.join("file")).unwrap().metadata().unwrap();
+        assert!(
+            validate_materialization_metadata(&linked, &root.metadata().unwrap(), owner).is_err()
+        );
+        let huge = File::create(path.join("huge")).unwrap();
+        huge.set_len(MAX_STAGE_FILE_BYTES + 1).unwrap();
+        huge.set_permissions(fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert!(
+            validate_materialization_metadata(
+                &huge.metadata().unwrap(),
+                &root.metadata().unwrap(),
+                owner
+            )
+            .is_err()
+        );
+        huge.set_len(0).unwrap();
+        huge.set_permissions(fs::Permissions::from_mode(0o622))
+            .unwrap();
+        assert!(
+            validate_materialization_metadata(
+                &huge.metadata().unwrap(),
+                &root.metadata().unwrap(),
+                owner
+            )
+            .is_err()
+        );
+        huge.set_permissions(fs::Permissions::from_mode(0o4600))
+            .unwrap();
+        assert!(
+            validate_materialization_metadata(
+                &huge.metadata().unwrap(),
+                &root.metadata().unwrap(),
+                owner
+            )
+            .is_err()
+        );
+        let filesystem = File::open("/").unwrap();
+        // /proc is an existing different mount; no namespace or mount operation.
+        assert!(open_materialization_entry(&filesystem, Path::new("proc")).is_err());
+    }
+
+    #[test]
+    fn materialization_cleanup_preserves_closed_primary_and_secondary_codes() {
+        let error = LocalMcpAdapterError::StageCleanup {
+            primary_code: LocalMcpAdapterError::StagePermissions.code(),
+            cleanup_code: LocalMcpAdapterError::StageIo.code(),
+        };
+        assert_eq!(error.code(), "stage_permissions_invalid");
+        assert_eq!(
+            error.to_string(),
+            "local n8n-mcp update adapter failed: stage_permissions_invalid; cleanup: stage_io_failed"
+        );
+        assert!(validate_materialization_budget(MAX_STAGE_ENTRIES, MAX_STAGE_BYTES).is_ok());
+        assert!(validate_materialization_budget(MAX_STAGE_ENTRIES + 1, 0).is_err());
+        assert!(validate_materialization_budget(0, MAX_STAGE_BYTES + 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_requires_observed_npm_group_absence() {
+        assert!(classify_npm_group_absence(Err(rustix::io::Errno::SRCH)).is_ok());
+        assert_eq!(
+            classify_npm_group_absence(Ok(())).unwrap_err().code(),
+            "npm_group_still_present"
+        );
+        for error in [rustix::io::Errno::PERM, rustix::io::Errno::IO] {
+            assert_eq!(
+                classify_npm_group_absence(Err(error)).unwrap_err().code(),
+                "npm_group_absence_unknown"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn staged_lock_integrity_mismatch_fails_closed() {
         let (_root, plan, metadata, owner) = staged_fixture();
         let mismatched_lock = json!({
@@ -8784,11 +9273,17 @@ mod tests {
     struct MockCommandRunner {
         metadata: Vec<u8>,
         calls: Vec<Vec<String>>,
+        failure: Option<(usize, &'static str)>,
     }
 
     impl LocalMcpCommandRunner for MockCommandRunner {
         fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
             self.calls.push(command.args.clone());
+            if let Some((call, code)) = self.failure {
+                if self.calls.len() == call {
+                    return Err(LocalMcpAdapterError::StageMismatch(code));
+                }
+            }
             if command.args.first().map(String::as_str) == Some("view") {
                 if command
                     .args

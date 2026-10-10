@@ -192,6 +192,7 @@ struct RegistryPackageMetadata {
     registry_tarball_url: String,
     engine_requirement: Option<String>,
     lifecycle_scripts_digest: String,
+    inert_overrides_digest: Option<String>,
     dependencies: BTreeMap<String, String>,
     optional_dependencies: BTreeMap<String, String>,
     peer_dependencies: BTreeMap<String, String>,
@@ -601,7 +602,7 @@ fn registry_metadata_string<'a>(value: &'a Value, dotted_key: &str) -> Option<&'
 
 fn parse_peer_dependencies_meta(
     value: Option<&Value>,
-    peers: &BTreeMap<String, String>,
+    _peers: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, bool>, LocalMcpAdapterError> {
     let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(BTreeMap::new());
@@ -620,11 +621,9 @@ fn parse_peer_dependencies_meta(
         .iter()
         .map(|(name, entry)| {
             validate_package_name(name)?;
-            if !peers.contains_key(name) {
-                return Err(LocalMcpAdapterError::InvalidMetadata(
-                    "peer_dependencies_meta_unknown",
-                ));
-            }
+            // npm Arborist applies annotations only to declared peer edges.
+            // Preserve well-formed orphan metadata for canonical lock equality;
+            // dependency_edges still iterates peer_dependencies, never this map.
             let entry = entry
                 .as_object()
                 .ok_or(LocalMcpAdapterError::InvalidMetadata(
@@ -681,6 +680,40 @@ fn parse_platform_constraints(value: Option<&Value>) -> Result<Vec<String>, Loca
             Ok(value.to_ascii_lowercase())
         })
         .collect()
+}
+
+fn inert_dependency_overrides_digest(
+    package_name: &str,
+    value: Option<&Value>,
+) -> Result<Option<String>, LocalMcpAdapterError> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    // Published dependency overrides are inert: only the install project owns
+    // npm override rules. Keep the existing root-package refusal unchanged.
+    if package_name == PACKAGE_NAME {
+        return Err(LocalMcpAdapterError::InvalidMetadata(
+            "registry_dependency_closure_invalid",
+        ));
+    }
+    let object = value
+        .as_object()
+        .ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "dependency_overrides_invalid",
+        ))?;
+    if object.len() > 512 {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    // Only the witnessed flat package -> registry range form is supported.
+    // These values are bound for archive equality, never applied as edges.
+    for (name, spec) in object {
+        validate_package_name(name)?;
+        let spec = spec.as_str().ok_or(LocalMcpAdapterError::InvalidMetadata(
+            "dependency_overrides_invalid",
+        ))?;
+        validate_registry_dependency_spec(spec)?;
+    }
+    canonical_digest(value).map(Some)
 }
 
 fn registry_package_metadata(
@@ -764,9 +797,10 @@ fn registry_package_metadata(
         ));
     }
     let lifecycle_scripts_digest = canonical_digest(&lifecycle_scripts)?;
-    // These fields can alter the package source or the selected tree and are
-    // intentionally unsupported. Reject them before any tarball is fetched.
-    for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
+    let inert_overrides_digest =
+        inert_dependency_overrides_digest(package_name, object.get("overrides"))?;
+    // Bundling can alter the package source and selected tree; still refuse it.
+    for field in ["bundleDependencies", "bundledDependencies"] {
         if object.get(field).is_some_and(|entry| !entry.is_null()) {
             return Err(LocalMcpAdapterError::InvalidMetadata(
                 "registry_dependency_closure_invalid",
@@ -780,6 +814,7 @@ fn registry_package_metadata(
         registry_tarball_url: tarball.to_string(),
         engine_requirement,
         lifecycle_scripts_digest,
+        inert_overrides_digest,
         dependencies,
         optional_dependencies,
         peer_dependencies,
@@ -973,12 +1008,204 @@ fn resolve_registry_dependency_closure<R: LocalMcpCommandRunner>(
     }
     let packages = packages.into_values().collect::<Vec<_>>();
     edges.sort_by(|left, right| closure_edge_sort_key(left).cmp(&closure_edge_sort_key(right)));
-    let digest = registry_closure_digest(&packages, &edges)?;
-    Ok(RegistryClosure {
-        packages,
-        edges,
-        digest,
-    })
+    reconcile_registry_peer_contexts(
+        root,
+        RegistryClosure {
+            packages,
+            edges,
+            digest: String::new(),
+        },
+    )
+}
+
+fn peer_provider_for_occurrences<'a>(
+    closure: &'a RegistryClosure,
+    records: &serde_json::Map<String, Value>,
+    edge: &RegistryClosureEdge,
+) -> Result<&'a RegistryPackageMetadata, LocalMcpAdapterError> {
+    let original = closure_package_for_identity(
+        closure,
+        &edge.dependency_name,
+        &edge.target_version,
+        &edge.target_integrity,
+        &edge.target_registry_tarball_url,
+    )
+    .ok_or(LocalMcpAdapterError::StageMismatch(
+        "registry_peer_identity_mismatch",
+    ))?;
+    if !dependency_spec_allows_version(&edge.dependency_spec, &original.version) {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_peer_identity_mismatch",
+        ));
+    }
+    let mut agreed: Option<&RegistryPackageMetadata> = None;
+    for (path, record) in records {
+        if path.is_empty()
+            || validate_lock_package_key(path)? != edge.source_package_name
+            || record.get("version").and_then(Value::as_str) != Some(edge.source_version.as_str())
+        {
+            continue;
+        }
+        let provider = if let Some(key) =
+            resolve_lock_dependency_key(path, &edge.dependency_name, records, "peerDependencies")
+        {
+            let candidate_record = &records[&key];
+            let candidate = closure
+                .packages
+                .iter()
+                .find(|candidate| {
+                    candidate.package_name == edge.dependency_name
+                        && registry_lock_package_record(candidate) == *candidate_record
+                })
+                .ok_or(LocalMcpAdapterError::StageMismatch(
+                    "registry_peer_identity_mismatch",
+                ))?;
+            if !dependency_spec_allows_version(&edge.dependency_spec, &candidate.version) {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "registry_peer_shadow_incompatible",
+                ));
+            }
+            candidate
+        } else {
+            // Only the original pinned selection can occupy a demonstrably
+            // empty peer slot. Final generated-lock verification is mandatory.
+            frozen_lock_dependency_path(
+                records,
+                path,
+                &edge.dependency_name,
+                original,
+                "peerDependencies",
+            )?;
+            original
+        };
+        if agreed.is_some_and(|previous| previous != provider) {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_context_conflict",
+            ));
+        }
+        agreed = Some(provider);
+    }
+    // Peer-only importers are checked at their actual final occurrences by
+    // the unchanged builder and full verifier; no global range search here.
+    Ok(agreed.unwrap_or(original))
+}
+
+fn prune_registry_closure(
+    root: &LocalMcpRegistryMetadata,
+    closure: &mut RegistryClosure,
+) -> Result<(), LocalMcpAdapterError> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![(PACKAGE_NAME.to_string(), root.version.clone())];
+    while let Some(key) = pending.pop() {
+        if !reachable.insert(key.clone()) {
+            continue;
+        }
+        if reachable.len() > MAX_REGISTRY_CLOSURE_PACKAGES {
+            return Err(LocalMcpAdapterError::StageBounds);
+        }
+        for edge in &closure.edges {
+            if edge.source_package_name == key.0 && edge.source_version == key.1 {
+                pending.push((edge.dependency_name.clone(), edge.target_version.clone()));
+            }
+        }
+    }
+    closure.packages.retain(|package| {
+        reachable.contains(&(package.package_name.clone(), package.version.clone()))
+    });
+    closure.edges.retain(|edge| {
+        reachable.contains(&(
+            edge.source_package_name.clone(),
+            edge.source_version.clone(),
+        ))
+    });
+    closure.packages.sort_by(|left, right| {
+        (&left.package_name, &left.version).cmp(&(&right.package_name, &right.version))
+    });
+    closure
+        .edges
+        .sort_by(|left, right| closure_edge_sort_key(left).cmp(&closure_edge_sort_key(right)));
+    Ok(())
+}
+
+fn reconcile_registry_peer_contexts(
+    root: &LocalMcpRegistryMetadata,
+    mut closure: RegistryClosure,
+) -> Result<RegistryClosure, LocalMcpAdapterError> {
+    if closure.packages.len() > MAX_REGISTRY_CLOSURE_PACKAGES
+        || closure.edges.len() > MAX_REGISTRY_CLOSURE_EDGES
+    {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    let mut identities = BTreeSet::new();
+    for package in &closure.packages {
+        if !identities.insert((&package.package_name, &package.version)) {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_identity_mismatch",
+            ));
+        }
+    }
+    let root_package = closure
+        .packages
+        .iter()
+        .find(|package| package.package_name == PACKAGE_NAME && package.version == root.version)
+        .ok_or(LocalMcpAdapterError::StageMismatch(
+            "registry_peer_identity_mismatch",
+        ))?;
+    let mut ordinary = closure.clone();
+    ordinary
+        .edges
+        .retain(|edge| edge.dependency_kind != "peerDependencies");
+    ordinary
+        .edges
+        .sort_by(|left, right| closure_edge_sort_key(left).cmp(&closure_edge_sort_key(right)));
+    let ordinary_lock = build_frozen_install_lock(root_package, &ordinary)?;
+    let records = ordinary_lock["packages"]
+        .as_object()
+        .ok_or(LocalMcpAdapterError::StageLayout)?;
+    let mut reconciled = closure.edges.clone();
+    for edge in &mut reconciled {
+        if edge.dependency_kind == "peerDependencies" {
+            let provider = peer_provider_for_occurrences(&closure, records, edge)?;
+            edge.target_version.clone_from(&provider.version);
+            edge.target_integrity.clone_from(&provider.integrity);
+            edge.target_registry_tarball_url
+                .clone_from(&provider.registry_tarball_url);
+        }
+    }
+    closure.edges = reconciled;
+    prune_registry_closure(root, &mut closure)?;
+    let root_package = closure
+        .packages
+        .iter()
+        .find(|package| package.package_name == PACKAGE_NAME && package.version == root.version)
+        .ok_or(LocalMcpAdapterError::StageMismatch(
+            "registry_peer_identity_mismatch",
+        ))?;
+    let lock = build_frozen_install_lock(root_package, &closure)?;
+    // Logical generated-lock validation only: these are in-memory directory
+    // keys, never a claim of a materialized or qualified package tree.
+    let tree = StageTreeDigest {
+        digest: String::new(),
+        entry_count: 0,
+        total_bytes: 0,
+        directories: lock["packages"]
+            .as_object()
+            .ok_or(LocalMcpAdapterError::StageLayout)?
+            .keys()
+            .filter(|key| !key.is_empty())
+            .cloned()
+            .collect(),
+        files: BTreeMap::new(),
+    };
+    validate_installed_package_lock_with_closure(
+        &lock,
+        root,
+        &root.version,
+        &tree,
+        Some(&closure),
+    )?;
+    closure.digest = registry_closure_digest(&closure.packages, &closure.edges)?;
+    Ok(closure)
 }
 
 pub fn snapshot_from_registry_metadata(
@@ -1336,10 +1563,10 @@ where
     let root_value = select_registry_view_value(PACKAGE_NAME, version, &value)?;
     let metadata = parse_registry_metadata(&root_value)?;
     validate_registry_metadata(&metadata)?;
-    // Resolve every dependency range to one concrete registry metadata record
-    // before creating the stage. This is deterministic (highest matching
-    // semver, then integrity/tarball tie-breakers), and rejects source or
-    // graph features npm could otherwise fetch or reinterpret during install.
+    // Initially select highest matching registry versions with deterministic
+    // integrity/tarball tie-breakers, then bind peers to verified visible
+    // importer contexts before the final digest and stage creation. Reject
+    // ambiguous contexts and source/graph features npm could reinterpret.
     let closure = resolve_registry_dependency_closure(command_runner, &root_value, &metadata)?;
     stage_io.create_empty_stage(&plan)?;
     let cleanup =
@@ -1955,9 +2182,12 @@ fn validate_installed_package_lock_with_closure(
                 .ok_or(LocalMcpAdapterError::StageMismatch(
                     "registry_dependency_closure_invalid",
                 ))?;
-                let Some(dependency_key) =
-                    resolve_lock_dependency_key(&package_key, &edge.dependency_name, packages)
-                else {
+                let Some(dependency_key) = resolve_lock_dependency_key(
+                    &package_key,
+                    &edge.dependency_name,
+                    packages,
+                    &edge.dependency_kind,
+                ) else {
                     if optional_edge_omission_is_allowed(edge, target) {
                         continue;
                     }
@@ -2000,10 +2230,20 @@ fn validate_installed_package_lock_with_closure(
             }
         } else {
             for (dependency_name, dependency_spec) in lock_record_dependencies(record)? {
+                let kind = if record
+                    .get("peerDependencies")
+                    .and_then(Value::as_object)
+                    .is_some_and(|peers| peers.contains_key(&dependency_name))
+                {
+                    "peerDependencies"
+                } else {
+                    "dependencies"
+                };
                 let dependency_key =
-                    resolve_lock_dependency_key(&package_key, &dependency_name, packages).ok_or(
-                        LocalMcpAdapterError::StageMismatch("lock_dependency_missing"),
-                    )?;
+                    resolve_lock_dependency_key(&package_key, &dependency_name, packages, kind)
+                        .ok_or(LocalMcpAdapterError::StageMismatch(
+                            "lock_dependency_missing",
+                        ))?;
                 let dependency_record = packages
                     .get(&dependency_key)
                     .and_then(Value::as_object)
@@ -2285,21 +2525,24 @@ fn resolve_lock_dependency_key(
     package_key: &str,
     dependency_name: &str,
     packages: &serde_json::Map<String, Value>,
+    dependency_kind: &str,
 ) -> Option<String> {
-    let mut base = package_key;
-    loop {
-        let candidate = format!("{base}/node_modules/{dependency_name}");
+    validate_lock_package_key(package_key).ok()?;
+    validate_package_name(dependency_name).ok()?;
+    let mut base = match dependency_kind {
+        "peerDependencies" => package_parent_path(package_key),
+        "dependencies" | "optionalDependencies" => Some(package_key),
+        _ => return None,
+    };
+    while let Some(parent) = base {
+        let candidate = format!("{parent}/node_modules/{dependency_name}");
         if packages.contains_key(&candidate) {
             return Some(candidate);
         }
-        base = base
-            .rsplit_once("/node_modules/")
-            .map_or("", |(parent, _)| parent);
-        if base.is_empty() {
-            let candidate = format!("node_modules/{dependency_name}");
-            return packages.contains_key(&candidate).then_some(candidate);
-        }
+        base = package_parent_path(parent);
     }
+    let candidate = format!("node_modules/{dependency_name}");
+    packages.contains_key(&candidate).then_some(candidate)
 }
 
 fn closure_package_for_edge<'a>(
@@ -2399,13 +2642,52 @@ fn registry_lock_package_record(package: &RegistryPackageMetadata) -> Value {
     Value::Object(record)
 }
 
+fn frozen_lock_reuse_slot(
+    record: &Value,
+    expected_record: &Value,
+    candidate: String,
+) -> Result<String, LocalMcpAdapterError> {
+    if record == expected_record {
+        Ok(candidate)
+    } else {
+        Err(LocalMcpAdapterError::StageMismatch(
+            "registry_lock_placement_conflict",
+        ))
+    }
+}
+
 fn frozen_lock_dependency_path(
     records: &serde_json::Map<String, Value>,
     source_path: &str,
     dependency_name: &str,
     target: &RegistryPackageMetadata,
+    dependency_kind: &str,
 ) -> Result<String, LocalMcpAdapterError> {
-    let mut base = Some(source_path);
+    validate_lock_package_key(source_path)?;
+    validate_package_name(dependency_name)?;
+    if dependency_name != target.package_name
+        || !matches!(
+            dependency_kind,
+            "dependencies" | "optionalDependencies" | "peerDependencies"
+        )
+    {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_lock_placement_invalid",
+        ));
+    }
+    let peer = dependency_kind == "peerDependencies";
+    let private_slot = format!("{source_path}/node_modules/{dependency_name}");
+    if private_slot.len() > 4096 {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
+    validate_lock_package_key(&private_slot)?;
+    let expected_record = registry_lock_package_record(target);
+    // A peer must resolve beside/above its importer, never inside it.
+    let mut base = if peer {
+        package_parent_path(source_path)
+    } else {
+        Some(source_path)
+    };
     while let Some(path) = base {
         let candidate = format!("{path}/node_modules/{dependency_name}");
         if let Some(record) = records.get(&candidate) {
@@ -2413,11 +2695,42 @@ fn frozen_lock_dependency_path(
                 LocalMcpAdapterError::StageMismatch("registry_lock_placement_invalid"),
             )?;
             if version == target.version {
-                return Ok(candidate);
+                #[cfg(test)]
+                if record != &expected_record {
+                    tests::capture_lock_failure(
+                        "identity_mismatch",
+                        source_path,
+                        target,
+                        dependency_kind,
+                        Some(record),
+                        &candidate,
+                    );
+                }
+                return frozen_lock_reuse_slot(record, &expected_record, candidate);
             }
-            return Err(LocalMcpAdapterError::StageMismatch(
-                "registry_lock_placement_conflict",
-            ));
+            // Nearest ancestor version shadows every higher slot. Ordinary
+            // dependencies may use an empty private slot; a contradictory
+            // own slot and any conflicting peer remain fail-closed.
+            return if !peer && path != source_path {
+                Ok(private_slot)
+            } else {
+                #[cfg(test)]
+                tests::capture_lock_failure(
+                    if peer {
+                        "peer_shadow"
+                    } else {
+                        "private_conflict"
+                    },
+                    source_path,
+                    target,
+                    dependency_kind,
+                    Some(record),
+                    &candidate,
+                );
+                Err(LocalMcpAdapterError::StageMismatch(
+                    "registry_lock_placement_conflict",
+                ))
+            };
         }
         base = package_parent_path(path);
     }
@@ -2427,11 +2740,35 @@ fn frozen_lock_dependency_path(
             LocalMcpAdapterError::StageMismatch("registry_lock_placement_invalid"),
         )?;
         if version == target.version {
-            return Ok(candidate);
+            #[cfg(test)]
+            if record != &expected_record {
+                tests::capture_lock_failure(
+                    "identity_mismatch",
+                    source_path,
+                    target,
+                    dependency_kind,
+                    Some(record),
+                    &candidate,
+                );
+            }
+            return frozen_lock_reuse_slot(record, &expected_record, candidate);
         }
-        return Err(LocalMcpAdapterError::StageMismatch(
-            "registry_lock_placement_conflict",
-        ));
+        return if peer {
+            #[cfg(test)]
+            tests::capture_lock_failure(
+                "peer_shadow",
+                source_path,
+                target,
+                dependency_kind,
+                Some(record),
+                &candidate,
+            );
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_lock_placement_conflict",
+            ))
+        } else {
+            Ok(private_slot)
+        };
     }
     Ok(candidate)
 }
@@ -2440,11 +2777,18 @@ fn build_frozen_install_lock(
     root: &RegistryPackageMetadata,
     closure: &RegistryClosure,
 ) -> Result<Value, LocalMcpAdapterError> {
+    if closure.packages.len() > MAX_REGISTRY_CLOSURE_PACKAGES
+        || closure.edges.len() > MAX_REGISTRY_CLOSURE_EDGES
+    {
+        return Err(LocalMcpAdapterError::StageBounds);
+    }
     let root_path = format!("node_modules/{PACKAGE_NAME}");
     let mut records =
         serde_json::Map::from_iter([(root_path.clone(), registry_lock_package_record(root))]);
     let mut pending = vec![(root_path, root.clone())];
     let mut expanded = BTreeSet::new();
+    let mut expanded_edges = 0usize;
+    let mut importer_bindings = BTreeMap::<(String, String), &RegistryPackageMetadata>::new();
     while let Some((source_path, source)) = pending.pop() {
         if !expanded.insert(source_path.clone()) {
             continue;
@@ -2452,6 +2796,12 @@ fn build_frozen_install_lock(
         for edge in closure.edges.iter().filter(|edge| {
             edge.source_package_name == source.package_name && edge.source_version == source.version
         }) {
+            expanded_edges = expanded_edges
+                .checked_add(1)
+                .ok_or(LocalMcpAdapterError::StageBounds)?;
+            if expanded_edges > MAX_REGISTRY_CLOSURE_EDGES {
+                return Err(LocalMcpAdapterError::StageBounds);
+            }
             let target = closure
                 .packages
                 .iter()
@@ -2464,9 +2814,41 @@ fn build_frozen_install_lock(
                 .ok_or(LocalMcpAdapterError::StageMismatch(
                     "registry_dependency_closure_invalid",
                 ))?;
-            let target_path =
-                frozen_lock_dependency_path(&records, &source_path, &edge.dependency_name, target)?;
+            let binding = (source_path.clone(), edge.dependency_name.clone());
+            if importer_bindings
+                .get(&binding)
+                .is_some_and(|previous| *previous != target)
+            {
+                #[cfg(test)]
+                {
+                    let previous_record = importer_bindings
+                        .get(&binding)
+                        .map(|previous| registry_lock_package_record(previous));
+                    tests::capture_lock_failure(
+                        "importer_binding",
+                        &source_path,
+                        target,
+                        &edge.dependency_kind,
+                        previous_record.as_ref(),
+                        &format!("{source_path}/node_modules/{}", edge.dependency_name),
+                    );
+                }
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "registry_lock_placement_conflict",
+                ));
+            }
+            importer_bindings.insert(binding, target);
+            let target_path = frozen_lock_dependency_path(
+                &records,
+                &source_path,
+                &edge.dependency_name,
+                target,
+                &edge.dependency_kind,
+            )?;
             if !records.contains_key(&target_path) {
+                if records.len() >= MAX_REGISTRY_CLOSURE_PACKAGES {
+                    return Err(LocalMcpAdapterError::StageBounds);
+                }
                 records.insert(target_path.clone(), registry_lock_package_record(target));
                 pending.push((target_path, target.clone()));
             }
@@ -4102,7 +4484,17 @@ fn validate_selected_registry_manifest(
             "registry_manifest_mismatch",
         ));
     }
-    for field in ["bundleDependencies", "bundledDependencies", "overrides"] {
+    let inert_overrides_digest =
+        inert_dependency_overrides_digest(&metadata.package_name, object.get("overrides"))
+            .map_err(|_| {
+                LocalMcpAdapterError::StageMismatch("registry_manifest_metadata_unsupported")
+            })?;
+    if inert_overrides_digest != metadata.inert_overrides_digest {
+        return Err(LocalMcpAdapterError::StageMismatch(
+            "registry_manifest_mismatch",
+        ));
+    }
+    for field in ["bundleDependencies", "bundledDependencies"] {
         if object.get(field).is_some_and(|entry| !entry.is_null()) {
             return Err(LocalMcpAdapterError::StageMismatch(
                 "registry_manifest_metadata_unsupported",
@@ -5265,6 +5657,54 @@ impl LocalMcpStageIo for FixedFilesystemLocalMcpStageIo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    thread_local! {
+        static LOCK_FAILURE: std::cell::RefCell<Option<Value>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn capture_lock_failure(
+        reason: &'static str,
+        source_path: &str,
+        target: &RegistryPackageMetadata,
+        kind: &str,
+        observed: Option<&Value>,
+        path: &str,
+    ) {
+        if !matches!(
+            reason,
+            "peer_shadow" | "private_conflict" | "importer_binding" | "identity_mismatch"
+        ) || validate_lock_package_key(source_path).is_err()
+            || validate_lock_package_key(path).is_err()
+            || validate_package_name(&target.package_name).is_err()
+            || validate_exact_npm_version(&target.version).is_err()
+            || !matches!(
+                kind,
+                "dependencies" | "optionalDependencies" | "peerDependencies"
+            )
+        {
+            return;
+        }
+        let observed_version = observed
+            .and_then(|record| record.get("version"))
+            .and_then(Value::as_str)
+            .filter(|version| validate_exact_npm_version(version).is_ok());
+        let witness = json!({"reason":reason,"sourcePath":source_path,
+            "dependencyName":target.package_name,"kind":kind,"targetVersion":target.version,
+            "observedVersion":observed_version,"path":path});
+        if serde_json::to_vec(&witness).is_ok_and(|bytes| bytes.len() <= 16 * 1024) {
+            LOCK_FAILURE.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(witness);
+                }
+            });
+        }
+    }
+
+    fn take_lock_failure() -> Option<Value> {
+        LOCK_FAILURE.with(|slot| slot.borrow_mut().take())
+    }
     use crate::update::ToolImpact;
     use crate::update::{
         BackendError, DecisionLedger, DetectionOutcome, OwnerPrincipal, ReviewDecision,
@@ -6580,6 +7020,110 @@ mod tests {
         assert!(registry_package_metadata("optional-package", &raw).is_err());
     }
 
+    fn orphan_debug_metadata() -> Value {
+        // Retained public debug@4.4.3 registry witness, not a fabricated peer.
+        json!({
+            "version":"4.4.3",
+            "dist.integrity":"sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
+            "dist.tarball":"https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
+            "engines":{"node":">=6.0"},
+            "dependencies":{"ms":"^2.1.3"},
+            "peerDependenciesMeta":{"supports-color":{"optional":true}}
+        })
+    }
+
+    #[test]
+    fn orphan_peer_metadata_preserves_debug_closure_and_canonical_lock() {
+        let raw = orphan_debug_metadata();
+        let selected = registry_package_metadata("debug", &raw).expect("real orphan annotation");
+        assert!(selected.peer_dependencies_meta["supports-color"]);
+        assert!(selected.peer_dependencies.is_empty());
+        let edges = selected.dependency_edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].name, "ms");
+        assert_eq!(edges[0].spec, "^2.1.3");
+        assert_eq!(edges[0].kind, RegistryDependencyKind::Required);
+        let record = registry_lock_package_record(&selected);
+        validate_lock_record_against_selected(record.as_object().unwrap(), &selected)
+            .expect("canonical orphan metadata retained in lock");
+        let mut wrong = record;
+        wrong["peerDependenciesMeta"] = json!({});
+        assert!(
+            validate_lock_record_against_selected(wrong.as_object().unwrap(), &selected).is_err()
+        );
+
+        let mut root = metadata_value("2.91.0");
+        root["dependencies"] = json!({"debug":"^4.4.3"});
+        let root_metadata = parse_registry_metadata(&root).expect("root pins");
+        let mut runner = OfflineClosureRunner {
+            outputs: BTreeMap::from([
+                ("debug@^4.4.3".into(), serde_json::to_vec(&raw).unwrap()),
+                (
+                    "ms@^2.1.3".into(),
+                    serde_json::to_vec(&json!({
+                        "version":"2.1.3","dist.integrity":INTEGRITY,
+                        "dist.tarball":"https://registry.npmjs.org/ms/-/ms-2.1.3.tgz"
+                    }))
+                    .unwrap(),
+                ),
+            ]),
+            requests: Vec::new(),
+            missing: None,
+        };
+        let closure = resolve_registry_dependency_closure(&mut runner, &root, &root_metadata)
+            .expect("actual debug to ms resolver");
+        assert_eq!(closure.packages.len(), 3);
+        assert_eq!(closure.edges.len(), 2);
+        assert_eq!(runner.requests, ["debug@^4.4.3", "ms@^2.1.3"]);
+        assert!(
+            closure
+                .edges
+                .iter()
+                .all(|edge| edge.dependency_name != "supports-color")
+        );
+        assert_eq!(
+            closure.digest,
+            registry_closure_digest(&closure.packages, &closure.edges).unwrap()
+        );
+    }
+
+    #[test]
+    fn orphan_peer_annotations_remain_closed_and_declared_edges_keep_optionality() {
+        let peers = BTreeMap::from([("declared".into(), "^1.0.0".into())]);
+        let meta = json!({"orphan":{"optional":true},"declared":{"optional":false}});
+        assert_eq!(
+            parse_peer_dependencies_meta(Some(&meta), &peers)
+                .unwrap()
+                .len(),
+            2
+        );
+        for entry in [
+            json!({"optional":"true"}),
+            json!({"optional":null}),
+            json!({"optional":true,"extra":false}),
+            json!(true),
+        ] {
+            assert!(parse_peer_dependencies_meta(Some(&json!({"orphan":entry})), &peers).is_err());
+        }
+        assert!(parse_peer_dependencies_meta(Some(&json!({"../bad":{}})), &peers).is_err());
+        let oversized: serde_json::Map<String, Value> = (0..513)
+            .map(|index| (format!("package-{index}"), json!({"optional":true})))
+            .collect();
+        assert!(parse_peer_dependencies_meta(Some(&Value::Object(oversized)), &peers).is_err());
+        let mut raw = orphan_debug_metadata();
+        raw["peerDependencies"] = json!({"required-peer":"^1.0.0","optional-peer":"^2.0.0"});
+        raw["peerDependenciesMeta"]["optional-peer"] = json!({"optional":true});
+        let parsed = registry_package_metadata("debug", &raw).unwrap();
+        let edges = parsed.dependency_edges();
+        assert!(edges.iter().any(|edge| edge.name == "required-peer"
+            && edge.kind == RegistryDependencyKind::Peer
+            && !edge.optional));
+        assert!(edges.iter().any(|edge| edge.name == "optional-peer"
+            && edge.kind == RegistryDependencyKind::Peer
+            && edge.optional));
+        assert!(!edges.iter().any(|edge| edge.name == "supports-color"));
+    }
+
     #[test]
     fn frozen_lock_platform_constraints_require_strict_two_way_equality() {
         let selected = registry_package_metadata(
@@ -6670,6 +7214,592 @@ mod tests {
         );
         assert_eq!(packages["node_modules/zod"]["integrity"], INTEGRITY);
         assert_eq!(packages[""]["dependencies"][PACKAGE_NAME], "2.69.2");
+    }
+
+    fn lock_test_package(
+        name: &str,
+        version: &str,
+        dependencies: &Value,
+    ) -> RegistryPackageMetadata {
+        let basename = name.rsplit('/').next().unwrap();
+        registry_package_metadata(
+            name,
+            &json!({
+                "version":version,"dist.integrity":INTEGRITY,
+                "dist.tarball":format!("https://registry.npmjs.org/{name}/-/{basename}-{version}.tgz"),
+                "dependencies":dependencies
+            }),
+        )
+        .unwrap()
+    }
+
+    fn lock_test_edge(
+        source: &RegistryPackageMetadata,
+        target: &RegistryPackageMetadata,
+    ) -> RegistryClosureEdge {
+        RegistryClosureEdge {
+            source_package_name: source.package_name.clone(),
+            source_version: source.version.clone(),
+            dependency_name: target.package_name.clone(),
+            dependency_spec: target.version.clone(),
+            dependency_kind: "dependencies".into(),
+            optional: false,
+            target_version: target.version.clone(),
+            target_integrity: target.integrity.clone(),
+            target_registry_tarball_url: target.registry_tarball_url.clone(),
+        }
+    }
+
+    fn lock_multiversion_fixture() -> (RegistryPackageMetadata, RegistryClosure) {
+        // Observed mime-types versions; fixture importer names/SRIs are synthetic.
+        let root = lock_test_package(
+            PACKAGE_NAME,
+            "2.91.0",
+            &json!({"consumer-two":"1.0.0","consumer-three":"1.0.0"}),
+        );
+        let two = lock_test_package("consumer-two", "1.0.0", &json!({"mime-types":"2.1.35"}));
+        let three = lock_test_package("consumer-three", "1.0.0", &json!({"mime-types":"3.0.2"}));
+        let mime_two = lock_test_package("mime-types", "2.1.35", &json!({}));
+        let mime_three = lock_test_package("mime-types", "3.0.2", &json!({}));
+        let edges = vec![
+            lock_test_edge(&root, &two),
+            lock_test_edge(&root, &three),
+            lock_test_edge(&two, &mime_two),
+            lock_test_edge(&three, &mime_three),
+        ];
+        let closure = RegistryClosure {
+            packages: vec![root.clone(), two, three, mime_two, mime_three],
+            edges,
+            digest: "blake3-256:synthetic-fixture".into(),
+        };
+        (root, closure)
+    }
+
+    #[test]
+    fn registry_peer_context_witness_retargets_visible_hono_and_prunes_maximum() {
+        let (metadata, closure) = peer_hono_fixture();
+        let reconciled = reconcile_registry_peer_contexts(&metadata, closure.clone()).unwrap();
+        let peer = reconciled
+            .edges
+            .iter()
+            .find(|edge| edge.dependency_kind == "peerDependencies")
+            .unwrap();
+        assert_eq!(peer.target_version, "4.13.13");
+        assert_eq!(peer.target_integrity, INTEGRITY);
+        assert_eq!(
+            peer.target_registry_tarball_url,
+            "https://registry.npmjs.org/hono/-/hono-4.13.13.tgz"
+        );
+        assert_eq!(reconciled.packages.len(), 3);
+        assert_eq!(reconciled.edges.len(), 3);
+        assert!(
+            !reconciled
+                .packages
+                .iter()
+                .any(|package| package.version == "5.0.0-rc.0")
+        );
+        assert_eq!(
+            reconciled.digest,
+            registry_closure_digest(&reconciled.packages, &reconciled.edges).unwrap()
+        );
+        let mut permuted = closure;
+        permuted.packages.reverse();
+        permuted.edges.reverse();
+        assert_eq!(
+            reconcile_registry_peer_contexts(&metadata, permuted).unwrap(),
+            reconciled
+        );
+    }
+
+    fn peer_hono_fixture() -> (LocalMcpRegistryMetadata, RegistryClosure) {
+        // Public witnessed hono versions/range; importer version/SRIs synthetic.
+        let mut value = metadata_value("2.91.0");
+        value["dependencies"] = json!({"@hono/node-server":"1.0.0","hono":"4.13.13"});
+        let metadata = parse_registry_metadata(&value).unwrap();
+        let root = registry_package_metadata(PACKAGE_NAME, &value).unwrap();
+        let mut importer = lock_test_package("@hono/node-server", "1.0.0", &json!({}));
+        importer
+            .peer_dependencies
+            .insert("hono".into(), "^4 || ^5.0.0-0".into());
+        let visible = lock_test_package("hono", "4.13.13", &json!({}));
+        let maximum = lock_test_package("hono", "5.0.0-rc.0", &json!({}));
+        let mut peer = lock_test_edge(&importer, &maximum);
+        peer.dependency_kind = "peerDependencies".into();
+        peer.dependency_spec = "^4 || ^5.0.0-0".into();
+        let edges = vec![
+            lock_test_edge(&root, &importer),
+            lock_test_edge(&root, &visible),
+            peer,
+        ];
+        (
+            metadata,
+            RegistryClosure {
+                packages: vec![root, importer, visible, maximum],
+                edges,
+                digest: String::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn registry_peer_context_refuses_shadow_and_full_identity_drift() {
+        let (_, closure) = peer_hono_fixture();
+        let root = &closure.packages[0];
+        let mut ordinary = closure.clone();
+        ordinary
+            .edges
+            .retain(|edge| edge.dependency_kind != "peerDependencies");
+        let mut lock = build_frozen_install_lock(root, &ordinary).unwrap();
+        let peer = closure
+            .edges
+            .iter()
+            .find(|edge| edge.dependency_kind == "peerDependencies")
+            .unwrap();
+        let records = lock["packages"].as_object_mut().unwrap();
+        let mut incompatible = peer.clone();
+        incompatible.dependency_spec = "^5.0.0-0".into();
+        assert!(matches!(
+            peer_provider_for_occurrences(&closure, records, &incompatible),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_shadow_incompatible"
+            ))
+        ));
+        records.get_mut("node_modules/hono").unwrap()["integrity"] = json!("IDENTITY-CANARY");
+        assert!(matches!(
+            peer_provider_for_occurrences(&closure, records, peer),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_identity_mismatch"
+            ))
+        ));
+        records.remove("node_modules/hono");
+        assert_eq!(
+            peer_provider_for_occurrences(&closure, records, peer)
+                .unwrap()
+                .version,
+            "5.0.0-rc.0"
+        );
+        let mut missing = peer.clone();
+        missing.target_integrity = "MISSING-PIN-CANARY".into();
+        let mut missing_closure = closure.clone();
+        missing_closure.edges = vec![missing.clone()];
+        assert!(peer_provider_for_occurrences(&missing_closure, records, &missing).is_err());
+    }
+
+    #[test]
+    fn registry_peer_context_empty_slot_uses_only_original_pin_and_rejects_duplicate_metadata() {
+        let (mut metadata, mut closure) = peer_hono_fixture();
+        metadata.dependencies.remove("hono");
+        closure.packages[0].dependencies.remove("hono");
+        closure.edges.retain(|edge| {
+            edge.source_package_name != PACKAGE_NAME || edge.dependency_name != "hono"
+        });
+        let reconciled = reconcile_registry_peer_contexts(&metadata, closure.clone()).unwrap();
+        let peer = reconciled
+            .edges
+            .iter()
+            .find(|edge| edge.dependency_kind == "peerDependencies")
+            .unwrap();
+        assert_eq!(peer.target_version, "5.0.0-rc.0");
+        assert!(
+            !reconciled
+                .packages
+                .iter()
+                .any(|package| package.version == "4.13.13")
+        );
+        let mut duplicate = closure.packages[3].clone();
+        duplicate.engine_requirement = Some("IDENTITY-CANARY".into());
+        closure.packages.push(duplicate);
+        assert!(matches!(
+            reconcile_registry_peer_contexts(&metadata, closure),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_identity_mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn registry_peer_context_repeated_importer_disagreement_refuses() {
+        let mut value = metadata_value("2.91.0");
+        value["dependencies"] =
+            json!({"consumer-two":"1.0.0","consumer-three":"1.0.0","shared":"2.0.0"});
+        let metadata = parse_registry_metadata(&value).unwrap();
+        let root = registry_package_metadata(PACKAGE_NAME, &value).unwrap();
+        let two = lock_test_package(
+            "consumer-two",
+            "1.0.0",
+            &json!({"hono":"4.13.13","shared":"1.0.0"}),
+        );
+        let three = lock_test_package(
+            "consumer-three",
+            "1.0.0",
+            &json!({"hono":"5.0.0-rc.0","shared":"1.0.0"}),
+        );
+        let mut shared = lock_test_package("shared", "1.0.0", &json!({}));
+        shared
+            .peer_dependencies
+            .insert("hono".into(), "^4 || ^5.0.0-0".into());
+        let blocker = lock_test_package("shared", "2.0.0", &json!({}));
+        let four = lock_test_package("hono", "4.13.13", &json!({}));
+        let five = lock_test_package("hono", "5.0.0-rc.0", &json!({}));
+        let mut peer = lock_test_edge(&shared, &five);
+        peer.dependency_kind = "peerDependencies".into();
+        peer.dependency_spec = "^4 || ^5.0.0-0".into();
+        let edges = vec![
+            lock_test_edge(&root, &two),
+            lock_test_edge(&root, &three),
+            lock_test_edge(&root, &blocker),
+            lock_test_edge(&two, &shared),
+            lock_test_edge(&three, &shared),
+            lock_test_edge(&two, &four),
+            lock_test_edge(&three, &five),
+            peer,
+        ];
+        let closure = RegistryClosure {
+            packages: vec![root, two, three, shared, blocker, four, five],
+            edges,
+            digest: String::new(),
+        };
+        assert!(matches!(
+            reconcile_registry_peer_contexts(&metadata, closure),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_peer_context_conflict"
+            ))
+        ));
+    }
+
+    #[test]
+    fn frozen_lock_multiversion_importers_resolve_exact_private_and_global_slots() {
+        let (root, closure) = lock_multiversion_fixture();
+        let lock = build_frozen_install_lock(&root, &closure).expect("declared multiversion lock");
+        let records = lock["packages"].as_object().unwrap();
+        assert_eq!(records.len(), 6);
+        for (importer, version) in [("consumer-two", "2.1.35"), ("consumer-three", "3.0.2")] {
+            let key = resolve_lock_dependency_key(
+                &format!("node_modules/{importer}"),
+                "mime-types",
+                records,
+                "dependencies",
+            )
+            .unwrap();
+            assert_eq!(records[&key]["version"], version);
+            assert_eq!(records[&key]["integrity"], INTEGRITY);
+            assert_eq!(
+                records[&key]["resolved"],
+                format!("https://registry.npmjs.org/mime-types/-/mime-types-{version}.tgz")
+            );
+        }
+        let mut reversed = closure;
+        reversed.edges.reverse();
+        let lock = build_frozen_install_lock(&root, &reversed).expect("reverse traversal");
+        let records = lock["packages"].as_object().unwrap();
+        let key = resolve_lock_dependency_key(
+            "node_modules/consumer-two",
+            "mime-types",
+            records,
+            "dependencies",
+        )
+        .unwrap();
+        assert_eq!(records[&key]["version"], "2.1.35");
+    }
+
+    #[test]
+    fn frozen_lock_peer_verifier_rejects_own_slot_and_accepts_sibling() {
+        let mut value = metadata_value("2.91.0");
+        value["dependencies"] = json!({"consumer":"1.0.0"});
+        let metadata = parse_registry_metadata(&value).unwrap();
+        let root = registry_package_metadata(PACKAGE_NAME, &value).unwrap();
+        let mut consumer = lock_test_package("consumer", "1.0.0", &json!({}));
+        consumer
+            .peer_dependencies
+            .insert("mime-types".into(), "2.1.35".into());
+        let target = lock_test_package("mime-types", "2.1.35", &json!({}));
+        let mut peer = lock_test_edge(&consumer, &target);
+        peer.dependency_kind = "peerDependencies".into();
+        let closure = RegistryClosure {
+            packages: vec![root.clone(), consumer.clone(), target],
+            edges: vec![lock_test_edge(&root, &consumer), peer],
+            digest: "blake3-256:synthetic-fixture".into(),
+        };
+        let mut lock = build_frozen_install_lock(&root, &closure).unwrap();
+        let tree_for = |lock: &Value| StageTreeDigest {
+            digest: "blake3-256:synthetic-tree".into(),
+            entry_count: 0,
+            total_bytes: 0,
+            directories: lock["packages"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .filter(|key| !key.is_empty())
+                .cloned()
+                .collect(),
+            files: BTreeMap::new(),
+        };
+        assert!(
+            validate_installed_package_lock_with_closure(
+                &lock,
+                &metadata,
+                "2.91.0",
+                &tree_for(&lock),
+                Some(&closure),
+            )
+            .is_ok()
+        );
+        let records = lock["packages"].as_object_mut().unwrap();
+        let sibling = records.remove("node_modules/mime-types").unwrap();
+        records.insert(
+            "node_modules/consumer/node_modules/mime-types".into(),
+            sibling,
+        );
+        assert_eq!(
+            resolve_lock_dependency_key(
+                "node_modules/consumer",
+                "mime-types",
+                records,
+                "peerDependencies",
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_lock_dependency_key(
+                "node_modules/consumer",
+                "mime-types",
+                records,
+                "dependencies",
+            )
+            .as_deref(),
+            Some("node_modules/consumer/node_modules/mime-types")
+        );
+        assert!(matches!(
+            validate_installed_package_lock_with_closure(
+                &lock,
+                &metadata,
+                "2.91.0",
+                &tree_for(&lock),
+                Some(&closure),
+            ),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "lock_dependency_missing"
+            ))
+        ));
+    }
+
+    #[test]
+    fn frozen_lock_lookup_keeps_ordinary_shadow_and_closed_kinds() {
+        let mut records = serde_json::Map::from_iter([(
+            "node_modules/consumer/node_modules/mime-types".into(),
+            registry_lock_package_record(&lock_test_package("mime-types", "2.1.35", &json!({}))),
+        )]);
+        records.insert(
+            "node_modules/mime-types".into(),
+            registry_lock_package_record(&lock_test_package("mime-types", "3.0.2", &json!({}))),
+        );
+        for (kind, expected) in [
+            (
+                "dependencies",
+                "node_modules/consumer/node_modules/mime-types",
+            ),
+            (
+                "optionalDependencies",
+                "node_modules/consumer/node_modules/mime-types",
+            ),
+            ("peerDependencies", "node_modules/mime-types"),
+        ] {
+            let key =
+                resolve_lock_dependency_key("node_modules/consumer", "mime-types", &records, kind);
+            assert_eq!(key.as_deref(), Some(expected));
+        }
+        assert_eq!(
+            resolve_lock_dependency_key("node_modules/consumer", "mime-types", &records, "unknown",),
+            None
+        );
+    }
+
+    #[test]
+    fn frozen_lock_failure_witness_preserves_first_actual_boundary_without_records() {
+        let _ = take_lock_failure();
+        let (root, mut closure) = lock_multiversion_fixture();
+        closure
+            .edges
+            .push(lock_test_edge(&closure.packages[1], &closure.packages[4]));
+        assert!(build_frozen_install_lock(&root, &closure).is_err());
+        let first = LOCK_FAILURE.with(|slot| slot.borrow().clone()).unwrap();
+        assert_eq!(first["reason"], "importer_binding");
+        let target = &closure.packages[3];
+        for (kind, path, reason) in [
+            ("peerDependencies", "node_modules/mime-types", "peer_shadow"),
+            (
+                "dependencies",
+                "node_modules/consumer-two/node_modules/mime-types",
+                "private_conflict",
+            ),
+        ] {
+            let records = serde_json::Map::from_iter([(
+                path.into(),
+                registry_lock_package_record(&closure.packages[4]),
+            )]);
+            assert!(
+                frozen_lock_dependency_path(
+                    &records,
+                    "node_modules/consumer-two",
+                    "mime-types",
+                    target,
+                    kind,
+                )
+                .is_err()
+            );
+            assert_eq!(take_lock_failure(), Some(first.clone()));
+            assert!(
+                frozen_lock_dependency_path(
+                    &records,
+                    "node_modules/consumer-two",
+                    "mime-types",
+                    target,
+                    kind,
+                )
+                .is_err()
+            );
+            assert_eq!(take_lock_failure().unwrap()["reason"], reason);
+            LOCK_FAILURE.with(|slot| *slot.borrow_mut() = Some(first.clone()));
+        }
+        let _ = take_lock_failure();
+        let mut altered = registry_lock_package_record(target);
+        altered["integrity"] = json!("RAW-RECORD-CANARY");
+        let records = serde_json::Map::from_iter([("node_modules/mime-types".into(), altered)]);
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                "node_modules/consumer-two",
+                "mime-types",
+                target,
+                "dependencies",
+            )
+            .is_err()
+        );
+        let witness = take_lock_failure().unwrap();
+        assert_eq!(witness["reason"], "identity_mismatch");
+        assert!(!serde_json::to_string(&witness).unwrap().contains("CANARY"));
+    }
+
+    #[test]
+    fn frozen_lock_conflicting_same_importer_peer_and_identity_are_refused() {
+        let (root, mut closure) = lock_multiversion_fixture();
+        closure
+            .edges
+            .push(lock_test_edge(&closure.packages[1], &closure.packages[4]));
+        assert!(matches!(
+            build_frozen_install_lock(&root, &closure),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "registry_lock_placement_conflict"
+            ))
+        ));
+        let target = &closure.packages[3];
+        let mut records = serde_json::Map::from_iter([(
+            "node_modules/mime-types".into(),
+            registry_lock_package_record(&closure.packages[4]),
+        )]);
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                "node_modules/consumer-two",
+                "mime-types",
+                target,
+                "peerDependencies"
+            )
+            .is_err()
+        );
+        records.insert(
+            "node_modules/consumer-two/node_modules/mime-types".into(),
+            registry_lock_package_record(&closure.packages[4]),
+        );
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                "node_modules/consumer-two",
+                "mime-types",
+                target,
+                "dependencies"
+            )
+            .is_err()
+        );
+        records.clear();
+        let mut altered = registry_lock_package_record(target);
+        altered["integrity"] = json!("CANARY");
+        records.insert("node_modules/mime-types".into(), altered);
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                "node_modules/consumer-two",
+                "mime-types",
+                target,
+                "dependencies"
+            )
+            .is_err()
+        );
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                "node_modules/consumer-two",
+                "../mime-types",
+                target,
+                "dependencies"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frozen_lock_nested_ancestor_conflict_uses_private_slot_only_for_non_peers() {
+        let target = lock_test_package("mime-types", "2.1.35", &json!({}));
+        let other = lock_test_package("mime-types", "3.0.2", &json!({}));
+        let records = serde_json::Map::from_iter([(
+            "node_modules/parent/node_modules/mime-types".into(),
+            registry_lock_package_record(&other),
+        )]);
+        let source = "node_modules/parent/node_modules/child";
+        assert_eq!(
+            frozen_lock_dependency_path(&records, source, "mime-types", &target, "dependencies")
+                .unwrap(),
+            "node_modules/parent/node_modules/child/node_modules/mime-types"
+        );
+        assert!(
+            frozen_lock_dependency_path(
+                &records,
+                source,
+                "mime-types",
+                &target,
+                "peerDependencies"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn frozen_lock_cycles_and_generated_record_path_bounds_are_checked() {
+        let (root, mut closure) = lock_multiversion_fixture();
+        closure.packages[3]
+            .dependencies
+            .insert("consumer-two".into(), "1.0.0".into());
+        closure
+            .edges
+            .push(lock_test_edge(&closure.packages[3], &closure.packages[1]));
+        let lock = build_frozen_install_lock(&root, &closure).expect("exact ancestor cycle reused");
+        assert_eq!(lock["packages"].as_object().unwrap().len(), 6);
+        let source = format!("{}node_modules/a", "node_modules/a/".repeat(272));
+        assert!(matches!(
+            frozen_lock_dependency_path(
+                &serde_json::Map::new(),
+                &source,
+                "mime-types",
+                &closure.packages[3],
+                "dependencies"
+            ),
+            Err(LocalMcpAdapterError::StageBounds)
+        ));
+        closure.edges = vec![closure.edges[0].clone(); MAX_REGISTRY_CLOSURE_EDGES + 1];
+        assert!(matches!(
+            build_frozen_install_lock(&root, &closure),
+            Err(LocalMcpAdapterError::StageBounds)
+        ));
     }
 
     #[cfg(target_os = "linux")]
@@ -6796,6 +7926,94 @@ mod tests {
         let mut published_override = manifest;
         published_override["overrides"] = json!({});
         assert!(validate_selected_registry_manifest(&published_override, &metadata).is_err());
+    }
+
+    #[test]
+    fn dependency_only_sdk_overrides_are_inert_and_archive_bound() {
+        // Witnessed SDK@1.30.0 flat overrides shape; synthetic artifact SRI.
+        let raw = json!({
+            "name":"@modelcontextprotocol/sdk","version":"1.30.0",
+            "dist.integrity":INTEGRITY,
+            "dist.tarball":"https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.30.0.tgz",
+            "dependencies":{"qs":"^6.14.0"},"overrides":{"qs":"6.14.1"}
+        });
+        let selected = registry_package_metadata("@modelcontextprotocol/sdk", &raw)
+            .expect("inert dependency overrides");
+        assert!(selected.inert_overrides_digest.is_some());
+        assert_eq!(selected.dependency_edges().len(), 1);
+        assert_eq!(selected.dependency_edges()[0].spec, "^6.14.0");
+        validate_selected_registry_manifest(&raw, &selected).expect("archive equality");
+        for overrides in [Value::Null, json!({}), json!({"qs":"6.14.2"})] {
+            let mut changed = raw.clone();
+            changed["overrides"] = overrides;
+            assert!(validate_selected_registry_manifest(&changed, &selected).is_err());
+        }
+        let mut root = metadata_value("2.91.0");
+        root["dependencies"] = json!({"@modelcontextprotocol/sdk":"1.30.0"});
+        let root_metadata = parse_registry_metadata(&root).unwrap();
+        let mut runner = OfflineClosureRunner {
+            outputs: BTreeMap::from([
+                (
+                    "@modelcontextprotocol/sdk@1.30.0".into(),
+                    serde_json::to_vec(&raw).unwrap(),
+                ),
+                (
+                    "qs@^6.14.0".into(),
+                    serde_json::to_vec(&json!({
+                        "version":"6.14.0","dist.integrity":INTEGRITY,
+                        "dist.tarball":"https://registry.npmjs.org/qs/-/qs-6.14.0.tgz"
+                    }))
+                    .unwrap(),
+                ),
+            ]),
+            requests: Vec::new(),
+            missing: None,
+        };
+        let closure = resolve_registry_dependency_closure(&mut runner, &root, &root_metadata)
+            .expect("actual resolver does not apply dependency override");
+        assert_eq!(closure.packages.len(), 3);
+        assert_eq!(
+            runner.requests,
+            ["@modelcontextprotocol/sdk@1.30.0", "qs@^6.14.0"]
+        );
+        assert!(closure.edges.iter().any(|edge| edge.dependency_name == "qs"
+            && edge.dependency_spec == "^6.14.0"
+            && edge.target_version == "6.14.0"));
+    }
+
+    #[test]
+    fn dependency_overrides_keep_root_bundling_and_grammar_refusals() {
+        assert!(inert_dependency_overrides_digest(PACKAGE_NAME, Some(&json!({}))).is_err());
+        assert!(
+            inert_dependency_overrides_digest(PACKAGE_NAME, Some(&json!({"qs":"6.14.1"}))).is_err()
+        );
+        for value in [
+            json!(true),
+            json!([]),
+            json!({"../bad":"1.0.0"}),
+            json!({"qs":false}),
+            json!({"qs":{".":"1.0.0"}}),
+            json!({"qs":"file:../outside"}),
+            json!({"qs":"npm:other@1.0.0"}),
+        ] {
+            assert!(inert_dependency_overrides_digest("dependency", Some(&value)).is_err());
+        }
+        let oversized = Value::Object(
+            (0..513)
+                .map(|index| (format!("dependency-{index}"), json!("1.0.0")))
+                .collect(),
+        );
+        assert!(inert_dependency_overrides_digest("dependency", Some(&oversized)).is_err());
+        assert_eq!(
+            inert_dependency_overrides_digest("dependency", None).unwrap(),
+            None
+        );
+        let mut raw = orphan_debug_metadata();
+        for field in ["bundleDependencies", "bundledDependencies"] {
+            raw[field] = json!([]);
+            assert!(registry_package_metadata("debug", &raw).is_err());
+            raw.as_object_mut().unwrap().remove(field);
+        }
     }
 
     #[test]
@@ -7431,6 +8649,268 @@ mod tests {
                 Ok(Vec::new())
             }
         }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct OfflineCorpusInput {
+        manifest_path: PathBuf,
+        manifest_sha256: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct OfflineCorpusManifest {
+        schema: String,
+        root_integrity: String,
+        root_tarball_url: String,
+        outputs: BTreeMap<String, OfflineCorpusFile>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields, rename_all = "camelCase")]
+    struct OfflineCorpusFile {
+        file: String,
+        sha256: String,
+    }
+
+    #[derive(Default)]
+    struct OfflineClosureRunner {
+        outputs: BTreeMap<String, Vec<u8>>,
+        requests: Vec<String>,
+        missing: Option<String>,
+    }
+
+    impl LocalMcpCommandRunner for OfflineClosureRunner {
+        fn run(&mut self, command: &FixedCommandSpec) -> Result<Vec<u8>, LocalMcpAdapterError> {
+            let request = command
+                .args
+                .get(1)
+                .ok_or(LocalMcpAdapterError::StageLayout)?;
+            let (name, spec) = request
+                .rsplit_once('@')
+                .ok_or(LocalMcpAdapterError::StageLayout)?;
+            if command != &npm_dependency_metadata_plan(name, spec)? {
+                return Err(LocalMcpAdapterError::StageMismatch(
+                    "offline_non_view_request",
+                ));
+            }
+            self.requests.push(request.clone());
+            if self.requests.len() > MAX_REGISTRY_CLOSURE_EDGES {
+                return Err(LocalMcpAdapterError::StageBounds);
+            }
+            if let Some(bytes) = self.outputs.get(request) {
+                Ok(bytes.clone())
+            } else {
+                self.missing = Some(request.clone());
+                Err(LocalMcpAdapterError::StageMismatch(
+                    "offline_corpus_missing_request",
+                ))
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn offline_corpus_read(
+        path: &Path,
+        expected_sha256: &str,
+    ) -> Result<Vec<u8>, LocalMcpAdapterError> {
+        use rustix::fs::{Mode, OFlags};
+        use sha2::{Digest, Sha256};
+        use std::os::unix::fs::MetadataExt;
+
+        if expected_sha256.len() != 64
+            || !expected_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !path.starts_with("/srv/dev-ssd/fcp/nqm81-35")
+            || fs::canonicalize(path).map_err(|_| LocalMcpAdapterError::StageIo)? != path
+        {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        let before = fs::symlink_metadata(path).map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if !before.is_file()
+            || before.nlink() != 1
+            || before.mode() & 0o7022 != 0
+            || before.len() > MAX_NPM_OUTPUT_BYTES as u64
+        {
+            return Err(LocalMcpAdapterError::StagePermissions);
+        }
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        let mut file = File::from(fd);
+        if file_metadata_changed(
+            &before,
+            &file.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?,
+        ) {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "offline_corpus_changed",
+            ));
+        }
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_NPM_OUTPUT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocalMcpAdapterError::StageIo)?;
+        if bytes.len() > MAX_NPM_OUTPUT_BYTES
+            || file_metadata_changed(
+                &before,
+                &file.metadata().map_err(|_| LocalMcpAdapterError::StageIo)?,
+            )
+            || file_metadata_changed(
+                &before,
+                &fs::symlink_metadata(path).map_err(|_| LocalMcpAdapterError::StageIo)?,
+            )
+            || hex::encode(Sha256::digest(&bytes)) != expected_sha256
+        {
+            return Err(LocalMcpAdapterError::StageMismatch(
+                "offline_corpus_hash_or_identity",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn offline_corpus_load(
+        input: &OfflineCorpusInput,
+    ) -> Result<(OfflineCorpusManifest, OfflineClosureRunner), LocalMcpAdapterError> {
+        let bytes = offline_corpus_read(&input.manifest_path, &input.manifest_sha256)?;
+        let manifest: OfflineCorpusManifest =
+            serde_json::from_slice(&bytes).map_err(|_| LocalMcpAdapterError::Encoding)?;
+        if manifest.schema != "fwc.n8n.offline-registry-corpus.v1"
+            || manifest.outputs.len() > MAX_REGISTRY_CLOSURE_EDGES
+            || !manifest.outputs.contains_key("n8n-mcp@2.91.0")
+        {
+            return Err(LocalMcpAdapterError::StageLayout);
+        }
+        let root = input
+            .manifest_path
+            .parent()
+            .ok_or(LocalMcpAdapterError::StageLayout)?;
+        let mut runner = OfflineClosureRunner::default();
+        let mut total = 0usize;
+        for (request, entry) in &manifest.outputs {
+            let (name, spec) = request
+                .rsplit_once('@')
+                .ok_or(LocalMcpAdapterError::StageLayout)?;
+            npm_dependency_metadata_plan(name, spec)?;
+            if entry.file.is_empty()
+                || entry.file.len() > 128
+                || !entry
+                    .file
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                || matches!(entry.file.as_str(), "." | "..")
+            {
+                return Err(LocalMcpAdapterError::StageLayout);
+            }
+            let bytes = offline_corpus_read(&root.join(&entry.file), &entry.sha256)?;
+            total = total
+                .checked_add(bytes.len())
+                .ok_or(LocalMcpAdapterError::StageBounds)?;
+            if total > 64 * 1024 * 1024 {
+                return Err(LocalMcpAdapterError::StageBounds);
+            }
+            runner.outputs.insert(request.clone(), bytes);
+        }
+        Ok((manifest, runner))
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "explicit SHA-pinned public SSD metadata corpus; offline only, no commands or staging"]
+    fn registry_closure_offline_corpus_replay() {
+        let text =
+            std::env::var("FCP_N8N_REGISTRY_CORPUS_INPUT").expect("explicit corpus input required");
+        assert!(text.len() <= 8192, "corpus input bound");
+        let input: OfflineCorpusInput = serde_json::from_str(&text).expect("closed corpus input");
+        let (manifest, mut runner) =
+            offline_corpus_load(&input).expect("all corpus SHA pins before resolver");
+        let root: Value =
+            serde_json::from_slice(&runner.outputs["n8n-mcp@2.91.0"]).expect("root npm view JSON");
+        let metadata = parse_registry_metadata(&root).expect("root native metadata parser");
+        assert_eq!(metadata.version, "2.91.0");
+        assert_eq!(metadata.integrity, manifest.root_integrity);
+        assert_eq!(metadata.registry_tarball_url, manifest.root_tarball_url);
+        let _ = take_lock_failure();
+        let result = resolve_registry_dependency_closure(&mut runner, &root, &metadata);
+        let summary = match &result {
+            Ok(closure) => {
+                let lock = closure
+                    .packages
+                    .iter()
+                    .find(|package| {
+                        package.package_name == PACKAGE_NAME && package.version == metadata.version
+                    })
+                    .ok_or(LocalMcpAdapterError::StageMismatch("offline_root_missing"))
+                    .and_then(|root| build_frozen_install_lock(root, closure));
+                let lock_digest = lock
+                    .as_ref()
+                    .ok()
+                    .map(canonical_digest)
+                    .transpose()
+                    .expect("canonical lock digest");
+                let lock_count = lock
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value["packages"].as_object().map(serde_json::Map::len));
+                json!({"scope":"offline_public_corpus","complete":lock.is_ok(),
+                    "resolverComplete":true,"lockComplete":lock.is_ok(),
+                    "lockError":lock.as_ref().err().map(LocalMcpAdapterError::code),
+                    "lockFailure":take_lock_failure(),
+                    "lockDigest":lock_digest,"lockRecordCountIncludingProject":lock_count,
+                    "digest":closure.digest,"packageCount":closure.packages.len(),"edgeCount":closure.edges.len(),
+                    "packages":closure.packages.iter().map(|package| json!({
+                        "metadata":package.closure_package(),"engineRequirement":package.engine_requirement
+                    })).collect::<Vec<_>>(),"edges":closure.edges,"requests":runner.requests})
+            }
+            Err(error) => json!({"scope":"offline_public_corpus","complete":false,
+                "resolverComplete":false,"lockComplete":null,"lockError":null,
+                "lockFailure":take_lock_failure(),
+                "lockDigest":null,"lockRecordCountIncludingProject":null,
+                "error":error.code(),"missingRequest":runner.missing,"requests":runner.requests}),
+        };
+        let bytes = serde_json::to_string(&summary).expect("public closed summary");
+        assert!(bytes.len() <= 32 * 1024 * 1024, "summary bound");
+        println!("{bytes}");
+        assert!(
+            result.is_ok(),
+            "offline resolver incomplete or rejected metadata"
+        );
+        assert_eq!(
+            summary["lockComplete"], true,
+            "offline frozen lock incomplete"
+        );
+    }
+
+    #[test]
+    fn offline_registry_runner_reports_exact_missing_request_and_refuses_execution() {
+        let mut runner = OfflineClosureRunner::default();
+        let plan = npm_dependency_metadata_plan("@scope/public-package", "^1.2.3").unwrap();
+        assert!(matches!(
+            runner.run(&plan),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "offline_corpus_missing_request"
+            ))
+        ));
+        assert_eq!(
+            runner.missing.as_deref(),
+            Some("@scope/public-package@^1.2.3")
+        );
+        assert_eq!(runner.requests, ["@scope/public-package@^1.2.3"]);
+        let mut wrong = plan;
+        wrong.program = "/bin/sh".into();
+        assert!(matches!(
+            runner.run(&wrong),
+            Err(LocalMcpAdapterError::StageMismatch(
+                "offline_non_view_request"
+            ))
+        ));
+        assert_eq!(runner.requests.len(), 1);
     }
 
     struct ClosureCommandRunner {

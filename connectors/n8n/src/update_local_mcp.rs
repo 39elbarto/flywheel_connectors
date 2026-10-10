@@ -3994,8 +3994,14 @@ fn registry_artifact_filename(
     package_name: &str,
     version: &str,
 ) -> Result<String, LocalMcpAdapterError> {
+    validate_package_name(package_name)?;
     validate_exact_npm_version(version)?;
-    let basename = package_name.rsplit('/').next().unwrap_or(package_name);
+    // npm pack names the local archive from the complete manifest name, not
+    // the registry URL's unscoped basename (libnpmpack 5.0.6, lines 45–46).
+    let basename = package_name
+        .strip_prefix('@')
+        .unwrap_or(package_name)
+        .replace('/', "-");
     Ok(format!("{basename}-{version}.tgz"))
 }
 
@@ -5928,6 +5934,78 @@ mod tests {
                 .verification_receipt_path()
                 .starts_with(&format!("{}/", plan.stage_root()))
         );
+    }
+
+    #[test]
+    fn registry_scoped_pack_filename_matches_npm_and_cache_reader() {
+        // Installed libnpmpack 5.0.6 names a pack from the manifest, removing
+        // one leading '@' and replacing the scope separator with '-'. The
+        // registry URL basename is deliberately different for scoped names.
+        let plan = local_mcp_stage_plan("2.91.0").unwrap();
+        for (name, version, filename, url) in [
+            (
+                "@cfworker/json-schema",
+                "4.1.1",
+                "cfworker-json-schema-4.1.1.tgz",
+                "https://registry.npmjs.org/@cfworker/json-schema/-/json-schema-4.1.1.tgz",
+            ),
+            (
+                "@modelcontextprotocol/sdk",
+                "1.30.0",
+                "modelcontextprotocol-sdk-1.30.0.tgz",
+                "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.30.0.tgz",
+            ),
+            (
+                "zod",
+                "3.25.0",
+                "zod-3.25.0.tgz",
+                "https://registry.npmjs.org/zod/-/zod-3.25.0.tgz",
+            ),
+            (
+                "n8n-mcp",
+                "2.91.0",
+                "n8n-mcp-2.91.0.tgz",
+                "https://registry.npmjs.org/n8n-mcp/-/n8n-mcp-2.91.0.tgz",
+            ),
+        ] {
+            assert_eq!(registry_artifact_filename(name, version).unwrap(), filename);
+            let pack = npm_registry_pack_plan(&plan, name, version, url).unwrap();
+            let destination = pack
+                .args()
+                .windows(2)
+                .find(|pair| pair[0] == "--pack-destination")
+                .unwrap();
+            let expected = Path::new(&destination[1]).join(filename);
+            assert_eq!(
+                packed_registry_artifact_path(&plan, name, version).unwrap(),
+                expected
+            );
+            let cache = npm_registry_cache_add_plan(&plan, name, version).unwrap();
+            let cache_source = if name == PACKAGE_NAME {
+                Path::new(plan.stage_root()).join(STAGE_TARBALL_RECEIPT)
+            } else {
+                expected
+            };
+            assert_eq!(cache.args()[2], cache_source.to_str().unwrap());
+            assert!(pack.args().iter().any(|arg| arg == "--ignore-scripts"));
+            assert!(cache.args().iter().any(|arg| arg == "--offline"));
+        }
+    }
+
+    #[test]
+    fn registry_scoped_pack_filename_rejects_invalid_inputs() {
+        for name in [
+            "",
+            "@scope/name/extra",
+            "../name",
+            "name with space",
+            "https://registry.npmjs.org/name",
+        ] {
+            assert!(registry_artifact_filename(name, "1.0.0").is_err());
+        }
+        for version in ["", "../1.0.0", "1.0.0/extra"] {
+            assert!(registry_artifact_filename("@scope/name", version).is_err());
+        }
     }
 
     fn npm_command_builder_suite(root: &Path) -> Vec<FixedCommandSpec> {

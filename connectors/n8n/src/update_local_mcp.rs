@@ -2991,8 +2991,17 @@ fn parse_npm_range(value: &str) -> Option<Vec<Vec<NpmComparator>>> {
                 if tokens.contains(&"-") {
                     return None;
                 }
-                for token in tokens {
-                    parse_npm_comparator_token(token, &mut output)?;
+                let mut tokens = tokens.into_iter();
+                while let Some(token) = tokens.next() {
+                    // npm trims operator/version whitespace before splitting
+                    // comparators. Consume the pair atomically; a missing or
+                    // malformed version still fails the ordinary token parser.
+                    if matches!(token, ">=" | "<=" | ">" | "<" | "=" | "^" | "~") {
+                        let comparator = format!("{token}{}", tokens.next()?);
+                        parse_npm_comparator_token(&comparator, &mut output)?;
+                    } else {
+                        parse_npm_comparator_token(token, &mut output)?;
+                    }
                 }
             }
             Some(output)
@@ -6230,6 +6239,207 @@ mod tests {
                 expected,
                 "{spec}"
             );
+        }
+    }
+
+    // Reduced public npm-view response retained as registry-stage-metadata-
+    // reproduction.stdout, SHA256 7e3d2417e6a44bd4e720d48b6efef184272cbbaa5bead06c57004ffd3e5934b7.
+    // All eight version/dist/engine/peer records are exact; lifecycle scripts
+    // are omitted because these tests exercise metadata/range selection only.
+    fn real_eight_express_rate_limit_registry_rows() -> Value {
+        json!([
+            {
+                "version": "7.1.5",
+                "dist.integrity": "sha512-/iVogxu7ueadrepw1bS0X0kaRC/U0afwiYRSLg68Ts+p4Dc85Q5QKsOnPS/QUjPMHvOJQtBDrZgvkOzf8ejUYw==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.1.5.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.2.0",
+                "dist.integrity": "sha512-T7nul1t4TNyfZMJ7pKRKkdeVJWa2CqB8NA1P8BwYaoDI5QSBZARv5oMS43J7b7I5P+4asjVXjb7ONuwDKucahg==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.2.0.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.3.0",
+                "dist.integrity": "sha512-ZPfWlcQQ1PsZonB/vqksOsBQV74z5osi/QcdoBCyKJXl/wOVjS1yRDmvkpMM52KJeLbiF2+djwVEnEgVCDdvtw==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.3.0.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.3.1",
+                "dist.integrity": "sha512-BbaryvkY4wEgDqLgD18/NSy2lDO2jTuT9Y8c1Mpx0X63Yz0sYd5zN6KPe7UvpuSVvV33T6RaE1o1IVZQjHMYgw==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.3.1.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.4.0",
+                "dist.integrity": "sha512-v1204w3cXu5gCDmAvgvzI6qjzZzoMWKnyVDk3ACgfswTQLYiGen+r8w0VnXnGMmzEN/g8fwIQ4JrFFd4ZP6ssg==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.4.0.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.4.1",
+                "dist.integrity": "sha512-KS3efpnpIDVIXopMc65EMbWbUht7qvTCdtCR2dD/IZmi9MIkopYESwyRqLgv8Pfu589+KqDqOdzJWW7AHoACeg==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.4.1.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "4 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.5.0",
+                "dist.integrity": "sha512-eB5zbQh5h+VenMPM3fh+nw1YExi5nMr6HUCR62ELSP11huvxm/Uir1H1QEyTkk5QX6A58pX6NmaTMceKZ0Eodg==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.5.0.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": "^4.11 || 5 || ^5.0.0-beta.1"}
+            },
+            {
+                "version": "7.5.1",
+                "dist.integrity": "sha512-7iN8iPMDzOMHPUYllBEsQdWVB6fPDMPqwjBaFrgr4Jgr/+okjvzAy+UHlYYL/Vs0OsOrMkwS6PJDkFlJwoxUnw==",
+                "dist.tarball": "https://registry.npmjs.org/express-rate-limit/-/express-rate-limit-7.5.1.tgz",
+                "engines": {"node": ">= 16"},
+                "peerDependencies": {"express": ">= 4.11"}
+            }
+        ])
+    }
+
+    #[test]
+    fn registry_real_eight_rows_select_whitespace_peer_candidate_without_skipping() {
+        let output = real_eight_express_rate_limit_registry_rows();
+        assert_eq!(output.as_array().unwrap().len(), 8);
+        let selected = resolve_registry_view_metadata("express-rate-limit", "^7.1.5", &output)
+            .expect("real npm peer comparator whitespace must not reject registry candidates");
+        assert_eq!(selected.version, "7.5.1");
+        assert_eq!(
+            selected.integrity,
+            output[7]["dist.integrity"].as_str().unwrap()
+        );
+        assert_eq!(
+            selected.registry_tarball_url,
+            output[7]["dist.tarball"].as_str().unwrap()
+        );
+        assert_eq!(selected.peer_dependencies["express"], ">= 4.11");
+        assert_eq!(selected.engine_requirement.as_deref(), Some(">= 16"));
+
+        let mut malformed = output;
+        malformed[0]["peerDependencies"]["express"] = json!(">= >");
+        assert!(
+            resolve_registry_view_metadata("express-rate-limit", "^7.5.0", &malformed).is_err()
+        );
+    }
+
+    #[test]
+    fn registry_real_eight_rows_preserve_all_peer_metadata_and_pins() {
+        let output = real_eight_express_rate_limit_registry_rows();
+        for row in output.as_array().unwrap() {
+            let parsed = registry_package_metadata("express-rate-limit", row)
+                .expect("every real registry row must validate before selection");
+            assert_eq!(parsed.version, row["version"].as_str().unwrap());
+            assert_eq!(parsed.integrity, row["dist.integrity"].as_str().unwrap());
+            assert_eq!(
+                parsed.registry_tarball_url,
+                row["dist.tarball"].as_str().unwrap()
+            );
+            assert_eq!(
+                parsed.peer_dependencies["express"],
+                row["peerDependencies"]["express"].as_str().unwrap()
+            );
+        }
+    }
+
+    // npm/node-semver v7.7.2 internal/re.js COMPARATORTRIM, CARETTRIM,
+    // TILDETRIM; classes/range.js normalizes these before comparator splitting.
+    #[test]
+    fn npm_comparator_whitespace_matches_compact_grammar_and_boundaries() {
+        for (spaced, compact) in [
+            (">= 4.11", ">=4.11"),
+            (">=   4.11", ">=4.11"),
+            ("> 4.11", ">4.11"),
+            ("<= 4.11", "<=4.11"),
+            ("< 4.11", "<4.11"),
+            ("= 4.11", "=4.11"),
+            ("^ 4.11", "^4.11"),
+            ("~ 4.11", "~4.11"),
+            (">= 4.11 < 5", ">=4.11 <5"),
+            (">= 4.11 || ^ 5.0.0-beta.1", ">=4.11 || ^5.0.0-beta.1"),
+            (">= 4.11 >= 4.11", ">=4.11 >=4.11"),
+        ] {
+            assert!(
+                validate_registry_dependency_spec(spaced).is_ok(),
+                "{spaced}"
+            );
+            assert_eq!(
+                parse_npm_range(spaced),
+                parse_npm_range(compact),
+                "{spaced}"
+            );
+            for version in [
+                "4.10.99",
+                "4.11.0",
+                "4.11.9",
+                "4.12.0",
+                "5.0.0",
+                "5.0.0-beta.2",
+            ] {
+                assert_eq!(
+                    dependency_spec_allows_version(spaced, version),
+                    dependency_spec_allows_version(compact, version),
+                    "{spaced} / {version}"
+                );
+            }
+        }
+        for (version, expected) in [
+            ("4.10.99", false),
+            ("4.11.0", true),
+            ("5.0.0", true),
+            ("5.0.0-beta.2", false),
+        ] {
+            assert_eq!(dependency_spec_allows_version(">= 4.11", version), expected);
+        }
+        assert!(dependency_spec_allows_version("4.11 - 5.0", "5.0.9"));
+        assert!(!dependency_spec_allows_version("4.11 - 5.0", "5.1.0"));
+        assert!(dependency_spec_allows_version(
+            ">= 5.0.0-beta.1 < 6",
+            "5.0.0-beta.2"
+        ));
+        assert!(!dependency_spec_allows_version(
+            ">= 5.0.0-beta.1 < 6",
+            "5.1.0-beta.1"
+        ));
+    }
+
+    #[test]
+    fn npm_comparator_whitespace_rejects_missing_atoms_and_non_registry_sources() {
+        for spec in [
+            ">=",
+            "<=",
+            ">",
+            "<",
+            "=",
+            "^",
+            "~",
+            ">= >",
+            ">= <=4.11",
+            ">= >=4.11",
+            "> >4.11",
+            ">> 4.11",
+            ">=4.11 <",
+            ">=4.11 || >=",
+            "4.11 -",
+            "- 5",
+            ">= || 4.11",
+            "https://example.test/package.tgz",
+            "git+https://example.test/repo",
+            "file:../pkg",
+            "npm:express@4.11",
+            "workspace:^4.11",
+        ] {
+            assert!(validate_registry_dependency_spec(spec).is_err(), "{spec}");
+            assert!(!dependency_spec_allows_version(spec, "4.11.0"), "{spec}");
         }
     }
 

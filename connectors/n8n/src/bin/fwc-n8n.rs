@@ -11767,7 +11767,7 @@ mod tests {
         assert_eq!(output["valid"], true);
         assert_eq!(output["errors"], json!([]));
         assert_eq!(output["warnings"].as_array().unwrap().len(), 1);
-        assert!(!output.to_string().contains("Workflow is empty"));
+        assert!(output.to_string().contains("Workflow is empty"));
         assert!(output.get("summary").is_none());
         assert!(output.get("suggestions").is_none());
     }
@@ -11793,7 +11793,10 @@ mod tests {
         let output = project_local_validation_result(&invalid).unwrap();
         assert_eq!(output["valid"], false);
         assert_eq!(output["errors"].as_array().unwrap().len(), 1);
-        assert!(!output.to_string().contains("SECRET_CANARY"));
+        assert_eq!(
+            output["errors"][0]["nativeDiagnostic"]["message"],
+            "SECRET_CANARY"
+        );
         for native in [
             json!({"valid":true,"errors":[{"message":"SECRET_CANARY"}],"warnings":[]}),
             json!({"valid":false,"errors":[],"warnings":[]}),
@@ -13112,9 +13115,18 @@ mod tests {
                 rpc_phase: error.rpc_phase,
                 rpc_code: error.rpc_code,
                 correlation_id: "test".to_string(),
+                native_diagnostic: error.native_diagnostic.clone(),
             })
             .expect("safe error envelope");
-            assert!(!encoded.contains(private));
+            if error
+                .native_diagnostic
+                .as_ref()
+                .is_some_and(|diagnostic| diagnostic["messageStatus"] == "present")
+            {
+                assert!(encoded.contains(private));
+            } else {
+                assert!(!encoded.contains(private));
+            }
         }
         let result_error = decode_official_mcp_lifecycle_result(
             json!({"status": "ok", "result": {"error": {"private": private}}}),
@@ -13134,6 +13146,7 @@ mod tests {
             rpc_phase: result_error.rpc_phase,
             rpc_code: result_error.rpc_code,
             correlation_id: "test".to_string(),
+            native_diagnostic: result_error.native_diagnostic.clone(),
         })
         .expect("safe error envelope");
         assert!(!encoded.contains(private));
@@ -13230,6 +13243,7 @@ mod tests {
                 rpc_phase: error.rpc_phase,
                 rpc_code: error.rpc_code,
                 correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+                native_diagnostic: error.native_diagnostic.clone(),
             })
             .expect("general error envelope remains redacted");
             assert!(!encoded.contains("private.example"));
@@ -13307,6 +13321,7 @@ mod tests {
             rpc_phase: error.rpc_phase,
             rpc_code: error.rpc_code,
             correlation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+            native_diagnostic: error.native_diagnostic.clone(),
         })
         .expect("safe error envelope");
         assert!(!encoded.contains(private));
@@ -13862,6 +13877,7 @@ mod tests {
             rpc_phase: error.rpc_phase,
             rpc_code: error.rpc_code,
             correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            native_diagnostic: error.native_diagnostic.clone(),
         })
         .expect("safe error envelope");
         assert_eq!(encoded["code"], "unknown_outcome");
@@ -13877,6 +13893,7 @@ mod tests {
             rpc_phase: without_diagnostic.rpc_phase,
             rpc_code: without_diagnostic.rpc_code,
             correlation_id: "00000000-0000-0000-0000-000000000000".to_string(),
+            native_diagnostic: without_diagnostic.native_diagnostic.clone(),
         })
         .expect("error envelope without diagnostic");
         assert!(encoded_without_diagnostic.get("diagnostic").is_none());

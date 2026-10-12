@@ -203,13 +203,14 @@ impl fmt::Debug for BridgeErrorCode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BridgeError {
     code: BridgeErrorCode,
     diagnostic: Option<&'static str>,
     correlation_id: Option<Uuid>,
     rpc_phase: Option<&'static str>,
     rpc_code: Option<i32>,
+    native_diagnostic: Option<Value>,
 }
 
 impl BridgeError {
@@ -220,6 +221,7 @@ impl BridgeError {
             correlation_id: None,
             rpc_phase: None,
             rpc_code: None,
+            native_diagnostic: None,
         }
     }
 
@@ -228,24 +230,32 @@ impl BridgeError {
         self
     }
 
-    pub const fn code(self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         self.code.as_str()
     }
 
-    pub const fn diagnostic(self) -> Option<&'static str> {
+    pub const fn diagnostic(&self) -> Option<&'static str> {
         self.diagnostic
     }
 
-    pub const fn correlation_id(self) -> Option<Uuid> {
+    pub const fn correlation_id(&self) -> Option<Uuid> {
         self.correlation_id
     }
 
-    pub const fn rpc_phase(self) -> Option<&'static str> {
+    pub const fn rpc_phase(&self) -> Option<&'static str> {
         self.rpc_phase
     }
 
-    pub const fn rpc_code(self) -> Option<i32> {
+    pub const fn rpc_code(&self) -> Option<i32> {
         self.rpc_code
+    }
+
+    pub const fn native_diagnostic(&self) -> Option<&Value> {
+        self.native_diagnostic.as_ref()
+    }
+
+    pub fn into_native_diagnostic(self) -> Option<Value> {
+        self.native_diagnostic
     }
 
     const fn with_correlation_id(mut self, correlation_id: Option<Uuid>) -> Self {
@@ -1092,11 +1102,11 @@ pub fn run_process(
         receive_once(&mut workers[1], &mut stdout_result);
         receive_once(&mut workers[STDERR_WORKER_INDEX], &mut stderr_result);
         if let Some(Err(error)) = stdin_result.as_ref() {
-            failure = Some(*error);
+            failure = Some(error.clone());
         } else if let Some(Err(error)) = stdout_result.as_ref() {
-            failure = Some(*error);
+            failure = Some(error.clone());
         } else if let Some(Err(error)) = stderr_result.as_ref() {
-            failure = Some(*error);
+            failure = Some(error.clone());
         }
         if failure.is_some()
             || (status.is_some()
@@ -1236,13 +1246,17 @@ pub fn child_failure_with_stderr(
         existing => existing.or(fallback_diagnostic),
     };
     let error = error.with_diagnostic(diagnostic);
-    child_mcp_rpc_provenance(stderr)
-        .map_or(error, |provenance| error.with_rpc_provenance(provenance))
+    if let Some(provenance) = child_mcp_rpc_provenance(stderr) {
+        error.with_rpc_provenance(provenance)
+    } else {
+        error
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn with_diagnostic(error: BridgeError, diagnostic: Option<&'static str>) -> BridgeError {
-    error.with_diagnostic(error.diagnostic().or(diagnostic))
+    let diagnostic = error.diagnostic().or(diagnostic);
+    error.with_diagnostic(diagnostic)
 }
 
 #[cfg(target_os = "linux")]
@@ -2199,18 +2213,20 @@ struct ChildFailureEnvelope {
 #[serde(deny_unknown_fields)]
 struct ChildFailureDetail {
     code: String,
+    #[serde(default, rename = "nativeDiagnostic")]
+    native_diagnostic: Option<Value>,
 }
 
 #[cfg(target_os = "linux")]
-fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
+fn parse_child_failure(bytes: &[u8]) -> Option<BridgeError> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let Ok(envelope) = ChildFailureEnvelope::deserialize(&mut deserializer) else {
-        return BridgeErrorCode::ChildFailed;
+        return None;
     };
     if deserializer.end().is_err() || envelope.kind != "error" {
-        return BridgeErrorCode::ChildFailed;
+        return None;
     }
-    match envelope.error.code.as_str() {
+    let code = match envelope.error.code.as_str() {
         "connector_not_found" => BridgeErrorCode::HostConnectorNotFound,
         "invalid_input" => BridgeErrorCode::HostInvalidInput,
         "preflight_denied" => BridgeErrorCode::HostPreflightDenied,
@@ -2227,16 +2243,34 @@ fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
         "n8n_capability_failed" => BridgeErrorCode::HostN8nCapabilityFailed,
         "n8n_invoke_failed" => BridgeErrorCode::HostN8nInvokeFailed,
         _ => BridgeErrorCode::ChildFailed,
+    };
+    let mut error = BridgeError::new(code);
+    if let Some(diagnostic) = envelope.error.native_diagnostic {
+        if code != BridgeErrorCode::HostN8nInvokeFailed
+            || diagnostic["source"] != "n8n.invocation"
+            || diagnostic["stage"] != "invoke"
+            || diagnostic["severity"] != "error"
+        {
+            return None;
+        }
+        error.native_diagnostic = Some(super::preserved_native_diagnostic(&diagnostic)?);
     }
+    Some(error)
+}
+
+#[cfg(target_os = "linux")]
+fn child_failure_code(bytes: &[u8]) -> BridgeErrorCode {
+    parse_child_failure(bytes).map_or(BridgeErrorCode::ChildFailed, |error| error.code)
 }
 
 #[cfg(target_os = "linux")]
 fn child_failure(bytes: &[u8]) -> BridgeError {
     let error = parse_fwc_n8n_error_envelope(bytes)
-        .unwrap_or_else(|| BridgeError::new(child_failure_code(bytes)));
+        .or_else(|| parse_child_failure(bytes))
+        .unwrap_or_else(|| BridgeError::new(BridgeErrorCode::ChildFailed));
     if error.code == BridgeErrorCode::HostN8nInvokeFailed && error.diagnostic.is_none() {
-        // The host deliberately redacts provider details.  If it reaches the
-        // invoke stage without a fixed stderr marker, preserve that fact as a
+        // If the host reaches the invoke stage without a fixed stderr marker,
+        // preserve that fact as a
         // bounded ambiguity label instead of inventing a provider category.
         error.with_diagnostic(Some("invoke_unknown"))
     } else {

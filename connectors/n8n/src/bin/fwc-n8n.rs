@@ -618,6 +618,8 @@ struct ErrorEnvelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     rpc_code: Option<i32>,
     correlation_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_diagnostic: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -638,13 +640,27 @@ struct ExecuteWrapperReceipt {
     observed_correlation_id: Option<String>,
 }
 
-#[derive(Debug)]
 struct AppError {
     code: &'static str,
     diagnostic: Option<&'static str>,
     correlation_id: Option<String>,
     rpc_phase: Option<&'static str>,
     rpc_code: Option<i32>,
+    native_diagnostic: Option<Value>,
+}
+
+impl fmt::Debug for AppError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AppError")
+            .field("code", &self.code)
+            .field("diagnostic", &self.diagnostic)
+            .field(
+                "native_diagnostic",
+                &self.native_diagnostic.as_ref().map(|_| "[AVAILABLE]"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppError {
@@ -655,6 +671,7 @@ impl AppError {
             correlation_id: None,
             rpc_phase: None,
             rpc_code: None,
+            native_diagnostic: None,
         }
     }
 
@@ -665,6 +682,7 @@ impl AppError {
             correlation_id: None,
             rpc_phase: None,
             rpc_code: None,
+            native_diagnostic: None,
         }
     }
 
@@ -672,6 +690,16 @@ impl AppError {
         if self.correlation_id.is_none() {
             self.correlation_id = correlation_id;
         }
+        self
+    }
+
+    fn with_native_diagnostic(mut self, diagnostic: Value) -> Self {
+        self.native_diagnostic = Some(diagnostic);
+        self
+    }
+
+    fn with_optional_native_diagnostic(mut self, diagnostic: Option<Value>) -> Self {
+        self.native_diagnostic = diagnostic;
         self
     }
 
@@ -769,6 +797,7 @@ fn error_envelope(error: &AppError, correlation_id: &str) -> ErrorEnvelope {
             .as_deref()
             .unwrap_or(correlation_id)
             .to_string(),
+        native_diagnostic: error.native_diagnostic.clone(),
     }
 }
 
@@ -2184,21 +2213,28 @@ fn local_knowledge_native_responses(response: &Value) -> Result<&[Value], AppErr
     if response["schema"] != LOCAL_RUN_ONCE_SCHEMA
         || response["provider"] != "local_mcp"
         || response["response"]["operation"] != "knowledge_query"
-        || response["response"]["result"]["status"] != "Completed"
-        || !response["response"]["result"]["teardown_error_code"].is_null()
     {
         return Err(malformed());
+    }
+    let result = &response["response"]["result"];
+    if result["status"] != "Completed" || !result["teardown_error_code"].is_null() {
+        return Err(local_provider_failure(result)?);
     }
     let responses = response["response"]["result"]["responses"]
         .as_array()
         .ok_or_else(malformed)?;
-    if responses.is_empty()
-        || responses.len() > 20
-        || responses
-            .iter()
-            .any(|response| response.get("isError").is_some_and(|value| value != false))
-    {
+    if responses.is_empty() || responses.len() > 20 {
         return Err(malformed());
+    }
+    for response in responses {
+        match response.get("isError") {
+            Some(Value::Bool(true)) => {
+                return Err(AppError::new("local_provider_failed")
+                    .with_native_diagnostic(provider_native_diagnostic(response, "tool_result")));
+            }
+            None | Some(Value::Bool(false)) => {}
+            _ => return Err(malformed()),
+        }
     }
     Ok(responses)
 }
@@ -2914,8 +2950,7 @@ fn project_catalog_display_options(value: &Value) -> Result<Value, AppError> {
     Ok(Value::Object(result))
 }
 
-/// Interpret a completed MCP validation result without exposing native text,
-/// node names, details, suggestions or transport lifecycle internals.
+/// Interpret MCP validation while preserving bounded authorized diagnostics.
 #[cfg(test)]
 fn project_local_validation_result(envelope: &Value) -> Result<Value, AppError> {
     project_local_validation_result_with_input(envelope, None)
@@ -2934,11 +2969,33 @@ fn project_local_validation_result_with_input(
     }
     let result = &envelope["response"]["result"];
     if result["status"] != "Completed" || !result["teardown_error_code"].is_null() {
-        return Err(AppError::new("local_provider_failed"));
+        return Err(local_provider_failure(result)?);
     }
     let responses = result["responses"].as_array().ok_or_else(malformed)?;
     if responses.len() != 1 {
         return Err(malformed());
+    }
+    if responses[0]["isError"] == true
+        && responses[0]["content"]
+            .as_array()
+            .is_some_and(|blocks| blocks.len() == 1 && blocks[0]["type"] == "text")
+        && responses[0]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| {
+                serde_json::from_str::<Value>(text)
+                    .ok()
+                    .is_none_or(|value| value.get("valid").is_none())
+            })
+    {
+        let diagnostic = fcp_host::project_native_diagnostic(
+            responses[0]["content"][0].get("text"),
+            None,
+            None,
+            "local_mcp.tool",
+            "validation",
+            &mut 16384,
+        );
+        return Err(AppError::new("local_provider_failed").with_native_diagnostic(diagnostic));
     }
     // A native marker is not authority. Reconstruct only the fixed signed
     // provider proof and bind it to the actual completed response metadata.
@@ -2986,6 +3043,134 @@ fn project_local_validation_result_with_input(
     });
     fcp_host::project_local_n8n_validation_with_context(&responses[0], context.as_ref())
         .map_err(|_| malformed())
+}
+
+fn provider_metadata_truncated(value: &Value) -> Option<bool> {
+    let metadata = value.as_object()?;
+    if metadata.len() != 5
+        || metadata.keys().any(|key| {
+            ![
+                "service",
+                "serviceStatus",
+                "statusCode",
+                "retryable",
+                "retryAfterMs",
+            ]
+            .contains(&key.as_str())
+        })
+        || !metadata["retryable"].is_boolean()
+        || (!metadata["statusCode"].is_null()
+            && metadata["statusCode"]
+                .as_u64()
+                .is_none_or(|code| code > u64::from(u16::MAX)))
+        || (!metadata["retryAfterMs"].is_null() && metadata["retryAfterMs"].as_u64().is_none())
+        || !matches!(
+            metadata["serviceStatus"].as_str(),
+            Some("present" | "truncated")
+        )
+        || !metadata["service"].is_string()
+        || !serde_json::to_vec(&metadata["service"]).is_ok_and(|bytes| bytes.len() <= 8194)
+    {
+        return None;
+    }
+    Some(metadata["serviceStatus"] == "truncated")
+}
+
+fn preserved_native_diagnostic(value: &Value) -> Option<Value> {
+    let object = value.as_object()?;
+    let keys = [
+        "source",
+        "stage",
+        "message",
+        "messageStatus",
+        "node",
+        "nodeStatus",
+        "details",
+        "detailsStatus",
+        "detailsTextPrefix",
+        "truncated",
+        "severity",
+        "rpcCode",
+        "providerMetadata",
+        "requestId",
+    ];
+    if object.keys().any(|key| !keys.contains(&key.as_str()))
+        || !serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= 32768)
+        || !value["truncated"].is_boolean()
+    {
+        return None;
+    }
+    for key in ["source", "stage"] {
+        if value[key].as_str().is_none_or(|text| text.len() > 64) {
+            return None;
+        }
+    }
+    let mut truncated = false;
+    for (key, status) in [("message", "messageStatus"), ("node", "nodeStatus")] {
+        match value[status].as_str()? {
+            "present" | "truncated" => {
+                if !value[key].is_string()
+                    || !serde_json::to_vec(&value[key]).is_ok_and(|bytes| bytes.len() <= 8194)
+                {
+                    return None;
+                }
+                truncated |= value[status] == "truncated";
+            }
+            "missing" | "non_text" if value[key].is_null() => {}
+            _ => return None,
+        }
+    }
+    match value["detailsStatus"].as_str()? {
+        "present"
+            if value["detailsTextPrefix"].is_null()
+                && serde_json::to_vec(&value["details"]).is_ok_and(|bytes| bytes.len() <= 8192) => {
+        }
+        "missing" | "unavailable"
+            if value["details"].is_null() && value["detailsTextPrefix"].is_null() => {}
+        "truncated"
+            if value["details"].is_null()
+                && value["detailsTextPrefix"].is_string()
+                && serde_json::to_vec(&value["detailsTextPrefix"])
+                    .is_ok_and(|bytes| bytes.len() <= 8194) =>
+        {
+            truncated = true;
+        }
+        _ => return None,
+    }
+    if let Some(metadata) = value.get("providerMetadata") {
+        truncated |= provider_metadata_truncated(metadata)?;
+    }
+    if value["truncated"] != json!(truncated)
+        || value
+            .get("requestId")
+            .is_some_and(|id| id.as_str().is_none_or(|id| id.len() > 128))
+        || value
+            .get("severity")
+            .is_some_and(|severity| !matches!(severity.as_str(), Some("error" | "warning")))
+        || value
+            .get("rpcCode")
+            .is_some_and(|code| !code.is_null() && code.as_i64().is_none())
+    {
+        return None;
+    }
+    Some(value.clone())
+}
+
+fn local_provider_failure(result: &Value) -> Result<AppError, AppError> {
+    let diagnostic = if let Some(diagnostic) = result.get("native_diagnostic") {
+        preserved_native_diagnostic(diagnostic)
+            .ok_or_else(|| AppError::new("local_provider_response_invalid"))?
+    } else {
+        fcp_host::project_native_diagnostic(
+            None,
+            None,
+            None,
+            "local_mcp.process",
+            "lifecycle",
+            &mut 16384,
+        )
+    };
+    Ok(AppError::new("local_provider_failed").with_native_diagnostic(diagnostic))
 }
 
 /// Translate the public graph contract into the fixed local JSON validator.
@@ -4042,6 +4227,7 @@ fn map_host_bridge_error(error: fwc_n8n_bridge::BridgeError, lifecycle: bool) ->
                 .correlation_id()
                 .map(|correlation_id| correlation_id.to_string()),
         )
+        .with_optional_native_diagnostic(error.into_native_diagnostic())
 }
 
 fn owned_egress_stage_diagnostic(value: Option<&str>) -> Option<&'static str> {
@@ -4192,10 +4378,45 @@ fn normalize_error_envelope(response: &Value, fallback_code: &'static str) -> Op
         .get("rpcCode")
         .and_then(Value::as_i64)
         .and_then(|code| i32::try_from(code).ok());
+    let native_diagnostic = if let Some(value) = object.get("nativeDiagnostic") {
+        let Some(value) = preserved_native_diagnostic(value) else {
+            return Some(AppError::new("provider_diagnostic_invalid"));
+        };
+        value
+    } else {
+        provider_native_diagnostic(response, "response")
+    };
     Some(
         AppError::with_diagnostic(code, diagnostic)
             .with_rpc_provenance(diagnostic, phase, rpc_code)
-            .with_correlation_id(correlation_id),
+            .with_correlation_id(correlation_id)
+            .with_native_diagnostic(native_diagnostic),
+    )
+}
+
+fn provider_native_diagnostic(value: &Value, stage: &str) -> Value {
+    let value = value.get("structuredContent").unwrap_or(value);
+    let error = value.get("error").unwrap_or(value);
+    let message = if error.is_string() {
+        Some(error)
+    } else {
+        error.get("message")
+    };
+    let message = message.or_else(|| {
+        (value["isError"] == true)
+            .then(|| value.get("content"))
+            .flatten()
+            .and_then(Value::as_array)
+            .filter(|blocks| blocks.len() == 1 && blocks[0]["type"] == "text")
+            .and_then(|blocks| blocks[0].get("text"))
+    });
+    fcp_host::project_native_diagnostic(
+        message,
+        error.get("details").or_else(|| error.get("data")),
+        error.get("node").or_else(|| error.get("nodeName")),
+        "n8n.provider",
+        stage,
+        &mut 16384,
     )
 }
 
@@ -4206,7 +4427,8 @@ fn response_result(mut response: Value, unknown_code: &'static str) -> Result<Va
     if response.get("status").and_then(Value::as_str) != Some("ok")
         || response.get("error").is_some_and(|error| !error.is_null())
     {
-        return Err(AppError::new(unknown_code));
+        return Err(AppError::new(unknown_code)
+            .with_native_diagnostic(provider_native_diagnostic(&response, "response")));
     }
     response
         .get_mut("result")
@@ -4252,11 +4474,10 @@ fn verify_lifecycle_baseline(input: &Value, state: &Value) -> Result<(), AppErro
 
 fn lifecycle_response_result(response: Value) -> Result<Value, AppError> {
     response_result(response, "unknown_outcome").map_err(|error| {
-        AppError::with_diagnostic(
-            "unknown_outcome",
-            error.diagnostic.or(Some("lifecycle_response_shape")),
-        )
-        .with_correlation_id(error.correlation_id)
+        let mut error = error;
+        error.code = "unknown_outcome";
+        error.diagnostic = error.diagnostic.or(Some("lifecycle_response_shape"));
+        error
     })
 }
 
@@ -4274,7 +4495,7 @@ fn decode_official_mcp_lifecycle_result(
     if response.get("status").and_then(Value::as_str) != Some("ok")
         || response.get("error").is_some_and(|value| !value.is_null())
     {
-        // Report only which fixed envelope slot rejected; provider text and keys stay private.
+        // Keep the fixed rejection label and the received diagnostic separately.
         let diagnostic = lifecycle_provider_error_diagnostic(&response).unwrap_or_else(|| {
             if response.get("status").and_then(Value::as_str) == Some("ok") {
                 "lifecycle_provider_error_field"
@@ -4282,7 +4503,8 @@ fn decode_official_mcp_lifecycle_result(
                 "lifecycle_provider_status_rejected"
             }
         });
-        return Err(rejection_error(Some(diagnostic)));
+        return Err(rejection_error(Some(diagnostic))
+            .with_native_diagnostic(provider_native_diagnostic(&response, "response")));
     }
     let Some(result) = response.get_mut("result").map(Value::take) else {
         return Err(shape_error());
@@ -4294,7 +4516,8 @@ fn decode_official_mcp_lifecycle_result(
     // an advisory signal only; the independent REST readback below is the
     // sole authority for lifecycle state.
     if let Some(diagnostic) = lifecycle_provider_result_rejection_diagnostic(&result) {
-        return Err(rejection_error(Some(diagnostic)));
+        return Err(rejection_error(Some(diagnostic))
+            .with_native_diagnostic(provider_native_diagnostic(&result, "tool_result")));
     }
     Ok(json!({"delivered": true}))
 }
@@ -4668,11 +4891,10 @@ fn lifecycle_state_error(error: AppError) -> AppError {
     if error.diagnostic == Some("lifecycle_provider_field_mismatch") {
         return error;
     }
-    AppError::with_diagnostic(
-        "unknown_outcome",
-        Some("lifecycle_readback_precondition_mismatch"),
-    )
-    .with_correlation_id(error.correlation_id)
+    let mut error = error;
+    error.code = "unknown_outcome";
+    error.diagnostic = Some("lifecycle_readback_precondition_mismatch");
+    error
 }
 
 fn lifecycle_error_after_provider_advisory(
@@ -4680,7 +4902,7 @@ fn lifecycle_error_after_provider_advisory(
     readback_error: AppError,
 ) -> AppError {
     provider_advisory
-        .filter(|error| error.diagnostic.is_some())
+        .filter(|error| error.diagnostic.is_some() || error.native_diagnostic.is_some())
         .unwrap_or_else(|| lifecycle_state_error(readback_error))
 }
 

@@ -1200,8 +1200,8 @@ fn unknown_validation_finding(
         "message":"Native validator finding could not be safely classified"})
 }
 
-/// Project one native local validator result without native messages, node
-/// names, suggestions, or provider transport fields.
+/// Project one native local validator result with bounded original diagnostics.
+/// Classification remains separate from the authorized original message/details.
 ///
 /// # Errors
 /// Rejects malformed envelopes and contradictory validation outcomes.
@@ -1893,7 +1893,29 @@ fn sha256_hex(text: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// Preserve native counts while projecting only closed diagnostics bound to
+fn project_validation_finding(
+    context: Option<&LocalN8nDiagnosticContext>,
+    item: &Value,
+    warning: bool,
+    budget: &mut usize,
+) -> Value {
+    let mut finding = context
+        .and_then(|ctx| ctx.finding(item, warning))
+        .unwrap_or_else(|| unknown_validation_finding(context, item, warning));
+    let mut original = crate::local_mcp::project_native_diagnostic(
+        item.get("message"),
+        item.get("details"),
+        item.get("node"),
+        "local_mcp.validation",
+        "finding",
+        budget,
+    );
+    original["severity"] = json!(if warning { "warning" } else { "error" });
+    finding["nativeDiagnostic"] = original;
+    finding
+}
+
+/// Preserve native counts and original diagnostics with classifications bound to
 /// the exact input graph. Missing/ambiguous context is explicitly unclassified.
 ///
 /// # Errors
@@ -1941,21 +1963,18 @@ pub fn project_local_n8n_validation_with_context(
                 .is_none_or(|s| s["schemaCoverageComplete"] != false)
         || errors.iter().chain(warnings).any(|item| {
             !item.is_object()
-                || item["message"]
-                    .as_str()
-                    .is_none_or(|message| message.len() > 8192)
+                || item
+                    .get("message")
+                    .is_some_and(|message| !message.is_string())
         })
     {
         return Err(malformed());
     }
-    let project = |items: &[Value], warning| {
+    let mut diagnostic_budget = 64 * 1024;
+    let mut project = |items: &[Value], warning| {
         items
             .iter()
-            .map(|item| {
-                context
-                    .and_then(|ctx| ctx.finding(item, warning))
-                    .unwrap_or_else(|| unknown_validation_finding(context, item, warning))
-            })
+            .map(|item| project_validation_finding(context, item, warning, &mut diagnostic_budget))
             .collect::<Vec<_>>()
     };
     let mut projected = json!({"valid":valid,"nativeValid":valid,"overallStatus":"incomplete",

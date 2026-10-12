@@ -16869,7 +16869,9 @@ fn accept_n8n_run_once_invoke_response(response: InvokeResponse) -> HostResult<I
             n8n_run_once_response_diagnostic,
         );
         emit_n8n_run_once_invoke_diagnostic(diagnostic);
-        return Err(n8n_run_once_stage_error(N8nRunOnceFailureStage::Invoke));
+        return Err(HostError::N8nInvocationFailed(
+            fcp_host::N8nInvokeFailure::from_response(&response),
+        ));
     }
     Ok(response)
 }
@@ -16951,6 +16953,7 @@ fn attach_n8n_disposable_creation_receipt(
 
 fn run_once_error_code(error: &HostError) -> &'static str {
     match error {
+        HostError::N8nInvocationFailed(_) => "n8n_invoke_failed",
         HostError::ConnectorNotFound(_) => "connector_not_found",
         HostError::InvalidFilter(_) => "invalid_input",
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "preflight_denied",
@@ -16972,6 +16975,9 @@ fn encode_run_once_response(result: &HostResult<InvokeResponse>) -> (String, boo
                 true,
             ),
         },
+        Err(HostError::N8nInvocationFailed(failure)) => {
+            (failure.error_envelope().to_string(), true)
+        }
         Err(error) => (
             json!({
                 "type": "error",
@@ -24608,6 +24614,7 @@ fn normalized_invalid_filter_class(message: &str) -> &'static str {
 
 fn normalized_host_error_class(error: &HostError) -> &'static str {
     match error {
+        HostError::N8nInvocationFailed(_) => "transport.n8n_invocation",
         HostError::ConnectorNotFound(_) => "local.capability_denied",
         HostError::InvalidFilter(message) => normalized_invalid_filter_class(message),
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => "local.policy_denied",
@@ -24967,6 +24974,7 @@ fn dependency_failed_error() -> BatchOperationError {
 
 fn batch_error_from_host_error(err: HostError) -> BatchOperationError {
     let code = match err {
+        HostError::N8nInvocationFailed(_) => "N8N_INVOKE_FAILED",
         HostError::ConnectorNotFound(_) => "CONNECTOR_NOT_FOUND",
         HostError::InvalidFilter(_) => "INVALID_REQUEST",
         HostError::RegistryError(_) => "CONNECTOR_ERROR",
@@ -26047,7 +26055,7 @@ fn warm_entry_survives_error(error: &HostError) -> bool {
         HostError::RegistryError(message) => {
             message.starts_with(CONNECTOR_JSON_RPC_ERROR_PREFIX)
         }
-        HostError::ConnectorFrameLimit { .. } => false,
+        HostError::ConnectorFrameLimit { .. } | HostError::N8nInvocationFailed(_) => false,
         // Unexpected internal/protocol state: assume the subprocess is broken.
         HostError::Internal(_) => false,
     }
@@ -26064,6 +26072,7 @@ fn map_lifecycle_host_error(error: LifecycleError) -> HostError {
 
 fn map_host_error(err: HostError) -> (StatusCode, String) {
     match err {
+        HostError::N8nInvocationFailed(_) => (StatusCode::BAD_GATEWAY, err.to_string()),
         HostError::ConnectorNotFound(_) => (StatusCode::NOT_FOUND, err.to_string()),
         HostError::InvalidFilter(_) => (StatusCode::BAD_REQUEST, err.to_string()),
         HostError::PreflightFailed(_) | HostError::ZoneEnvelopeRequired(_) => {

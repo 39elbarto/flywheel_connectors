@@ -2,9 +2,103 @@
 
 use thiserror::Error;
 
+/// Original diagnostics of one failed n8n invocation; never implicit log content.
+#[derive(Clone)]
+pub struct N8nInvokeFailure(serde_json::Value);
+
+impl N8nInvokeFailure {
+    /// Bind diagnostics to the received invocation, without changing its outcome.
+    #[must_use]
+    pub fn from_response(response: &fcp_core::InvokeResponse) -> Self {
+        let mut failure = Self::from_error(response.error.as_ref());
+        if response.id.0.len() <= 128 {
+            failure.0["requestId"] = serde_json::json!(response.id.0);
+        }
+        failure
+    }
+
+    /// Capture only actual message fields and external-service metadata.
+    #[must_use]
+    pub fn from_error(error: Option<&fcp_core::FcpError>) -> Self {
+        use fcp_core::FcpError;
+        let message = match error {
+            Some(
+                FcpError::External { message, .. }
+                | FcpError::InvalidRequest { message, .. }
+                | FcpError::MalformedFrame { message, .. }
+                | FcpError::Unauthorized { message, .. }
+                | FcpError::ZoneViolation { message, .. }
+                | FcpError::ConnectorUnavailable { message, .. }
+                | FcpError::Conflict { message }
+                | FcpError::Internal { message },
+            ) => Some(serde_json::Value::String(message.clone())),
+            _ => None,
+        };
+        let mut diagnostic = crate::project_native_diagnostic(
+            message.as_ref(),
+            None,
+            None,
+            "n8n.invocation",
+            "invoke",
+            &mut 16384,
+        );
+        diagnostic["severity"] = serde_json::json!("error");
+        if let Some(FcpError::External {
+            service,
+            status_code,
+            retryable,
+            retry_after,
+            ..
+        }) = error
+        {
+            // Service is original metadata, not an invented node or details object.
+            let service = crate::project_native_diagnostic(
+                Some(&serde_json::json!(service)),
+                None,
+                None,
+                "n8n.invocation",
+                "invoke",
+                &mut 8192,
+            );
+            diagnostic["providerMetadata"] = serde_json::json!({
+                "service": service["message"], "serviceStatus": service["messageStatus"],
+                "statusCode": status_code, "retryable": retryable,
+                "retryAfterMs": retry_after.and_then(|duration| u64::try_from(duration.as_millis()).ok()),
+            });
+            if service["truncated"] == true {
+                diagnostic["truncated"] = serde_json::json!(true);
+            }
+        }
+        Self(diagnostic)
+    }
+
+    /// Deliberate public response encoding, separate from Debug and Display.
+    #[must_use]
+    pub fn error_envelope(&self) -> serde_json::Value {
+        serde_json::json!({"type":"error","error":{
+            "code":"n8n_invoke_failed", "nativeDiagnostic":self.0,
+        }})
+    }
+}
+
+impl std::fmt::Debug for N8nInvokeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("N8nInvokeFailure([AVAILABLE])")
+    }
+}
+
+impl std::fmt::Display for N8nInvokeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("n8n invocation failed")
+    }
+}
+
 /// Errors that can occur in fcp-host operations.
 #[derive(Debug, Error)]
 pub enum HostError {
+    /// Fixed failure classification with deliberately carried n8n diagnostics.
+    #[error("{0}")]
+    N8nInvocationFailed(N8nInvokeFailure),
     /// Connector not found in registry.
     #[error("connector not found: {0}")]
     ConnectorNotFound(String),

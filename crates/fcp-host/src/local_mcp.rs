@@ -298,7 +298,80 @@ pub struct LocalMcpResult {
     pub status: LocalMcpResultStatus,
     pub teardown_error_code: Option<String>,
     pub result_code: String,
+    /// Only the already received JSON-RPC diagnostic, never stderr or request data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_diagnostic: Option<Value>,
     pub telemetry: LocalMcpTelemetry,
+}
+
+/// Preserve authorized diagnostic content as bounded JSON data, not instructions.
+///
+/// Callers select only message/details/node fields from the current response.
+/// The shared budget bounds content across all findings in one invocation.
+#[must_use]
+pub fn project_native_diagnostic(
+    message: Option<&Value>,
+    details: Option<&Value>,
+    node: Option<&Value>,
+    source: &str,
+    stage: &str,
+    budget: &mut usize,
+) -> Value {
+    fn text(value: Option<&Value>, budget: &mut usize) -> (Value, &'static str) {
+        let Some(value) = value else {
+            return (Value::Null, "missing");
+        };
+        let Some(value) = value.as_str() else {
+            return (Value::Null, "non_text");
+        };
+        let limit = (*budget).min(8192);
+        let mut encoded = 0;
+        let mut end = 0;
+        for (index, character) in value.char_indices() {
+            let bytes = match character {
+                '"' | '\\' | '\n' | '\r' | '\t' => 2,
+                c if c <= '\u{001f}' => 6,
+                c => c.len_utf8(),
+            };
+            if encoded + bytes > limit {
+                break;
+            }
+            encoded += bytes;
+            end = index + character.len_utf8();
+        }
+        *budget = budget.saturating_sub(encoded);
+        (
+            json!(&value[..end]),
+            if end == value.len() {
+                "present"
+            } else {
+                "truncated"
+            },
+        )
+    }
+    let (message, message_status) = text(message, budget);
+    let (node, node_status) = text(node, budget);
+    let (details, details_status, prefix) = details.map_or(
+        (Value::Null, "missing", Value::Null),
+        |value| match serde_json::to_vec(value) {
+            Ok(encoded) if encoded.len() <= (*budget).min(8192) => {
+                *budget -= encoded.len();
+                (value.clone(), "present", Value::Null)
+            }
+            Ok(encoded) => String::from_utf8(encoded).map_or(
+                (Value::Null, "unavailable", Value::Null),
+                |encoded| {
+                    let (prefix, _) = text(Some(&json!(encoded)), budget);
+                    (Value::Null, "truncated", prefix)
+                },
+            ),
+            Err(_) => (Value::Null, "unavailable", Value::Null),
+        },
+    );
+    json!({"source":source,"stage":stage,"message":message,"messageStatus":message_status,
+        "node":node,"nodeStatus":node_status,"details":details,"detailsStatus":details_status,
+        "detailsTextPrefix":prefix,
+        "truncated":message_status=="truncated" || node_status=="truncated" || details_status=="truncated"})
 }
 
 /// Safe completion status. A post-spawn failure is returned with lifecycle
@@ -601,6 +674,7 @@ impl LocalMcpProvider {
                 response_bytes: session.response_bytes,
             },
             result_code,
+            native_diagnostic: session.native_diagnostic.take(),
         })
     }
     fn revalidate_before_spawn(&self) -> Result<(), LocalMcpError> {
@@ -701,6 +775,45 @@ impl LocalMcpPhase {
     }
 }
 
+fn decode_rpc_response(
+    response: &Value,
+    id: u64,
+    phase: LocalMcpPhase,
+) -> Result<Value, (LocalMcpError, Option<Value>)> {
+    // Authenticate the invocation/phase binding before exposing any error text.
+    if response.get("id") != Some(&json!(id)) || response["jsonrpc"] != "2.0" {
+        return Err((LocalMcpError::InvalidFrame, None));
+    }
+    if let Some(error) = response.get("error") {
+        let mut diagnostic = project_native_diagnostic(
+            if error.is_string() {
+                Some(error)
+            } else {
+                error.get("message")
+            },
+            error.get("data"),
+            None,
+            "local_mcp.jsonrpc",
+            match phase {
+                LocalMcpPhase::Startup => "startup",
+                LocalMcpPhase::Call => "request",
+            },
+            &mut 16384,
+        );
+        diagnostic["severity"] = json!("error");
+        diagnostic["rpcCode"] = error
+            .get("code")
+            .filter(|code| code.as_i64().is_some())
+            .cloned()
+            .unwrap_or(Value::Null);
+        return Err((LocalMcpError::ProviderError, Some(diagnostic)));
+    }
+    response
+        .get("result")
+        .cloned()
+        .ok_or((LocalMcpError::InvalidFrame, None))
+}
+
 struct LocalMcpSession {
     process: Option<OwnedProcess>,
     writer: Option<LocalMcpWriter>,
@@ -717,6 +830,7 @@ struct LocalMcpSession {
     stdout_overflow: Arc<AtomicBool>,
     teardown_complete: bool,
     workers_joined: bool,
+    native_diagnostic: Option<Value>,
 }
 
 impl LocalMcpSession {
@@ -771,6 +885,7 @@ impl LocalMcpSession {
             stdout_overflow,
             teardown_complete: false,
             workers_joined: false,
+            native_diagnostic: None,
         }
     }
 }
@@ -1009,19 +1124,10 @@ impl LocalMcpSession {
             .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         let response: Value =
             serde_json::from_slice(&bytes).map_err(|_| LocalMcpError::InvalidFrame)?;
-        if response.get("id") != Some(&Value::from(id)) {
-            return Err(LocalMcpError::InvalidFrame);
-        }
-        if response.get("jsonrpc") != Some(&Value::from("2.0")) {
-            return Err(LocalMcpError::InvalidFrame);
-        }
-        if response.get("error").is_some() {
-            return Err(LocalMcpError::ProviderError);
-        }
-        response
-            .get("result")
-            .cloned()
-            .ok_or(LocalMcpError::InvalidFrame)
+        decode_rpc_response(&response, id, phase).map_err(|(error, diagnostic)| {
+            self.native_diagnostic = diagnostic;
+            error
+        })
     }
 
     fn write_frame(

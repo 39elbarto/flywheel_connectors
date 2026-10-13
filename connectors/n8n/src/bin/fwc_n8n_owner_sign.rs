@@ -68,12 +68,33 @@ fn run() -> Result<Vec<u8>, &'static str> {
         .map_err(|()| "invalid_request")?;
     let request: SigningRequest =
         serde_json::from_slice(&request_bytes).map_err(|_| "invalid_request")?;
-    if request.schema != PROVISION_INPUT_SCHEMA || request.release_id != cli.release_id {
+    sign_request(
+        &cli.release_id,
+        request,
+        fwc_n8n_owner_signing::read_seed_from_stdin,
+    )
+}
+
+fn sign_request(
+    release_id: &str,
+    request: SigningRequest,
+    read_seed: impl FnOnce() -> Result<
+        zeroize::Zeroizing<[u8; fcp_crypto::ed25519::SECRET_KEY_SIZE]>,
+        fwc_n8n_owner_signing::SeedReadError,
+    >,
+) -> Result<Vec<u8>, &'static str> {
+    if request.schema != PROVISION_INPUT_SCHEMA || request.release_id != release_id {
         return Err("invalid_request");
     }
-    let seed = fwc_n8n_owner_signing::read_seed_from_stdin().map_err(|()| "invalid_seed")?;
+    fwc_n8n_owner_signing::validate_staged_signing_request(
+        release_id,
+        &request.git_revision,
+        &request.bindings,
+    )
+    .map_err(fwc_n8n_provision::ProvisionError::redacted_code)?;
+    let seed = read_seed().map_err(fwc_n8n_owner_signing::SeedReadError::redacted_code)?;
     fwc_n8n_owner_signing::sign_staged_provision_receipt(
-        &cli.release_id,
+        release_id,
         &request.git_revision,
         request.bindings,
         &seed,
@@ -107,4 +128,58 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ()>
         return Err(());
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod signing_cli_tests {
+    use super::*;
+
+    #[test]
+    fn stdin_signer_requires_request_and_rejects_removed_custody_flags() {
+        let fixed = [
+            "owner-sign",
+            "--release-id",
+            "release-test",
+            "--request-file",
+            "/public-request",
+        ];
+        assert!(Cli::try_parse_from(fixed).is_ok());
+        assert!(Cli::try_parse_from(["owner-sign"]).is_err());
+        assert!(Cli::try_parse_from(["owner-sign", "--release-id", "release-test"]).is_err());
+        for forbidden in [
+            "--custody",
+            "--inspect-fixed-custody",
+            "--inspect-master-frame",
+            "--identity-file",
+            "--payload",
+        ] {
+            let mut arguments = fixed.to_vec();
+            arguments.push(forbidden);
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_request_and_stage_never_reach_seed_reader() {
+        for (schema, release_id, git_revision) in [
+            ("wrong-schema", "release-test", "a".repeat(40)),
+            (PROVISION_INPUT_SCHEMA, "other-release", "a".repeat(40)),
+            (PROVISION_INPUT_SCHEMA, "release-test", "invalid".to_owned()),
+            (PROVISION_INPUT_SCHEMA, "release-test", "a".repeat(40)),
+            (PROVISION_INPUT_SCHEMA, "../outside", "a".repeat(40)),
+        ] {
+            let request = SigningRequest {
+                schema: schema.to_owned(),
+                release_id: release_id.to_owned(),
+                git_revision,
+                bindings: Vec::new(),
+            };
+            assert!(
+                sign_request("release-test", request, || {
+                    panic!("invalid request must not read seed")
+                })
+                .is_err()
+            );
+        }
+    }
 }

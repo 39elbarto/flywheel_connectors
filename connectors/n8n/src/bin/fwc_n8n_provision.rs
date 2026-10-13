@@ -269,12 +269,70 @@ struct CommonInventoryEntry {
     config: CommonInventoryConfig,
     allowed_zones: Vec<String>,
     allowed_operations: Vec<String>,
+    #[serde(deserialize_with = "deserialize_common_network_constraints")]
     operation_network_constraints: BTreeMap<String, Value>,
     enforce_empty_allow_lists: bool,
     enforce_operation_network_constraints: bool,
     runtime_network_enforcement: String,
     lifecycle_mode: String,
     launch_binding: LaunchBinding,
+}
+
+fn deserialize_common_network_constraints<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Typed fields preserve duplicate-key refusal before Value comparison.
+    #[derive(Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    // The fixed signed JSON contract uses independent enforcement flags.
+    #[allow(clippy::struct_excessive_bools)]
+    struct Network {
+        host_allow: Vec<String>,
+        port_allow: Vec<u64>,
+        ip_allow: Vec<String>,
+        cidr_deny: Vec<String>,
+        deny_localhost: bool,
+        deny_private_ranges: bool,
+        deny_tailnet_ranges: bool,
+        require_sni: bool,
+        spki_pins: Vec<String>,
+        deny_ip_literals: bool,
+        require_host_canonicalization: bool,
+        dns_max_ips: u64,
+        max_redirects: u64,
+        connect_timeout_ms: u64,
+        total_timeout_ms: u64,
+        max_response_bytes: u64,
+    }
+    struct Networks;
+    impl<'de> serde::de::Visitor<'de> for Networks {
+        type Value = BTreeMap<String, Value>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("unique common operation network constraints")
+        }
+
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut networks = BTreeMap::new();
+            while let Some((operation, network)) = map.next_entry::<String, Network>()? {
+                if networks.contains_key(&operation) {
+                    return Err(serde::de::Error::custom("duplicate operation network"));
+                }
+                networks.insert(
+                    operation,
+                    serde_json::to_value(network).map_err(serde::de::Error::custom)?,
+                );
+            }
+            Ok(networks)
+        }
+    }
+    deserializer.deserialize_map(Networks)
 }
 
 #[derive(Deserialize)]
@@ -2253,6 +2311,7 @@ fn validate_unsigned_release_tree_with_schema_mode(
                 inventory_release_root,
                 root,
                 common_inventory_schema_mode,
+                lifecycle_schema_mode,
                 search,
             )?;
         } else if relative_path.ends_with("official-mcp.json") {
@@ -2565,6 +2624,7 @@ fn validate_common_inventory(
     release_root: &Path,
     artifact_root: &Path,
     schema_mode: CommonInventorySchemaMode,
+    lifecycle_schema_mode: LifecycleSchemaMode,
     search: bool,
 ) -> Result<(), ProvisionError> {
     reject_secret_keys(value)?;
@@ -2600,6 +2660,24 @@ fn validate_common_inventory(
             return Err(ProvisionError::new(ProvisionErrorCode::Policy));
         }
         expected_operations.push("n8n.workflows.get_code");
+    }
+    let execution_search = entry
+        .allowed_operations
+        .iter()
+        .any(|operation| operation == "n8n.executions.search");
+    if execution_search
+        != entry
+            .operation_network_constraints
+            .contains_key("n8n.executions.search")
+        || (execution_search
+            && (!search
+                || !matches!(schema_mode, CommonInventorySchemaMode::Current)
+                || !matches!(lifecycle_schema_mode, LifecycleSchemaMode::CurrentPerServer)))
+    {
+        return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+    }
+    if execution_search {
+        expected_operations.push("n8n.executions.search");
     }
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
@@ -2661,6 +2739,8 @@ fn validate_common_inventory_network(
     ]);
     let expected_bounded_network =
         expected_n8n_network_constraint_with_limit(expected_host, expected_port, 1_048_576);
+    let mut expected_execution_search_network = expected_validation_network.clone();
+    expected_execution_search_network["max_response_bytes"] = serde_json::json!(1_048_576);
     let metadata_network = expected_n8n_network_constraint(
         expected_host,
         match server {
@@ -2678,11 +2758,14 @@ fn validate_common_inventory_network(
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     if expected_operations.iter().any(|operation| {
-        let expected = if *operation == "n8n.validation.run"
+        let expected = if *operation == "n8n.executions.search" {
+            &expected_execution_search_network
+        } else if *operation == "n8n.validation.run"
             && !matches!(
                 schema_mode,
                 CommonInventorySchemaMode::IndependentReadPreviousNetwork
-            ) {
+            )
+        {
             &expected_validation_network
         } else if *operation == "n8n.credentials.list"
             && entry.config.credential_metadata_read.is_some()
@@ -4996,6 +5079,15 @@ mod tests {
         }
 
         fn enable_read_from_pure_producer_with_code(&self, safe: bool, sensitive: bool) {
+            self.enable_read_from_pure_producer_options(safe, sensitive, false);
+        }
+
+        fn enable_read_from_pure_producer_options(
+            &self,
+            safe: bool,
+            sensitive: bool,
+            execution_search: bool,
+        ) {
             let script = concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../scripts/n8n_release_assembler.sh"
@@ -5043,6 +5135,17 @@ for server in ('eec','hetzner'):
     paths = [root/'inventory'/f'{server}-official-mcp.json',root/'inventory'/f'{server}.json']
     values = [json.loads(path.read_bytes())[0] for path in paths]
     outputs = ns['add_read_inventory'](*values, server, policy)
+    if sys.argv[5] == 'executions':
+        produced = ns['add_execution_search_inventory'](outputs[1], server)
+        before = json.loads(json.dumps(produced))
+        before['allowed_operations'].remove('n8n.executions.search')
+        del before['operation_network_constraints']['n8n.executions.search']
+        assert before == outputs[1]
+        for altered, selected in ((produced, server), (outputs[1], 'other')):
+            try: ns['add_execution_search_inventory'](altered, selected)
+            except ValueError: pass
+            else: raise AssertionError('execution search producer accepted duplicate or server drift')
+        outputs = (outputs[0], produced)
     for path, output in zip(paths, outputs): path.write_text(json.dumps([output]))
 "#;
             let output = std::process::Command::new("/usr/bin/python3")
@@ -5050,6 +5153,11 @@ for server in ('eec','hetzner'):
                 .arg(&self.stage)
                 .arg(if safe { "safe" } else { "search" })
                 .arg(if sensitive { "code" } else { "metadata" })
+                .arg(if execution_search {
+                    "executions"
+                } else {
+                    "historical"
+                })
                 .output()
                 .expect("pure producer subprocess");
             assert!(output.status.success(), "pure producer failed");
@@ -5112,7 +5220,7 @@ original = json.loads(path.read_bytes())
 bindings = {key:original[key] for key in ('expected_catalog','callable_tools')}
 for key in ('expected_output_catalog','reviewed_schemas'):
     if key in original: bindings[key] = original[key]
-context = dict(package_id=original['package_id'], observed_version=original['package_version'],
+context = dict(package_binding=None, package_id=original['package_id'], observed_version=original['package_version'],
     node_path=original['launcher_path'], package_metadata_path=original['package_metadata_path'],
     package_metadata=b'FIXTURE_ONLY', wrapper_path=original['fixed_args'][0],
     protocol_version=original['protocol_version'], bindings=bindings,
@@ -5413,6 +5521,560 @@ else: raise AssertionError('reader suppressed open refusal')
                 fixture.refresh_stage_receipts();
             }
         }
+    }
+
+    #[test]
+    fn execution_search_assembler_opt_in_is_closed_and_default_unchanged() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/n8n_release_assembler.sh"
+        );
+        let run = |opt_in: Option<&str>| {
+            let mut command = std::process::Command::new("bash");
+            command
+                .args([
+                    script,
+                    "--emit-release-provenance",
+                    "release-test",
+                    "0123456789abcdef0123456789abcdef01234567",
+                ])
+                .env_remove("FWC_N8N_EXECUTION_SEARCH")
+                .env_remove("FWC_N8N_SEARCH_READ_POLICY_SHA256")
+                .env_remove("FWC_N8N_SAFE_READ_POLICY_SHA256");
+            if let Some(value) = opt_in {
+                command.env("FWC_N8N_EXECUTION_SEARCH", value);
+            }
+            command.output().unwrap()
+        };
+        let historical = run(None);
+        assert!(historical.status.success());
+        let zero = run(Some("0"));
+        assert!(zero.status.success());
+        assert_eq!(historical.stdout, zero.stdout);
+        for invalid in ["", "true", "01", "2", "-1", "1 ", "1\n", "1"] {
+            let denied = run(Some(invalid));
+            assert!(!denied.status.success(), "{invalid:?}");
+            assert!(denied.stdout.is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exact retained public pin DATA; never executes retained artifacts"]
+    fn retained_reuse_choices_and_pinned_input_refusals() {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../scripts/n8n_release_assembler.sh"
+        );
+        let fixture = Fixture::retained();
+        let code = r#"
+import copy, hashlib, io, json, pathlib, stat, subprocess, sys, types
+source = pathlib.Path(sys.argv[1]).read_text()
+def body(name):
+    return source.split(name + '() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n', 1)[0]
+def namespace(name):
+    ns = {'__name__': 'synthetic_reuse_fixture'}
+    exec(compile(body(name), sys.argv[1], 'exec'), ns)
+    return ns
+retained = namespace('validate_retained_inputs')
+# Read only exact public pins; never execute a retained artifact or helper.
+retained['validate_retained'](retained['ROOT'])
+for name, (size, digest, _) in retained['PINS'].items():
+    for bad_size, bad_digest in ((size+1, digest), (size, '0'*64)):
+        try: retained['read_pinned'](retained['ROOT']+'/'+name, bad_size, bad_digest)
+        except ValueError: pass
+        else: raise AssertionError('retained file drift accepted')
+for path in (retained['ROOT']+'/missing', retained['ROOT']+'/../other'):
+    try: retained['read_pinned'](path, 1, '0'*64)
+    except (OSError, ValueError): pass
+    else: raise AssertionError('missing/aliased path accepted')
+records = {name: pathlib.Path(retained['ROOT'], name).read_bytes() for name in retained['RECEIPTS']}
+for case in ('root', 'source', 'receipt', 'signed-source', 'duplicate-row', 'duplicate-field', 'missing'):
+    changed = dict(records)
+    root = retained['ROOT']
+    if case == 'root': root += '/other'
+    elif case == 'missing': del changed['receipt.json']
+    else:
+        name = 'provenance.json' if case == 'source' else 'receipt.json'
+        if case == 'signed-source': name = 'provision-receipt.json'
+        value = json.loads(changed[name])
+        if case in ('source', 'signed-source'): value['git_revision'] = '0'*40
+        elif case == 'receipt': value['artifacts'][1]['digest'] = '0'*64
+        elif case == 'duplicate-row': value['artifacts'].append(value['artifacts'][0])
+        raw = json.dumps(value).encode()
+        if case == 'duplicate-field': raw = raw.replace(b'"schema":', b'"schema":"wrong","schema":', 1)
+        changed[name] = raw
+    def reader(path, size, digest):
+        name = path[len(retained['ROOT'])+1:]
+        if name in retained['RECEIPTS']: return changed[name]
+        return b''
+    try: retained['validate_retained'](root, reader)
+    except (OSError, ValueError, KeyError): pass
+    else: raise AssertionError('retained source/receipt drift accepted: '+case)
+
+# Execute the actual helper/rlib FD validator against synthetic metadata/bytes.
+# Synthetic paths exist only in this in-memory reader, never as a runtime override.
+pin = namespace('require_pinned_build_input')
+raw = b'PUBLIC SYNTHETIC helper bytes'
+digest = hashlib.sha256(raw).hexdigest()
+base = dict(st_dev=1, st_ino=2, st_uid=0, st_gid=0, st_mode=stat.S_IFREG|0o755,
+    st_nlink=1, st_size=len(raw), st_mtime_ns=3, st_ctime_ns=4)
+for kind in ('helper', 'rlib'):
+    for case in ('valid', 'uid', 'gid', 'mode', 'size', 'link', 'drift', 'path', 'ancestor', 'digest'):
+        meta = dict(base, st_mode=stat.S_IFREG|(0o755 if kind == 'helper' else 0o644))
+        if case in ('uid', 'gid', 'size', 'link'):
+            field = {'uid':'st_uid','gid':'st_gid','size':'st_size','link':'st_nlink'}[case]
+            meta[field] += 1
+        if case == 'mode': meta['st_mode'] ^= 0o111
+        after = dict(meta)
+        if case == 'drift': after['st_ino'] += 1
+        parent = types.SimpleNamespace(st_mode=stat.S_IFDIR|0o755, st_uid=0, st_gid=0)
+        if case == 'ancestor': parent.st_uid = 1000
+        class Path:
+            def __init__(self, name): self.name = name
+            def __str__(self): return self.name
+            def resolve(self, strict): return self.name if case != 'path' else '/other'
+            @property
+            def parents(self): return [types.SimpleNamespace(lstat=lambda: parent)]
+            def lstat(self): return types.SimpleNamespace(**after)
+        class Stream(io.BytesIO):
+            def fileno(self): return 1
+        observations = iter([types.SimpleNamespace(**meta), types.SimpleNamespace(**after)])
+        pin['pathlib'] = types.SimpleNamespace(Path=Path)
+        pin['os'] = types.SimpleNamespace(O_RDONLY=0, O_NOFOLLOW=1, O_NONBLOCK=2,
+            open=lambda *a:1, fdopen=lambda *a:Stream(raw), fstat=lambda *a:next(observations))
+        try: result = pin['validate_input']('/synthetic/'+kind, digest if case != 'digest' else '0'*64, str(len(raw)), kind)
+        except ValueError: assert case != 'valid'
+        else: assert case == 'valid' and result == '/synthetic/'+kind
+for args in (('', digest, str(len(raw)), 'helper'), ('/synthetic/helper', '', str(len(raw)), 'helper'),
+             ('/synthetic/helper', digest, '', 'helper')):
+    try: pin['validate_input'](*args)
+    except ValueError: pass
+    else: raise AssertionError('missing pinned input accepted')
+
+local = namespace('rebind_retained_local_policy')
+policy = json.loads(pathlib.Path(retained['ROOT'], 'policy/local-mcp.json').read_bytes())
+updated = local['rebind'](policy, pathlib.Path(retained['ROOT']).name, 'new-release')
+restored = copy.deepcopy(updated)
+restored['package_binding']['release_id'] = policy['package_binding']['release_id']
+assert restored == policy
+for old, new in (('wrong', 'new-release'), (policy['package_binding']['release_id'], '../outside'),
+                 (policy['package_binding']['release_id'], policy['package_binding']['release_id'])):
+    try: local['rebind'](policy, old, new)
+    except ValueError: pass
+    else: raise AssertionError('local release drift accepted')
+
+# Exercise the inherited production rebinding/normalization body without a
+# helper or subprocess. Exact retained DATA has no additional semantic delta.
+stage = pathlib.Path(sys.argv[2], 'synthetic-normalization')
+(stage/'inventory').mkdir(parents=True)
+originals = {}
+for server in ('eec', 'hetzner'):
+    for name in (server+'.json', server+'-official-mcp.json'):
+        originals[name] = json.loads(pathlib.Path(retained['ROOT'], 'inventory', name).read_bytes())
+        (stage/'inventory'/name).write_text(json.dumps(originals[name]))
+pins = []
+for server in ('eec', 'hetzner'):
+    tools = originals[server+'-official-mcp.json'][0]['config']['capability_policy']['approved_tools']
+    for name in ('publish_workflow', 'unpublish_workflow', 'archive_workflow', 'execute_workflow'):
+        tool = next(tool for tool in tools if tool['name'] == name)
+        pins += [tool['input_schema_digest'], tool['output_schema_digest']]
+def schema_reader(path, size, digest):
+    name = path[len(retained['ROOT'])+1:]
+    if name in records: return records[name]
+    if name.startswith('inventory/'):
+        return json.dumps(originals[name.removeprefix('inventory/')]).encode()
+    return b''
+retained['validate_retained'](retained['ROOT'], schema_reader, pins)
+for index in range(16):
+    changed = list(pins)
+    changed[index] = 'sha256:' + '0'*64
+    try: retained['validate_retained'](retained['ROOT'], schema_reader, changed)
+    except ValueError: pass
+    else: raise AssertionError('schema drift accepted')
+for changed in (pins[:-1], pins + [pins[0]]):
+    try: retained['validate_retained'](retained['ROOT'], schema_reader, changed)
+    except ValueError: pass
+    else: raise AssertionError('partial/extraneous schema pins accepted')
+new_root = str(pathlib.Path(sys.argv[2], 'releases', 'normalized'))
+request = str(stage/'request.json')
+saved_argv = sys.argv
+sys.argv = [saved_argv[1], str(stage), retained['ROOT'], new_root, '1'*64, '2'*64,
+    request, 'fwc.n8n.provision-request.v1', '3'*40, *pins]
+producer = body('write_inventory_and_request')
+# No ambient reviewed-baseline path may cause a CLI call in this fixture.
+import os
+os.environ.pop('FWC_N8N_REVIEWED_SCHEMA_BASELINES', None)
+exec(compile(producer, saved_argv[1], 'exec'), {'__name__':'synthetic_normalization'})
+sys.argv = saved_argv
+for name, original in originals.items():
+    result = json.loads((stage/'inventory'/name).read_bytes())
+    item = result[0]
+    for key in ('binary', 'manifest_path'):
+        item[key] = item[key].replace(new_root, retained['ROOT'])
+    for key in ('launcher_path', 'runtime_executable'):
+        item['launch_binding'][key] = item['launch_binding'][key].replace(new_root, retained['ROOT'])
+    for key in ('launcher_digest', 'runtime_executable_digest'):
+        item['launch_binding'][key] = original[0]['launch_binding'][key]
+    assert result == original, 'unreviewed normalization delta: '+name
+assert json.loads(pathlib.Path(request).read_bytes())['git_revision'] == '3'*40
+
+prefix = source.split('\nmain() {', 1)[0]
+def shell(extra):
+    return subprocess.run(['bash', '-c', prefix+'\n'+extra], capture_output=True, text=True,
+        env={'PATH':'/usr/bin:/bin'})
+for mode in ('unset', '0', '1'):
+    setup = 'unset FWC_N8N_REUSE_RETAINED' if mode == 'unset' else 'FWC_N8N_REUSE_RETAINED='+mode
+    run = shell(setup+'''
+build_one() { printf '%s\n' "$*"; }
+build_external_approval_issuer() { printf 'ISSUER\n'; }
+build_runtime_artifacts
+''')
+    assert run.returncode == 0
+    if mode == '1':
+        assert run.stdout.splitlines() == ['build --release --package fcp-n8n --bin fwc-n8n',
+            'build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign']
+    else:
+        assert run.stdout.splitlines() == [
+            'build --release --package fcp-host --bin fcp-host',
+            'build --release --package fcp-n8n --bin fwc-n8n',
+            'rustc --release --package fcp-n8n --bin fcp-n8n -- -C target-feature=+crt-static',
+            'rustc --release --package fcp-mcp-bridge --bin fcp-mcp-bridge -- -C target-feature=+crt-static',
+            'build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign',
+            'ISSUER']
+for deny in ('none', 'pins', 'package'):
+    run = shell('FWC_N8N_REUSE_RETAINED=1\nTARGET_DIR=/synthetic-target\nREPO_ROOT='+str(pathlib.Path(sys.argv[1]).parent.parent)+'''
+validate_retained_inputs() { '''+('die denied' if deny == 'pins' else 'return 0')+'''; }
+validate_retained_native_package() { '''+('die denied' if deny == 'package' else 'return 0')+'''; }
+install() { printf '%s\n' "$*"; }
+cmp() { return 0; }
+copy_templates "$RETAINED_RELEASE" "'''+sys.argv[2]+'''/absent-reuse-stage"
+''')
+    if deny != 'none': assert run.returncode != 0 and not run.stdout
+    else:
+        assert run.returncode == 0, run.stderr
+        assert '/synthetic-target/release/fwc-n8n ' in run.stdout
+        for binary in ('fcp-host','fcp-n8n','fcp-mcp-bridge'):
+            assert retained['ROOT']+'/bin/'+binary+' ' in run.stdout
+            assert '/synthetic-target/release/'+binary+' ' not in run.stdout
+        assert retained['ROOT']+'/manifests/fcp-mcp-bridge.toml ' in run.stdout
+        assert 'approval-issue' not in run.stdout
+for denied in (False, True):
+    run = shell('''
+validate_retained_inputs() { return 0; }
+readlink() { printf '%s\n' "$RETAINED_RELEASE"; }
+/usr/local/lib/fwc-n8n/releases/release-20261012-native-diagnostics-4a2d827a-rc1/bin/fwc-n8n() {
+  printf 'SYNTHETIC ARGV %s\n' "$*" >&2
+  return '''+('42' if denied else '0')+'''
+}
+validate_retained_native_package
+''')
+    assert 'SYNTHETIC ARGV export-schemas local --check-only' in run.stderr
+    assert (run.returncode != 0) == denied and not run.stdout
+# Actual reuse helper choice must require both helper and selected rlib before any effect.
+for denied in ('helper', 'rlib'):
+    run = shell('''
+FWC_N8N_REUSE_RETAINED=1
+require_pinned_build_input() { [[ "$3" != '''+denied+''' ]] || die denied; }
+build_hash_helper
+''')
+    assert run.returncode != 0 and not run.stdout
+print('reuse choices/refusals passed; no retained executable/helper/provider invoked')
+"#;
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", code, script])
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn retained_execution_search_producer_and_native_validator_agree() {
+        use serde_json::json;
+
+        for safe in [false, true] {
+            let fixture = Fixture::retained();
+            fixture.request().validate().expect("historical default");
+            fixture.enable_read_from_pure_producer_options(safe, false, true);
+            let request = fixture.request();
+            validate_unsigned_release_tree(
+                &fixture.stage,
+                &fixture.release_id,
+                &request.git_revision,
+                &request.bindings,
+                fixture.owner,
+                &fixture.releases.join(&fixture.release_id),
+            )
+            .expect("production producer through native pre-seed validator");
+            request
+                .validate()
+                .expect("signed isolated rootless fixture");
+            for server in [ServerId::Eec, ServerId::Hetzner] {
+                let path = fixture
+                    .stage
+                    .join(format!("inventory/{}.json", server.as_str()));
+                let original = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+                assert_eq!(
+                    original[0]["allowed_operations"].as_array().unwrap().len(),
+                    COMMON_ALLOWED_OPERATIONS.len() + 3
+                );
+                assert_eq!(
+                    original[0]["operation_network_constraints"]
+                        .as_object()
+                        .unwrap()
+                        .len(),
+                    COMMON_ALLOWED_OPERATIONS.len() + 3
+                );
+                for lifecycle in [
+                    LifecycleSchemaMode::Rc42PerServer,
+                    LifecycleSchemaMode::PreviousPerServer,
+                    LifecycleSchemaMode::LegacyCommon,
+                ] {
+                    assert!(
+                        validate_common_inventory(
+                            &original,
+                            server,
+                            &fixture.releases.join(&fixture.release_id),
+                            &fixture.stage,
+                            CommonInventorySchemaMode::Current,
+                            lifecycle,
+                            true,
+                        )
+                        .is_err(),
+                        "historical lifecycle with Current common enum must refuse"
+                    );
+                }
+                for mode in [
+                    CommonInventorySchemaMode::CurrentLegacyLimits,
+                    CommonInventorySchemaMode::IndependentReadPreviousNetwork,
+                    CommonInventorySchemaMode::Previous,
+                    CommonInventorySchemaMode::Legacy,
+                    CommonInventorySchemaMode::LegacyDisposable,
+                ] {
+                    assert!(
+                        validate_common_inventory(
+                            &original,
+                            server,
+                            &fixture.releases.join(&fixture.release_id),
+                            &fixture.stage,
+                            mode,
+                            LifecycleSchemaMode::CurrentPerServer,
+                            true,
+                        )
+                        .is_err(),
+                        "historical schema must refuse execution search"
+                    );
+                }
+                assert!(
+                    validate_common_inventory(
+                        &original,
+                        server,
+                        &fixture.releases.join(&fixture.release_id),
+                        &fixture.stage,
+                        CommonInventorySchemaMode::Current,
+                        LifecycleSchemaMode::CurrentPerServer,
+                        false,
+                    )
+                    .is_err(),
+                    "missing reviewed read profile"
+                );
+                for case in [
+                    "missing-allow",
+                    "missing-network",
+                    "duplicate-operation",
+                    "extra-operation",
+                    "extra-network",
+                    "host",
+                    "port",
+                    "connect",
+                    "total",
+                    "bytes",
+                    "cidr-missing",
+                    "cidr-extra",
+                    "cidr-wrong",
+                    "redirect",
+                    "dns",
+                    "ip",
+                    "spki",
+                    "extra-key",
+                    "type",
+                    "zone",
+                    "profile",
+                    "deny_localhost",
+                    "deny_private_ranges",
+                    "deny_tailnet_ranges",
+                    "require_sni",
+                    "deny_ip_literals",
+                    "require_host_canonicalization",
+                ] {
+                    let mut changed = original.clone();
+                    let entry = &mut changed[0];
+                    match case {
+                        "missing-allow" => entry["allowed_operations"]
+                            .as_array_mut()
+                            .unwrap()
+                            .retain(|operation| operation != "n8n.executions.search"),
+                        "duplicate-operation" => entry["allowed_operations"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("n8n.executions.search")),
+                        "extra-operation" => entry["allowed_operations"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!("n8n.unreviewed")),
+                        "missing-network" => {
+                            entry["operation_network_constraints"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("n8n.executions.search");
+                        }
+                        "extra-network" => {
+                            entry["operation_network_constraints"]["n8n.unreviewed"] =
+                                entry["operation_network_constraints"]["n8n.executions.search"]
+                                    .clone();
+                        }
+                        "zone" => entry["allowed_zones"] = json!(["z:owner"]),
+                        "profile" => entry["config"]["server_id"] = json!("other"),
+                        _ => {
+                            let network = &mut entry["operation_network_constraints"]["n8n.executions.search"];
+                            match case {
+                                "host" => network["host_allow"] = json!(["unreviewed.example"]),
+                                "port" => network["port_allow"] = json!([8443]),
+                                "connect" => network["connect_timeout_ms"] = json!(5001),
+                                "total" => network["total_timeout_ms"] = json!(15001),
+                                "bytes" => network["max_response_bytes"] = json!(10485760),
+                                "cidr-missing" => {
+                                    network["cidr_deny"].as_array_mut().unwrap().pop();
+                                }
+                                "cidr-extra" => network["cidr_deny"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .push(json!("198.18.0.0/15")),
+                                "cidr-wrong" => network["cidr_deny"][0] = json!("198.18.0.0/15"),
+                                "redirect" => network["max_redirects"] = json!(1),
+                                "dns" => network["dns_max_ips"] = json!(5),
+                                "ip" => network["ip_allow"] = json!(["1.1.1.1"]),
+                                "spki" => network["spki_pins"] = json!(["unreviewed"]),
+                                "extra-key" => network["extra"] = json!(true),
+                                "type" => network["max_response_bytes"] = json!("1048576"),
+                                flag => network[flag] = json!(false),
+                            }
+                        }
+                    }
+                    fs::write(&path, changed.to_string()).unwrap();
+                    fixture.refresh_stage_receipts();
+                    assert!(
+                        fixture.request().validate().is_err(),
+                        "{}:{safe}:{case}",
+                        server.as_str()
+                    );
+                }
+                for field in original[0]["operation_network_constraints"]["n8n.executions.search"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                {
+                    for missing in [false, true] {
+                        let mut changed = original.clone();
+                        let network =
+                            changed[0]["operation_network_constraints"]["n8n.executions.search"]
+                                .as_object_mut()
+                                .unwrap();
+                        if missing {
+                            network.remove(field);
+                        } else {
+                            network.insert(field.clone(), json!(null));
+                        }
+                        fs::write(&path, changed.to_string()).unwrap();
+                        fixture.refresh_stage_receipts();
+                        assert!(
+                            fixture.request().validate().is_err(),
+                            "{}:{field}:missing={missing}",
+                            server.as_str()
+                        );
+                    }
+                }
+                let raw = original.to_string();
+                let network = original[0]["operation_network_constraints"]["n8n.executions.search"]
+                    .to_string();
+                for duplicate in [
+                    raw.replacen(
+                        "\"n8n.executions.search\":",
+                        &format!("\"n8n.executions.search\":{network},\"n8n.executions.search\":"),
+                        1,
+                    ),
+                    raw.replacen(
+                        "\"max_response_bytes\":1048576",
+                        "\"max_response_bytes\":1048576,\"max_response_bytes\":1048576",
+                        1,
+                    ),
+                ] {
+                    assert_ne!(duplicate, raw);
+                    fs::write(&path, duplicate).unwrap();
+                    fixture.refresh_stage_receipts();
+                    assert!(
+                        fixture.request().validate().is_err(),
+                        "raw duplicate denied"
+                    );
+                }
+                fs::write(&path, raw).unwrap();
+                fixture.refresh_stage_receipts();
+            }
+            fixture
+                .request()
+                .validate()
+                .expect("restored generated fixture");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires separately permitted rootless immutable-package DATA verification"]
+    fn mixed_recipe_and_retained_native_package_pass_actual_unsigned_validator() {
+        let fixture = Fixture::retained();
+        fixture.enable_read_from_pure_producer_options(true, false, true);
+        // Public retained DATA only. No retained executable, helper or Node runs.
+        let retained = Path::new(
+            "/usr/local/lib/fwc-n8n/releases/release-20261012-native-diagnostics-4a2d827a-rc1",
+        );
+        let mut policy = read_value(&retained.join("policy/local-mcp.json"), MAX_POLICY_BYTES)
+            .expect("retained public local policy");
+        policy["package_binding"]["release_id"] = serde_json::json!(fixture.release_id);
+        fs::write(
+            fixture.stage.join("policy/local-mcp.json"),
+            policy.to_string(),
+        )
+        .unwrap();
+        fs::write(
+            fixture.stage.join("bin/fwc-n8n"),
+            b"PUBLIC SYNTHETIC new CLI recipe; retained runtime fixture bytes unchanged",
+        )
+        .unwrap();
+        fs::write(
+            fixture.stage.join("manifests/fcp-n8n.toml"),
+            include_bytes!("../../manifest.toml"),
+        )
+        .unwrap();
+        fixture.refresh_stage_receipts();
+        let request = fixture.request();
+        validate_unsigned_release_tree(
+            &fixture.stage,
+            &fixture.release_id,
+            &request.git_revision,
+            &request.bindings,
+            fixture.owner,
+            &fixture.releases.join(&fixture.release_id),
+        )
+        .expect("actual unsigned validator with mixed recipe and retained immutable package");
+        request.validate().expect("synthetic signed mixed recipe");
+        fs::write(fixture.stage.join("bin/fcp-host"), b"PUBLIC DRIFT").unwrap();
+        assert!(
+            fixture.request().validate().is_err(),
+            "retained receipt drift"
+        );
     }
 
     #[test]

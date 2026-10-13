@@ -7,6 +7,7 @@ set -euo pipefail
 
 readonly INSTALL_ROOT="/usr/local/lib/fwc-n8n"
 readonly CURRENT_PATH="${INSTALL_ROOT}/current"
+readonly RETAINED_RELEASE="${INSTALL_ROOT}/releases/release-20261012-native-diagnostics-4a2d827a-rc1"
 readonly STAGING_ROOT="/var/lib/fwc-n8n/staging"
 readonly SSD_ROOT="/srv/dev-ssd/fcp"
 readonly PROVISION_REQUEST_SCHEMA="fwc.n8n.provision-request.v1"
@@ -97,6 +98,13 @@ usage: sudo FWC_N8N_OWNER_PUBLIC_KEY_HEX=<64 lowercase hex chars> \
   FWC_N8N_HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   FWC_N8N_HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST=<sha256:64 lowercase hex chars> \
   [FWC_N8N_LOCAL_CALL_BUDGET_SHA256=<64 lowercase hex chars>] \
+  [FWC_N8N_REUSE_RETAINED=1 FWC_N8N_EXECUTION_SEARCH=1 \
+   FWC_N8N_BLAKE3_HELPER=<admitted canonical helper> \
+   FWC_N8N_BLAKE3_HELPER_SHA256=<64 lowercase hex chars> \
+   FWC_N8N_BLAKE3_HELPER_BYTES=<exact byte count> \
+   FWC_N8N_BLAKE3_RLIB=<admitted canonical rlib> \
+   FWC_N8N_BLAKE3_RLIB_SHA256=<64 lowercase hex chars> \
+   FWC_N8N_BLAKE3_RLIB_BYTES=<exact byte count>] \
   scripts/n8n_release_assembler.sh \
   --release-id <safe-release-id> \
   [--target-dir /srv/dev-ssd/fcp/targets/<name>]
@@ -109,6 +117,11 @@ The optional local-call-budget digest binds separately admitted root:root 0600
 /srv/dev-ssd/rc41-inputs/local-call-budget.json with exactly
 {"schema":"fwc.n8n.local-call-budget.v1","max_sequential_calls":20}.
 Without this opt-in, the generated signed policy retains 7 calls.
+Retained reuse requires an admitted read profile and the exact pinned rc1
+runtime/template set. It builds only the CLI and guarded admin, retains the
+native package and local policy, and never builds or substitutes the issuer.
+The closed runtime provenance identifies the new recipe/CLI source; a separate
+review ledger must retain the three runtime binaries' actual 4a source identity.
 EOF
 }
 
@@ -130,6 +143,10 @@ require_safe_directory() {
 }
 
 find_blake3_rlib() {
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    require_pinned_build_input "${FWC_N8N_BLAKE3_RLIB:-}" "${FWC_N8N_BLAKE3_RLIB_SHA256:-}" rlib
+    return
+  fi
   local candidate
   candidate="$(find "${TARGET_DIR}/release/deps" -maxdepth 1 -type f \
     -name 'libblake3-*.rlib' -printf '%T@ %p\n' 2>/dev/null \
@@ -139,6 +156,11 @@ find_blake3_rlib() {
 }
 
 build_hash_helper() {
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    require_pinned_build_input "${FWC_N8N_BLAKE3_HELPER:-}" "${FWC_N8N_BLAKE3_HELPER_SHA256:-}" helper >/dev/null
+    find_blake3_rlib >/dev/null
+    return
+  fi
   local helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
   local rlib
   rlib="$(find_blake3_rlib)"
@@ -894,6 +916,217 @@ PY
   chmod 0644 "$stage_root/policy/local-mcp.json"
 }
 
+require_pinned_build_input() {
+  local path="$1" digest="$2" kind="$3"
+  local size=""
+  case "$kind" in
+    helper) size="${FWC_N8N_BLAKE3_HELPER_BYTES:-}" ;;
+    rlib) size="${FWC_N8N_BLAKE3_RLIB_BYTES:-}" ;;
+    *) die "unknown pinned build input" ;;
+  esac
+  python3 - "$path" "$digest" "$size" "$kind" <<'PY'
+import hashlib
+import os
+import pathlib
+import re
+import stat
+import sys
+
+def validate_input(path, digest, size, kind):
+    if (not path.startswith('/') or not re.fullmatch('[0-9a-f]{64}', digest)
+        or not re.fullmatch('[1-9][0-9]{0,8}', size) or kind not in ('helper', 'rlib')):
+        raise ValueError('explicit pinned input required')
+    path = pathlib.Path(path)
+    if str(path.resolve(strict=True)) != str(path):
+        raise ValueError('pinned path denied')
+    for parent in path.parents:
+        meta = parent.lstat()
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError('pinned ancestor denied')
+    def identity(meta):
+        return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+            meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        mode = 0o755 if kind == 'helper' else 0o644
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
+            or before.st_nlink != 1 or before.st_size != int(size) or stat.S_IMODE(before.st_mode) != mode):
+            raise ValueError('pinned identity denied')
+        raw = stream.read(int(size) + 1)
+        after = os.fstat(stream.fileno())
+    if (identity(before) != identity(after) or identity(after) != identity(path.lstat())
+        or len(raw) != int(size) or hashlib.sha256(raw).hexdigest() != digest):
+        raise ValueError('pinned drift denied')
+    return str(path)
+
+if __name__ == '__main__':
+    try:
+        print(validate_input(*sys.argv[1:]))
+    except (OSError, ValueError, TypeError):
+        raise SystemExit('pinned_build_input_denied') from None
+PY
+}
+
+runtime_input() {
+  case "$1" in
+    fcp-host|fcp-n8n|fcp-mcp-bridge)
+      if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+        printf '%s/bin/%s\n' "$RETAINED_RELEASE" "$1"
+        return
+      fi ;;
+    fwc-n8n) ;;
+    *) die "unknown runtime artifact" ;;
+  esac
+  printf '%s/release/%s\n' "$TARGET_DIR" "$1"
+}
+
+validate_retained_inputs() {
+  [[ "$1" == "$RETAINED_RELEASE" ]] || die "retained release path denied"
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+
+ROOT = '/usr/local/lib/fwc-n8n/releases/release-20261012-native-diagnostics-4a2d827a-rc1'
+SOURCE = '4a2d827aa35a85e05d7b24c61595015fb0d938e3'
+# SHA-256 binds bytes; BLAKE3 additionally binds the accepted receipt rows.
+PINS = {
+    'bin/fwc-n8n': (3318680, '5aa23c5842780142d4c57ec27f7bdb461b8d57e6a36cba4c93a465404ed647d6', '80af5116a7b10d19e555078092c716fda1af5671356f5d99933ae9d430981082'),
+    'bin/fcp-host': (22403872, '1c41af1ba7ed8cc7b664baa55fa49a98d8f8e7264d4d4e1cd6650fbb9dc8c11e', 'a9c5be2ef24ae6078bda49cf96c178af130bce2908912ba3acf0723a116797c9'),
+    'bin/fcp-n8n': (9274360, '5133dc331a3f37f927b18f19f8d4b072b9bbdd724468eff6bbf9639fec8733fe', 'a18256ab6ae26a23f3f0b0d0099cf4975cb82146f53f281eb31836610fce6d28'),
+    'bin/fcp-mcp-bridge': (9605016, 'bc80be0b0e79cbdafd2c12db4793d7eb09ce1a287dece99d593755ff99fdef66', 'ab7754e0da0efd82695670e2cbb15c86a5d1b132e89333f4305395682a959e3d'),
+    'manifests/fcp-mcp-bridge.toml': (19608, '13b572ed7bdc5524bae6b35126a21b0be6335d4f83415bfb6cf587af8106ca20', 'dca0f62c66f45e3e58a3f2f9d7ef17c7e48acc550ce36f6b7ea996eb5122af57'),
+    'inventory/eec.json': (13866, 'f6f8bf59bd6323093037f789414f771efa372584de27f53d9554290d8c8fa58a', 'c68a3eb1156744d6c8a023e8b4ad8de8022e2fbbc3df4c6e76055c8cc1c6f505'),
+    'inventory/hetzner.json': (13770, '89ae8720568768338efc8489cdc26e18bab4bced5417add727df7f8338149608', 'd508957e2ab84870c6cc338db6d1ef33ca3392c9aa67fdefc478b387e2ca829c'),
+    'inventory/eec-official-mcp.json': (17505, '2a2307b4b0f119f264a280b26aeea1a85e3581a0459fb36e9be6ef23874af761', 'ef69250be1fcb26884a0fe218aaca6b3649bcd46844df64015d36fe4f63a44e7'),
+    'inventory/hetzner-official-mcp.json': (17497, 'dd5db4b8e459d4f4b744e578205e9ae6c3c2b4c8489ec081d4d34fe966716090', '0b42196915aac8814bf723b9b0a90602e0d3edc7b2ea12336029d518a587fbe7'),
+    'policy/zone-policies.json': (828, '0f1d85d0d2be8bcb7e7936d1689d6d2b85b6e2c632ba835f5d342d17c047606a', 'ffc5620cc0c54203d7cec21df37a90233b2ae49e238a50de2f9a6f6cca3b72e7'),
+    'policy/local-mcp.json': (21455, '614e2bc0799a6d3175ba29f8c52fa4e7d5ac489f096e16212af2da76f84d5cff', 'e1959a471a4199a12513d9379fe1a609a01bf7469961e2d14b19a11557cad29f'),
+}
+RECEIPTS = {
+    'receipt.json': (1748, '5c12bd083fc5e198d0dd89105612093e6bc4c32b3dc23b38f262e652b4aec8d3'),
+    'provenance.json': (170, '18cb471770acb87c555f80a555763e8b5bdb0c4de56f56dad115a9bca88946d9'),
+    'provision-receipt.json': (2778, '9e174432e462358ca96d66a390a961f877f3f101daa9b4b843288c502b00750c'),
+}
+
+def closed_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate retained field')
+        result[key] = value
+    return result
+
+def identity(meta):
+    return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
+        meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
+
+def read_pinned(path, size, digest):
+    path = pathlib.Path(path)
+    if str(path.resolve(strict=True)) != str(path):
+        raise ValueError('retained canonical path denied')
+    for parent in path.parents:
+        meta = parent.lstat()
+        if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+            raise ValueError('retained ancestor denied')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
+            or before.st_nlink != 1 or before.st_size != size
+            or stat.S_IMODE(before.st_mode) != (0o755 if path.parent.name == 'bin' else 0o644)):
+            raise ValueError('retained file identity denied')
+        raw = stream.read(size + 1)
+        after = os.fstat(stream.fileno())
+    if (identity(before) != identity(after) or identity(after) != identity(path.lstat())
+        or len(raw) != size or hashlib.sha256(raw).hexdigest() != digest):
+        raise ValueError('retained file drift denied')
+    return raw
+
+def validate_retained(root, read=read_pinned, schemas=None):
+    if root != ROOT:
+        raise ValueError('retained root denied')
+    records = {name: json.loads(read(root + '/' + name, *pin), object_pairs_hook=closed_object)
+        for name, pin in RECEIPTS.items()}
+    release_id = pathlib.Path(root).name
+    if records['provenance.json'] != {'schema': 'fwc.n8n.provenance.v1', 'release_id': release_id, 'git_revision': SOURCE}:
+        raise ValueError('retained source denied')
+    for name, schema in [('receipt.json', 'fwc.n8n.bundle.v1'), ('provision-receipt.json', 'fwc.n8n.provision.v1')]:
+        record = records[name]
+        if record['schema'] != schema or record['release_id'] != release_id:
+            raise ValueError('retained receipt denied')
+        rows = record['artifacts']
+        digests = {row['path']: row['digest'] for row in rows}
+        if len(digests) != len(rows) or any(digests.get(p) != pin[2] for p, pin in PINS.items()):
+            raise ValueError('retained artifact receipt denied')
+    if records['provision-receipt.json']['git_revision'] != SOURCE:
+        raise ValueError('retained signed source denied')
+    for name, (size, digest, _) in PINS.items():
+        read(root + '/' + name, size, digest)
+    if schemas is not None:
+        if len(schemas) != 16:
+            raise ValueError('retained schema input count denied')
+        expected = []
+        for server in ('eec', 'hetzner'):
+            name = 'inventory/' + server + '-official-mcp.json'
+            tools = json.loads(read(root + '/' + name, *PINS[name][:2]), object_pairs_hook=closed_object)[0]['config']['capability_policy']['approved_tools']
+            for operation in ('publish_workflow', 'unpublish_workflow', 'archive_workflow', 'execute_workflow'):
+                tool = next(tool for tool in tools if tool['name'] == operation)
+                expected += [tool['input_schema_digest'], tool['output_schema_digest']]
+        if schemas != expected:
+            raise ValueError('retained schema input drift denied')
+    # The policy hash binds the exact immutable package/tree/receipt pins.
+    # Native unsigned validation still verifies that actual package tree.
+
+if __name__ == '__main__':
+    try:
+        validate_retained(sys.argv[1], schemas=sys.argv[2:] or None)
+    except (OSError, ValueError, KeyError, TypeError, StopIteration):
+        raise SystemExit('retained_inputs_denied') from None
+PY
+}
+
+validate_retained_schema_inputs() {
+  validate_retained_inputs "$RETAINED_RELEASE" \
+    "$EEC_PUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$EEC_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_ARCHIVE_INPUT_SCHEMA_DIGEST" "$EEC_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$EEC_EXECUTE_INPUT_SCHEMA_DIGEST" "$EEC_EXECUTE_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_PUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_PUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_UNPUBLISH_INPUT_SCHEMA_DIGEST" "$HETZNER_UNPUBLISH_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_ARCHIVE_INPUT_SCHEMA_DIGEST" "$HETZNER_ARCHIVE_OUTPUT_SCHEMA_DIGEST" \
+    "$HETZNER_EXECUTE_INPUT_SCHEMA_DIGEST" "$HETZNER_EXECUTE_OUTPUT_SCHEMA_DIGEST"
+}
+
+build_runtime_artifacts() {
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    build_one build --release --package fcp-n8n --bin fwc-n8n
+    build_one build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign
+    return
+  fi
+  build_one build --release --package fcp-host --bin fcp-host
+  build_one build --release --package fcp-n8n --bin fwc-n8n
+  build_one rustc --release --package fcp-n8n --bin fcp-n8n -- -C target-feature=+crt-static
+  build_one rustc --release --package fcp-mcp-bridge --bin fcp-mcp-bridge -- -C target-feature=+crt-static
+  build_one build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign
+  build_external_approval_issuer
+}
+
+validate_retained_native_package() {
+  validate_retained_inputs "$RETAINED_RELEASE"
+  [[ "$(readlink -e "$CURRENT_PATH")" == "$RETAINED_RELEASE" ]] || die "retained current drift"
+  # Existing native signed-current/package verifier; --check-only never starts
+  # Node or discovers a catalog. No helper or signer is involved in this check.
+  "$RETAINED_RELEASE/bin/fwc-n8n" export-schemas local --check-only >/dev/null \
+    || die "retained native package denied"
+  validate_retained_inputs "$RETAINED_RELEASE"
+  [[ "$(readlink -e "$CURRENT_PATH")" == "$RETAINED_RELEASE" ]] || die "retained current drift"
+}
+
 build_one() {
   echo "[build] $*" >&2
   if [[ -n "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX:-}" ]]; then
@@ -941,7 +1174,10 @@ require_immutable_template_release() {
 
 run_static_smoke() {
   echo "[test] owned static fcp-n8n smoke" >&2
-  env FCP_N8N_OWNED_SMOKE_BINARY="$TARGET_DIR/release/fcp-n8n" \
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    validate_retained_inputs "$RETAINED_RELEASE"
+  fi
+  env FCP_N8N_OWNED_SMOKE_BINARY="$(runtime_input fcp-n8n)" \
     bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test --release -p fcp-host --test n8n_owned_static_smoke \
       static_n8n_connector_introspects_under_owned_network_filter -- --ignored --exact
 }
@@ -963,16 +1199,26 @@ assert_external_approval_issuer_is_not_staged() {
 copy_templates() {
   local source_release="$1"
   local stage_root="$2"
+  local bridge_manifest="$REPO_ROOT/connectors/mcp-bridge/manifest.toml"
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    validate_retained_inputs "$source_release"
+    validate_retained_native_package
+    bridge_manifest="$RETAINED_RELEASE/manifests/fcp-mcp-bridge.toml"
+    [[ "$(sha256sum "$REPO_ROOT/connectors/n8n/manifest.toml" | cut -d' ' -f1)" == \
+      4c71a7d0f0765afb4a8f9fd1d7df71539ef2495f465bd4ca4d8e6c1d603acf8c ]] \
+      || die "reuse n8n manifest denied"
+    [[ ! -e "$stage_root" && ! -L "$stage_root" ]] || die "reuse stage already exists"
+  fi
 
   install -d -o root -g root -m 0755 \
     "$stage_root" "$stage_root/bin" "$stage_root/manifests" \
     "$stage_root/inventory" "$stage_root/policy"
-  install -o root -g root -m 0755 "$TARGET_DIR/release/fwc-n8n" "$stage_root/bin/fwc-n8n"
-  install -o root -g root -m 0755 "$TARGET_DIR/release/fcp-host" "$stage_root/bin/fcp-host"
-  install -o root -g root -m 0755 "$TARGET_DIR/release/fcp-n8n" "$stage_root/bin/fcp-n8n"
-  install -o root -g root -m 0755 "$TARGET_DIR/release/fcp-mcp-bridge" "$stage_root/bin/fcp-mcp-bridge"
+  local binary
+  for binary in fwc-n8n fcp-host fcp-n8n fcp-mcp-bridge; do
+    install -o root -g root -m 0755 "$(runtime_input "$binary")" "$stage_root/bin/$binary"
+  done
   install -o root -g root -m 0644 "$REPO_ROOT/connectors/n8n/manifest.toml" "$stage_root/manifests/fcp-n8n.toml"
-  install -o root -g root -m 0644 "$REPO_ROOT/connectors/mcp-bridge/manifest.toml" "$stage_root/manifests/fcp-mcp-bridge.toml"
+  install -o root -g root -m 0644 "$bridge_manifest" "$stage_root/manifests/fcp-mcp-bridge.toml"
 
   for server in eec hetzner; do
     install -o root -g root -m 0644 "$source_release/inventory/${server}.json" "$stage_root/inventory/${server}.json"
@@ -980,6 +1226,45 @@ copy_templates() {
   done
   install -o root -g root -m 0644 "$source_release/policy/zone-policies.json" "$stage_root/policy/zone-policies.json"
   install -o root -g root -m 0644 "$source_release/policy/local-mcp.json" "$stage_root/policy/local-mcp.json"
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    # Recheck selected sources after copy; native receipts bind staged bytes.
+    validate_retained_inputs "$source_release"
+    for binary in fcp-host fcp-n8n fcp-mcp-bridge; do
+      cmp -s "$stage_root/bin/$binary" "$(runtime_input "$binary")" || die "retained copy drift"
+    done
+    cmp -s "$stage_root/manifests/fcp-mcp-bridge.toml" "$bridge_manifest" || die "retained manifest copy drift"
+  fi
+}
+
+rebind_retained_local_policy() {
+  local stage_root="$1"
+  validate_retained_inputs "$RETAINED_RELEASE"
+  python3 - "$stage_root/policy/local-mcp.json" "$RETAINED_RELEASE" "$RELEASE_ID" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+def rebind(policy, old_release_id, new_release_id):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', new_release_id) or old_release_id == new_release_id:
+        raise ValueError('retained local release denied')
+    result = json.loads(json.dumps(policy))
+    if result['package_binding']['release_id'] != old_release_id:
+        raise ValueError('retained local binding denied')
+    result['package_binding']['release_id'] = new_release_id
+    return result
+
+if __name__ == '__main__':
+    try:
+        path = pathlib.Path(sys.argv[1])
+        original = (pathlib.Path(sys.argv[2]) / 'policy/local-mcp.json').read_bytes()
+        if path.read_bytes() != original:
+            raise ValueError('retained local policy drift')
+        updated = rebind(json.loads(original), pathlib.Path(sys.argv[2]).name, sys.argv[3])
+        path.write_text(json.dumps(updated, indent=2) + '\n')
+    except (OSError, ValueError, KeyError, TypeError):
+        raise SystemExit('retained_local_policy_denied') from None
+PY
 }
 
 local_call_budget() {
@@ -1060,6 +1345,9 @@ search_read_policy() {
   # or this pure check is not owner approval. There is no caller-selected path.
   local admission="${FWC_N8N_SEARCH_READ_POLICY_SHA256:-}"
   local safe_admission="${FWC_N8N_SAFE_READ_POLICY_SHA256:-}"
+  local execution_search="${FWC_N8N_EXECUTION_SEARCH-0}"
+  [[ "$execution_search" == 0 || "$execution_search" == 1 ]] || die "execution search opt-in is invalid"
+  [[ "$execution_search" == 0 || -n "$admission$safe_admission" ]] || die "execution search requires admitted read policy"
   [[ -z "$admission" || -z "$safe_admission" ]] || die "read policy inputs are mutually exclusive"
   local kind="search"
   if [[ -n "$safe_admission" ]]; then
@@ -1068,7 +1356,7 @@ search_read_policy() {
   fi
   [[ -n "$admission" ]] || return 0
   [[ "$admission" =~ ^[0-9a-f]{64}$ ]] || die "search read policy admission digest is invalid"
-  python3 - "$1" "$admission" "${2:-}" "$kind" <<'PY'
+  python3 - "$1" "$admission" "${2:-}" "$kind" "$execution_search" <<'PY'
 import copy
 import hashlib
 import json
@@ -1221,6 +1509,31 @@ def input_identity(meta):
     return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_gid, meta.st_mode,
         meta.st_nlink, meta.st_size, meta.st_mtime_ns, meta.st_ctime_ns)
 
+def add_execution_search_inventory(common, server):
+    # One exact optional operation; this recipe is not release authority.
+    common = copy.deepcopy(common)
+    if server not in ("eec", "hetzner") or common["config"]["server_id"] != server:
+        raise ValueError("execution search policy denied")
+    operations = common["allowed_operations"]
+    networks = common["operation_network_constraints"]
+    operation = "n8n.executions.search"
+    if (operation in operations or operation in networks
+        or "n8n.workflows.compare" not in operations
+        or "n8n.validation.run" not in operations):
+        raise ValueError("execution search policy denied")
+    host = "n8n.europeaneyecenter.com" if server == "eec" else "n8nhet.levilaser.com"
+    network = {"host_allow": [host], "port_allow": [443], "ip_allow": [],
+        "cidr_deny": ["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+            "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4",
+            "240.0.0.0/4", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"],
+        "deny_localhost": True, "deny_private_ranges": True, "deny_tailnet_ranges": True,
+        "require_sni": True, "spki_pins": [], "deny_ip_literals": True,
+        "require_host_canonicalization": True, "dns_max_ips": 4, "max_redirects": 0,
+        "connect_timeout_ms": 5000, "total_timeout_ms": 15000, "max_response_bytes": 1048576}
+    operations.append(operation)
+    networks[operation] = network
+    return common
+
 def admitted_input(digest):
     # All ancestors and the data file remain root-controlled and non-symlinked.
     for name in ("/srv", "/srv/dev-ssd", "/srv/dev-ssd/rc41-inputs"):
@@ -1241,7 +1554,9 @@ def admitted_input(digest):
     return validate_read_policy(raw)
 
 def main():
-    mode, digest, stage, kind = sys.argv[1:]
+    mode, digest, stage, kind, execution_search = sys.argv[1:]
+    if execution_search not in ("0", "1"):
+        raise ValueError("execution search policy denied")
     policy = admitted_input(digest)
     expected_schema = "fwc.n8n.safe-read-policy.v1" if kind == "safe" else "fwc.n8n.search-read-policy.v1"
     if policy["schema"] != expected_schema:
@@ -1270,6 +1585,8 @@ def main():
                 raise ValueError("search read policy denied")
             values.append(parsed[0])
         outputs = add_read_inventory(*values, server, policy)
+        if execution_search == "1":
+            outputs = (outputs[0], add_execution_search_inventory(outputs[1], server))
         for path, output in zip(paths, outputs):
             updates.append((path, output))
     if mode == "apply":
@@ -1655,6 +1972,15 @@ PY
 }
 
 main() {
+  [[ "${FWC_N8N_REUSE_RETAINED-0}" == 0 || "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]] \
+    || die "retained reuse opt-in is invalid"
+  [[ "${FWC_N8N_REUSE_RETAINED-0}" == 0 || "${FWC_N8N_EXECUTION_SEARCH-0}" == 1 ]] \
+    || die "retained reuse requires execution search"
+  # Reject malformed opt-in before any command can create or change artifacts.
+  [[ "${FWC_N8N_EXECUTION_SEARCH-0}" == 0 || "${FWC_N8N_EXECUTION_SEARCH-0}" == 1 ]] \
+    || die "execution search opt-in is invalid"
+  [[ "${FWC_N8N_EXECUTION_SEARCH-0}" == 0 || -n "${FWC_N8N_SEARCH_READ_POLICY_SHA256:-}${FWC_N8N_SAFE_READ_POLICY_SHA256:-}" ]] \
+    || die "execution search requires admitted read policy"
   if [[ "${1:-}" == "--prepare-derived-local-validator" ]]; then
     [[ "$#" == 2 ]] || die "derived preparation requires one closed input FILE"
     prepare_derived_local_validator "$2"
@@ -1744,6 +2070,23 @@ main() {
     [[ "${FWC_N8N_OWNER_PREVIOUS_PUBLIC_KEY_HEX}" != "${FWC_N8N_OWNER_PUBLIC_KEY_HEX}" ]] \
       || die "active and previous owner public keys must differ"
   fi
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    [[ -z "$LOCAL_MCP_PACKAGE_INPUT$LOCAL_MCP_PACKAGE_INPUT_SHA256" ]] || die "reuse retains the exact native package"
+    [[ -z "${FWC_N8N_LOCAL_CALL_BUDGET_SHA256:-}${FWC_N8N_CREDENTIAL_METADATA_MAPPING_SHA256:-}" ]] \
+      || die "reuse retains the exact local and credential policies"
+    require_clean_tracked_head
+    validate_retained_inputs "$(readlink -e "$CURRENT_PATH")"
+    validate_retained_schema_inputs
+    build_hash_helper
+    validate_retained_native_package
+    [[ "$(sha256sum "$REPO_ROOT/connectors/n8n/manifest.toml" | cut -d' ' -f1)" == \
+      4c71a7d0f0765afb4a8f9fd1d7df71539ef2495f465bd4ca4d8e6c1d603acf8c ]] \
+      || die "reuse n8n manifest denied"
+    validate_official_schema_baselines "$RETAINED_RELEASE/bin/fwc-n8n"
+    search_read_policy check "$RETAINED_RELEASE"
+    credential_metadata_mapping check "$RETAINED_RELEASE"
+    local_call_budget >/dev/null
+  fi
   bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- true >/dev/null
   require_safe_directory "/var/lib/fwc-n8n"
   require_safe_directory "$STAGING_ROOT"
@@ -1768,10 +2111,12 @@ main() {
   [[ "$source_release" == "${INSTALL_ROOT}/releases/"* && -d "$source_release" ]] || die "current is outside fixed releases root"
   require_immutable_template_release "$source_release"
   # Refuse inconsistent admitted inputs before any Cargo/build or stage writes.
-  validate_official_schema_baselines "$source_release/bin/fwc-n8n"
-  search_read_policy check "$source_release"
-  credential_metadata_mapping check "$source_release"
-  local_call_budget >/dev/null
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" != 1 ]]; then
+    validate_official_schema_baselines "$source_release/bin/fwc-n8n"
+    search_read_policy check "$source_release"
+    credential_metadata_mapping check "$source_release"
+    local_call_budget >/dev/null
+  fi
   RELEASE_ID="$release_id"
   stage_root="${STAGING_ROOT}/${release_id}"
   [[ ! -e "$stage_root" ]] || die "staging target already exists; refusing to overwrite"
@@ -1784,15 +2129,14 @@ main() {
     require_safe_directory "$TARGET_DIR/requests"
   fi
 
-  build_one build --release --package fcp-host --bin fcp-host
-  build_one build --release --package fcp-n8n --bin fwc-n8n
-  build_one rustc --release --package fcp-n8n --bin fcp-n8n -- -C target-feature=+crt-static
-  build_one rustc --release --package fcp-mcp-bridge --bin fcp-mcp-bridge -- -C target-feature=+crt-static
-  build_one build --release --package fcp-n8n --features owner-signing --bin fwc-n8n-owner-sign
-  build_external_approval_issuer
+  build_runtime_artifacts
   run_static_smoke
   build_hash_helper
-  hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    hash_helper="$(require_pinned_build_input "$FWC_N8N_BLAKE3_HELPER" "$FWC_N8N_BLAKE3_HELPER_SHA256" helper)"
+  else
+    hash_helper="$TARGET_DIR/release/fwc-n8n-blake3-helper"
+  fi
 
   copy_templates "$source_release" "$stage_root"
   echo "[test] staged n8n manifest production validation" >&2
@@ -1801,7 +2145,11 @@ main() {
   echo "[test] staged MCP bridge manifest production validation" >&2
   FCP_MCP_BRIDGE_STAGED_MANIFEST_PATH="$stage_root/manifests/fcp-mcp-bridge.toml" \
     bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- cargo --locked --offline test -p fcp-mcp-bridge --lib runtime_operation_catalog_matches_manifest_metadata
-  write_local_mcp_policy "$stage_root" "$hash_helper"
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    rebind_retained_local_policy "$stage_root"
+  else
+    write_local_mcp_policy "$stage_root" "$hash_helper"
+  fi
   assert_external_approval_issuer_is_not_staged "$stage_root"
   write_inventory_and_request "$stage_root" "$source_release" "$hash_helper" "$request_path" "$git_revision"
   search_read_policy apply "$stage_root"
@@ -1812,7 +2160,11 @@ main() {
   echo "stage_root=${stage_root}"
   echo "request_file=${request_path}"
   echo "signer=${TARGET_DIR}/release/fwc-n8n-owner-sign"
-  echo "external_approval_issuer=${TARGET_DIR}/release/${EXTERNAL_APPROVAL_ISSUER}"
+  if [[ "${FWC_N8N_REUSE_RETAINED-0}" == 1 ]]; then
+    echo "external_approval_issuer=${EXTERNAL_APPROVAL_ISSUER_INSTALL_PATH}"
+  else
+    echo "external_approval_issuer=${TARGET_DIR}/release/${EXTERNAL_APPROVAL_ISSUER}"
+  fi
   echo "external_approval_issuer_install_target=${EXTERNAL_APPROVAL_ISSUER_INSTALL_PATH}"
   echo "next_step=owner-sign then fwc-n8n provision --mode preflight"
 }

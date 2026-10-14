@@ -460,6 +460,38 @@ ephemeral owner-seed **data** pipe/FD to the admitted signer stdin is separate:
 no controller seed read, secret variable/environment/file/log, new key or issuer
 replacement. Fixed public mapping/key8e7 and the approval key are distinct.
 
+For a continuation after a failed unsigned phase, import only the exact successful
+prepare result and its original procedure hash; do not repeat prepare at those
+occupied paths or accept the failed unsigned result as a prerequisite. Preserve original attempts, results,
+public exports and prepared sources. Revalidate actual prepared file identities,
+source commit/tree, locks, private namespace inputs and current receipt, and
+require staging, release and both old/new generated-request paths absent before
+new effects. Use exclusive versioned admission, attempt, result, originals and
+export names; all later prerequisites must bind the new successful unsigned
+result. Keep owner/reviewer GO records absent during local preparation.
+
+Budget unsigned verification, packing and metadata separately under one fixed
+overall deadline, with teardown margin before the parent wait expires; progress
+must not reset it. Retain bounded public stdout and numeric step/elapsed markers
+on failure, excluding diagnostic stderr. Rootless connected tests must exercise
+owned-process interruption/reaping as well as drift/collision refusals; synthetic
+timings establish mechanics, not production completion. Unknown outcomes still
+deny progression, retry and restoration. Signing/apply remain at most once, and
+conditional restoration requires the original exact known-success trigger and
+explicit initial owner grant. A documentation revision does not change the
+already built artifact's source commit or authorize rebuilding or replaying it.
+The read-parity continuation uses check/pack/metadata caps of 110/70/30 seconds,
+each clipped by the remaining fixed 240-second child budget with six seconds
+reserved for owned teardown; the parent pipe cap is 260 seconds, followed by
+at most nine seconds of namespace wait/teardown against the 300-second outer
+reference. Verification includes eight sequential schema subprocesses capped at
+10 seconds each plus repeated retained/package reads. The extra check margin,
+packing and metadata caps are unmeasured workload hypotheses, not reserved time
+or cold/warm completion proof; filesystem/kernel IO has no total wall-time claim.
+Choose future caps from measurements or workload bounds and record hypotheses.
+A corrected rootless test with its own exclusive evidence is local verification;
+it never renews a privileged unsigned, signing, installation or external attempt.
+
 The reviewed file hashes are assembly
 `746b079efa81044f79a765e3c26776af26c323623b5f98cb3adb175a20aacf6a`,
 sign/preflight `519d6f010ee8756403c889afc95970ffebc4a79e6741a83503d813b19e3bb33b`,

@@ -7,7 +7,8 @@ set -euo pipefail
 
 readonly INSTALL_ROOT="/usr/local/lib/fwc-n8n"
 readonly CURRENT_PATH="${INSTALL_ROOT}/current"
-readonly RETAINED_RELEASE="${INSTALL_ROOT}/releases/release-20261012-native-diagnostics-4a2d827a-rc1"
+# Selected once from the closed current-release profiles before retained work.
+RETAINED_RELEASE="${INSTALL_ROOT}/releases/release-20261012-native-diagnostics-4a2d827a-rc1"
 readonly STAGING_ROOT="/var/lib/fwc-n8n/staging"
 readonly SSD_ROOT="/srv/dev-ssd/fcp"
 readonly PROVISION_REQUEST_SCHEMA="fwc.n8n.provision-request.v1"
@@ -981,6 +982,15 @@ runtime_input() {
   printf '%s/release/%s\n' "$TARGET_DIR" "$1"
 }
 
+select_retained_release() {
+  case "$1" in
+    /usr/local/lib/fwc-n8n/releases/release-20261012-native-diagnostics-4a2d827a-rc1|\
+    /usr/local/lib/fwc-n8n/releases/release-20261014-execution-search-a5cc0834-rc1)
+      printf '%s\n' "$1" ;;
+    *) die "retained current profile denied" ;;
+  esac
+}
+
 validate_retained_inputs() {
   [[ "$1" == "$RETAINED_RELEASE" ]] || die "retained release path denied"
   python3 - "$@" <<'PY'
@@ -1012,6 +1022,34 @@ RECEIPTS = {
     'provenance.json': (170, '18cb471770acb87c555f80a555763e8b5bdb0c4de56f56dad115a9bca88946d9'),
     'provision-receipt.json': (2778, '9e174432e462358ca96d66a390a961f877f3f101daa9b4b843288c502b00750c'),
 }
+
+# Exact installed successor: the three runtime binaries and bridge manifest
+# retain their 4a artifact identities. SOURCE identifies the recipe/new CLI,
+# not a source attestation for the retained binaries.
+SEARCH_ROOT = '/usr/local/lib/fwc-n8n/releases/release-20261014-execution-search-a5cc0834-rc1'
+SEARCH_SOURCE = 'a5cc083424e6c83113313f782b7d82a121835b3b'
+SEARCH_PINS = {
+    **PINS,
+    'bin/fwc-n8n': (3333736, 'cf53c594d75a2761db75f6d4787db91e27bc32aaefa2e0fbbdb8f7aa6b412935', 'a49836478051c55dd125a2006e3de3221b69b6601a1197d66537b4acf58a5eb9'),
+    'manifests/fcp-n8n.toml': (120340, '4c71a7d0f0765afb4a8f9fd1d7df71539ef2495f465bd4ca4d8e6c1d603acf8c', '48afb389873be8192e6dd99173f3ab1c3d5443e8f1855d3ded0557fa1ec14457'),
+    'inventory/eec.json': (14834, 'e9cea951ef6f6d610e027891d0298eaa2f542a3f4eef0287244668f0770b125b', 'fdacc955b95190e07949f75dde32733bb52d1dba21f271cc9c0cff132b1f5246'),
+    'inventory/hetzner.json': (14733, '1a29354980f14fa2fa560442e4662fb6e66e91691ada4dd182a3f5fceda061ce', 'de1de1b733045c2fe24f808c05afe066101aa05e6f4f1c313780fe91763f4e7f'),
+    'inventory/eec-official-mcp.json': (17497, 'f994b6e865248b298b8889c424503da9b3d4ac16d5d246fba899dd8c1f62a4c6', '757643bbf2919c93c4774a97e60982e10bc15d610ef21ec3422c3cddd6ff6bac'),
+    'inventory/hetzner-official-mcp.json': (17489, 'acb9507b2ec55b1563b4ddff57d44b20c21ab4000b90ffeacfc73f3ec1613fac', 'f5d44c975ee92c672cc36511e7cbb1101e77250ae48e94825529340043a64a72'),
+    'policy/local-mcp.json': (21453, 'c7b1591737d4e406cc6d73cebcd719a96e92dc06a06f061609a40f2f484dbd75', '7b954579f8516872799ccc32f3d1ecd951660790321a4a46ed971f085b277f07'),
+}
+SEARCH_RECEIPTS = {
+    'receipt.json': (1746, '1de8818655cc1351db321f08fb733661f68e8a329eb3a941472bfece87586d8b'),
+    'provenance.json': (168, 'cd567cf051602a5337b1d5c9686a3079c6229b7f585b1902f720c57dca99134b'),
+    'provision-receipt.json': (2776, '50b8bd4be8869d9c9a3f97e2da24d188a4fcdca35ce0c57584aae8a7d56b142f'),
+}
+
+def retained_profile(root):
+    if root == ROOT:
+        return SOURCE, PINS, RECEIPTS
+    if root == SEARCH_ROOT:
+        return SEARCH_SOURCE, SEARCH_PINS, SEARCH_RECEIPTS
+    raise ValueError('retained root denied')
 
 def closed_object(pairs):
     result = {}
@@ -1048,12 +1086,11 @@ def read_pinned(path, size, digest):
     return raw
 
 def validate_retained(root, read=read_pinned, schemas=None):
-    if root != ROOT:
-        raise ValueError('retained root denied')
+    source, pins, receipts = retained_profile(root)
     records = {name: json.loads(read(root + '/' + name, *pin), object_pairs_hook=closed_object)
-        for name, pin in RECEIPTS.items()}
+        for name, pin in receipts.items()}
     release_id = pathlib.Path(root).name
-    if records['provenance.json'] != {'schema': 'fwc.n8n.provenance.v1', 'release_id': release_id, 'git_revision': SOURCE}:
+    if records['provenance.json'] != {'schema': 'fwc.n8n.provenance.v1', 'release_id': release_id, 'git_revision': source}:
         raise ValueError('retained source denied')
     for name, schema in [('receipt.json', 'fwc.n8n.bundle.v1'), ('provision-receipt.json', 'fwc.n8n.provision.v1')]:
         record = records[name]
@@ -1061,11 +1098,11 @@ def validate_retained(root, read=read_pinned, schemas=None):
             raise ValueError('retained receipt denied')
         rows = record['artifacts']
         digests = {row['path']: row['digest'] for row in rows}
-        if len(digests) != len(rows) or any(digests.get(p) != pin[2] for p, pin in PINS.items()):
+        if len(digests) != len(rows) or any(digests.get(p) != pin[2] for p, pin in pins.items()):
             raise ValueError('retained artifact receipt denied')
-    if records['provision-receipt.json']['git_revision'] != SOURCE:
+    if records['provision-receipt.json']['git_revision'] != source:
         raise ValueError('retained signed source denied')
-    for name, (size, digest, _) in PINS.items():
+    for name, (size, digest, _) in pins.items():
         read(root + '/' + name, size, digest)
     if schemas is not None:
         if len(schemas) != 16:
@@ -1073,7 +1110,7 @@ def validate_retained(root, read=read_pinned, schemas=None):
         expected = []
         for server in ('eec', 'hetzner'):
             name = 'inventory/' + server + '-official-mcp.json'
-            tools = json.loads(read(root + '/' + name, *PINS[name][:2]), object_pairs_hook=closed_object)[0]['config']['capability_policy']['approved_tools']
+            tools = json.loads(read(root + '/' + name, *pins[name][:2]), object_pairs_hook=closed_object)[0]['config']['capability_policy']['approved_tools']
             for operation in ('publish_workflow', 'unpublish_workflow', 'archive_workflow', 'execute_workflow'):
                 tool = next(tool for tool in tools if tool['name'] == operation)
                 expected += [tool['input_schema_digest'], tool['output_schema_digest']]
@@ -1517,7 +1554,9 @@ def add_execution_search_inventory(common, server):
     operations = common["allowed_operations"]
     networks = common["operation_network_constraints"]
     operation = "n8n.executions.search"
-    if (operation in operations or operation in networks
+    if (not isinstance(operations, list) or not isinstance(networks, dict)
+        or any(not isinstance(entry, str) for entry in operations)
+        or len(set(operations)) != len(operations)
         or "n8n.workflows.compare" not in operations
         or "n8n.validation.run" not in operations):
         raise ValueError("execution search policy denied")
@@ -1530,6 +1569,14 @@ def add_execution_search_inventory(common, server):
         "require_sni": True, "spki_pins": [], "deny_ip_literals": True,
         "require_host_canonicalization": True, "dns_max_ips": 4, "max_redirects": 0,
         "connect_timeout_ms": 5000, "total_timeout_ms": 15000, "max_response_bytes": 1048576}
+    if operation in operations or operation in networks:
+        # Reuse only the complete exact admitted tuple, without rewriting it.
+        # JSON comparison also distinguishes booleans from numeric values.
+        if (operations.count(operation) != 1 or operation not in networks
+            or not isinstance(networks[operation], dict)
+            or json.dumps(networks[operation], sort_keys=True) != json.dumps(network, sort_keys=True)):
+            raise ValueError("execution search policy denied")
+        return common
     operations.append(operation)
     networks[operation] = network
     return common
@@ -2075,6 +2122,8 @@ main() {
     [[ -z "${FWC_N8N_LOCAL_CALL_BUDGET_SHA256:-}${FWC_N8N_CREDENTIAL_METADATA_MAPPING_SHA256:-}" ]] \
       || die "reuse retains the exact local and credential policies"
     require_clean_tracked_head
+    RETAINED_RELEASE="$(select_retained_release "$(readlink -e "$CURRENT_PATH")")"
+    readonly RETAINED_RELEASE
     validate_retained_inputs "$(readlink -e "$CURRENT_PATH")"
     validate_retained_schema_inputs
     build_hash_helper

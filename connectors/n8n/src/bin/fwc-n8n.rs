@@ -2851,7 +2851,25 @@ fn project_catalog_metadata(value: &Value, depth: usize) -> Result<Value, AppErr
             }
             let mut projected = serde_json::Map::new();
             for (key, value) in object {
-                if key == "displayOptions" {
+                if key == "migrationStrategy" {
+                    projected.insert(key.clone(), project_catalog_migration_strategy(value)?);
+                } else if matches!(key.as_str(), "fromVersion" | "toVersion") {
+                    let version = value
+                        .as_str()
+                        .filter(|version| {
+                            !version.is_empty()
+                                && version.len() <= 32
+                                && version
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+                                && version
+                                    .parse::<f64>()
+                                    .ok()
+                                    .is_some_and(|number| number.is_finite() && number > 0.0)
+                        })
+                        .ok_or_else(|| AppError::new("knowledge_provider_response_invalid"))?;
+                    projected.insert(key.clone(), json!(version));
+                } else if key == "displayOptions" {
                     projected.insert(key.clone(), project_catalog_display_options(value)?);
                 } else if matches!(key.as_str(), "default" | "oldValue" | "newValue") {
                     let bytes = serde_json::to_vec(value)
@@ -2908,6 +2926,93 @@ fn project_catalog_metadata(value: &Value, depth: usize) -> Result<Value, AppErr
     }
 }
 
+/// The native breaking-changes registry supplies four declarative strategies.
+/// Preserve their metadata, never apply them or disclose their default values.
+fn project_catalog_migration_strategy(value: &Value) -> Result<Value, AppError> {
+    let refused = || AppError::new("knowledge_provider_response_invalid");
+    let object = value.as_object().ok_or_else(refused)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "type" | "defaultValue" | "sourceProperty" | "targetProperty"
+        )
+    }) {
+        return Err(refused());
+    }
+    let kind = value["type"]
+        .as_str()
+        .filter(|kind| {
+            matches!(
+                *kind,
+                "add_property" | "remove_property" | "rename_property" | "set_default"
+            )
+        })
+        .ok_or_else(refused)?;
+    let mut strategy = json!({"type":kind});
+    for key in ["sourceProperty", "targetProperty"] {
+        if let Some(property) = object.get(key) {
+            let property = property
+                .as_str()
+                .filter(|property| {
+                    !property.is_empty()
+                        && property.len() <= 256
+                        && property.split('.').all(|segment| {
+                            !segment.is_empty()
+                                && !matches!(segment, "__proto__" | "prototype" | "constructor")
+                                && segment.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                                })
+                        })
+                })
+                .ok_or_else(refused)?;
+            strategy[key] = json!(property);
+        }
+    }
+    if kind == "rename_property"
+        && (strategy.get("sourceProperty").is_none() || strategy.get("targetProperty").is_none())
+    {
+        return Err(refused());
+    }
+    if let Some(default) = object.get("defaultValue") {
+        validate_catalog_migration_default(default, 0)?;
+        let bytes = serde_json::to_vec(default).map_err(|_| refused())?;
+        if bytes.len() > 4096 {
+            return Err(refused());
+        }
+        strategy["defaultValueDigest"] =
+            json!(format!("sha256:{}", hex::encode(Sha256::digest(bytes))));
+    }
+    Ok(strategy)
+}
+
+fn validate_catalog_migration_default(value: &Value, depth: usize) -> Result<(), AppError> {
+    let refused = || AppError::new("knowledge_provider_response_invalid");
+    if depth > 8 {
+        return Err(refused());
+    }
+    match value {
+        Value::Array(items) => {
+            if items.len() > 64 {
+                return Err(refused());
+            }
+            for item in items {
+                validate_catalog_migration_default(item, depth + 1)?;
+            }
+        }
+        Value::Object(object) => {
+            if object.len() > 64 || object.keys().any(|key| key.len() > 256) {
+                return Err(refused());
+            }
+            for item in object.values() {
+                validate_catalog_migration_default(item, depth + 1)?;
+            }
+        }
+        Value::String(text) if text.len() > 1024 => return Err(refused()),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Public node-definition conditions are schema metadata, not node parameters.
 /// Retain their property bindings instead of dropping dynamic names via the
 /// general metadata allowlist. Unknown shapes refuse rather than appearing empty.
@@ -2915,10 +3020,19 @@ fn project_catalog_display_options(value: &Value) -> Result<Value, AppError> {
     let refused = || AppError::new("knowledge_provider_response_invalid");
     let object = value
         .as_object()
-        .filter(|object| object.len() <= 2)
+        .filter(|object| object.len() <= 3)
         .ok_or_else(refused)?;
     let mut result = serde_json::Map::new();
     for (kind, conditions) in object {
+        if kind == "showOnDeployment" {
+            // Native IDisplayOptions uses a closed deployment literal, never
+            // a condition object or an arbitrary deployment/environment name.
+            if !matches!(conditions.as_str(), Some("cloud" | "hosted")) {
+                return Err(refused());
+            }
+            result.insert(kind.clone(), conditions.clone());
+            continue;
+        }
         if !matches!(kind.as_str(), "show" | "hide") {
             return Err(refused());
         }
@@ -2936,18 +3050,55 @@ fn project_catalog_display_options(value: &Value) -> Result<Value, AppError> {
                 .as_array()
                 .filter(|values| values.len() <= 100)
                 .ok_or_else(refused)?;
-            if values.iter().any(|value| match value {
-                Value::Null | Value::Bool(_) | Value::Number(_) => false,
-                Value::String(text) => text.len() > 1024 || text.chars().any(char::is_control),
-                _ => true,
-            }) {
-                return Err(refused());
+            for value in values {
+                validate_catalog_display_condition(value)?;
             }
             bound.insert(property.clone(), json!(values));
         }
         result.insert(kind.clone(), Value::Object(bound));
     }
     Ok(Value::Object(result))
+}
+
+/// A closed subset of native `_cnd` metadata. Equality retains scalar types;
+/// ordered operands must be numbers, without JavaScript coercion or recursion.
+fn validate_catalog_display_condition(value: &Value) -> Result<(), AppError> {
+    let refused = || AppError::new("knowledge_provider_response_invalid");
+    let scalar = |value: &Value| match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => text.len() <= 1024 && !text.chars().any(char::is_control),
+        _ => false,
+    };
+    if scalar(value) {
+        return Ok(());
+    }
+    let object = value
+        .as_object()
+        .filter(|object| object.len() == 1)
+        .ok_or_else(refused)?;
+    let condition = object
+        .get("_cnd")
+        .and_then(Value::as_object)
+        .filter(|condition| condition.len() == 1)
+        .ok_or_else(refused)?;
+    let (operator, operand) = condition.iter().next().ok_or_else(refused)?;
+    let valid = match operator.as_str() {
+        "eq" | "not" => scalar(operand),
+        "gte" | "lte" | "gt" | "lt" => operand.is_number(),
+        // Preserve declarative strings only; do not compile or run regexes.
+        "regex" | "includes" => operand.is_string() && scalar(operand),
+        "exists" => operand.is_boolean(),
+        "between" => operand.as_object().is_some_and(|range| {
+            range.len() == 2
+                && range.get("from").is_some_and(Value::is_number)
+                && range.get("to").is_some_and(Value::is_number)
+        }),
+        _ => false,
+    };
+    if !valid {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// Interpret MCP validation while preserving bounded authorized diagnostics.
@@ -8017,6 +8168,184 @@ mod tests {
     }
 
     #[test]
+    fn public_node_migration_metadata_retains_serialized_native_strategy_and_versions() {
+        let cases = [
+            (
+                "migrations",
+                json!({"nodeType":"nodes-base.executeWorkflow","available":true,
+                    "fromVersion":"1.0","toVersion":"1.1","autoMigratableChanges":1,
+                    "noActionRequired":0,"totalChanges":1,"requiresManualMigration":false,
+                    "migrations":[{"property":"parameters.inputFieldMapping","changeType":"added",
+                        "migrationStrategy":{"type":"add_property","defaultValue":{"mappings":[]}},
+                        "severity":"HIGH","source":"registry"}]}),
+            ),
+            (
+                "breaking",
+                json!({"nodeType":"nodes-base.executeWorkflow","available":true,
+                    "fromVersion":"1.0","toVersion":"1.1","totalBreakingChanges":1,
+                    "upgradeSafe":false,"changes":[{"fromVersion":"1.0","toVersion":"1.1",
+                        "property":"parameters.inputFieldMapping","changeType":"added",
+                        "severity":"HIGH","source":"registry","migrationHint":"Add explicit field mapping",
+                        "oldValue":"PRIVATE_MIGRATION_CANARY","newValue":{"token":"PRIVATE_MIGRATION_CANARY"},
+                        "default":"PRIVATE_MIGRATION_CANARY","credentials":{"id":"PRIVATE_MIGRATION_CANARY"}}]}),
+            ),
+        ];
+        for (mode, native) in cases {
+            let input = json!({"action":"get_node","nodeType":"nodes-base.executeWorkflow",
+                "mode":mode,"fromVersion":"1.0","toVersion":"1.1"});
+            let result = project_serialized_node_migration(&input, &native).unwrap();
+            let definition = &result["data"]["node"]["definition"];
+            if mode == "migrations" {
+                let strategy = &definition["migrations"][0]["migrationStrategy"];
+                assert_eq!(strategy["type"], "add_property");
+                assert_eq!(
+                    strategy["defaultValueDigest"],
+                    format!(
+                        "sha256:{}",
+                        hex::encode(Sha256::digest(
+                            serde_json::to_vec(
+                                &native["migrations"][0]["migrationStrategy"]["defaultValue"]
+                            )
+                            .unwrap()
+                        ))
+                    )
+                );
+                assert!(strategy.get("defaultValue").is_none());
+            } else {
+                let change = &definition["changes"][0];
+                assert_eq!(change["fromVersion"], "1.0");
+                assert_eq!(change["toVersion"], "1.1");
+                for key in ["oldValue", "newValue", "default"] {
+                    assert_eq!(
+                        change[format!("{key}Digest")],
+                        format!(
+                            "sha256:{}",
+                            hex::encode(Sha256::digest(
+                                serde_json::to_vec(&native["changes"][0][key]).unwrap()
+                            ))
+                        )
+                    );
+                    assert!(change.get(key).is_none());
+                }
+                assert!(change.get("credentials").is_none());
+            }
+            assert!(
+                !serde_json::to_string(&result)
+                    .unwrap()
+                    .contains("PRIVATE_MIGRATION_CANARY")
+            );
+        }
+        // Registry strategies contain arbitrary defaults; only their digest is public.
+        for strategy in [
+            json!({"type":"add_property","defaultValue":null}),
+            json!({"type":"set_default","defaultValue":"PRIVATE_MIGRATION_CANARY"}),
+            json!({"type":"remove_property"}),
+            json!({"type":"rename_property","sourceProperty":"continueOnFail",
+                "targetProperty":"onError","defaultValue":"continueErrorOutput"}),
+        ] {
+            let native = json!({"nodeType":"nodes-base.executeWorkflow","available":true,
+                "fromVersion":"1.0","toVersion":"1.1","autoMigratableChanges":1,
+                "migrations":[{"property":"continueOnFail","migrationStrategy":strategy}]});
+            let input = json!({"action":"get_node","nodeType":"nodes-base.executeWorkflow",
+                "mode":"migrations","fromVersion":"1.0","toVersion":"1.1"});
+            let result = project_serialized_node_migration(&input, &native).unwrap();
+            let projected =
+                &result["data"]["node"]["definition"]["migrations"][0]["migrationStrategy"];
+            for key in ["type", "sourceProperty", "targetProperty"] {
+                assert_eq!(projected.get(key), strategy.get(key));
+            }
+            assert!(projected.get("defaultValue").is_none());
+            assert_eq!(
+                projected.get("defaultValueDigest").is_some(),
+                strategy.get("defaultValue").is_some()
+            );
+            assert!(
+                !serde_json::to_string(&result)
+                    .unwrap()
+                    .contains("PRIVATE_MIGRATION_CANARY")
+            );
+        }
+    }
+
+    fn project_serialized_node_migration(input: &Value, native: &Value) -> Result<Value, AppError> {
+        let response = json!({"schema":LOCAL_RUN_ONCE_SCHEMA,"provider":"local_mcp",
+            "response":{"operation":"knowledge_query","result":{"status":"Completed",
+                "teardown_error_code":null,"responses":[{"content":[{"type":"text",
+                    "text":serde_json::to_string(native).unwrap()}],"structuredContent":native}]}}});
+        let bytes = serde_json::to_vec(&json!({"input":input})).unwrap();
+        run_local_once_from_bytes("n8n.knowledge.query", &bytes, |_| Ok(response))
+    }
+
+    #[test]
+    fn public_node_migration_metadata_denies_hostile_types_sizes_and_depth() {
+        let input = json!({"action":"get_node","nodeType":"nodes-base.executeWorkflow",
+            "mode":"migrations","fromVersion":"1.0","toVersion":"1.1"});
+        let mut deep = json!(null);
+        for _ in 0..10 {
+            deep = json!([deep]);
+        }
+        let hostile = [
+            json!(null),
+            json!([]),
+            json!("execute arbitrary text"),
+            json!({"type":1}),
+            json!({"type":"execute_code"}),
+            json!({"type":"add_property","code":"hostile()"}),
+            json!({"type":"add_property","defaultValueDigest":"spoofed"}),
+            json!({"type":"rename_property","sourceProperty":"continueOnFail"}),
+            json!({"type":"rename_property","sourceProperty":[],"targetProperty":"onError"}),
+            json!({"type":"rename_property","sourceProperty":"__proto__.token","targetProperty":"onError"}),
+            json!({"type":"rename_property","sourceProperty":"parameters.x","targetProperty":"constructor.token"}),
+            json!({"type":"rename_property","sourceProperty":"x","targetProperty":"hostile()"}),
+            json!({"type":"rename_property","sourceProperty":"x","targetProperty":"x".repeat(257)}),
+            json!({"type":"add_property","defaultValue":"x".repeat(1025)}),
+            json!({"type":"add_property","defaultValue":vec![json!(null);65]}),
+            json!({"type":"add_property","defaultValue":deep}),
+            json!({"type":"add_property","defaultValue":vec![json!("x".repeat(1024));5]}),
+        ];
+        for strategy in hostile {
+            let native = json!({"nodeType":"nodes-base.executeWorkflow","available":true,
+                "fromVersion":"1.0","toVersion":"1.1","autoMigratableChanges":1,
+                "migrations":[{"property":"parameters.inputFieldMapping","migrationStrategy":strategy}]});
+            assert_eq!(
+                project_serialized_node_migration(&input, &native)
+                    .unwrap_err()
+                    .code,
+                "knowledge_provider_response_invalid",
+                "strategy: {strategy}"
+            );
+        }
+        let input = json!({"action":"get_node","nodeType":"nodes-base.executeWorkflow",
+            "mode":"breaking","fromVersion":"1.0","toVersion":"1.1"});
+        for key in ["fromVersion", "toVersion"] {
+            for invalid in [
+                json!(null),
+                json!(1),
+                json!([]),
+                json!({}),
+                json!("0"),
+                json!("-1"),
+                json!("NaN"),
+                json!("1;hostile()"),
+                json!("1\n"),
+                json!("1".repeat(33)),
+            ] {
+                let native = json!({"nodeType":"nodes-base.executeWorkflow","available":true,
+                    "fromVersion":"1.0","toVersion":"1.1","totalBreakingChanges":1,
+                    "changes":[{"property":"parameters.inputFieldMapping","fromVersion":"1.0",
+                        "toVersion":"1.1",key:invalid}]});
+                assert_eq!(
+                    project_serialized_node_migration(&input, &native)
+                        .unwrap_err()
+                        .code,
+                    "knowledge_provider_response_invalid",
+                    "{key}: {invalid}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values() {
         for mode in [
             "info",
@@ -8451,6 +8780,254 @@ mod tests {
             json!({"show":{"bad\nname":[true]}}),
         ] {
             assert!(project_catalog_display_options(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn node_catalog_conditions_project_serialized_native_comparisons() {
+        let input = json!({"action":"get_node","nodeType":"nodes-base.noOp",
+            "mode":"info","detail":"full"});
+        for condition in [
+            json!(null),
+            json!(false),
+            json!(2),
+            json!("message"),
+            json!({"_cnd":{"eq":null}}),
+            json!({"_cnd":{"eq":true}}),
+            json!({"_cnd":{"eq":"message"}}),
+            json!({"_cnd":{"not":2}}),
+            json!({"_cnd":{"gte":1.1}}),
+            json!({"_cnd":{"lte":2}}),
+            json!({"_cnd":{"gt":0}}),
+            json!({"_cnd":{"lt":3}}),
+            json!({"_cnd":{"between":{"from":1,"to":2.5}}}),
+            json!({"_cnd":{"eq":"x".repeat(1024)}}),
+            json!({"_cnd":{"regex":"\\S"}}),
+            json!({"_cnd":{"regex":"(a+)+$"}}),
+            json!({"_cnd":{"regex":"x".repeat(1024)}}),
+            json!({"_cnd":{"includes":"_"}}),
+            json!({"_cnd":{"includes":""}}),
+            json!({"_cnd":{"includes":"x".repeat(1024)}}),
+            json!({"_cnd":{"exists":true}}),
+            json!({"_cnd":{"exists":false}}),
+        ] {
+            let options = json!({"show":{"@version":[condition]},"hide":{"operation":["delete"]}});
+            let native = json!({"nodeType":"nodes-base.noOp","properties":[{
+                "name":"operation","type":"string","displayOptions":options,
+                "default":"DISPLAY_PRIVATE_CANARY","credentials":{"id":"DISPLAY_PRIVATE_CANARY"}}],
+                "token":"DISPLAY_PRIVATE_CANARY"});
+            let projected = project_serialized_node_migration(&input, &native).unwrap();
+            assert_eq!(
+                projected["data"]["node"]["definition"]["properties"][0]["displayOptions"],
+                options
+            );
+            assert!(!projected.to_string().contains("DISPLAY_PRIVATE_CANARY"));
+        }
+    }
+
+    #[test]
+    fn node_catalog_conditions_refuse_serialized_hostile_operands_and_bounds() {
+        let input = json!({"action":"get_node","nodeType":"nodes-base.noOp",
+            "mode":"info","detail":"full"});
+        let mut deep = json!(1);
+        for _ in 0..20 {
+            deep = json!({"_cnd":{"eq":deep}});
+        }
+        for condition in [
+            json!([]),
+            json!({}),
+            json!({"_cnd":null}),
+            json!({"_cnd":[]}),
+            json!({"_cnd":{}}),
+            json!({"_cnd":{"eq":1,"not":2}}),
+            json!({"_cnd":{"eq":1},"token":"DISPLAY_HOSTILE_CANARY"}),
+            json!({"_cnd":{"regex":true}}),
+            json!({"_cnd":{"regex":{"token":"DISPLAY_HOSTILE_CANARY"}}}),
+            json!({"_cnd":{"regex":"x".repeat(1025)}}),
+            json!({"_cnd":{"regex":"bad\nvalue"}}),
+            json!({"_cnd":{"includes":["DISPLAY_HOSTILE_CANARY"]}}),
+            json!({"_cnd":{"includes":"x".repeat(1025)}}),
+            json!({"_cnd":{"includes":"bad\nvalue"}}),
+            json!({"_cnd":{"exists":"true"}}),
+            json!({"_cnd":{"exists":1}}),
+            json!({"_cnd":{"exists":null}}),
+            json!({"_cnd":{"startsWith":"DISPLAY_HOSTILE_CANARY"}}),
+            json!({"_cnd":{"endsWith":"DISPLAY_HOSTILE_CANARY"}}),
+            json!({"_cnd":{"gte":"2"}}),
+            json!({"_cnd":{"gt":true}}),
+            json!({"_cnd":{"lt":null}}),
+            json!({"_cnd":{"lte":[]}}),
+            json!({"_cnd":{"eq":{"token":"DISPLAY_HOSTILE_CANARY"}}}),
+            json!({"_cnd":{"not":[1]}}),
+            json!({"_cnd":{"eq":"bad\nvalue"}}),
+            json!({"_cnd":{"eq":"x".repeat(1025)}}),
+            json!({"_cnd":{"between":[]}}),
+            json!({"_cnd":{"between":{"from":1}}}),
+            json!({"_cnd":{"between":{"from":"1","to":2}}}),
+            json!({"_cnd":{"between":{"from":1,"to":null}}}),
+            json!({"_cnd":{"between":{"from":1,"to":2,"token":"DISPLAY_HOSTILE_CANARY"}}}),
+            deep,
+        ] {
+            let native = json!({"nodeType":"nodes-base.noOp","properties":[{
+                "name":"operation","displayOptions":{"show":{"@version":[condition]}}}]});
+            let error = project_serialized_node_migration(&input, &native).unwrap_err();
+            assert_eq!(error.code, "knowledge_provider_response_invalid");
+            assert!(!format!("{error:?}").contains("DISPLAY_HOSTILE_CANARY"));
+        }
+        let boundary = json!({"show":{"@version":vec![json!({"_cnd":{"gte":1}});100]}});
+        assert!(project_catalog_display_options(&boundary).is_ok());
+        for invalid in [
+            json!({"show":{"@version":vec![json!({"_cnd":{"gte":1}});101]}}),
+            json!({"show":{"x".repeat(257):[1]}}),
+            json!({"show":{"@version":[1]},"extra":{}}),
+        ] {
+            assert!(project_catalog_display_options(&invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn node_catalog_conditions_preserve_http_method_option_bindings() {
+        // These five bindings are from the pinned public 2.91.0 DB schema.
+        // The full-schema offline qualification below connects the actual data.
+        let options = ["COPY", "MKCOL", "MOVE", "PROPFIND", "REPORT"].map(|method| {
+            json!({"name":method,"value":method,"displayOptions":{
+                "hide":{"method":[{"_cnd":{"not":method}}],"options.webdavMethods":[true]}}})
+        });
+        let native = json!({"nodeType":"nodes-base.httpRequest","properties":[{
+            "name":"method","type":"options","default":"GET","options":options}]});
+        let input = json!({"action":"get_node","nodeType":"nodes-base.httpRequest",
+            "mode":"info","detail":"full"});
+        let result = project_serialized_node_migration(&input, &native).unwrap();
+        let property = &result["data"]["node"]["definition"]["properties"][0];
+        assert_eq!(property["options"], json!(options));
+        assert!(property.get("default").is_none());
+        assert_eq!(
+            property["defaultDigest"],
+            json!(format!(
+                "sha256:{}",
+                hex::encode(Sha256::digest(br#""GET""#))
+            ))
+        );
+    }
+
+    #[test]
+    fn node_catalog_conditions_deployment_literals_are_closed() {
+        let input = json!({"action":"get_node","nodeType":"nodes-base.readWriteFile",
+            "mode":"info","detail":"full"});
+        for deployment in ["cloud", "hosted"] {
+            let options = json!({"showOnDeployment":deployment,
+                "show":{"operation":["read"]},"hide":{"@version":[{"_cnd":{"lt":1}}]}});
+            let native = json!({"nodeType":"nodes-base.readWriteFile","properties":[{
+                "name":"cloudNotice","default":"DEPLOYMENT_DEFAULT_CANARY","displayOptions":options}]});
+            let result = project_serialized_node_migration(&input, &native).unwrap();
+            assert_eq!(
+                result["data"]["node"]["definition"]["properties"][0]["displayOptions"],
+                options
+            );
+            assert!(!result.to_string().contains("DEPLOYMENT_DEFAULT_CANARY"));
+        }
+        for deployment in [
+            json!(null),
+            json!(true),
+            json!([]),
+            json!({"cloud":true}),
+            json!("private"),
+            json!("cloud\n"),
+            json!("x".repeat(1025)),
+        ] {
+            let native = json!({"nodeType":"nodes-base.readWriteFile","properties":[{
+                "name":"cloudNotice","displayOptions":{"showOnDeployment":deployment}}]});
+            assert_eq!(
+                project_serialized_node_migration(&input, &native)
+                    .unwrap_err()
+                    .code,
+                "knowledge_provider_response_invalid"
+            );
+        }
+        assert!(
+            project_catalog_display_options(&json!({"show":{},"hide":{},
+            "showOnDeployment":"cloud","unknown":{}}))
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit pinned public DB reconstruction with injected transport; no native process proof"]
+    fn node_catalog_conditions_qualify_pinned_public_db_through_wrapper() {
+        let bytes = std::fs::read("/srv/dev-ssd/fcp/nqm81-35/execution-metadata-acceptance-20261014-1/autonomous1/source-checks/public-schema-ctx30e2055c/public-data.json").unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "d6901366ac1627070cbda10f0b0f783e1c10a5c53f6356d2785518488dac10da"
+        );
+        let data: Value = serde_json::from_slice(&bytes).unwrap();
+        let nodes = data["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        for native in nodes {
+            let input = json!({"action":"get_node","nodeType":native["nodeType"],
+                "mode":"info","detail":"full"});
+            let result = project_serialized_node_migration(&input, native).unwrap();
+            let properties = &result["data"]["node"]["definition"]["properties"];
+            for (index, raw) in native["properties"].as_array().unwrap().iter().enumerate() {
+                if let Some(default) = raw.get("default") {
+                    assert!(properties[index].get("default").is_none());
+                    assert_eq!(
+                        properties[index]["defaultDigest"],
+                        json!(format!(
+                            "sha256:{}",
+                            hex::encode(Sha256::digest(serde_json::to_vec(default).unwrap()))
+                        ))
+                    );
+                }
+            }
+            if native["nodeType"] == "nodes-base.httpRequest" {
+                assert_eq!(properties.as_array().unwrap().len(), 42);
+                for (index, method) in [
+                    (8, "COPY"),
+                    (10, "MKCOL"),
+                    (12, "MOVE"),
+                    (14, "PROPFIND"),
+                    (16, "REPORT"),
+                ] {
+                    let raw = &native["properties"][1]["options"][index];
+                    let projected = &properties[1]["options"][index];
+                    assert_eq!(raw["name"], method);
+                    assert_eq!(projected["displayOptions"], raw["displayOptions"]);
+                    assert_eq!(
+                        projected["displayOptions"]["hide"]["method"],
+                        json!([{"_cnd":{"not":method}}])
+                    );
+                    assert_eq!(
+                        projected["displayOptions"]["hide"]["options.webdavMethods"],
+                        json!([true])
+                    );
+                }
+            } else {
+                assert_eq!(properties.as_array().unwrap().len(), 9);
+                for index in [2, 5] {
+                    assert_eq!(
+                        properties[index]["displayOptions"],
+                        native["properties"][index]["displayOptions"]
+                    );
+                    assert_eq!(
+                        properties[index]["displayOptions"]["showOnDeployment"],
+                        "cloud"
+                    );
+                }
+            }
+        }
+        let cases = data["conditionProperties"].as_array().unwrap();
+        assert_eq!(cases.len(), 49);
+        for case in cases {
+            let native = json!({"nodeType":case["nodeType"],"properties":[case["property"]]});
+            let input = json!({"action":"get_node","nodeType":case["nodeType"],
+                "mode":"info","detail":"full"});
+            let result = project_serialized_node_migration(&input, &native).unwrap();
+            let property = &result["data"]["node"]["definition"]["properties"][0];
+            assert_eq!(
+                property["displayOptions"],
+                case["property"]["displayOptions"]
+            );
+            assert!(property.get("default").is_none());
         }
     }
 

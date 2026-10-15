@@ -2679,6 +2679,13 @@ fn validate_common_inventory(
     if execution_search {
         expected_operations.push("n8n.executions.search");
     }
+    extend_optional_audit_inventory_operations(
+        entry,
+        schema_mode,
+        lifecycle_schema_mode,
+        search,
+        &mut expected_operations,
+    )?;
     let expected_operations_set = expected_operations.iter().copied().collect::<BTreeSet<_>>();
     let actual_operations = entry
         .allowed_operations
@@ -2709,6 +2716,35 @@ fn validate_common_inventory(
     validate_common_inventory_network(entry, server, schema_mode, &expected_operations)
 }
 
+fn extend_optional_audit_inventory_operations(
+    entry: &CommonInventoryEntry,
+    schema_mode: CommonInventorySchemaMode,
+    lifecycle_schema_mode: LifecycleSchemaMode,
+    search: bool,
+    expected_operations: &mut Vec<&'static str>,
+) -> Result<(), ProvisionError> {
+    // Local categories and the external instance reporter remain separately
+    // enrolled operations, with separately validated network constraints.
+    for operation in ["n8n.audit.inspect", "n8n.audit.inspect_instance"] {
+        let enabled = entry
+            .allowed_operations
+            .iter()
+            .any(|value| value == operation);
+        if enabled != entry.operation_network_constraints.contains_key(operation)
+            || (enabled
+                && (!search
+                    || !matches!(schema_mode, CommonInventorySchemaMode::Current)
+                    || !matches!(lifecycle_schema_mode, LifecycleSchemaMode::CurrentPerServer)))
+        {
+            return Err(ProvisionError::new(ProvisionErrorCode::Policy));
+        }
+        if enabled {
+            expected_operations.push(operation);
+        }
+    }
+    Ok(())
+}
+
 fn validate_common_inventory_network(
     entry: &CommonInventoryEntry,
     server: ServerId,
@@ -2721,6 +2757,10 @@ fn validate_common_inventory_network(
     };
     let expected_port = 443;
     let expected_network = expected_n8n_network_constraint(expected_host, expected_port);
+    let mut expected_instance_audit_network = expected_network.clone();
+    // Native version lookup has a 30-second timeout. The caller additionally
+    // bounds the whole HTTP request; this is not a remote database deadline.
+    expected_instance_audit_network["total_timeout_ms"] = serde_json::json!(45_000);
     let mut expected_validation_network = expected_network.clone();
     expected_validation_network["cidr_deny"] = serde_json::json!([
         "0.0.0.0/8",
@@ -2758,7 +2798,9 @@ fn validate_common_inventory_network(
         return Err(ProvisionError::new(ProvisionErrorCode::Policy));
     }
     if expected_operations.iter().any(|operation| {
-        let expected = if *operation == "n8n.executions.search" {
+        let expected = if *operation == "n8n.audit.inspect_instance" {
+            &expected_instance_audit_network
+        } else if *operation == "n8n.executions.search" {
             &expected_execution_search_network
         } else if *operation == "n8n.validation.run"
             && !matches!(
@@ -4211,6 +4253,13 @@ mod tests {
             .expect("previous receipt remains trusted");
     }
 
+    #[derive(Clone, Copy)]
+    enum AuditFixtureProfile {
+        Disabled,
+        Local,
+        Instance,
+    }
+
     struct Fixture {
         root: PathBuf,
         stage: PathBuf,
@@ -5088,11 +5137,27 @@ mod tests {
             sensitive: bool,
             execution_search: bool,
         ) {
-            let script = concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/n8n_release_assembler.sh"
+            self.enable_read_from_pure_producer_with_audit(
+                safe,
+                sensitive,
+                execution_search,
+                AuditFixtureProfile::Disabled,
             );
-            let code = r#"
+        }
+
+        fn enable_read_from_pure_producer_with_audit(
+            &self,
+            safe: bool,
+            sensitive: bool,
+            execution_search: bool,
+            audit: AuditFixtureProfile,
+        ) {
+            let code = Self::read_policy_producer_fixture();
+            self.run_read_policy_producer(code, safe, sensitive, execution_search, audit);
+        }
+
+        fn read_policy_producer_fixture() -> &'static str {
+            r#"
 import json, pathlib, sys
 source = pathlib.Path(sys.argv[1]).read_text()
 body = source.split('search_read_policy() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
@@ -5130,6 +5195,33 @@ if sys.argv[4] == 'code':
         try: ns['validate_read_policy'](json.dumps(changed).encode())
         except ValueError: pass
         else: raise AssertionError('sensitive code producer accepted malformed admission')
+if sys.argv[6] == 'audit':
+    policy['audit_read'] = {'operation':'n8n.audit.inspect','capability':'n8n.audit.read',
+        'categories':['credentials','database','filesystem','nodes']}
+    policy = ns['validate_read_policy'](json.dumps(policy).encode())
+    for bad in (None, True, dict(policy['audit_read'], extra=True),
+        dict(policy['audit_read'], categories=['instance']),
+        dict(policy['audit_read'], categories=['credentials','database','filesystem','nodes','instance'])):
+        changed = dict(policy, audit_read=bad)
+        try: ns['validate_read_policy'](json.dumps(changed).encode())
+        except ValueError: pass
+        else: raise AssertionError('audit producer accepted malformed admission')
+elif sys.argv[6] == 'instance-audit':
+    policy['instance_audit_read'] = {'operation':'n8n.audit.inspect_instance',
+        'capability':'n8n.audit.instance.read',
+        'categories':['credentials','database','filesystem','nodes','instance'],
+        'delegated_effect':'native-version-service-with-instance-id-and-provider-redirect-policy'}
+    policy = ns['validate_read_policy'](json.dumps(policy).encode())
+    try: ns['validate_read_policy'](json.dumps(policy).encode(), True)
+    except ValueError: pass
+    else: raise AssertionError('old runtime reuse admitted new instance audit operation')
+    for bad in (None, True, dict(policy['instance_audit_read'], extra=True),
+        dict(policy['instance_audit_read'], delegated_effect='none'),
+        dict(policy['instance_audit_read'], capability='n8n.audit.read')):
+        changed = dict(policy, instance_audit_read=bad)
+        try: ns['validate_read_policy'](json.dumps(changed).encode())
+        except ValueError: pass
+        else: raise AssertionError('instance audit producer accepted malformed effect admission')
 root = pathlib.Path(sys.argv[2])
 for server in ('eec','hetzner'):
     paths = [root/'inventory'/f'{server}-official-mcp.json',root/'inventory'/f'{server}.json']
@@ -5141,13 +5233,30 @@ for server in ('eec','hetzner'):
         before['allowed_operations'].remove('n8n.executions.search')
         del before['operation_network_constraints']['n8n.executions.search']
         assert before == outputs[1]
-        for altered, selected in ((produced, server), (outputs[1], 'other')):
+        assert ns['add_execution_search_inventory'](produced, server) == produced
+        duplicate = json.loads(json.dumps(produced))
+        duplicate['allowed_operations'].append('n8n.executions.search')
+        for altered, selected in ((duplicate, server), (outputs[1], 'other')):
             try: ns['add_execution_search_inventory'](altered, selected)
             except ValueError: pass
             else: raise AssertionError('execution search producer accepted duplicate or server drift')
         outputs = (outputs[0], produced)
     for path, output in zip(paths, outputs): path.write_text(json.dumps([output]))
-"#;
+"#
+        }
+
+        fn run_read_policy_producer(
+            &self,
+            code: &str,
+            safe: bool,
+            sensitive: bool,
+            execution_search: bool,
+            audit: AuditFixtureProfile,
+        ) {
+            let script = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../scripts/n8n_release_assembler.sh"
+            );
             let output = std::process::Command::new("/usr/bin/python3")
                 .args(["-c", code, script])
                 .arg(&self.stage)
@@ -5157,6 +5266,11 @@ for server in ('eec','hetzner'):
                     "executions"
                 } else {
                     "historical"
+                })
+                .arg(match audit {
+                    AuditFixtureProfile::Disabled => "none",
+                    AuditFixtureProfile::Local => "audit",
+                    AuditFixtureProfile::Instance => "instance-audit",
                 })
                 .output()
                 .expect("pure producer subprocess");
@@ -5249,7 +5363,7 @@ path.write_text(json.dumps(context['policy']))
                 "/../../scripts/n8n_release_assembler.sh"
             );
             let code = r#"
-import json, pathlib, sys
+import hashlib, json, pathlib, sys
 source = pathlib.Path(sys.argv[1]).read_text()
 body = source.split('credential_metadata_mapping() {', 1)[1].split("<<'PY'\n", 1)[1].split('\nPY\n}', 1)[0]
 ns = {'__name__': 'retained_metadata_fixture'}
@@ -5446,6 +5560,86 @@ else: raise AssertionError('reader suppressed open refusal')
     }
 
     #[test]
+    fn retained_audit_explicit_producer_and_signed_policy_consumer_agree() {
+        for (profile, operation, timeout) in [
+            (AuditFixtureProfile::Local, "n8n.audit.inspect", 15_000),
+            (
+                AuditFixtureProfile::Instance,
+                "n8n.audit.inspect_instance",
+                45_000,
+            ),
+        ] {
+            let fixture = Fixture::retained();
+            fixture.enable_read_from_pure_producer_with_audit(true, false, false, profile);
+            let request = fixture.request();
+            validate_unsigned_release_tree(
+                &fixture.stage,
+                &fixture.release_id,
+                &request.git_revision,
+                &request.bindings,
+                fixture.owner,
+                &fixture.releases.join(&fixture.release_id),
+            )
+            .expect("explicit bounded audit producer accepted before signing");
+            request.validate().expect("signed audit policy accepted");
+            for server in ["eec", "hetzner"] {
+                let path = fixture.stage.join(format!("inventory/{server}.json"));
+                let original = read_value(&path, MAX_INVENTORY_BYTES).unwrap();
+                let network = &original[0]["operation_network_constraints"][operation];
+                assert_eq!(network["port_allow"], json!([443]));
+                assert_eq!(network["max_response_bytes"], json!(10_485_760));
+                assert_eq!(network["total_timeout_ms"], json!(timeout));
+                for case in [
+                    "missing-network",
+                    "missing-operation",
+                    "duplicate",
+                    "port",
+                    "timeout",
+                    "extra",
+                ] {
+                    let mut changed = original.clone();
+                    match case {
+                        "missing-network" => {
+                            changed[0]["operation_network_constraints"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove(operation);
+                        }
+                        "missing-operation" => {
+                            changed[0]["allowed_operations"]
+                                .as_array_mut()
+                                .unwrap()
+                                .retain(|value| value != operation);
+                        }
+                        "duplicate" => changed[0]["allowed_operations"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(json!(operation)),
+                        "port" => {
+                            changed[0]["operation_network_constraints"][operation]["port_allow"] =
+                                json!([8443]);
+                        }
+                        "timeout" => {
+                            changed[0]["operation_network_constraints"][operation]["total_timeout_ms"] =
+                                json!(timeout + 1);
+                        }
+                        "extra" => {
+                            changed[0]["operation_network_constraints"][operation]["extra"] =
+                                json!(true);
+                        }
+                        _ => unreachable!(),
+                    }
+                    fs::write(&path, changed.to_string()).unwrap();
+                    fixture.refresh_stage_receipts();
+                    assert!(fixture.request().validate().is_err(), "{server}:{case}");
+                    fs::write(&path, original.to_string()).unwrap();
+                    fixture.refresh_stage_receipts();
+                }
+            }
+        }
+    }
+
+    #[test]
     fn retained_safe_reads_producer_preseed_signed_provision_and_runtime_agree() {
         let fixture = Fixture::retained();
         fixture.enable_read_from_pure_producer(true);
@@ -5558,15 +5752,13 @@ else: raise AssertionError('reader suppressed open refusal')
         }
     }
 
-    #[test]
-    #[ignore = "requires exact retained public pin DATA; never executes retained artifacts"]
-    fn retained_reuse_choices_and_pinned_input_refusals() {
+    fn run_retained_reuse_scenario(code: &str) {
         let script = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../scripts/n8n_release_assembler.sh"
         );
         let fixture = Fixture::retained();
-        let code = r#"
+        let setup = r#"
 import copy, hashlib, io, json, pathlib, stat, subprocess, sys, types
 source = pathlib.Path(sys.argv[1]).read_text()
 def body(name):
@@ -5578,6 +5770,25 @@ def namespace(name):
 retained = namespace('validate_retained_inputs')
 # Read only exact public pins; never execute a retained artifact or helper.
 retained['validate_retained'](retained['ROOT'])
+records = {name: pathlib.Path(retained['ROOT'], name).read_bytes() for name in retained['RECEIPTS']}
+"#;
+        let output = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", &format!("{setup}\n{code}"), script])
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires exact retained public pin DATA; never executes retained artifacts"]
+    fn retained_pinned_input_refusals() {
+        run_retained_reuse_scenario(
+            r#"
 for name, (size, digest, _) in retained['PINS'].items():
     for bad_size, bad_digest in ((size+1, digest), (size, '0'*64)):
         try: retained['read_pinned'](retained['ROOT']+'/'+name, bad_size, bad_digest)
@@ -5587,7 +5798,6 @@ for path in (retained['ROOT']+'/missing', retained['ROOT']+'/../other'):
     try: retained['read_pinned'](path, 1, '0'*64)
     except (OSError, ValueError): pass
     else: raise AssertionError('missing/aliased path accepted')
-records = {name: pathlib.Path(retained['ROOT'], name).read_bytes() for name in retained['RECEIPTS']}
 for case in ('root', 'source', 'receipt', 'signed-source', 'duplicate-row', 'duplicate-field', 'missing'):
     changed = dict(records)
     root = retained['ROOT']
@@ -5651,6 +5861,15 @@ for args in (('', digest, str(len(raw)), 'helper'), ('/synthetic/helper', '', st
     except ValueError: pass
     else: raise AssertionError('missing pinned input accepted')
 
+"#,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires exact retained public pin DATA; never executes retained artifacts"]
+    fn retained_rebinding_and_normalization_refusals() {
+        run_retained_reuse_scenario(
+            r"
 local = namespace('rebind_retained_local_policy')
 policy = json.loads(pathlib.Path(retained['ROOT'], 'policy/local-mcp.json').read_bytes())
 updated = local['rebind'](policy, pathlib.Path(retained['ROOT']).name, 'new-release')
@@ -5718,6 +5937,15 @@ for name, original in originals.items():
     assert result == original, 'unreviewed normalization delta: '+name
 assert json.loads(pathlib.Path(request).read_bytes())['git_revision'] == '3'*40
 
+",
+        );
+    }
+
+    #[test]
+    #[ignore = "requires exact retained public pin DATA; never executes retained artifacts"]
+    fn retained_reuse_choices_and_pinned_input_refusals() {
+        run_retained_reuse_scenario(
+            r#"
 prefix = source.split('\nmain() {', 1)[0]
 def shell(extra):
     return subprocess.run(['bash', '-c', prefix+'\n'+extra], capture_output=True, text=True,
@@ -5779,23 +6007,12 @@ build_hash_helper
 ''')
     assert run.returncode != 0 and not run.stdout
 print('reuse choices/refusals passed; no retained executable/helper/provider invoked')
-"#;
-        let output = std::process::Command::new("/usr/bin/python3")
-            .args(["-c", code, script])
-            .arg(&fixture.root)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+"#,
         );
     }
 
     #[test]
     fn retained_execution_search_producer_and_native_validator_agree() {
-        use serde_json::json;
-
         for safe in [false, true] {
             let fixture = Fixture::retained();
             fixture.request().validate().expect("historical default");
@@ -5829,205 +6046,232 @@ print('reuse choices/refusals passed; no retained executable/helper/provider inv
                         .len(),
                     COMMON_ALLOWED_OPERATIONS.len() + 3
                 );
-                for lifecycle in [
-                    LifecycleSchemaMode::Rc42PerServer,
-                    LifecycleSchemaMode::PreviousPerServer,
-                    LifecycleSchemaMode::LegacyCommon,
-                ] {
-                    assert!(
-                        validate_common_inventory(
-                            &original,
-                            server,
-                            &fixture.releases.join(&fixture.release_id),
-                            &fixture.stage,
-                            CommonInventorySchemaMode::Current,
-                            lifecycle,
-                            true,
-                        )
-                        .is_err(),
-                        "historical lifecycle with Current common enum must refuse"
-                    );
-                }
-                for mode in [
-                    CommonInventorySchemaMode::CurrentLegacyLimits,
-                    CommonInventorySchemaMode::IndependentReadPreviousNetwork,
-                    CommonInventorySchemaMode::Previous,
-                    CommonInventorySchemaMode::Legacy,
-                    CommonInventorySchemaMode::LegacyDisposable,
-                ] {
-                    assert!(
-                        validate_common_inventory(
-                            &original,
-                            server,
-                            &fixture.releases.join(&fixture.release_id),
-                            &fixture.stage,
-                            mode,
-                            LifecycleSchemaMode::CurrentPerServer,
-                            true,
-                        )
-                        .is_err(),
-                        "historical schema must refuse execution search"
-                    );
-                }
-                assert!(
-                    validate_common_inventory(
-                        &original,
-                        server,
-                        &fixture.releases.join(&fixture.release_id),
-                        &fixture.stage,
-                        CommonInventorySchemaMode::Current,
-                        LifecycleSchemaMode::CurrentPerServer,
-                        false,
-                    )
-                    .is_err(),
-                    "missing reviewed read profile"
-                );
-                for case in [
-                    "missing-allow",
-                    "missing-network",
-                    "duplicate-operation",
-                    "extra-operation",
-                    "extra-network",
-                    "host",
-                    "port",
-                    "connect",
-                    "total",
-                    "bytes",
-                    "cidr-missing",
-                    "cidr-extra",
-                    "cidr-wrong",
-                    "redirect",
-                    "dns",
-                    "ip",
-                    "spki",
-                    "extra-key",
-                    "type",
-                    "zone",
-                    "profile",
-                    "deny_localhost",
-                    "deny_private_ranges",
-                    "deny_tailnet_ranges",
-                    "require_sni",
-                    "deny_ip_literals",
-                    "require_host_canonicalization",
-                ] {
-                    let mut changed = original.clone();
-                    let entry = &mut changed[0];
-                    match case {
-                        "missing-allow" => entry["allowed_operations"]
-                            .as_array_mut()
-                            .unwrap()
-                            .retain(|operation| operation != "n8n.executions.search"),
-                        "duplicate-operation" => entry["allowed_operations"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(json!("n8n.executions.search")),
-                        "extra-operation" => entry["allowed_operations"]
-                            .as_array_mut()
-                            .unwrap()
-                            .push(json!("n8n.unreviewed")),
-                        "missing-network" => {
-                            entry["operation_network_constraints"]
-                                .as_object_mut()
-                                .unwrap()
-                                .remove("n8n.executions.search");
-                        }
-                        "extra-network" => {
-                            entry["operation_network_constraints"]["n8n.unreviewed"] =
-                                entry["operation_network_constraints"]["n8n.executions.search"]
-                                    .clone();
-                        }
-                        "zone" => entry["allowed_zones"] = json!(["z:owner"]),
-                        "profile" => entry["config"]["server_id"] = json!("other"),
-                        _ => {
-                            let network = &mut entry["operation_network_constraints"]["n8n.executions.search"];
-                            match case {
-                                "host" => network["host_allow"] = json!(["unreviewed.example"]),
-                                "port" => network["port_allow"] = json!([8443]),
-                                "connect" => network["connect_timeout_ms"] = json!(5001),
-                                "total" => network["total_timeout_ms"] = json!(15001),
-                                "bytes" => network["max_response_bytes"] = json!(10485760),
-                                "cidr-missing" => {
-                                    network["cidr_deny"].as_array_mut().unwrap().pop();
-                                }
-                                "cidr-extra" => network["cidr_deny"]
-                                    .as_array_mut()
-                                    .unwrap()
-                                    .push(json!("198.18.0.0/15")),
-                                "cidr-wrong" => network["cidr_deny"][0] = json!("198.18.0.0/15"),
-                                "redirect" => network["max_redirects"] = json!(1),
-                                "dns" => network["dns_max_ips"] = json!(5),
-                                "ip" => network["ip_allow"] = json!(["1.1.1.1"]),
-                                "spki" => network["spki_pins"] = json!(["unreviewed"]),
-                                "extra-key" => network["extra"] = json!(true),
-                                "type" => network["max_response_bytes"] = json!("1048576"),
-                                flag => network[flag] = json!(false),
-                            }
-                        }
-                    }
-                    fs::write(&path, changed.to_string()).unwrap();
-                    fixture.refresh_stage_receipts();
-                    assert!(
-                        fixture.request().validate().is_err(),
-                        "{}:{safe}:{case}",
-                        server.as_str()
-                    );
-                }
-                for field in original[0]["operation_network_constraints"]["n8n.executions.search"]
-                    .as_object()
-                    .unwrap()
-                    .keys()
-                {
-                    for missing in [false, true] {
-                        let mut changed = original.clone();
-                        let network =
-                            changed[0]["operation_network_constraints"]["n8n.executions.search"]
-                                .as_object_mut()
-                                .unwrap();
-                        if missing {
-                            network.remove(field);
-                        } else {
-                            network.insert(field.clone(), json!(null));
-                        }
-                        fs::write(&path, changed.to_string()).unwrap();
-                        fixture.refresh_stage_receipts();
-                        assert!(
-                            fixture.request().validate().is_err(),
-                            "{}:{field}:missing={missing}",
-                            server.as_str()
-                        );
-                    }
-                }
-                let raw = original.to_string();
-                let network = original[0]["operation_network_constraints"]["n8n.executions.search"]
-                    .to_string();
-                for duplicate in [
-                    raw.replacen(
-                        "\"n8n.executions.search\":",
-                        &format!("\"n8n.executions.search\":{network},\"n8n.executions.search\":"),
-                        1,
-                    ),
-                    raw.replacen(
-                        "\"max_response_bytes\":1048576",
-                        "\"max_response_bytes\":1048576,\"max_response_bytes\":1048576",
-                        1,
-                    ),
-                ] {
-                    assert_ne!(duplicate, raw);
-                    fs::write(&path, duplicate).unwrap();
-                    fixture.refresh_stage_receipts();
-                    assert!(
-                        fixture.request().validate().is_err(),
-                        "raw duplicate denied"
-                    );
-                }
-                fs::write(&path, raw).unwrap();
+                assert_execution_search_profiles(&fixture, &original, server);
+                assert_execution_search_mutations(&fixture, &original, server, safe, &path);
+                assert_execution_search_fields(&fixture, &original, server, &path);
+                fs::write(&path, original.to_string()).unwrap();
                 fixture.refresh_stage_receipts();
             }
             fixture
                 .request()
                 .validate()
                 .expect("restored generated fixture");
+        }
+    }
+
+    fn assert_execution_search_profiles(fixture: &Fixture, original: &Value, server: ServerId) {
+        for lifecycle in [
+            LifecycleSchemaMode::Rc42PerServer,
+            LifecycleSchemaMode::PreviousPerServer,
+            LifecycleSchemaMode::LegacyCommon,
+        ] {
+            assert!(
+                validate_common_inventory(
+                    original,
+                    server,
+                    &fixture.releases.join(&fixture.release_id),
+                    &fixture.stage,
+                    CommonInventorySchemaMode::Current,
+                    lifecycle,
+                    true,
+                )
+                .is_err(),
+                "historical lifecycle with Current common enum must refuse"
+            );
+        }
+        for mode in [
+            CommonInventorySchemaMode::CurrentLegacyLimits,
+            CommonInventorySchemaMode::IndependentReadPreviousNetwork,
+            CommonInventorySchemaMode::Previous,
+            CommonInventorySchemaMode::Legacy,
+            CommonInventorySchemaMode::LegacyDisposable,
+        ] {
+            assert!(
+                validate_common_inventory(
+                    original,
+                    server,
+                    &fixture.releases.join(&fixture.release_id),
+                    &fixture.stage,
+                    mode,
+                    LifecycleSchemaMode::CurrentPerServer,
+                    true,
+                )
+                .is_err(),
+                "historical schema must refuse execution search"
+            );
+        }
+        assert!(
+            validate_common_inventory(
+                original,
+                server,
+                &fixture.releases.join(&fixture.release_id),
+                &fixture.stage,
+                CommonInventorySchemaMode::Current,
+                LifecycleSchemaMode::CurrentPerServer,
+                false,
+            )
+            .is_err(),
+            "missing reviewed read profile"
+        );
+    }
+
+    fn assert_execution_search_mutations(
+        fixture: &Fixture,
+        original: &Value,
+        server: ServerId,
+        safe: bool,
+        path: &Path,
+    ) {
+        for case in [
+            "missing-allow",
+            "missing-network",
+            "duplicate-operation",
+            "extra-operation",
+            "extra-network",
+            "host",
+            "port",
+            "connect",
+            "total",
+            "bytes",
+            "cidr-missing",
+            "cidr-extra",
+            "cidr-wrong",
+            "redirect",
+            "dns",
+            "ip",
+            "spki",
+            "extra-key",
+            "type",
+            "zone",
+            "profile",
+            "deny_localhost",
+            "deny_private_ranges",
+            "deny_tailnet_ranges",
+            "require_sni",
+            "deny_ip_literals",
+            "require_host_canonicalization",
+        ] {
+            let mut changed = original.clone();
+            mutate_execution_search_inventory(&mut changed, case);
+            fs::write(path, changed.to_string()).unwrap();
+            fixture.refresh_stage_receipts();
+            assert!(
+                fixture.request().validate().is_err(),
+                "{}:{safe}:{case}",
+                server.as_str()
+            );
+        }
+    }
+
+    fn mutate_execution_search_inventory(changed: &mut Value, case: &str) {
+        use serde_json::json;
+        let entry = &mut changed[0];
+        match case {
+            "missing-allow" => entry["allowed_operations"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|operation| operation != "n8n.executions.search"),
+            "duplicate-operation" => entry["allowed_operations"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("n8n.executions.search")),
+            "extra-operation" => entry["allowed_operations"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("n8n.unreviewed")),
+            "missing-network" => {
+                entry["operation_network_constraints"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("n8n.executions.search");
+            }
+            "extra-network" => {
+                entry["operation_network_constraints"]["n8n.unreviewed"] =
+                    entry["operation_network_constraints"]["n8n.executions.search"].clone();
+            }
+            "zone" => entry["allowed_zones"] = json!(["z:owner"]),
+            "profile" => entry["config"]["server_id"] = json!("other"),
+            _ => {
+                let network = &mut entry["operation_network_constraints"]["n8n.executions.search"];
+                match case {
+                    "host" => network["host_allow"] = json!(["unreviewed.example"]),
+                    "port" => network["port_allow"] = json!([8443]),
+                    "connect" => network["connect_timeout_ms"] = json!(5001),
+                    "total" => network["total_timeout_ms"] = json!(15001),
+                    "bytes" => network["max_response_bytes"] = json!(10_485_760),
+                    "cidr-missing" => {
+                        network["cidr_deny"].as_array_mut().unwrap().pop();
+                    }
+                    "cidr-extra" => network["cidr_deny"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!("198.18.0.0/15")),
+                    "cidr-wrong" => network["cidr_deny"][0] = json!("198.18.0.0/15"),
+                    "redirect" => network["max_redirects"] = json!(1),
+                    "dns" => network["dns_max_ips"] = json!(5),
+                    "ip" => network["ip_allow"] = json!(["1.1.1.1"]),
+                    "spki" => network["spki_pins"] = json!(["unreviewed"]),
+                    "extra-key" => network["extra"] = json!(true),
+                    "type" => network["max_response_bytes"] = json!("1048576"),
+                    flag => network[flag] = json!(false),
+                }
+            }
+        }
+    }
+
+    fn assert_execution_search_fields(
+        fixture: &Fixture,
+        original: &Value,
+        server: ServerId,
+        path: &Path,
+    ) {
+        use serde_json::json;
+        for field in original[0]["operation_network_constraints"]["n8n.executions.search"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            for missing in [false, true] {
+                let mut changed = original.clone();
+                let network = changed[0]["operation_network_constraints"]["n8n.executions.search"]
+                    .as_object_mut()
+                    .unwrap();
+                if missing {
+                    network.remove(field);
+                } else {
+                    network.insert(field.clone(), json!(null));
+                }
+                fs::write(path, changed.to_string()).unwrap();
+                fixture.refresh_stage_receipts();
+                assert!(
+                    fixture.request().validate().is_err(),
+                    "{}:{field}:missing={missing}",
+                    server.as_str()
+                );
+            }
+        }
+        let raw = original.to_string();
+        let network =
+            original[0]["operation_network_constraints"]["n8n.executions.search"].to_string();
+        for duplicate in [
+            raw.replacen(
+                "\"n8n.executions.search\":",
+                &format!("\"n8n.executions.search\":{network},\"n8n.executions.search\":"),
+                1,
+            ),
+            raw.replacen(
+                "\"max_response_bytes\":1048576",
+                "\"max_response_bytes\":1048576,\"max_response_bytes\":1048576",
+                1,
+            ),
+        ] {
+            assert_ne!(duplicate, raw);
+            fs::write(path, duplicate).unwrap();
+            fixture.refresh_stage_receipts();
+            assert!(
+                fixture.request().validate().is_err(),
+                "raw duplicate denied"
+            );
         }
     }
 

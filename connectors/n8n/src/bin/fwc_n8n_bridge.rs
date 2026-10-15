@@ -210,7 +210,7 @@ pub struct BridgeError {
     correlation_id: Option<Uuid>,
     rpc_phase: Option<&'static str>,
     rpc_code: Option<i32>,
-    native_diagnostic: Option<Value>,
+    native_diagnostic: Option<Box<Value>>,
 }
 
 impl BridgeError {
@@ -250,12 +250,12 @@ impl BridgeError {
         self.rpc_code
     }
 
-    pub const fn native_diagnostic(&self) -> Option<&Value> {
-        self.native_diagnostic.as_ref()
+    pub fn native_diagnostic(&self) -> Option<&Value> {
+        self.native_diagnostic.as_deref()
     }
 
     pub fn into_native_diagnostic(self) -> Option<Value> {
-        self.native_diagnostic
+        self.native_diagnostic.map(|value| *value)
     }
 
     const fn with_correlation_id(mut self, correlation_id: Option<Uuid>) -> Self {
@@ -2253,7 +2253,7 @@ fn parse_child_failure(bytes: &[u8]) -> Option<BridgeError> {
         {
             return None;
         }
-        error.native_diagnostic = Some(super::preserved_native_diagnostic(&diagnostic)?);
+        error.native_diagnostic = Some(Box::new(super::preserved_native_diagnostic(&diagnostic)?));
     }
     Some(error)
 }
@@ -2830,6 +2830,32 @@ mod tests {
             br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_invoke_failed","diagnostic":"response_external_unknown"}"#,
         );
         assert_eq!(error.diagnostic(), Some("response_external_unknown"));
+
+        let mut original = fcp_host::project_native_diagnostic(
+            Some(&serde_json::json!("AUTHORIZED_NATIVE_CANARY\n\"quoted\"")),
+            Some(&serde_json::json!({"original":"AUTHORIZED_DETAILS_CANARY"})),
+            Some(&serde_json::json!("AUTHORIZED_NODE_CANARY")),
+            "n8n.invocation",
+            "invoke",
+            &mut (64 * 1024),
+        );
+        original["severity"] = serde_json::json!("error");
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "type":"error",
+            "error":{"code":"n8n_invoke_failed", "nativeDiagnostic":original}
+        }))
+        .unwrap();
+        let error = child_failure(&encoded);
+        assert_eq!(error.code(), "host_n8n_invoke_failed");
+        assert_eq!(error.diagnostic(), Some("invoke_unknown"));
+        assert_eq!(error.native_diagnostic(), Some(&original));
+        assert!(!format!("{error:?}").contains("CANARY"));
+        let owned = error.into_native_diagnostic().unwrap();
+        assert_eq!(owned, original);
+        assert_eq!(
+            serde_json::to_vec(&owned).unwrap(),
+            serde_json::to_vec(&original).unwrap()
+        );
     }
 
     #[cfg(target_os = "linux")]

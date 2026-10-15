@@ -14,9 +14,6 @@ pub(crate) enum TypedN8nRead {
     WorkflowBestPractices {
         technique: String,
     },
-    WorkflowCode {
-        code: String,
-    },
     Nodes {
         nodes: Vec<TypedN8nNode>,
     },
@@ -100,18 +97,10 @@ fn bounded_read_text(text: &str, max: usize) -> bool {
 }
 
 impl TypedN8nRead {
-    pub(crate) const fn ensure_effect_admission(&self) -> Result<(), &'static str> {
-        if matches!(self, Self::WorkflowCode { .. }) {
-            return Err("native_workflow_code_effect_admission_pending");
-        }
-        Ok(())
-    }
-
     pub(crate) const fn action(&self) -> &'static str {
         match self {
             Self::SdkReference { .. } => "sdk_reference",
             Self::WorkflowBestPractices { .. } => "workflow_best_practices",
-            Self::WorkflowCode { .. } => "workflow_code",
             Self::Nodes { .. } => "nodes",
             Self::Projects { .. } => "projects",
             Self::Folders { .. } => "folders",
@@ -125,7 +114,6 @@ impl TypedN8nRead {
         match self {
             Self::SdkReference { .. } => "get_workflow_sdk_reference",
             Self::WorkflowBestPractices { .. } => "get_workflow_best_practices",
-            Self::WorkflowCode { .. } => "validate_workflow",
             Self::Nodes { .. } => "validate_node_config",
             Self::Projects { .. } => "search_projects",
             Self::Folders { .. } => "search_folders",
@@ -144,10 +132,6 @@ impl TypedN8nRead {
             Self::WorkflowBestPractices { .. } => (
                 "sha256:d95120da8063c53d7dc379b938043cfdc81da869c40a33ce608fe76ddda31423",
                 "sha256:9530d1f518b2640320f8ffbfd971d662b3f00558be8b3ff9418fe0d916a1728c",
-            ),
-            Self::WorkflowCode { .. } => (
-                "sha256:34160cafc3bf8971e214a3b35195b12d5e33a22f3738d49d68c1e2aeb736e9f0",
-                "sha256:a56a4e3038b4b2732ab9fffbfcf038b4d4824c48481123ede01f3a444358fae9",
             ),
             Self::Nodes { .. } => (
                 "sha256:37231a38664a9375573c84d8484fc30cef2e99efbca5f6172f1a4cd308c34f8d",
@@ -306,12 +290,6 @@ impl TypedN8nRead {
                     return Err(invalid);
                 }
                 Ok(json!({"technique":technique}))
-            }
-            Self::WorkflowCode { code } => {
-                if code.is_empty() || code.len() > 300_000 {
-                    return Err(invalid);
-                }
-                Ok(json!({"code":code}))
             }
             Self::Nodes { nodes } => {
                 if nodes.is_empty() || nodes.len() > 50 {
@@ -573,38 +551,6 @@ impl TypedN8nRead {
                 }
                 json!({"technique":technique,"guidance":text,"digest":read_document_digest(text)})
             }
-            Self::WorkflowCode { .. } => {
-                let valid = native["valid"].as_bool().ok_or(invalid)?;
-                let errors = match native.get("errors") {
-                    None if valid => &[][..],
-                    Some(Value::Array(errors)) => errors.as_slice(),
-                    _ => return Err(invalid),
-                };
-                let warnings = match native.get("warnings") {
-                    None => &[][..],
-                    Some(Value::Array(warnings)) => warnings.as_slice(),
-                    _ => return Err(invalid),
-                };
-                if errors.len() > 256
-                    || warnings.len() > 256
-                    || valid && (is_error || !errors.is_empty())
-                    || !valid && errors.is_empty()
-                    || errors
-                        .iter()
-                        .any(|error| error.as_str().is_none_or(|text| text.len() > 8192))
-                    || warnings.iter().any(|warning| {
-                        !warning.is_object()
-                            || warning["code"].as_str().is_none_or(|text| text.len() > 256)
-                            || warning["message"]
-                                .as_str()
-                                .is_none_or(|text| text.len() > 8192)
-                    })
-                {
-                    return Err(invalid);
-                }
-                json!({"valid":valid,"errors":errors.iter().map(|_|json!({"path":"workflow_code","code":"sdk_validation_error","message":"Native SDK validator reported an error"})).collect::<Vec<_>>(),
-                    "warnings":warnings.iter().map(|_|json!({"path":"workflow_code","code":"sdk_validation_warning","message":"Native SDK validator reported a warning"})).collect::<Vec<_>>()})
-            }
             Self::Nodes { nodes } => {
                 if is_error || native.get("error").is_some() {
                     return Err(invalid);
@@ -699,7 +645,13 @@ impl TypedN8nRead {
                     credentials.push(json!({"resourceUri":format!("fwc-n8n://{server}/credentials/{encoded}"),"id":id,"name":field(&row["name"])?,"type":field(&row["type"])?,"scopes":scopes,
                         "isManaged":row["isManaged"].as_bool().ok_or(invalid)?,"isGlobal":row["isGlobal"].as_bool().ok_or(invalid)?,"homeProject":home}));
                 }
-                json!({"credentials":credentials,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}})
+                let mut output = json!({"credentials":credentials,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}});
+                if rows.len() == usize::from(*limit) {
+                    output["page"]["hint"] = json!(
+                        "Result may be limited; narrow query, type, projectId or sharing filters."
+                    );
+                }
+                output
             }
         };
         Ok(json!({"serverId":server,"action":self.action(),"data":data}))
@@ -863,20 +815,18 @@ mod tests {
     }
 
     #[test]
-    fn workflow_code_effect_admission_refuses_before_native_call() {
-        let code: super::TypedN8nRead = serde_json::from_value(
-            serde_json::json!({"action":"workflow_code","code":"HOSTILE_SDK_CANARY"}),
-        )
-        .unwrap();
-        assert_eq!(
-            code.ensure_effect_admission(),
-            Err("native_workflow_code_effect_admission_pending")
+    fn retired_workflow_code_is_not_a_typed_action() {
+        assert!(
+            serde_json::from_value::<super::TypedN8nRead>(
+                serde_json::json!({"action":"workflow_code","code":"HOSTILE_SDK_CANARY"}),
+            )
+            .is_err()
         );
         let reference: super::TypedN8nRead = serde_json::from_value(
             serde_json::json!({"action":"sdk_reference","section":"patterns"}),
         )
         .unwrap();
-        assert_eq!(reference.ensure_effect_admission(), Ok(()));
+        assert_eq!(reference.tool(), "get_workflow_sdk_reference");
     }
 
     #[test]
@@ -945,22 +895,6 @@ mod tests {
         ] {
             assert!(serde_json::from_value::<super::TypedN8nRead>(input).is_err());
         }
-        let read: super::TypedN8nRead = serde_json::from_value(json!({
-            "action":"workflow_code","code":"synthetic"
-        }))
-        .unwrap();
-        assert_eq!(read.tool(), "validate_workflow");
-        assert_eq!(read.arguments().unwrap(), json!({"code":"synthetic"}));
-        let structured = json!({"valid":false,"errors":["PRIVATE_CANARY"],"warnings":[]});
-        let native = json!({"isError":true,"content":[{"type":"text","text":structured.to_string()}],"structuredContent":structured});
-        let projected = read.project("eec", &native).unwrap();
-        assert_eq!(projected["data"]["valid"], false);
-        assert!(!projected.to_string().contains("PRIVATE_CANARY"));
-        assert!(read.project("legacy", &native).is_err());
-        let mut contradictory = native;
-        contradictory["structuredContent"]["valid"] = json!(true);
-        contradictory["content"][0]["text"] = json!(contradictory["structuredContent"].to_string());
-        assert!(read.project("eec", &contradictory).is_err());
     }
 
     #[test]

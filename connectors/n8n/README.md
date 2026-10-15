@@ -115,14 +115,38 @@ identifier without querying the provider.” Draft/published reads, comparisons,
 metadata searches and official knowledge adapters have source/local tests, but
 new installed calls require reviewed runtime/schema/profile admission.
 
-OPEN criteria include direct-FCP credential mediation and credential
-continuation; global runtime observation; provider existence/project mapping;
+Owner scope revision (2026-10-15, `flywheel_connectors-nqm81.44`): retire the
+experimental workflow SDK executor and local n8n patches. Keep the ordinary
+n8n/MCP path: find/read a workflow, edit its JSON graph or template, validate
+with MCP, then separately authorize save/test and diagnose execution history.
+SDK reference documentation, Code-node reads, FCP SDK transport and existing
+owned-process teardown are not the removed executor. This is source cleanup,
+not an installed release change or completion of `.35`.
+
+Installed current remains `release-20261014-read-parity-4c39cbe7-rc1`, signed
+receipt BLAKE3 `66403a8dbd49a7e0fc12873653432b31d2363f9b1bdc5efb7cf9673c7851200a`.
+Cleanup source is in `39elbarto/feat-n8n-execution-search-derived`, based on
+`05f8d3b9656157ec747bd88508bfce5389701353`; the reviewed source diff is `5a1d46`.
+The dated RC43c/operator snapshots below are historical, not the current release.
+The exact owner-authorized retirement removed the SDK-only source/artifacts and
+N worktree without an archive; the matrix links the execution/preservation
+record. Current was not switched. The bounded analyzer exception applies only
+to that reviewed cleanup diff; UBS and workspace Clippy remain non-green.
+
+The cleanup candidate's credential route is limited to metadata with
+query/type/project/sharing filters and a limit of 1–200. `count` means returned
+rows; continuation is unavailable and completeness is not established. A full
+page calls for narrower filters, not a synthetic cursor or a server fork.
+
+OPEN criteria include direct-FCP bounded credential mediation;
+provider existence/project mapping;
 archived workflow search and continuation beyond the native bound; optional
 node-version selection or unavailable version-pair metadata; combined template
 selectors and the public node-query count versus installed policy. `includeCode`
-returns fingerprints only, not source text. Instance/default-all audit and
-native SDK-code validation refuse before provider calls pending their effect
-admission. These refusals and partial results do not close `.35`. Historical
+returns fingerprints only, not source text. Global runtime observation and
+instance-audit extension work are paused and excluded from automatic release.
+Workflow SDK execution and its old refusal stubs are retired from the cleanup
+source, not accepted as a working feature. These partial results do not close `.35`. Historical
 acceptance, FAIL/UNKNOWN and the exact RC43c UBS risk disposition remain unchanged.
 
 ## Historical delivery snapshot and remaining scope — 2026-09-30

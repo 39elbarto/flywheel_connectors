@@ -411,6 +411,7 @@ fn resource_uri(operation: &str, input: &Value) -> String {
         | "n8n.projects.list"
         | "n8n.credentials.list"
         | "n8n.audit.inspect"
+        | "n8n.audit.inspect_instance"
         | "n8n.tags.list"
         | "n8n.mcp_access.reconcile" => {
             format!("fwc-n8n://{TEST_SERVER_ID}")
@@ -512,6 +513,7 @@ fn capability_token_with_options(
         "n8n.projects.list" => "n8n.projects.read",
         "n8n.credentials.list" => "n8n.credentials.metadata.read",
         "n8n.audit.inspect" => "n8n.audit.read",
+        "n8n.audit.inspect_instance" => "n8n.audit.instance.read",
         "n8n.tags.list" => "n8n.tags.read",
         "n8n.folders.list" | "n8n.folders.get" => "n8n.folders.read",
         _ => panic!("unknown operation in test token: {operation}"),
@@ -809,6 +811,7 @@ async fn setup_connector_with_runtime_config(
             "n8n.structure.read",
             "n8n.credentials.metadata.read",
             "n8n.audit.read",
+            "n8n.audit.instance.read",
             "n8n.tags.read",
             "n8n.folders.read",
             "n8n.mcp_access.write",
@@ -1625,6 +1628,66 @@ async fn audit_inspect_fixed_body_redacts_locations_and_denies_external_effect_b
     let serialized = serde_json::to_string(&result).unwrap();
     assert!(!serialized.contains("AUDIT_SECRET_CANARY"));
     assert!(!serialized.contains("private-id"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn audit_instance_requires_separate_capability_and_projects_only_safe_counts() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/audit"))
+        .and(body_json(json!({"additionalOptions":{"categories":["instance"]}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Instance Risk Report":{"risk":"instance","sections":[{
+                "title":"Outdated instance","description":"PRIVATE_CANARY",
+                "recommendation":"PRIVATE_CANARY",
+                "nextVersions":[{"name":"PRIVATE_CANARY","nodes":[{"parameters":{"token":"PRIVATE_CANARY"}}]}]
+            }]}
+        })))
+        .expect(1).mount(&server).await;
+    let connector = setup_connector(&server.uri()).await;
+    let input = json!({"categories":["instance"]});
+    let constraints = CapabilityConstraints {
+        resource_allow: vec![format!("fwc-n8n://{TEST_SERVER_ID}")],
+        ..CapabilityConstraints::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).unwrap();
+    let now = chrono::Utc::now();
+    let token = CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
+            .capability_id("n8n.audit.read")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["n8n.audit.inspect_instance"])
+            .issuer("node:test")
+            .target_instance(TEST_INSTANCE_ID)
+            .validity(
+                now - chrono::Duration::seconds(1),
+                now + chrono::Duration::hours(1),
+            )
+            .try_constraints_cbor(&cbor)
+            .unwrap()
+            .sign(&test_signing_key())
+            .unwrap(),
+    );
+    assert!(
+        connector
+            .handle_invoke(json!({"operation":"n8n.audit.inspect_instance",
+        "input":input,"capability_token":token}))
+            .await
+            .is_err()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let result = invoke(&connector, "n8n.audit.inspect_instance", input)
+        .await
+        .unwrap();
+    assert_eq!(result["summary"]["fullAudit"], false);
+    assert_eq!(result["findings"][0]["code"], "instance_outdated");
+    assert_eq!(result["findings"][0]["affectedCount"], 1);
+    assert!(!result.to_string().contains("PRIVATE_CANARY"));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(!String::from_utf8_lossy(&requests[0].body).contains("daysAbandonedWorkflow"));
 }
 
 #[fcp_async_core::runtime::test]

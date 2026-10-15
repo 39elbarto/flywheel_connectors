@@ -1581,6 +1581,102 @@ required SSD target. The prior `unknown_outcome` publish is not replayed.
 All inputs reject additional properties and all outputs use the common envelope.
 The table specifies the exact operation-specific `data` shape.
 
+**Owner scope revision, 2026-10-15:** cleanup `flywheel_connectors-nqm81.44`
+is the prerequisite to resuming `.35`. The supported authoring path is a JSON graph or
+template, checked with the existing MCP validator, then saved or tested only
+with the operation's separate authorization. Workflow SDK execution and
+`workflow_code`/`workflowCode` inputs are withdrawn, including their old refusal
+stubs; SDK reference documentation and reading Code nodes are separate retained
+features. No custom n8n fork or native credential extension is required.
+Historical evidence below describes the attempts that occurred, not pending
+SDK implementation or authority to repeat them. Cleanup is not `.35` closure.
+
+Initial cleanup source checkpoint: the reviewed cumulative source diff against
+`05f8d3b9656157ec747bd88508bfce5389701353` is
+`2ca7713102385691ea67caca24518c882bba9fa8ea2833a95a85591f3b943dc9`.
+CLI tests passed 257 cases (12 ignored), host diagnostic tests 19 (3 ignored),
+the manifest fixture 4, workspace compilation and formatting passed. Strict
+Clippy at that checkpoint was non-green on two bridge tests and five sandbox
+tests; the follow-up below records their disposition, not a waiver.
+The first new UBS run is partial: Rust exceeded 120 seconds; only Bash completed
+with one independently explained warning. Its originals remain under
+`/srv/dev-ssd/fcp/nqm81-35/sdk-retirement1/ubs1.*`. The separate affected Rust-only
+check used the same 14 Rust files with a finite 600-second module budget and
+completed in 306 seconds, exit 1: 85 critical, 11,378 warning and 3,999 info
+counts. `ubs2.result.json` SHA256 is
+`785860cf67076aca293d3df99f6240ee6c174e65c0860b83e37edf4866fec2a3`;
+`ubs2.findings.jsonl` preserves 15,457 actual file records outside the disposable
+directory (five additional summary-only info counts have no file record).
+This is completed non-green scanning, not a blanket disposition or commit
+waiver. Code commits and physical removal were held at that checkpoint; the
+owner's subsequent exact authorization and its execution are recorded below.
+
+The subsequent test-only lint correction has source diff SHA256
+`5a1d46f9724a917643b75edd217ab3a85b03152641533fe8ad4f4a2c50f18be0`
+against the same HEAD (20 source paths). The sandbox production prefixes remain
+byte-identical to HEAD; 611 sandbox tests, seven bridge capability tests,
+formatting and `git diff --check` passed. Workspace Clippy still exited 101:
+seven further pre-existing bridge test-style findings remain at `client.rs:1217`,
+`connector.rs:3878,4039,4053,4076,4092` and `protocol.rs:1952`. No production
+defect, suppression or workspace-wide success is inferred from this result.
+The separate three-file UBS check completed in four seconds with exit 1:
+11 critical, 547 warning and 286 info counts (four info are summary-only).
+Its `sdk-retirement1/ubs3.result.json` SHA256 is
+`a650c0b9b8cd44d10078b80bfd5025957a763eee97379b37b4d83c04890439d1`.
+Independent source review explained all 11 critical and the added-line eight
+warnings/five info without finding an actionable defect; the other 539 warnings
+and 277 file-info records are not declared adjudicated. Earlier UBS2 review
+likewise covered all 85 critical and added-line 392 warnings/51 info, leaving
+10,986 warnings and 3,948 other info unadjudicated. These non-green results keep
+the code-commit gate held under the owner-approved UBS policy until the owner's
+explicit exception for this exact source diff. They remain non-green and do not
+authorize future changes or releases.
+
+Candidate process checks also passed without provider calls: the dedicated
+credentials child test ran 19 synthetic cases (EEC nine, Hetzner ten), including
+normal/empty/full-200 metadata and malformed, oversized, schema/body/token/port
+and deadline refusals. Each case recorded reaped/absent owned groups; this is
+synthetic transport evidence, not server acceptance. Its primary log is
+`/srv/dev-ssd/fcp/logs/nqm81-44-credential-child1.log`, SHA256
+`69472ea5d479b0418c840d1c8c7cb28d42708029522ec6d5c4e6471a44f24a87`.
+The existing local MCP process test passed all seven fixed catalog calls and
+teardown/redaction assertions; `nqm81-44-local-mcp-candidate1.log` SHA256 is
+`88d9fbe6042972acf742c603c78fc8e0fbc8f68613090ef3ed360399ce46f876`.
+Neither check admits an unsigned candidate as an installed release.
+
+**Owner-authorized SDK retirement, 2026-10-15:** message `msg_7b27e3849caf`
+confirmed the exact deletion DATA `8f8cd5a68def8092d1726a89cc0abe5499b31f10237ff89f5e70a7d127c2e273`
+and command literal `a70cdcb090f0243556c5097aebdce36940fcd2ab69e2b0d85aef240a7c1b67b4`,
+without an archive, plus the bounded analyzer exception for source diff `5a1d46`.
+All five commands completed with exit 0; 141 listed physical targets and the
+separate N worktree are absent, its branch and host registration are removed.
+The exact command/output/time record is
+`/srv/dev-ssd/fcp/nqm81-35/sdk-retirement1/deletion-execution1.json`, SHA256
+`eda95d98b8b275e22d59f90eeef917b29f1abc913bdeef166a2463816996622a`.
+It retains the supplementary lsof timing limitation and disjoint FUSE warnings;
+no continuous or whole-host preservation proof is claimed. The scoped 24 inputs,
+signed-current pointer and public dependency bytes/names matched before/after.
+Shared sandbox, FCP SDK, Code reads, JSON validation, signing machinery and
+historical FAIL/UNKNOWN evidence were excluded from removal. Post-removal Cargo
+metadata resolved all target source files and exposed no retired SDK target.
+The installed release is unchanged. This one cleanup/commit exception does not
+admit signing, installation, provider mutations or future cleanup.
+
+The same cleanup's four installed local MCP regressions read one minimal node
+definition and template `4275` in `nodes_only` mode (20 metadata nodes), then
+validated the fixed synthetic valid/URL-empty graph pair. All four processes
+completed with exit 0, absent owned groups, joined IO and empty stderr; the
+invalid graph retained its original URL diagnostic and complete assessment.
+The raw valid/invalid responses equal the previously accepted pair byte for
+byte. Before/after signed current and the scoped 24 inputs remained equal.
+Primary outputs and requests are in
+`/srv/dev-ssd/fcp/nqm81-35/sdk-retirement1/local-mcp-smoke1/`; `result.json` SHA256
+is `1c5452b73fa4514fe9b49e072a59b06386106967585bfecfc6dab0169ecf7aaa`.
+This checks the unchanged installed `release-20261014-read-parity-4c39cbe7-rc1`
+local JSON/knowledge path, with zero remote calls and no workflow/node
+execution. It is not acceptance of the uninstalled cleanup source, a deployed
+schema-equivalence proof, a global stability claim or completion of `.35`.
+
 | Operation | Required input | Optional input | `data` output |
 |---|---|---|---|
 | `targets.resolve` | exact URI/ID or explicit server/candidate authority for name reads | `projectId`, `projectName`, `workflowName`, `candidateServers[1..3]`, `legacyOptIn` | `{resolution: resolved\|ambiguous\|not_found, target?: TargetRef, candidates?: [TargetRef]}`; names are lookup inputs, not public output fields |
@@ -1594,7 +1690,7 @@ The table specifies the exact operation-specific `data` shape.
 | `workflows.get` | exact workflow target | `detail`, `version=draft|published|both`, `includeCode=false`; true requires the exact pins below and routes before admission to `get_code` | `{workflow: NormalizedWorkflowState,graph?: object,codeNodes?: [{name,digest}]}` for metadata; sensitive route uses the separate result below |
 | `workflows.get_code` | exact workflow target, `version=draft|published|both`, `pins` containing exactly each selected label's `versionId` and `graphDigest` | none | `{id,versions:[{version,versionId,graphDigest,codeNodes:[{nodeId,language,source,digest}]}]}`; requires `n8n.workflows.code.read`, not metadata authority |
 | `workflows.compare` | exact workflow target, `leftVersion`, `rightVersion` | `detail` | `{leftUri,rightUri,semanticDiff,layoutDiff,validationDelta}` |
-| `workflows.create_draft` | target server/project, `name`, one of `workflowCode` or `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
+| `workflows.create_draft` | target server/project, `name`, `graph`, `guard` | `folderId`, `skillsUsed[]`, `sourceTemplateUri` | `{workflow: NormalizedWorkflowState,created:true,validation}` |
 | `workflows.update_draft` | exact workflow target, `operations[1..100]`, `guard` | `skillsUsed[]`, `autofix=false` | `{workflow: NormalizedWorkflowState,appliedOperations,semanticDiff,validation}` |
 | `workflows.activate` | exact workflow target, `active`, full `guard.precondition`, UUID idempotency key | publish `versionId` (required for pinned activation), one matching approval | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState,active:true|false}` after one REST POST and independent REST GET readback |
 | `workflows.lifecycle` | exact workflow target, `action=publish|unpublish`, full `guard.precondition` | publish `versionId` (optional) | `{before: NormalizedWorkflowState,after: NormalizedWorkflowState}` after one exact official-MCP call and independent REST GET readback |
@@ -1603,7 +1699,7 @@ The table specifies the exact operation-specific `data` shape.
 | `executions.search` | `target.server` | `workflowId`, `status[]`, `startedAfter`, `startedBefore`, `page` | `{executions:[{resourceUri,id,workflowId,status,mode,startedAt?,stoppedAt?}]}` |
 | `executions.get` | exact execution target | metadata-only; provider queryless | `{id,finished,workflowId?,status?,mode?,startedAt?,stoppedAt?,workflowVersionId?,retryOf?,retrySuccessId?,waitTill?}` |
 | `executions.diagnostics` | exact execution target | fixed `includeData=true`; node/run/message/type/stack bounds | `{id,finished,mode?,startedAt?,stoppedAt?,workflowId?,workflowVersionId?,status?,retryOf?,retrySuccessId?,waitTill?,diagnostics:[{nodeName,nodeType?,errors:[{runIndex,message?,type?,stack?}]}]}` |
-| `credentials.list` | `target.server` | `query`, `type`, `projectId`, `onlySharedWithMe`, `page` | `{credentials:[{resourceUri,id,name,type,scopes,isManaged,isGlobal,homeProject?}]}` |
+| `credentials.list` | `target.server` | `query`, `type`, `projectId`, `onlySharedWithMe`, `limit` (1–200) | `{credentials:[{resourceUri,id,name,type,scopes,isManaged,isGlobal,homeProject?}],count,page:{returnedCount,limit,continuation:"unavailable",completeness:"not_established"}}`; count is returned rows, not a total |
 | `data_tables.search` | `target.server` | `query`, `projectId`, `page`, `includeSchema=false` | `{tables:[{resourceUri,id,name,projectId?,columns?,rowCount?}]}` |
 | `data_tables.mutate` | exact table target or target project for create, `action`, `guard` | action payload | `{before?,after,affectedRows?,schemaDigest}` |
 | `evaluations.manage` | exact workflow target, `action` | `runId`, `status`, `page`, `guard` | action-specific `{evaluationUri?,status?,runs?,cases?,summary?}` |
@@ -1619,13 +1715,50 @@ internal provider surface, not evidence for the public official contract.
 The official tool accepts a limit of 1–200 but no cursor. Candidate output
 therefore reports `page.returnedCount`, `limit`, `continuation:"unavailable"`
 and `completeness:"not_established"`; cursor requests refuse before dispatch.
-This bounded first-page behavior does not complete required continuation parity.
 The native `data,count` result does not establish that `count` is an untruncated
-global total. Completing this row needs an admitted provider extension supplying
-a cursor (or offset plus proven total), stable filter/snapshot semantics and
-corresponding original input/output schemas; REST fields cannot substitute for it.
+global total. Under the 2026-10-15 owner revision this bounded metadata result is
+the required contract, not an obligation to implement provider pagination. At
+the limit, report the bound and suggest narrower filters; do not invent a next
+cursor, snapshot or complete inventory. REST fields cannot substitute for the
+official metadata fields.
 The new typed bridge/schema projection is source-only until separately admitted;
 installed RC43c does not acquire these capabilities through discovery.
+
+Historical experiment, withdrawn by cleanup `.44`: the 2026-10-15 local
+continuation candidate preserved that legacy schema as a
+separate profile. A legacy result with the exact native limit of 200 establishes
+an observed complete set only when fewer than 200 rows are returned; a saturated
+result is refused. The proposed native `bounded-v1` extension collects at most
+4097 metadata rows, refuses more than 4096 rows or 4 MiB, and returns explicit
+total, end and opaque continuation fields. The FCP mapping selects only the
+complete reviewed input/output schema pair, never a mixture or a discovered
+replacement. The producer rejects this profile when old retained runtimes are
+selected. Provider deployment, mapping admission and installed acceptance remain
+pending.
+
+Both candidate profiles bind continuation to the explicit server, filters,
+page size and observed metadata. The native extension additionally binds the
+instance and authenticated user. Each page recollects the metadata and refuses
+a changed observed snapshot; it does not claim a transaction or detection of a
+change that was reverted between reads. Metadata values are projected through a
+whitelist; secret credential data is never requested. The native 15-second
+deadline bounds its response, not cancellation of the underlying database query.
+Local fixture evidence is retained in `autonomous1/source-checks/remaining-credentials1`
+under the existing `.35` evidence root; it is not provider deployment evidence.
+The first candidate used an inactive MCP SDK 1.26 serializer and is retained as
+invalid schema-provenance evidence. The selected native source actually uses
+MCP server 2, `shapeToStandardSchema` and `zodToDraft202012`. The corrected
+derivation runs that registration and tools-list serialization and reproduces
+the admitted legacy schema digests before deriving the candidate pair. Tests
+that used the first pair are not evidence for the corrected served schemas.
+
+Owner decision, 2026-10-15 (`msg_55b170751bf1`): retire the native `bounded-v1`
+tool, upstream schema-validator hook and local synthetic snapshot/cursor path.
+The remaining FCP route uses the unchanged official tool and bounded metadata
+projection. No complete credential inventory is inferred even from an
+unsaturated page without an authoritative provider completeness contract.
+Removal of experimental files requires the exact deletion gate; it does not
+activate the remaining mapping, grant access or prove installed acceptance.
 
 Validation diagnostic candidate (2026-10-08; local source, not installed): the
 shared local, remote-workflow and comparison projector preserves native `valid`
@@ -1641,8 +1774,16 @@ allowlisted `field`; legacy `nodeIndex` is zero-based and emitted only for a
 unique native node-name match in the original captured graph. A node named
 `workflow` remains unclassified even if a node has that name; the separately
 verified derived graph-warning origin described below has no node identity.
-No node names, native messages, details, parameters or source are returned.
-The index belongs to this
+The classified fields contain no native names, messages, details, parameter
+values or source. Since `4a2d827a`, the separate `nativeDiagnostic` attachment
+preserves bounded original message/node/details, source/stage and severity.
+It is not classifier authority: unclassified originals remain unclassified.
+Each original field has an 8192-byte encoded-content limit and findings share
+a 64 KiB content budget; explicit status/truncation fields distinguish missing,
+non-text, present and truncated values. Envelope/count/duplicate-key/binding and
+validity contradictions still refuse. This is not a promise that originals are
+anonymized or always complete; fixtures and retained outputs must be selected
+and handled within their authorized scope. The index belongs to this
 graph/version, not a stable node identity. Unknown, ambiguous, missing-context
 or unsupported-package findings retain their count with `code` and
 `classification` equal to `unclassified` and no node index or field.
@@ -1700,7 +1841,9 @@ origins at their actual error slot. Safe results expose anonymous `nodeIndex`,
 `nativePropertyOrdinal`, `schemaPropertyOrdinal`, `defaultApplied`, `apiVersion`
 and `nodeTypeVersion`. Special type predicates additionally expose closed
 `expectedType`, `actualType` and `structureKind` (for example object versus
-string for resourceLocator), never values or native text. These remain
+string for resourceLocator), never values or native text in classified fields.
+The separate bounded `nativeDiagnostic` attachment described above retains its
+own original content/status. These remain
 `validator_observation`, not confirmed workflow defects. Unknown native rules,
 missing origins and the reserved `workflow` node name preserve findings without
 invented node indexes. Verified derived origins bind the actual emitted slot
@@ -1719,7 +1862,8 @@ scope, unavailable/ambiguous node binding, unrecognized legacy form and
 unsupported native rule. The binding contains graph/layout digests, profile
 and verified package metadata digest, never names or raw native content.
 `nextDiagnostic:authorized_graph_bound_native_diagnostic_required` identifies
-a future authorized diagnostic path; it grants no execution authority.
+an informational requirement for further authorized diagnosis; a bounded
+`nativeDiagnostic` may already be present. It grants no execution authority.
 
 Optional `validationCoverage` contains per-node index/version/schema SHA/status,
 native source bindings, warning origins, `schemaCoverageComplete`,
@@ -1752,7 +1896,7 @@ source validation**, including projects, folders and tags. Discovery of native
 tools is not admission or successful dispatch; required filters must use their
 actual native contracts rather than invented REST fields or local-page sorting.
 
-Candidate read-route checkpoint (2026-10-04; source uncommitted, not installed):
+Historical read-route checkpoint (2026-10-04; superseded for SDK by `.44`):
 the closed `mcp.n8n.read` action set maps SDK reference, best practices, SDK code,
 node validation, credentials, projects, folders, tags and workflows to fixed
 native tools. Generic MCP calls retain their approval gate. Wrapper consumers
@@ -1791,7 +1935,8 @@ evidence, not original connector child-process or installed CLI acceptance.
 Pure producer fixtures exercise the native pre-seed validator and synthetic
 signed provision validation. Real mapping activation, new source admission and
 installed original-invocation acceptance remain OPEN; signed source7592 does
-not contain LOCAL A. Native credential continuation also remains OPEN. Earlier
+not contain LOCAL A. Native credential continuation was still OPEN at that
+checkpoint; the owner later withdrew that requirement in `.44`. Earlier
 unbound-token/child-attenuation findings remain historical; this implementation
 does not add general delegation or reinterpret them as a successful live call.
 
@@ -1800,6 +1945,51 @@ host has no shared-supervisor observation. Its explicit `observation` reports
 sessions and memory as `not_collected`; an empty provider array does not mean
 that other invocations are idle or absent. This nullable/unavailable projection
 requires contract review and does not prove the later zero-idle criterion.
+The retained-owner continuation (`remaining-runtime3-ctx_73622008fd40`, source
+checkpoint 6) passed scoped Clippy and ten pure regressions, including final
+authorization, freshness and invalidation checks. Its first fixed private
+two-CLI fixture instead exited 101 with `WorkerStopped` at the initial actor
+handshake, before either CLI ran. `native-fixture-run1.log` and
+`native-fixture-run1-result.md` retain this failure; inner actor reap, group
+absence and IO joins were not captured and remain unknown. Later process
+absence cannot supply those observations. Cross-process and installed runtime
+status acceptance therefore remain open while this fixture is corrected.
+The corrected fixed-shell fixture later passed its initial handshake but still
+exited 101: its first separate CLI helper returned `unknown` instead of active
+(`runtime-failure-ctx_f7cd4e198be1/native-diagnostic-run1.log`, SHA256
+`66c34225aaa288c33c8a0fa03748cc9c4d2cb872c4dbcb2e7641ca42f545cfc7`).
+That helper completed with EOF/reap/group-absence checks; the second CLI and
+final actor cleanup assertions were not reached. This is partial transport
+evidence with actor cleanup unknown, not a working status scenario.
+The later diagnostic with fixed stage/error/timing messages also exited 101
+(`runtime-unknown-ctx_98590ebcb0b3/native-diagnostic-run1.log`, SHA256
+`fa87b84b7313a1aecdff8bc56ca677700b8ea4c978c9fe96aa72346cdf6da2ce`).
+Peer authentication and request reading succeeded, but the authenticated reply
+was rejected as `Expired`; the first CLI again returned unknown. Its finalizer
+captured actual actor/IO joins, reap and group absence, with TERM but no KILL.
+The server thread panicked and the scenario failed. These new cleanup facts
+apply only to this attempt. They do not fill earlier unknown cleanup records,
+prove active/idle status, or justify extending the original three-second query
+deadline or five-second observation age. Timing diagnosis remains in progress.
+The subsequent fixed private comparison used only test-build BLAKE3 optimization,
+without changing those deadlines, authority or observation rules. Its two CLI
+processes passed active, verified idle and stale/EOF/deadline-unknown assertions
+(`runtime-unknown-ctx_98590ebcb0b3/blake3-opt3-diagnostic-run1.log`, SHA256
+`c8b9425d6905a4b4b9161074ec0af2aaecfc89603e1e53e2b5af64abcb646a1d`;
+exit 0, one test, 17.84 seconds). Actor/IO and server joins, reap and group
+absence were observed; finalization used TERM, not KILL. This is controlled
+cross-process evidence, not installed coverage, global idle or a production
+performance guarantee. Earlier failed attempts and unknown cleanup remain
+unchanged. The narrow missing-correlation wrapper regression subsequently
+passed. The revised private fixture also passed without a caller-supplied CWT
+(`runtime-no-cwt-ctx_6b65518aaf29/no-cwt-diagnostic-run1.log`, SHA256
+`0c3adf81999c3e2077c760acfa22a4f89aeddd016e3cfc6a1cae4707d83b5786`;
+exit 0, one test, 22.07 seconds). It retained a genuinely issued synthetic
+read proof, five bounded query outcomes and known actor/IO/server cleanup;
+the accepted-close branch still surfaced a deadline fallback, not a distinct
+EOF classification. This does not prove automatic production issuance or an
+ordinary provider launch. Profile-wide aggregate authorization, enforced
+multi-route coverage, role admission and activation remain open.
 
 Local continuation on base `031c6a17` (2026-10-05, not committed or installed):
 the original credentials CLI route now separates broker secret purpose from
@@ -1962,6 +2152,14 @@ The normal package identity guard refused the attempted seven-mode process test
 before launch. No package/policy update, native SDK call or hash override was
 made; the failed logs remain evidence rather than acceptance.
 
+#### Retired SDK investigation — historical results, not future work
+
+The following dated attempts explain the rejected route. Owner decision
+`msg_55b170751bf1` withdraws the executor and its fork dependencies; none of the
+pending gates described in this historical subsection is an instruction to
+resume SDK work. `.44` removes the corresponding source/artifacts without an
+archive. Retained ordinary MCP graph validation is unaffected.
+
 Native SDK-code validation effect boundary (2026-10-04): the installed parser
 uses a restricted synchronous AST interpreter that invokes supplied SDK graph
 builders. This is not static-only parsing or business workflow execution.
@@ -1974,7 +2172,7 @@ effect proof remains incomplete. Native interpreter errors include source
 frames; the tool forwards `error.message` to telemetry before public redaction.
 Both installed containers omit `N8N_DIAGNOSTICS_ENABLED`, whose native default
 is true; actual telemetry initialization or transmission was not observed.
-Thus this row remains pending effect/preemption/telemetry admission. No native
+At that checkpoint this row lacked effect/preemption/telemetry admission. No native
 SDK validation, attacker code or telemetry request was executed for discovery.
 Safe primary derivative: `sdk-validation-effect-boundary-20261004-1.json`,
 SHA-256 `406dfbd0e675579ac2bbc4ffb9bbea200d2411e231f8088bd70af47f71bd8902`.
@@ -1984,6 +2182,241 @@ The selected callback/getter follow-up is
 Candidate wrapper dispatch and the typed bridge both refuse this action with
 `native_workflow_code_effect_admission_pending` before broker/provider calls.
 Projection-only invalid-result fixtures do not authorize native evaluation.
+
+The 2026-10-15 local SDK candidate is a separate path, not enrollment of that
+remote interpreter. It binds native source `a9c858b4`, SDK `0.34.2`, a fixed
+Node image and an exact ELF/library/file closure. The proposed owned process
+has no provider credentials or egress channel; a separate exact-image policy
+restricts file contents and process/network creation. Path metadata and trusted
+same-UID mutation remain explicit limitations. Pure policy/parser tests do not
+establish kernel enforcement, Node startup, synchronous interruption or a usable
+public route. Those process and integration checks remain pending. Static
+qualification retained 7,341 original published schema files (11,593,521 bytes),
+with source-bound description/version metadata. The reviewed metadata-only
+producer completed locally; it did not evaluate SDK source or schema factories.
+The compiler then produced `native-sdk-adapter/package/dist-full-fixed/adapter.cjs`
+(39,112,322 bytes, SHA-256
+`46d9cd4683dc9ad689aabfeb17c6e78bdf11d4bd3e3f61438c5e04b3438b9f31`).
+This is a compiled candidate, not a successful validation or deployed-catalog
+equivalence proof. Missing or conservatively qualified node metadata must keep
+the affected assessment incomplete; the earlier two-node fixture remains
+qualification-only evidence.
+The rootless preparation producer copied the three pinned public assets into
+`/srv/dev-ssd/fcp/artifacts/native-sdk-candidate1`, preserving originals and
+using exclusive private directories. The exact all-asset data test passed
+(`native-sdk-adapter/sdk-package-all-assets-data-run1.log`, SHA256
+`df6342bb8800d91d18cffacd71da996f19ff291646dcb424268829ef12ae5977`):
+it read and qualified ten compiled assets, including the fixed loader/library
+closure. This is local package integrity/ELF evidence, not evaluation, signed
+package authority or installation; the producer reports admission false.
+The first fixed trusted-boot test (`native-sdk-adapter/trusted-boot-run1.json`)
+exited 101 during parent-side exact-image admission, before Node was spawned.
+It establishes neither kernel enforcement nor successful SDK execution; its
+original failed log and source pins remain retained during correction.
+After the source correction, `trusted-boot-run2.json` records an actual child
+SIGSYS with verified reap/group absence and joined actor workers, but no valid
+trusted response. This is failed startup with observed cleanup, not kernel
+compatibility or SDK success. The bounded raw trace attributes that failure to
+`capget`; it does not show a successful capability query. The host's configured
+core handler is a pipe, for which Linux ignores `RLIMIT_CORE` (see
+[core(5)](https://man7.org/linux/man-pages/man5/core.5.html)). Post-exec nondump
+protection, prevention of an exec-based reset and a trusted readiness check
+before sending caller source remain required; `CORE=0` alone is insufficient.
+The subsequent fixed guarded startup (`guarded-trusted-boot-run1.json`, SHA256
+`ea5de88048b2b438914091bfa84288eb9fcde512c0fd0c998249b1815a0688f8`)
+also failed: test exit 101, child SIGSYS before the parent accepted startup,
+no caller source sent, and observed reap/group absence with zero captured stderr.
+The original log SHA256 is
+`947be661dfd949e5711bc64cb56c342d8f03b42364126ebdae0298177f850cd3`.
+Its triggering syscall is not established by that result; it does not prove
+successful guarded startup, SDK validation or failure of a supplied workflow.
+The separate `guarded-boot-trace1.json` (SHA256
+`0f7068e04515599025c472a3209215042fe551056c84671fee2e5577d9ad9c8b`)
+captured test exit 101 after an actual 21-byte guard acknowledgement. Its raw
+trace (SHA256 `1f6ad6363300f1f554a3dc79ef2661179a8661f1b78a511bb146969f64b55971`)
+attributes SIGSYS to a later self `prlimit64` NOFILE setter; the child was reaped
+and its group absent. This traced attempt does not establish the earlier
+untraced child's acknowledgement phase. Tightening the exact-image NOFILE
+soft/hard pair to 1024/1024 preserves setter denial and generic sandbox limits.
+The corrected fixed boot (`guarded-trusted-boot-run2.json`, SHA256
+`b8afca75c426be433fdc95ad8ad0fb2cfb2d6cab9d53b7104dd0c6c6cedb08b4`)
+still failed: test exit 101, natural child exit 13 without a signal, 268 stderr
+bytes counted but not retained as content, no valid response, and observed
+reap/group absence with joined workers and no forced signals. Guard readiness
+was accepted in that attempt. The cause of exit 13 remains unproven; successful
+startup, synchronous interruption and SDK assessment remain unverified.
+The subsequent fixed-fixture stderr diagnostic preserved the complete 268-byte
+message: OpenSSL could not open `/etc/ssl/openssl.cnf` because permission was
+denied. `trusted-boot-stderr-diagnostic1.log` SHA256
+`20d048ba37eed6d35c7bb5efff3f38a3835846d0f0b192a608bb9d249a25fe2d`
+and its JSON SHA256
+`8ae77af738352f5690b8d9a93147a13970944813c8a8a23fc0fd47dd3697101d`
+retain readiness accepted, natural child exit 13, no response, and observed
+reap/group absence without forced signals. The diagnostic test exited zero
+because capture and cleanup succeeded; it explicitly records
+`bootAcceptance:not_assessed`. This proves the ambient OpenSSL configuration
+dependency for this attempt, not successful boot or a retroactive diagnosis of
+all earlier failures. The separately pinned inert configuration subsequently
+passed source, package-data and narrow contract checks. Its one fixed boot
+attempt still failed (`owned-config-trusted-boot-run1.log`, SHA256
+`ccbaa6a215d39f9b61b399fb67b970aa36cdd9443157ba4c1b70974fee7ce04c`;
+JSON SHA256 `70e72d838e1946b71ba2b3671021da9c0d13e2540733ba387750fad506e4fafc`).
+The test exited 101, the child received SIGSYS 31 with zero stderr, and reap
+and group absence were observed without TERM/KILL. No valid response was
+received; the rejected syscall is not yet identified. This new failure does
+not establish the phase or cause of older attempts. Access to the mutable
+system configuration remains denied, and SDK execution remains unverified.
+The separate raw attribution attempt (`owned-config-boot-trace-v1.raw`, SHA256
+`0397af1f7e527200341c1c9343a7b82b9ff73048a07fd45486eced75fac716cc`)
+then observed syscall 425, `io_uring_setup`, immediately before SIGSYS. The
+printed `0x1a9` is the syscall number, not a successful ring descriptor. Its
+test still failed, with actual reap/group absence and no forced signals;
+the traced launch/acknowledgement failure is not the same observed phase as
+the earlier untraced request failure. A source-reviewed exact-image correction
+returns EPERM without executing ring creation; enter/register remain killed,
+and generic policy is unchanged. All 22 exact-image filter tests subsequently
+passed, including that denial, and strict sandbox-library Clippy passed.
+The next fixed boot still failed (`owned-config-trusted-boot-harness5-run1.log`,
+SHA256 `1814daec1d59a6f96f1aa221a12aff46ded94cd75524e253bca9381228958ea8`;
+JSON SHA256 `b1c1289993e460e97a6c729f6a2afbc0f0fe2ecb6f92ce0deadca6535329b0db`):
+natural child exit 1, no signal, 786 non-truncated stderr bytes counted without
+text, malformed stdout and failed launch/acknowledgement admission. Actual
+reap/group absence and actor/IO joins were known without forced signals. Its
+stderr text was not preserved in that attempt. The separate bounded diagnostic
+(`harness5-stderr-diagnostic1.log`, SHA256
+`ffd59650c61a86b9ed95eb10925462da8414a8c24da5f82b5da6940d852cc395`;
+JSON SHA256 `76b24eeb343cc4cb96b7ba719dca0d22b8dcbf42244deeb515f770cbed5d3c3b`)
+captured its own 786 bytes completely: Node reported `open EPERM` while opening
+stdin. Capture passed; boot did not. The subsequent raw-only stdio trace
+(`harness5-stdio-trace1.raw`, SHA256
+`217d38be15df99a758b8e931a17e7e332258126057de54b35d39209eeaec0c39`;
+JSON SHA256 `d90df58a837b38c440f490d684c4dc6e508e9f91f7a78bd8a5acb4b9907d6c10`)
+observed the child call `ioctl(0, 0x5421, pointer)` and receive EPERM after its
+owned pipes were duplicated onto standard descriptors. Pointer contents were
+not decoded. That test still exited 101, with natural child exit 1 and actual
+reap/group absence without forced signals. These are distinct attempts, not
+reconstruction of the first missing stderr. No successful startup, SDK or
+canary result is inferred.
+A subsequent source-reviewed exact-image correction admits only canonical
+standard-descriptor numbers 0–2 with request `FIONBIO` (`0x5421`); descriptor
+and request high-word aliases and all other ioctl requests are refused. This
+changes nonblocking state, comparable to the already admitted restricted
+`F_SETFL`, and does not prove permanent pipe identity after descriptor rebinding.
+Architecture, network, device and generic-profile restrictions are unchanged.
+All 23 exact-image filter tests, strict sandbox-library Clippy and scoped
+formatting passed. The separately copied harness6 then passed one fixed
+guarded trusted-Node startup (`owned-config-trusted-boot-harness6-run1.log`,
+SHA256 `59c72ff3e95442bc1c3aec59927bc7bd286b893f621d06aa3229786f127cac1a`;
+JSON SHA256 `7dcf787f8d801c99a449ee009753dbac10dd8baa83583ed552806044202940e1`).
+The original records an exact reply, natural child exit 0, no signal, no
+failure, zero stderr and verified actor/IO joins, reap and group absence,
+without TERM/KILL. Independent primary-output review confirmed this narrow
+startup result. It does not prove SDK evaluation or adversarial boundaries.
+Before running the boundary group, source review found its existing stdout
+assertion unsatisfiable: bytes after a valid first frame trigger the stricter
+one-frame rejection before the byte cap. A test-only correction separated
+trailing data from an oversized first frame; the production prefix remained
+identical, and scoped formatting, strict host Clippy with test targets and
+compile-only checks passed.
+The resulting ten-case group stopped at its sixth case
+(`guarded-canaries-harness6-run1.log`, SHA256
+`5d5dc4ed2db7ad867c491bcbb8a30781ca739ab1e667af4b8219a8476bbe11ec`;
+JSON SHA256 `edaa386f2c171a352f21435e67dbb6ebb8f6c7bd0f06542a2834b53e3ec29647`;
+raw trace SHA256 `7e96ed18989f604c7c83e4a55ba7811745c372b011532ac91f1edfc9d6f34349`).
+The first five cases proved private-file denial, absent synthetic environment,
+closed inherited fd99, and SIGSYS at attempted socket creation and non-thread
+clone, with primary actor/IO joins, reap and group absence. Raw `0x29` and
+`0x38` are syscall numbers in those killed calls, not successful effects.
+The timer case failed teardown with `IdentityMismatch`; its primary completion
+and joins were not established. Memory and all three output-boundary cases
+were not run, and the final fd99 assertion was not reached. Later process
+absence and traced SIGKILL do not repair that missing proof. Review identified
+an incompatible source dependency: live teardown reinspects `/proc/PID/exe`
+after the guard disables dumpability. The actual failed read/errno was not
+captured, so that historical cause remains a hypothesis. The narrow sealed
+exact-image correction now retains the admitted image/guard and direct-child
+pidfd, consumes the owned ACK/EOF internally before exposing stdin, and avoids
+live executable reinspection only for that fixed guarded profile. Generic
+identity checks and kernel/resource rules are unchanged. Frozen source/pure
+review (`msg_ac4889a61271`) and the copied harness identity
+`guarded-lifecycle-harness1-identity.json` SHA256
+`d07e356c474ab8da4774a2cc65abec3d0e63ab761abb19bf37395797188ad851`
+remain distinct from physical evidence. One subsequent fixed interval-timer
+test passed: `guarded-lifecycle-timer-run1.log` (717 bytes, SHA256
+`5761c4c9850d547d2b495e7449b675a8a280b210daeae1c9b96479664f258adc`),
+result JSON SHA256
+`59cdaceea81d99a0043cf89c19d419311b3f4f12009f573d39a270466e94dd90`.
+The original five-second deadline produced `Deadline`, actual SIGTERM 15,
+reap/group absence, zero stderr and successful stdio/watchdog/actor joins;
+the lifecycle measured 5.220445487 seconds including teardown. All 50 held
+input pins were preserved; independent primary review is
+`msg_4816d32a9192`. This does not repair historical joins, resolve the generic
+actor failure or prove synchronous busy-loop interruption, the remaining four
+boundary cases or SDK assessment. A separate remaining-boundary group then
+stopped at its first memory case: `guarded-boundaries-run1.log` (1,203 bytes,
+SHA256 `19b5a2f003096544787e7966836311fa62f819e06a7f9f7c00d49254f130f3b8`),
+result SHA256 `e047b676b10be7c352230fc391a59285f2d7cab82637eb8b3a98a2718dc4a69a`.
+The child exited with SIGABRT 6 after 428.503982 ms, with `MalformedStdout`
+and 1,554 untruncated stderr bytes; the expected caught allocation-refusal
+reply was absent. Successful `finish` established primary reap/group absence
+and all joins, but stderr text was not captured, so the abort cause is unknown.
+The test failed with exit 101; the three output cases and synchronous busy loop
+were not reached. All 54 held pins remained unchanged; independent primary
+review is `msg_16b597918d0d`. No retry or memory-boundary success is inferred.
+A separately scoped fixed-memory diagnostic then retained all 1,556 stderr
+bytes and identified a V8 fatal semi-space allocation failure / JavaScript
+heap out of memory in that new run (`guarded-memory-diagnostic-run1.log`,
+SHA256 `0b4ed8bd08763ea3579e82ab1c57496d0741995c9595e2d1c71d9f9ce9358543`;
+result `c55901b1a4c8051c54458e82d3ab43c7a410e69d635fe6d61628876df56a9e0a`).
+Diagnostic capture passed with SIGABRT and known cleanup; caught allocation
+refusal, the causal kernel limit, measured RSS and the historical abort cause
+remain unproved (`msg_504e63ff6f77`). A separate four-fixture group passed
+(`guarded-output-boundaries-run1.log`, SHA256
+`4488f223837bc516f90a4a44d9abf9a7c2c34a99a162a5951d90ca9beda12543`;
+result `0a61f6e577964ff3fcceece0c22dd754ac50d48710c7c0217c3db491627debca`).
+It distinguished trailing-frame rejection, oversized-first-frame rejection
+and stderr overflow (8,192 bytes, truncated), then interrupted an armed
+synchronous loop by the original one-second wall deadline: actual SIGTERM 15
+at 1.206254793 seconds, before the five-second CPU soft limit. Each case had
+primary reap/group absence and all joins; all 53 held pins were preserved
+(`msg_7f2e503e88f1`). These fixed fixtures do not prove full SDK assessment.
+A subsequent real `.assess` invocation with the full SDK bundle and a sealed
+synthetic signed fixture failed on its first benign source: actual SIGSYS 31,
+zero stderr, malformed stdout, primary reap and group absence confirmed.
+The invalid and unknown-type cases were not run. The syscall cause is not
+established by that result (`guarded-sdk-assess-run1.log`, SHA256
+`8fb683f45baf2bfae472c48d672e9e17da859a05a07a2344457eb0e379f9e02d`;
+result `e88a89fcb7dcd8f89bb54e5d1c0a9135d40398d32a992b8f76691c6b90b28810`).
+All 57 held input pins were preserved; this is a failed local assessment,
+not installed SDK acceptance or proof of production package authority.
+A separate bounded raw-only trace preserved all 60 expanded pins and again
+failed with known primary cleanup. It observed the guard's 21-byte ACK, then
+`sched_getparam` (x86-64 syscall 143) on the calling child thread, which the
+initial filter's default kill rule rejected. Nearby `mmap` ENOMEM results do
+not establish the cause of that call or the earlier untraced failure. The
+2,731,732-byte trace is `sdk-assess-trace1.raw`, SHA256
+`b977bb8443ffd21793251c9a4095db42142b0725a6743b2d61113a0088ce819b`;
+result `87ecd085b0287beaa6693ddf4cba497edfc6bfc27caf7adb5031d45b34718291`.
+The resulting local correction returns EPERM for exactly scheduler queries
+143/145 in guarded mode without executing either syscall; unguarded kills,
+scheduler setters and all other access/resource guards remain unchanged.
+Source `linux.rs` SHA256
+`4b3d5199b6b4c7a86eb6c93ca20174a279c11619914214126259b49289daacf7`
+passed 24 selected exact-image tests; the rebuilt host passed three retained pure tests,
+formatting and strict production-library Clippy. Broader test-target Clippy
+still failed on five independently verified unchanged HEAD test contexts.
+The subsequent real assessment still failed on the first benign source,
+now with SIGABRT 6 and 1,022 untruncated stderr bytes, known primary cleanup
+and 67 preserved input pins. Its stderr text was not captured, so the abort
+cause remains unknown; invalid/unknown cases were not run
+(`guarded-sdk-assess-run2.log`, SHA256
+`920665a40bd24365d8b420b67d6c7b6b34a79a57013ceabb360f7ffd0f7ad0ac`;
+result `18b3dce8d051f5cc9f0e810d0bd5ecaf24fac17eea0ce2a11cb97da0b4ddcb24`;
+independent readout `msg_3c55ec401372`). Further SDK-candidate expansion is
+frozen under the owner clarification; no later diagnostic was launched.
+Source and local evidence are under
+`autonomous1/source-checks/remaining-sdk1` and `native-sdk-adapter`; signing,
+installation and installed acceptance are separate gates.
 
 #### .35 read-parity implementation matrix — source checkpoint 2026-10-04
 
@@ -1998,25 +2431,73 @@ admitted invocation. Tests below are local source tests unless explicitly
 identified as retained installed evidence. All new official read actions need
 separate signed schema/profile and runtime admission before installed use.
 
+The installed local n8n-mcp 2.91.0 already provides node/template knowledge
+and validation of a ready JSON graph. Owner decision `msg_55b170751bf1`
+withdraws the experimental SDK executor and native n8n patches; `.44` removes
+their source hooks, advertised inputs and SDK-only artifacts without archival.
+The checked `sdk_reference` documentation action and sensitive Code-node reads
+remain separate features. Provider limitations stay explicit; all other
+unproved FCP and authority gates remain. The global observer in the separate
+runtime worktree and instance-audit extension are paused, not bundled into this
+cleanup or automatically included in a release.
+
 | Required row / submodes | Installed baseline | Candidate route and bounded result | Evidence / remaining boundary |
 |---|---|---|---|
 | `capabilities.inspect` | Retained EEC/Hetzner catalogs contain 53 tools | Fixed official `tools/list`, bounded name/schema-digest projection; every discovery entry remains unreviewed | `initial-installed-eec-catalog-20261004.json` and Hetzner counterpart; `official_mcp_catalog_*` and schema-export tests cover presence/drift/redaction, not admission or successful invocation of discovered tools |
 | `targets.resolve`: exact URI/server, names and ambiguity | Needs installed public-path validation | Canonical URI plus typed existence reads; exact project/workflow name matching over complete unsaturated native snapshots; one shared deadline and exact server/project/resource bindings | `public_targets_*`, `public_target_name_lookup_*`, `public_project_name_lookup_*`; name search native-shaped bridge projection passes the actual wrapper decoder. Installed new-source acceptance remains open |
-| `runtime.status` | No proved global observer | Public nullable `not_collected`; local engine and physical lifecycle hooks tested with private fixture authority only | Mixed separate-process writers, real actor/local IO teardown and unknown epoch tests; trusted writer, scoped authenticated query and complete global coverage remain open |
-| Knowledge: tool documentation, node search, templates search/get | Local catalog exists; new public projection uninstalled | Fixed local tools, bounded action-specific projection, source/default digests; combined template selectors intersect complete native subsets before paging | `combined_template_*` controlled nonempty intersection and fixed-call tests; retained real network-disabled process tests current node 3.5 and two complete empty template subsets. Oversized native subset refused; no candidate CLI or installed trust claim |
+| `runtime.status` | Host-local observer and controlled two-CLI comparisons checked; installed owner route OPEN | Retained original invocation authority plus independent scoped read authorization; pending/stale/unretained observations are unknown, and idle requires actual owned teardown. Bounded registry saturation does not block the underlying read | Earlier `remaining-runtime2-ctx_177b2c79271e` component evidence remains historical. The explicit-token `runtime-unknown-ctx_98590ebcb0b3/blake3-opt3-diagnostic-run1.log` and no-caller-token `runtime-no-cwt-ctx_6b65518aaf29/no-cwt-diagnostic-run1.log` prove scoped active/idle/unknown through separate private CLI processes with original deadlines and known actor/server cleanup. The missing-correlation regression and later seven-file managed-route source fixes passed 18 selected tests and scoped checks (`msg_95d01a84ca84`; primary `managed-*-ctx_5813827b9c7f-*` logs). Aggregate physical coverage is still OPEN: the prospective distinct-UID profile has no compatible credential-transition, current-image and cross-UID teardown implementation. A separate trusted same-UID design is only conditional proposal data (`msg_170e692be9fe`), not an equivalent isolation claim or admitted fallback. Installed role/admission/activation and global observations remain OPEN |
+| Knowledge: tool documentation, node search, templates search/get | CHECKED installed `4c39` local process: standard `get_node` tool documentation, one `webhook` search limited to three rows, one keyword template page and its dependent `nodes_only` read | Fixed local tools, bounded action-specific projection, source/default digests; combined template selectors intersect complete native subsets before paging | `knowledge-continuation1/continuation2/result.json` and `knowledge-templates1/result.json` below prove these exact four public actions; inventory completeness, other selectors/pages and template modes remain open. `combined_template_*` controlled nonempty intersection and fixed-call tests remain local evidence; oversized native subset refusal is distinct from positive installed acceptance |
 | `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | CHECKED installed `4c39` local process: HTTP Request info/full, authentication search_properties/full, migrations 3→4.5; other modes retain scoped prior evidence | Full info returns 42 properties, 32 with display options; full property search returns one match; migration result preserves `migrationStrategy`, pair and availability | `local-result.json` below plus `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`. This fixes the prior full-info acceptance failure for this exact fixture; historical requested-version restrictions remain open |
-| SDK reference: all nine public sections; best practices | CHECKED installed `4c39`: `patterns` and technique `list`, independently on EEC and Hetzner | Ordinary public CLI → typed official MCP route; nonempty reference/guidance with domain-separated digest and exact selector. These actions use the remote official provider, not local knowledge | Actual reference 15,712 bytes and guidance 6,422 bytes per server; original outputs retained below. Other sections/techniques remain source-tested, not separately installed-tested; native extra `groups` is not enrolled |
-| Validation: graph, four profiles | Actual installed synthetic empty graph valid with warning | Fixed network-disabled local validator; public valid/errors/warnings projection | Pinned installed receipt `517ce0bf…`; `public_validation_projects_primary_installed_process_receipt` explicitly run with `--ignored` and receipt environment; malformed/contradictory responses denied |
+| SDK reference: all nine public sections; best practices | CHECKED installed `4c39`: all nine reference sections and the 12 documented best-practice techniques on EEC; `patterns` and technique `list` independently on Hetzner as well | Ordinary public CLI → typed official MCP route; nonempty reference/guidance with domain-separated digest and exact selector. These actions use the remote official provider, not local knowledge | Results `261f4781…` and `beaacbbf…` below retain the exact section/technique originals. Five techniques explicitly lack detailed native documentation and are not claimed; remaining Hetzner sections/techniques are not separately installed-tested; native extra `groups` is not enrolled |
+| Validation: graph, four profiles | CHECKED installed `4c39`: minimal, ai-friendly and strict on the same nonempty synthetic graph; runtime retains the accepted earlier installed evidence | Fixed network-disabled local validator; exact graph/layout/package/profile bindings and native diagnostic originals. Minimal is complete; ai-friendly/strict retain an unclassified warning and honest incomplete status | `graph-profiles1/continuation1/result.json` SHA256 `353851f710055374384bd07de6b17fc05aaa46b51f83a98ba9dff0bd0362aeb3`, independent `msg_3c55ec401372`: three known-zero processes, 24 pins and signed current preserved; two schemas validated. The parent zero-call precheck failure/current proofs NULL remain historical. This is one fixture per selected profile, not all-input or deployed-schema parity |
 | Validation: nodes 1–50/version/subnodes | CHECKED installed `4c39` on EEC and Hetzner: one synthetic Set node, version 3.4, empty parameters | Ordinary public CLI → fixed remote `validate_node_config`; native-default result `valid:true`, zero errors/warnings, no node/workflow execution | Only the one-node native-default fixture is installed acceptance. Counts/version/subnode boundaries retain local tests; unsupported profiles are not simulated. Public errors are deliberately generic/redacted, not retained original native error text |
-| Validation: workflow_code | Native restricted SDK interpreter available | Wrapper and typed bridge refuse before broker/provider calls; bounded invalid-result projection is tested only as a pure adapter | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`, `workflow_code_effect_admission_refuses_before_native_call`; admission pending synchronous-preemption, reachable effects and earlier telemetry leakage; no live SDK validation |
+| Withdrawn: workflow_code | Removed from required scope by owner; never accepted installed | `.44` retires local SDK hooks and inherited remote refusal stubs, not JSON graph validation or SDK documentation | Historical FAIL/UNKNOWN above remain facts, not SDK success. Source retirement and exact SDK-only file deletion are cleanup work, not a fulfilled validation feature |
 | Validation: remote_workflow/current draft or published, four profiles | Missing installed public composition | One exact REST GET captured privately; ID/version/digest bound; same selected graph validated by signed local provider with shared deadline/cancel/teardown | `remote_workflow_public_target_*`, `remote_validation_capture_*`, actual ignored local four-profile test; new runtime admission required; historical versions excluded |
 | Structure: projects/folders/tags | CHECKED installed `4c39`, separately on EEC and Hetzner, one public row per kind | Fixed official reads; folders project derived only from the actual single returned project. Exact server/resource and folder `parentUri` bindings verified | Both servers return nonempty project/folder/tag pages; folder totals 24/42, tag totals 1/8. One page is not the whole catalog; further cursor pages and additional selectors are not inferred. Native caps 100/100/500 and truncation refusal remain |
 | Workflows search: filters/page/sort | REST cannot supply folder/global sort equivalence | Fixed official native search for query/project/folder/tags/sort, complete snapshot before public paging/active filtering | `official_workflow_search_native_query_is_not_replaced_with_page_local_name_filter`; cap 200 and archived search remain explicit capability limits |
 | Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and metadata Code fingerprints. `includeCode:true` routes before admission to distinct pinned `workflows.get_code` / `workflows.code.read`; installed operation and rights remain OPEN | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, `get_code_production_projection_is_exact_pinned_and_sensitive`, `include_code_routes_before_authoritative_envelope_and_binds_every_pin`, `get_code_original_child_sensitive_authority_and_pins`; actual diagnostic CLI refusal is separate from callback/process fixtures |
 | Draft/published compare: semantic/layout/validation | New public composition missing | Same single GET crossbinds both graphs; semantic/layout digests; two owned local validations; no public raw graph | `captured_comparison_graphs` tests and retained native local comparison test; missing published/validator failure is limited outcome, not empty success |
 | Executions search/get metadata | Existing metadata routes; new filter parity needs validation | Native workflow/time/status pushdown; running explicitly requested/merged; queryless exact metadata GET, no execution payload | Six `metadata_*` HTTP tests passed; wrong workflow denied; payload/history/rollback remain outside .35 |
-| Credentials list query/type/project/sharing/page | REST lacks required official metadata; installed direct FCP mapping absent | Wrapper/host official adapter plus LOCAL A optional original-invocation mapping; bounded safe metadata, no native cursor | `official_credentials_*`, `credentials_owned_*`, retained producer/signer/provision fixtures and `credentials_original_child_inherited_transport`: actual original child and inherited proxy with private synthetic transport, not installed CLI acceptance. Mapping/source admission and continuation remain OPEN |
-| Audit credentials/database/filesystem/nodes | Source-proved fixed native POST, no installed audit invocation | Explicit four-category selection and redacted report/count projection; legitimate native empty array accepted | `audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes`; instance/default-all denied before HTTP pending external-effect decision, never full-audit success |
+| Credentials list query/type/project/sharing/limit | REST lacks required official metadata; installed direct FCP mapping absent | Unchanged official metadata tool, limit1–200, count=returned, continuation unavailable and completeness not established. No synthetic cursor or native extension | `.44` removes bounded-v1 and snapshot-only mechanisms. Earlier local experiments do not prove the simplified route or installed acceptance. Remaining FCP mapping admission and installed acceptance stay OPEN; a limit-sized response requires a visible bound and narrower-filter guidance |
+| Audit credentials/database/filesystem/nodes/instance | Source-proved fixed native POST, no installed audit invocation | Four local-read categories retain their capability; instance requests route to distinct `audit.inspect_instance` / `audit.instance.read` before admission. Safe static findings/counts only, always `fullAudit:false` | Local projection, CLI and loopback capability tests passed; reviewed actor/proxy/original-deadline and malformed-location corrections passed focused checks. Shared pending-HTTP tests prove cancellation/owned teardown, not native audit duration or DB-query cancellation. Instance version-service effects and all installed audit admission remain OPEN |
+
+**Installed local knowledge continuation, 2026-10-15:** under
+`/srv/dev-ssd/fcp/nqm81-35/execution-metadata-acceptance-20261014-1/autonomous1/knowledge-continuation1/continuation2/`,
+`result.json` SHA256
+`e3cea25734fca400613c624edd1430f13664002ad924cf5adaf14309625dbaa8`
+records two ordinary installed `4c39` local knowledge calls. Original
+`documentation.stdout` (1,016 bytes, SHA256
+`577e9a76dcf75c03b6e498a4de9f2e2d997e4c777afc33cf4bce1e5f398cb2b0`)
+contains 818 bytes of nonempty `get_node` documentation with its checked plain
+SHA256 text binding. `node-search.stdout` (587 bytes, SHA256
+`e2634ba5c5b2683f1504649e1114acfa48fbd7dbc9cba74ecec14daf9d160900`)
+contains three unique metadata rows for the bounded `webhook` query, with exact
+canonical local node URIs; no ranking or full-catalog claim follows. Both
+processes have known exit 0, joined IO, absent owned groups and zero stderr.
+Signed-current before/after remains `4c39` / receipt `66403a8d…`; the scoped
+24-file closure is preserved. Three source rows use exact installed-source Git
+blob snapshots rather than changed task files. The parent attempt's zero-call
+`fixed_signing_guard` precheck failure and missing current proofs remain intact.
+Independent primary-output review: `msg_1bda92b1f6a1`; synthetic interpretation
+checks remain separate evidence. No workflow/node execution or remote call is
+claimed by these two source-bound local routes.
+
+**Installed template continuation:** sibling `knowledge-templates1/result.json`
+SHA256 `163d367af0e7891a0c3a993c16edd7ed1a446ee362421db82d0d43c91aa7498e`
+records the additional two-call local group. The exact `Asynchronous` keyword
+query requested limit 1 / offset 0. Original `search.stdout` (2,317 bytes,
+SHA256 `f1ffeea48f4cf583ca8a9d7bfc929279c2a4ca8044ecc209d990676ce17da284`)
+returned template 4275, query-local total 28 and `hasMore:true`. Its actual
+ID/name/URI bound the following `nodes_only` request; original `get.stdout`
+(1,668 bytes, SHA256
+`f935dc849861c1191a641499b852f52a1f4118c45e958d3a88177b4a515a92f9`)
+contains 20 name/type-only node records, with no parameters, code or graph.
+Optional parameter digests were absent; the template digest's native source
+preimage was not retained for independent recomputation. Both processes have
+known exit 0, joined IO, absent groups, zero stderr and no retry; scoped 24 pins
+and signed-current before/after match the preceding release. Independent
+primary-output review: `msg_18d34503021b`. This is one keyword page and one
+metadata mode, not FTS/LIKE equivalence, a full catalog or template execution.
 
 **Installed v7 acceptance, 2026-10-15:** release
 `release-20261014-read-parity-4c39cbe7-rc1`, source `4c39cbe7`, signed receipt
@@ -2049,6 +2530,31 @@ proofs. Full-info original SHA256
 and migration original SHA256
 `ecc7351b8ea817d8a8dfaacee9920f80ee00eb293bdcb32b40e649fa9baede03`
 are retained without claiming remote validation or node execution.
+
+**Additional reference acceptance:**
+`autonomous1/knowledge-sections1/continuation1/result.json`, SHA256
+`261f478192b5932e253cfb2e1806f889abe5f3b9168d0b9d14bb1eacc0fbd4f2`,
+retains eight EEC reads for the other named SDK sections, each known exit0,
+joined IO/group absence and empty stderr. The originals, selector/content
+digests and current equality were independently reviewed. The 24 held inputs
+include three source snapshots byte-equal to installed-source Git `4c39cbe7`,
+replacing mutable task-source paths; their new metadata is not historical inode
+or timestamp equality. The preceding zero-call precheck failure and null current
+proof remain unchanged. This adds EEC reference coverage, not SDK execution,
+Hetzner section coverage or all best-practice techniques.
+
+`autonomous1/knowledge-sections1/techniques1/result.json`, SHA256
+`beaacbbff98db0f6ffefac0f0860560a2751bfc16325e8df142e8e569d7fb93b`,
+adds 12 EEC detailed-guidance reads selected from the retained native technique
+list. All 12 originals (87367 bytes collectively), exact request selectors,
+domain-separated content digests and process records were independently checked:
+known exit0, joined IO/group absence, empty stderr and no retry. The current
+proofs agree and all 24 held inputs were preserved. The native list names 17
+techniques but marks monitoring, enrichment, data_analysis, knowledge_base and
+human_in_the_loop as lacking detailed documentation; those five were not probed
+or counted as successful guidance. Guidance sample code was returned as text,
+never executed. This is EEC installed static-knowledge evidence, not Hetzner
+technique coverage, SDK validation or workflow execution.
 
 History/rollback (.36), external credential lookup (.39), execution payload (.40)
 and authoring (.42) are not implemented or accepted by this matrix. Existing
@@ -2142,10 +2648,11 @@ exclusions:
   changes nothing, REST transport remains port443 and inventory enrollment
   alone grants no caller capability. Native producer/consumer and projection
   tests qualify local source only; no installed policy was activated.
-- Credential continuation completeness, direct-FCP credential mediation,
-  global runtime observation, instance audit effects and SDK-code effects
-  remain OPEN as described above. No source-only test closes installed
-  admission for these or other new routes.
+- Direct-FCP bounded credential mediation and other supported read routes
+  still need their own installed admission and acceptance. SDK execution and
+  native continuation requirements are withdrawn by the owner, not completed.
+  Global runtime observation and instance-audit development are paused; no
+  source-only test closes admission or authorizes their activation.
 
 #### Useful workflow scenario — controlled evidence and installed boundary
 
@@ -2237,7 +2744,6 @@ Its action-specific outputs are exactly:
 - `nodes`, with `nodes[1..50]` containing `name?`, `type`, `typeVersion?`,
   `parameters?`, `subnodes?`, and `isToolNode?`;
 - `graph`, with a workflow graph and optional validation profile;
-- `workflow_code`, with Workflow SDK source;
 - `remote_workflow`, with an exact workflow target and version selector.
 
 `validation.run.profile` is `minimal`, `runtime`, `ai_friendly`, or `strict`.
@@ -2363,6 +2869,26 @@ provider descriptions, paths, names, recommendations and location values are
 not exposed. This projected shape is a `.35` contract change requiring review,
 not a claim of installed parity or full-audit acceptance.
 
+The 2026-10-15 local candidate adds the separate internal operation
+`n8n.audit.inspect_instance` and capability `n8n.audit.instance.read`. The public
+`audit.inspect` request containing `instance` is translated before the
+authoritative envelope is created; an ordinary four-category capability cannot
+authorize it. Its exact optional producer policy describes the delegated native
+version-service effect. It refuses old-runtime reuse and does not grant itself
+through discovery or a proposed policy file. No instance audit has been run.
+
+The native reporter may send the instance ID and version to its configured
+version service using provider-controlled redirects. FCP's REST network policy
+does not confine that server-side request. The proposed 45-second REST, proxy and
+actor limits accommodate the reporter's 30-second request plus a hypothesized
+15-second processing margin; the original shorter caller deadline still wins.
+These bounds do not cancel the remote database query. The native reporter can
+omit an outdated-version finding after a failed version request, so absence is
+not proof that the check completed or that the instance is current. Public
+output remains bounded static findings/counts with `fullAudit:false`; settings
+are informational counts, never their values or names. Deployment and the exact
+external-effect admission remain separate owner decisions.
+
 `mcp_access.reconcile.scope` is exactly `workflow_ids`, `project`, `folder`, or
 `all_current`; `desired` is a boolean. `all_current` is an explicit bounded
 one-shot snapshot of workflows visible when the invocation starts; it is not a
@@ -2412,7 +2938,7 @@ caller-configurable frame expansion.
 | Node/template knowledge | Host-owned local MCP run-once with API disabled | Official MCP builder tools | Local indexed knowledge and validation |
 | Node/workflow validation | Host-owned local MCP run-once | Official MCP | Detailed local validation without server dependency |
 | Draft/published comparison | Official MCP | REST plus local validation | Official server semantics expose both graphs |
-| Workflow SDK create/update | Official MCP | Typed REST only after parity | Server-side SDK and node schema validation |
+| JSON graph/template create/update | Typed approved graph operation | No SDK-source fallback | Validate the graph with MCP; saving/testing retains separate authorization and readback |
 | Publish/unpublish/archive/restore | Typed REST after parity | Official MCP | Typed preconditions and compact readback |
 | Manual/production execution | Owner-gated official MCP `execute_workflow` | No REST fallback | Manual accepted by `.25`; production `.26` and test/preparation `.41` remain incomplete, with separate provider-semantic and approval gates |
 | Credential metadata | Official MCP | Typed REST | Official MCP strips secret data |

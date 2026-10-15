@@ -516,6 +516,7 @@ fn installed_n8n_mcp_catalog_and_read_only_calls_run_through_supervisor() {
 
     let policy = LocalMcpPolicy {
         package_id: "n8n-mcp".into(),
+        package_binding: None,
         package_version,
         launcher_path: runtime.to_string_lossy().into_owned(),
         launcher_digest: digest(&runtime),
@@ -678,6 +679,7 @@ impl Fixture {
             .collect();
         LocalMcpPolicy {
             package_id: "fixture-provider".into(),
+            package_binding: None,
             package_version: semver::Version::new(1, 0, 0),
             launcher_path: launcher.to_string_lossy().into_owned(),
             launcher_digest: digest(Path::new(&launcher)),

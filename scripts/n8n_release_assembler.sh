@@ -1393,7 +1393,7 @@ search_read_policy() {
   fi
   [[ -n "$admission" ]] || return 0
   [[ "$admission" =~ ^[0-9a-f]{64}$ ]] || die "search read policy admission digest is invalid"
-  python3 - "$1" "$admission" "${2:-}" "$kind" "$execution_search" <<'PY'
+  python3 - "$1" "$admission" "${2:-}" "$kind" "$execution_search" "${FWC_N8N_REUSE_RETAINED-0}" <<'PY'
 import copy
 import hashlib
 import json
@@ -1426,14 +1426,15 @@ def closed_object(pairs):
         result[key] = value
     return result
 
-def validate_read_policy(raw):
-    if len(raw) > 16384:
+def validate_read_policy(raw, retained_runtime=False):
+    if len(raw) > 16384 or type(retained_runtime) is not bool:
         raise ValueError("search read policy denied")
     value = json.loads(raw, object_pairs_hook=closed_object)
     expected = {"name": "search_workflows", "class": "read",
         "input_schema_digest": INPUT_PIN, "output_schema_digest": OUTPUT_PIN,
         "input_schema_present": True, "output_schema_present": True}
-    if (not isinstance(value, dict) or set(value) not in ({"schema", "servers"}, {"schema", "servers", "code_read"})
+    if (not isinstance(value, dict) or not {"schema", "servers"} <= set(value)
+        or not set(value) <= {"schema", "servers", "code_read", "audit_read", "instance_audit_read"}
         or value["schema"] not in ("fwc.n8n.search-read-policy.v1", "fwc.n8n.safe-read-policy.v1")
         or not isinstance(value["servers"], dict)
         or set(value["servers"]) != {"eec", "hetzner"}):
@@ -1441,6 +1442,18 @@ def validate_read_policy(raw):
     if "code_read" in value and (value["schema"] != "fwc.n8n.safe-read-policy.v1"
         or value["code_read"] != {"operation": "n8n.workflows.get_code", "capability": "n8n.workflows.code.read"}):
         raise ValueError("sensitive code read policy denied")
+    if "audit_read" in value and (value["schema"] != "fwc.n8n.safe-read-policy.v1"
+        or value["audit_read"] != {"operation": "n8n.audit.inspect", "capability": "n8n.audit.read",
+            "categories": ["credentials", "database", "filesystem", "nodes"]}):
+        raise ValueError("local category audit policy denied")
+    if "instance_audit_read" in value and (value["schema"] != "fwc.n8n.safe-read-policy.v1"
+        or value["instance_audit_read"] != {"operation": "n8n.audit.inspect_instance",
+            "capability": "n8n.audit.instance.read",
+            "categories": ["credentials", "database", "filesystem", "nodes", "instance"],
+            "delegated_effect": "native-version-service-with-instance-id-and-provider-redirect-policy"}):
+        raise ValueError("instance audit effect policy denied")
+    if retained_runtime and "instance_audit_read" in value:
+        raise ValueError("instance audit requires rebuilt runtimes")
     for server in ("eec", "hetzner"):
         observed = value["servers"][server]
         if value["schema"] == "fwc.n8n.safe-read-policy.v1":
@@ -1540,6 +1553,26 @@ def add_read_inventory(official, common, server, policy):
             raise ValueError("sensitive code read duplicate denied")
         common["allowed_operations"].append(operation)
         network[operation] = copy.deepcopy(source)
+    if "audit_read" in policy:
+        network = common["operation_network_constraints"]
+        source = network.get("n8n.workflows.get")
+        if not isinstance(source, dict) or source.get("port_allow") != [443]:
+            raise ValueError("local category audit network denied")
+        operation = "n8n.audit.inspect"
+        if operation in network or operation in common["allowed_operations"]:
+            raise ValueError("local category audit duplicate denied")
+        common["allowed_operations"].append(operation)
+        network[operation] = copy.deepcopy(source)
+    if "instance_audit_read" in policy:
+        network = common["operation_network_constraints"]
+        source = network.get("n8n.workflows.get")
+        if not isinstance(source, dict) or source.get("port_allow") != [443]:
+            raise ValueError("instance audit network denied")
+        operation = "n8n.audit.inspect_instance"
+        if operation in network or operation in common["allowed_operations"]:
+            raise ValueError("instance audit duplicate denied")
+        common["allowed_operations"].append(operation)
+        network[operation] = dict(source, total_timeout_ms=45000)
     return official, common
 
 def input_identity(meta):
@@ -1581,7 +1614,7 @@ def add_execution_search_inventory(common, server):
     networks[operation] = network
     return common
 
-def admitted_input(digest):
+def admitted_input(digest, retained_runtime):
     # All ancestors and the data file remain root-controlled and non-symlinked.
     for name in ("/srv", "/srv/dev-ssd", "/srv/dev-ssd/rc41-inputs"):
         meta = os.lstat(name)
@@ -1598,13 +1631,13 @@ def admitted_input(digest):
     if (input_identity(before) != input_identity(after) or input_identity(os.lstat(INPUT)) != input_identity(after)
         or hashlib.sha256(raw).hexdigest() != digest):
         raise ValueError("search read policy denied")
-    return validate_read_policy(raw)
+    return validate_read_policy(raw, retained_runtime)
 
 def main():
-    mode, digest, stage, kind, execution_search = sys.argv[1:]
-    if execution_search not in ("0", "1"):
+    mode, digest, stage, kind, execution_search, retained_runtime = sys.argv[1:]
+    if execution_search not in ("0", "1") or retained_runtime not in ("0", "1"):
         raise ValueError("execution search policy denied")
-    policy = admitted_input(digest)
+    policy = admitted_input(digest, retained_runtime == "1")
     expected_schema = "fwc.n8n.safe-read-policy.v1" if kind == "safe" else "fwc.n8n.search-read-policy.v1"
     if policy["schema"] != expected_schema:
         raise ValueError("search read policy denied")

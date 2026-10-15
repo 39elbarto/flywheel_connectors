@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:7db5fb6e523ef2426be9542bc4f64e0484f550a2fe9ed8e964bc7230264e476d"
+interface_hash = "blake3-256:fcp.interface.v2:6f17fdc14626ad318c7e7fbc95717978f017b5143c6be7128ad4cce7ae4b42c3"
 
 [connector]
 id = "fcp.n8n"
@@ -43,6 +43,7 @@ required = [
 ]
 optional = [
     "n8n.audit.read",
+    "n8n.audit.instance.read",
     "n8n.credentials.metadata.read",
     "n8n.executions.read",
     "n8n.folders.read",
@@ -97,7 +98,7 @@ examples = ["{}"]
 related = []
 
 [provides.operations."n8n.validation.run"]
-description = "Read one selected current graph for host-owned signed local validation"
+description = "Validate one current graph"
 capability = "n8n.workflows.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -124,7 +125,7 @@ connect_timeout_ms = 5000
 total_timeout_ms = 15000
 max_response_bytes = 10485760
 [provides.operations."n8n.validation.run".ai_hints]
-when_to_use = "Validate a current draft or published graph under the invocation deadline."
+when_to_use = "Validate a current graph with the local MCP graph validator."
 common_mistakes = ["validation_required is an incomplete private binding, never a successful validation."]
 examples = ['{"subject":"remote_workflow","id":"1001","version":"draft","profile":"runtime"}']
 related = ["n8n.workflows.get"]
@@ -230,6 +231,41 @@ common_mistakes = ["Instance and default-all audit are denied before HTTP becaus
 examples = ['{"categories":["credentials","database","filesystem","nodes"]}']
 related = []
 
+[provides.operations."n8n.audit.inspect_instance"]
+description = "Inspect instance risks with separately authorized native version-check effects"
+capability = "n8n.audit.instance.read"
+risk_level = "high"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+input_schema = { type = "object", additionalProperties = false, required = ["categories"], properties = { categories = { type = "array", minItems = 1, maxItems = 5, uniqueItems = true, contains = { const = "instance" }, items = { type = "string", enum = ["credentials", "database", "filesystem", "nodes", "instance"] } } } }
+output_schema = { type = "object", additionalProperties = false, required = ["summary", "findings"], properties = { summary = { type = "object", additionalProperties = false, required = ["categories", "fullAudit"], properties = { categories = { type = "array", items = { type = "string" } }, fullAudit = { type = "boolean", const = false } } }, findings = { type = "array", maxItems = 15, items = { type = "object", additionalProperties = false, required = ["category", "severity", "code", "message", "affectedCount"], properties = { category = { type = "string" }, severity = { type = "string", enum = ["warning", "info"] }, code = { type = "string" }, message = { type = "string" }, affectedCount = { type = "integer", minimum = 0, maximum = 10000 } } } } } }
+
+[provides.operations."n8n.audit.inspect_instance".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 45000
+max_response_bytes = 10485760
+
+[provides.operations."n8n.audit.inspect_instance".ai_hints]
+when_to_use = "Inspect safe native audit findings without names, paths or provider descriptions."
+common_mistakes = ["Native instance audit can send the instance ID and version to its configured version service. Missing outdated findings do not prove a completed version check. No current admission is implied."]
+examples = ['{"categories":["instance"]}']
+related = []
+
 [provides.operations."n8n.credentials.list"]
 description = "List safe credential metadata in the n8n instance"
 capability = "n8n.credentials.metadata.read"
@@ -243,13 +279,13 @@ revocation_freshness = "safe"
 additionalProperties = false
 required = []
 type = "object"
-properties = { query = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, onlySharedWithMe = { type = "boolean" }, page = { type = "object", additionalProperties = false, properties = { limit = { type = "integer", minimum = 1, maximum = 200 } } } }
+properties = { query = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, onlySharedWithMe = { type = "boolean" }, limit = { type = "integer", minimum = 1, maximum = 200, default = 50 } }
 
 [provides.operations."n8n.credentials.list".output_schema]
 additionalProperties = false
 required = ["credentials", "page"]
 type = "object"
-properties = { credentials = { type = "array", maxItems = 200, items = { type = "object", additionalProperties = false, required = ["resourceUri", "id", "name", "type", "scopes", "isManaged", "isGlobal", "homeProject"], properties = { resourceUri = { type = "string" }, id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, scopes = { type = "array", maxItems = 64, items = { type = "string", minLength = 1, maxLength = 256 } }, isManaged = { type = "boolean" }, isGlobal = { type = "boolean" }, homeProject = { type = ["object", "null"], additionalProperties = false, required = ["id", "name", "type"], properties = { id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 } } } } } }, page = { type = "object", additionalProperties = false, required = ["returnedCount", "limit", "continuation", "completeness"], properties = { returnedCount = { type = "integer", minimum = 0, maximum = 200 }, limit = { type = "integer", minimum = 1, maximum = 200 }, continuation = { type = "string", enum = ["unavailable"] }, completeness = { type = "string", enum = ["not_established"] } } } }
+properties = { credentials = { type = "array", maxItems = 200, items = { type = "object", additionalProperties = false, required = ["resourceUri", "id", "name", "type", "scopes", "isManaged", "isGlobal", "homeProject"], properties = { resourceUri = { type = "string" }, id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, scopes = { type = "array", maxItems = 64, items = { type = "string", minLength = 1, maxLength = 256 } }, isManaged = { type = "boolean" }, isGlobal = { type = "boolean" }, homeProject = { type = ["object", "null"], additionalProperties = false, required = ["id", "name", "type"], properties = { id = { type = "string", minLength = 1, maxLength = 256 }, name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 } } } } } }, page = { type = "object", additionalProperties = false, required = ["returnedCount", "limit", "continuation", "completeness"], properties = { returnedCount = { type = "integer", minimum = 0, maximum = 200 }, limit = { type = "integer", minimum = 1, maximum = 200 }, continuation = { type = "string", enum = ["unavailable"] }, completeness = { type = "string", enum = ["not_established"] }, hint = { type = "string", const = "Result may be limited; narrow query, type, projectId or sharing filters." } } } }
 
 [provides.operations."n8n.credentials.list".network_constraints]
 host_allow = ["operator-configured"]
@@ -275,7 +311,7 @@ common_mistakes = [
     "The upstream endpoint requires the credential:list scope and owner or admin access.",
     "Credential values, secret maps, auth headers, and configuration data are never returned.",
     "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.",
-    "The admitted official tool has no cursor; page completeness and continuation are not established.",
+    "Continuation is unavailable and completeness is unknown, even for short results; at the limit narrow query, type, projectId or sharing filters.",
 ]
 examples = ["{}"]
 related = ["n8n.projects.list"]
@@ -3235,6 +3271,13 @@ burst = 1
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "n8n.audit.instance.read"
+requests = 10
+window_ms = 60000
+burst = 1
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "n8n.credentials.metadata.read"
 requests = 200
 window_ms = 60000
@@ -3320,6 +3363,7 @@ scope = "instance"
 
 [rate_limits.operation_pools]
 "n8n.audit.inspect" = ["n8n.audit.read"]
+"n8n.audit.inspect_instance" = ["n8n.audit.instance.read"]
 "n8n.credentials.list" = ["n8n.credentials.metadata.read"]
 "n8n.mcp_access.reconcile" = ["n8n.mcp_access.write"]
 "n8n.executions.get" = ["n8n.executions.read"]

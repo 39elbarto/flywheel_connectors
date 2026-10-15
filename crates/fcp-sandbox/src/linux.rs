@@ -2237,9 +2237,8 @@ mod tests {
             return;
         }
 
-        let static_executable = match std::fs::canonicalize("/bin/busybox") {
-            Ok(path) => path,
-            Err(_) => return,
+        let Ok(static_executable) = std::fs::canonicalize("/bin/busybox") else {
+            return;
         };
         verify_fixed_static_executable(&static_executable)
             .expect("busybox must be a static ELF fixture");
@@ -2328,9 +2327,8 @@ mod tests {
             Err(error) => panic!("Landlock ABI query failed: {error}"),
         };
         assert!(abi >= FIXED_LANDLOCK_MIN_ABI);
-        let static_executable = match std::fs::canonicalize("/bin/busybox") {
-            Ok(path) => path,
-            Err(_) => return,
+        let Ok(static_executable) = std::fs::canonicalize("/bin/busybox") else {
+            return;
         };
         verify_fixed_static_executable(&static_executable)
             .expect("busybox must be a static ELF fixture");

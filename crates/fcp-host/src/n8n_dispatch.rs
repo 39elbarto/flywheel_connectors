@@ -170,6 +170,15 @@ impl CredentialMetadataReadMapping {
         &self.credential_id
     }
 
+    /// Select the native metadata read from the admitted mapping.
+    /// # Errors
+    /// Rejects substituted server bindings and unsupported arguments.
+    pub fn arguments(&self, server: &str, input: &Value) -> Result<Value, &'static str> {
+        self.validate()?;
+        Self::endpoint(server)?;
+        official_n8n_credentials_arguments(input)
+    }
+
     /// Fixed server endpoints; neither caller input nor the mapping selects URL.
     /// # Errors
     /// Rejects local, legacy and unknown servers.
@@ -643,15 +652,140 @@ pub fn project_official_n8n_credentials(
             "isManaged":row["isManaged"].as_bool().ok_or("official_credential_response_invalid")?,
             "isGlobal":row["isGlobal"].as_bool().ok_or("official_credential_response_invalid")?,"homeProject":home}));
     }
-    Ok(
-        json!({"credentials":projected,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}}),
+    let mut output = json!({"credentials":projected,"page":{"returnedCount":rows.len(),"limit":limit,"continuation":"unavailable","completeness":"not_established"}});
+    if rows.len() == limit {
+        output["page"]["hint"] =
+            json!("Result may be limited; narrow query, type, projectId or sharing filters.");
+    }
+    Ok(output)
+}
+
+/// Maximum serialized public credential page, excluding its RPC envelope.
+pub const N8N_CREDENTIAL_METADATA_PUBLIC_MAX_BYTES: usize = 128 * 1024;
+
+fn credential_public_page_bound(output: Value) -> Result<Value, &'static str> {
+    if serde_json::to_vec(&output)
+        .map_err(|_| "official_credential_response_invalid")?
+        .len()
+        > N8N_CREDENTIAL_METADATA_PUBLIC_MAX_BYTES
+    {
+        return Err("credential_public_page_byte_bound_exceeded");
+    }
+    Ok(output)
+}
+
+/// Native credential filters and a bounded metadata result.
+/// # Errors
+/// Rejects unknown fields, malformed filters and limits outside 1..=200.
+pub fn official_n8n_credentials_arguments(input: &Value) -> Result<Value, &'static str> {
+    let invalid = "invalid_credential_metadata_input";
+    let object = input.as_object().ok_or(invalid)?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "query" | "type" | "projectId" | "onlySharedWithMe" | "limit"
+        )
+    }) {
+        return Err(invalid);
+    }
+    let mut arguments = serde_json::Map::new();
+    for key in ["query", "type", "projectId"] {
+        if let Some(value) = object.get(key) {
+            let value = value
+                .as_str()
+                .filter(|value| {
+                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+                })
+                .ok_or(invalid)?;
+            arguments.insert(key.into(), json!(value));
+        }
+    }
+    if let Some(value) = object.get("onlySharedWithMe") {
+        arguments.insert(
+            "onlySharedWithMe".into(),
+            json!(value.as_bool().ok_or(invalid)?),
+        );
+    }
+    let limit = match object.get("limit") {
+        None => 50,
+        Some(value) => value
+            .as_u64()
+            .filter(|limit| (1..=200).contains(limit))
+            .ok_or(invalid)?,
+    };
+    arguments.insert("limit".into(), json!(limit));
+    Ok(Value::Object(arguments))
+}
+
+/// Validate a bounded metadata result against the admitted request.
+/// # Errors
+/// Refuses malformed metadata, excess rows and oversized public results.
+pub fn project_official_n8n_credentials_page(
+    native: &Value,
+    server: &str,
+    input: &Value,
+) -> Result<Value, &'static str> {
+    let arguments = official_n8n_credentials_arguments(input)?;
+    if serde_json::to_vec(native)
+        .map_err(|_| "official_credential_response_invalid")?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err("credential_metadata_byte_bound_exceeded");
+    }
+    let rows = native["credentials"]
+        .as_array()
+        .ok_or("official_credential_response_invalid")?;
+    let limit = usize::try_from(
+        arguments["limit"]
+            .as_u64()
+            .ok_or("invalid_credential_metadata_input")?,
     )
+    .map_err(|_| "invalid_credential_metadata_input")?;
+    let safe =
+        project_official_n8n_credentials(&json!({"data":rows,"count":rows.len()}), server, limit)?;
+    if &safe != native {
+        return Err("official_credential_response_invalid");
+    }
+    credential_public_page_bound(safe)
+}
+
+/// Strict metadata validation at the CLI boundary. The host separately
+/// compares the result with its invocation-private native capture.
+/// # Errors
+/// Rejects unknown output fields, native secrets, server or request substitution.
+pub fn validate_official_n8n_credentials_page(
+    output: &Value,
+    server: &str,
+    input: &Value,
+) -> Result<(), &'static str> {
+    let arguments = official_n8n_credentials_arguments(input)?;
+    if serde_json::to_vec(output)
+        .map_err(|_| "official_credential_response_invalid")?
+        .len()
+        > N8N_CREDENTIAL_METADATA_PUBLIC_MAX_BYTES
+    {
+        return Err("credential_public_page_byte_bound_exceeded");
+    }
+    let invalid = "official_credential_response_invalid";
+    if output.as_object().ok_or(invalid)?.len() != 2 {
+        return Err(invalid);
+    }
+    let rows = output["credentials"].as_array().ok_or(invalid)?;
+    let limit =
+        usize::try_from(arguments["limit"].as_u64().ok_or(invalid)?).map_err(|_| invalid)?;
+    let safe =
+        project_official_n8n_credentials(&json!({"data":rows,"count":rows.len()}), server, limit)?;
+    if &safe != output {
+        return Err(invalid);
+    }
+    Ok(())
 }
 
 /// Closed official SDK reads. These arguments never select authoring tools.
 ///
 /// # Errors
-/// Rejects unknown fields, unsupported sections and oversized SDK source.
+/// Rejects unknown fields and unsupported reference or node validation inputs.
 pub fn official_n8n_sdk_arguments(
     operation: &str,
     input: &Value,
@@ -733,25 +867,10 @@ fn official_knowledge_arguments(input: &Value) -> Result<(&'static str, Value), 
 }
 
 fn official_validation_arguments(input: &Value) -> Result<(&'static str, Value), &'static str> {
-    let object = input.as_object().ok_or("invalid_operation_input")?;
     if input["subject"] == "nodes" {
         return official_node_validation_arguments(input);
     }
-    if object
-        .keys()
-        .any(|key| !matches!(key.as_str(), "subject" | "code" | "profile"))
-        || input["subject"] != "workflow_code"
-    {
-        return Err("invalid_operation_input");
-    }
-    if object.contains_key("profile") {
-        return Err("sdk_validation_profile_unsupported");
-    }
-    let code = input["code"]
-        .as_str()
-        .filter(|code| !code.is_empty() && code.len() <= 300_000)
-        .ok_or("invalid_operation_input")?;
-    Ok(("validate_workflow", json!({"code":code})))
+    Err("invalid_operation_input")
 }
 
 fn official_node_validation_arguments(
@@ -872,10 +991,6 @@ pub fn official_n8n_sdk_schema_pins(tool: &str) -> Option<(&'static str, &'stati
         "get_workflow_best_practices" => Some((
             "sha256:d95120da8063c53d7dc379b938043cfdc81da869c40a33ce608fe76ddda31423",
             "sha256:9530d1f518b2640320f8ffbfd971d662b3f00558be8b3ff9418fe0d916a1728c",
-        )),
-        "validate_workflow" => Some((
-            "sha256:34160cafc3bf8971e214a3b35195b12d5e33a22f3738d49d68c1e2aeb736e9f0",
-            "sha256:a56a4e3038b4b2732ab9fffbfcf038b4d4824c48481123ede01f3a444358fae9",
         )),
         "validate_node_config" => Some((
             "sha256:37231a38664a9375573c84d8484fc30cef2e99efbca5f6172f1a4cd308c34f8d",
@@ -3062,6 +3177,54 @@ mod typed_batch_tests {
             "typeVersion":9,"parameters":{"token":"PARAMETER_CANARY"},"position":[0,0]}],"connections":{}})
     }
 
+    fn assert_original_diagnostics_are_confined(result: &Value) {
+        let mut classified = result.clone();
+        let mut encoded_content = 0;
+        for category in ["errors", "warnings"] {
+            for finding in classified[category].as_array_mut().unwrap() {
+                let original = finding
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("nativeDiagnostic")
+                    .unwrap();
+                assert_eq!(original["source"], "local_mcp.validation");
+                assert_eq!(original["stage"], "finding");
+                assert_eq!(
+                    original["severity"],
+                    if category == "errors" {
+                        "error"
+                    } else {
+                        "warning"
+                    }
+                );
+                assert_eq!(original.as_object().unwrap().len(), 11);
+                assert_eq!(original["truncated"], false);
+                for field in ["message", "node", "detailsTextPrefix"] {
+                    if original[field].is_string() {
+                        let bytes = serde_json::to_vec(&original[field]).unwrap().len() - 2;
+                        assert!(bytes <= 8192);
+                        encoded_content += bytes;
+                    }
+                }
+                if !original["details"].is_null() {
+                    let bytes = serde_json::to_vec(&original["details"]).unwrap().len();
+                    assert!(bytes <= 8192);
+                    encoded_content += bytes;
+                }
+            }
+        }
+        assert!(encoded_content <= 64 * 1024);
+        assert!(!classified.to_string().contains("CANARY"));
+        for parameter in [
+            "PARAMETER_CANARY",
+            "PRIVATE_PARAMETER_CANARY",
+            "INACTIVE_CODE_CANARY",
+            "NONEMPTY_CODE_CANARY",
+        ] {
+            assert!(!result.to_string().contains(parameter));
+        }
+    }
+
     fn diagnostic_native(errors: Value, warnings: Value) -> Value {
         let mut typed = json!({"valid":errors.as_array().unwrap().is_empty()});
         typed["errors"] = errors;
@@ -3127,7 +3290,19 @@ mod typed_batch_tests {
         assert_eq!(result["errors"][1]["actualType"], "string");
         assert_eq!(result["validationCoverage"]["unclassifiedWarnings"], 1);
         assert_eq!(result["validationCoverage"]["assessmentComplete"], false);
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
+        assert_eq!(
+            result["errors"][0]["nativeDiagnostic"]["message"],
+            "MESSAGE_CANARY\nCONTROL"
+        );
+        assert_eq!(
+            result["errors"][0]["nativeDiagnostic"]["node"],
+            "PRIVATE_NODE_CANARY"
+        );
+        assert_eq!(
+            result["errors"][0]["nativeDiagnostic"]["details"],
+            "DETAIL_CANARY"
+        );
         assert_eq!(
             result["diagnosticBinding"]["packageMetadataDigest"],
             "0".repeat(64)
@@ -3171,7 +3346,6 @@ mod typed_batch_tests {
                 json!("FLAG_CANARY"),
             ),
             ("/errors/0/fwcDiagnostic/expectedType", json!("TYPE_CANARY")),
-            ("/errors/0/message", json!("x".repeat(8193))),
             ("/valid", json!(true)),
         ];
         for (path, value) in substitutions {
@@ -3182,9 +3356,27 @@ mod typed_batch_tests {
                     &repack_versioned(changed),
                     Some(&context)
                 )
-                .is_err()
+                .is_err(),
+                "substitution {path}"
             );
         }
+        let mut oversized = base.clone();
+        oversized["errors"][0]["message"] = json!("x".repeat(8193));
+        let truncated =
+            project_local_n8n_validation_with_context(&repack_versioned(oversized), Some(&context))
+                .unwrap();
+        assert_eq!(
+            truncated["errors"][0]["nativeDiagnostic"]["messageStatus"],
+            "truncated"
+        );
+        assert_eq!(
+            truncated["errors"][0]["nativeDiagnostic"]["truncated"],
+            true
+        );
+        assert_eq!(
+            truncated["errors"][0]["nativeDiagnostic"]["message"],
+            "x".repeat(8192)
+        );
         let mut extra = base;
         extra["errors"][0]["fwcDiagnostic"]["RAW_CANARY"] = json!("secret");
         assert!(
@@ -3208,7 +3400,7 @@ mod typed_batch_tests {
             "unsupported_native_rule"
         );
         assert_eq!(result["validationCoverage"]["unclassifiedErrors"], 1);
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         let mut graph = diagnostic_graph();
         graph["nodes"][0]["name"] = json!("workflow");
         let mut reserved = versioned_required();
@@ -3258,7 +3450,7 @@ mod typed_batch_tests {
         assert_eq!(result["warnings"][0]["nodeIndex"], 0);
         assert_eq!(result["warnings"][0]["field"], "continueOnFail");
         assert_eq!(result["validationCoverage"]["unclassifiedWarnings"], 1);
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         for index in [json!(1), Value::Null] {
             let mut changed = warning.clone();
             changed["fwcWarning"]["nodeIndex"] = index;
@@ -3297,7 +3489,7 @@ mod typed_batch_tests {
         assert_eq!(result["warnings"][0]["scope"], "graph");
         assert_eq!(result["warnings"][0]["field"], "connections");
         assert_eq!(result["warnings"].as_array().unwrap().len(), 1);
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         assert!(result["warnings"][0].get("nodeIndex").is_none());
         assert!(result["validationCoverage"]["warningOrigins"][0]["nodeIndex"].is_null());
         assert_eq!(
@@ -3337,7 +3529,7 @@ mod typed_batch_tests {
             assert_eq!(result["errors"][index]["nodeIndex"], index);
             assert_ne!(result["errors"][index]["code"], "unclassified");
         }
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         for (index, version) in [(1, 9), (0, 10), (2, 9)] {
             let mut substituted = typed.clone();
             substituted["errors"][0]["fwcDiagnostic"]["nodeIndex"] = json!(index);
@@ -3388,7 +3580,7 @@ mod typed_batch_tests {
             finding["nextDiagnostic"],
             "authorized_graph_bound_native_diagnostic_required"
         );
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         let unbound = project_local_n8n_validation_call(&diagnostic_native(
             json!([{"message":"UNKNOWN_CANARY"}]),
             json!([]),
@@ -3445,7 +3637,7 @@ mod typed_batch_tests {
         assert_eq!(result["errors"][0]["nodeIndex"], 0);
         assert_eq!(result["errors"][0]["field"], "typeVersion");
         assert_eq!(result["warnings"][0]["code"], "unclassified");
-        assert!(!result.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&result);
         assert_eq!(result["diagnosticBinding"]["packageVersion"], "2.91.0");
         let valid = project_local_n8n_validation_with_context(
             &diagnostic_native(json!([]), json!([])),
@@ -3483,7 +3675,7 @@ mod typed_batch_tests {
             .unwrap();
             assert_eq!(result["errors"][0]["code"], "unclassified");
             assert!(result["errors"][0].get("nodeIndex").is_none());
-            assert!(!result.to_string().contains("CANARY"));
+            assert_original_diagnostics_are_confined(&result);
         }
         let native = diagnostic_native(
             json!([{"node":"PRIVATE_NODE_CANARY","message":"typeVersion 9 exceeds maximum supported version 2"}]),
@@ -3615,7 +3807,7 @@ mod typed_batch_tests {
         );
         let safe = project_local_n8n_validation_with_context(&native, Some(&context)).unwrap();
         assert_eq!(safe["errors"][0]["field"], "parameters.pythonCode");
-        assert!(!safe.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&safe);
         graph["nodes"][0]["parameters"]["pythonCode"] = json!("NONEMPTY_CODE_CANARY");
         let context = LocalN8nDiagnosticContext::from_graph(
             &graph,
@@ -3699,7 +3891,7 @@ mod typed_batch_tests {
             second["diagnosticBinding"]["graphDigest"]
         );
         assert_eq!(second["diagnosticBinding"]["profile"], "strict");
-        assert!(!second.to_string().contains("CANARY"));
+        assert_original_diagnostics_are_confined(&second);
     }
 
     #[test]
@@ -3719,12 +3911,104 @@ mod typed_batch_tests {
         let mut native = diagnostic_native(json!([{"message":"x"}]), json!([]));
         native["structuredContent"]["valid"] = json!(true);
         assert!(project_local_n8n_validation_call(&native).is_err());
+        for typed in [
+            json!({"valid":true,"errors":[{"message":"x"}],"warnings":[]}),
+            json!({"valid":false,"errors":[],"warnings":[]}),
+        ] {
+            assert!(project_local_n8n_validation_call(&repack_versioned(typed)).is_err());
+        }
+        let mut provider_error = diagnostic_native(json!([]), json!([]));
+        provider_error["isError"] = json!(true);
+        assert!(project_local_n8n_validation_call(&provider_error).is_err());
         let native = diagnostic_native(json!([{"message":"x".repeat(8193)}]), json!([]));
-        assert!(project_local_n8n_validation_call(&native).is_err());
+        let result = project_local_n8n_validation_call(&native).unwrap();
+        assert_eq!(
+            result["errors"][0]["nativeDiagnostic"]["messageStatus"],
+            "truncated"
+        );
+        assert_eq!(result["errors"][0]["nativeDiagnostic"]["truncated"], true);
+        assert_eq!(
+            result["errors"][0]["nativeDiagnostic"]["message"],
+            "x".repeat(8192)
+        );
         let native = diagnostic_native(json!(vec![json!({"message":"x"}); 257]), json!([]));
+        assert!(project_local_n8n_validation_call(&native).is_err());
+        let native = diagnostic_native(json!([]), json!(vec![json!({"message":"x"}); 257]));
         assert!(project_local_n8n_validation_call(&native).is_err());
         let native = json!({"content":[{"type":"text","text":"x".repeat(256*1024+1)}]});
         assert!(project_local_n8n_validation_call(&native).is_err());
+        let native = diagnostic_native(
+            json!(vec![json!({"message":"\"".repeat(5000)}); 16]),
+            json!([]),
+        );
+        let result = project_local_n8n_validation_call(&native).unwrap();
+        let encoded_bytes: usize = result["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|finding| {
+                let original = &finding["nativeDiagnostic"];
+                assert_eq!(original["messageStatus"], "truncated");
+                assert_eq!(original["truncated"], true);
+                let bytes = serde_json::to_vec(&original["message"]).unwrap().len() - 2;
+                assert!(bytes <= 8192);
+                bytes
+            })
+            .sum();
+        assert_eq!(encoded_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn credential_metadata_native_limits_and_unknown_completeness() {
+        for limit in [1_usize, 50, 200] {
+            let input = json!({"query":"SQL_%","type":"http","projectId":"shared","onlySharedWithMe":true,"limit":limit});
+            assert_eq!(official_n8n_credentials_arguments(&input).unwrap(), input);
+            let rows = (0..limit).map(|index| json!({"id":format!("c{index}"),"name":"Synthetic","type":"httpHeaderAuth",
+                "scopes":[],"isManaged":false,"isGlobal":false,"homeProject":null,"data":{"secret":"PRIVATE_CANARY"}})).collect::<Vec<_>>();
+            let native =
+                project_official_n8n_credentials(&json!({"data":rows,"count":limit}), "eec", limit)
+                    .unwrap();
+            let public = project_official_n8n_credentials_page(&native, "eec", &input).unwrap();
+            validate_official_n8n_credentials_page(&public, "eec", &input).unwrap();
+            assert_eq!(public["page"]["returnedCount"], limit);
+            assert_eq!(public["page"]["continuation"], "unavailable");
+            assert_eq!(public["page"]["completeness"], "not_established");
+            assert!(public["page"]["hint"].as_str().unwrap().contains("narrow"));
+            assert!(!public.to_string().contains("PRIVATE_CANARY"));
+            for key in ["nextCursor", "total", "snapshotDigest", "requestDigest"] {
+                assert!(public["page"].get(key).is_none());
+            }
+            let mut injected = public.clone();
+            injected["credentials"][0]["data"] = json!({"secret":"PRIVATE_CANARY"});
+            assert!(validate_official_n8n_credentials_page(&injected, "eec", &input).is_err());
+            assert!(validate_official_n8n_credentials_page(&public, "hetzner", &input).is_err());
+        }
+        assert_eq!(
+            official_n8n_credentials_arguments(&json!({})).unwrap(),
+            json!({"limit":50})
+        );
+        for input in [
+            json!({"limit":0}),
+            json!({"limit":201}),
+            json!({"limit":null}),
+            json!({"limit":1.5}),
+            json!({"page":{"limit":1}}),
+            json!({"cursor":"retired"}),
+            json!({"query":null}),
+            json!({"onlySharedWithMe":"true"}),
+        ] {
+            assert!(official_n8n_credentials_arguments(&input).is_err());
+        }
+        let short =
+            project_official_n8n_credentials(&json!({"data":[],"count":0}), "eec", 50).unwrap();
+        assert_eq!(short["page"]["completeness"], "not_established");
+        assert!(short["page"].get("hint").is_none());
+        let mut over = short;
+        over["credentials"] = json!("x".repeat(N8N_CREDENTIAL_METADATA_PUBLIC_MAX_BYTES));
+        assert_eq!(
+            validate_official_n8n_credentials_page(&over, "eec", &json!({})).unwrap_err(),
+            "credential_public_page_byte_bound_exceeded"
+        );
     }
 
     #[test]

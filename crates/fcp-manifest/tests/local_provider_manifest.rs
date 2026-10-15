@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write;
 
 use fcp_manifest::{
     ConnectorManifest, LOCAL_MCP_CATALOG_TOOLS, LOCAL_MCP_METHODS, LocalMcpPolicy, ManifestError,
@@ -87,6 +88,7 @@ const PLACEHOLDER: &str =
 
 fn test_policy() -> LocalMcpPolicy {
     LocalMcpPolicy {
+        package_binding: None,
         package_id: "czlonkowski/n8n-mcp".into(),
         package_version: semver::Version::new(2, 69, 2),
         launcher_path: "/usr/bin/node".into(),
@@ -128,7 +130,7 @@ fn manifest_toml() -> String {
     let policy = test_policy();
     let mut expected = String::new();
     for (tool, digest) in &policy.expected_catalog {
-        expected.push_str(&format!("{tool} = \"{digest}\"\n"));
+        writeln!(expected, "{tool} = \"{digest}\"").expect("write catalog entry");
     }
     format!(
         r#"[manifest]

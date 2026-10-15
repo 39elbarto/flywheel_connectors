@@ -733,11 +733,6 @@ async fn typed_n8n_owner_approval_reaches_eec_and_hetzner_once() {
                 "name": tool_name,
                 "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
             })
-        } else if action == "unpublish" {
-            json!({
-                "name": tool_name,
-                "arguments": {"workflowId": "workflow-1"}
-            })
         } else {
             json!({
                 "name": tool_name,
@@ -1110,11 +1105,6 @@ async fn typed_n8n_approval_process_boundary_preserves_policy_and_diagnostics() 
             json!({
                 "name": tool_name,
                 "arguments": {"workflowId": "workflow-1", "versionId": "version-1"}
-            })
-        } else if action == "unpublish" {
-            json!({
-                "name": tool_name,
-                "arguments": {"workflowId": "workflow-1"}
             })
         } else {
             json!({

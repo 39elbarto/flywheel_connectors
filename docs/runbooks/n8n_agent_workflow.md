@@ -24,6 +24,44 @@ Boundaries:
 
 ## Current closeout and operating boundary — 2026-10-04
 
+### Owner scope revision — 2026-10-15
+
+`flywheel_connectors-nqm81.44` owns the SDK-retirement prerequisite to `.35`.
+Installed current remains `release-20261014-read-parity-4c39cbe7-rc1`;
+SDK cleanup uses the existing `39elbarto/feat-n8n-execution-search-derived`
+worktree based on `05f8d3b9656157ec747bd88508bfce5389701353`.
+Remove the experimental SDK executor and local n8n fork patches; do not replace
+them with another runtime, daemon or provider fork. Keep standard n8n, the
+installed local MCP and typed FCP operations. The useful cycle is find/read →
+edit a JSON graph/template → MCP validation → separately authorized save/test →
+diagnose the observed execution. SDK reference documents and reading Code nodes
+are not execution authority and remain separate capabilities.
+
+Before starting a feature, state its user-visible result, the existing route,
+the smallest missing behavior and its verification. A new runtime, permanent
+observer or provider fork requires reconsidering the solution before coding.
+The separate global-observer and instance-audit extensions are paused and must
+not enter a release as a consequence of SDK cleanup.
+
+Use the unchanged credential metadata tool with a bounded result and honest
+unknown completeness; do not require native pagination or manufacture snapshot
+cursors. Source cleanup does not change signed current, provider rights or
+historical FAIL/UNKNOWN outcomes. Exact SDK-only filesystem/Git removal needs
+the owner's concrete command/impact approval; shared sandbox, teardown,
+release/signing, Code-read and JSON-validation files must not be removed whole.
+No archive, backup branch or retained copy is created for the retired SDK.
+
+The owner authorized the exact one-shot removal on 2026-10-15; its five commands
+completed with exit 0, removing the 141 named targets and separate N worktree,
+branch and host registration. The immutable execution record is
+`/srv/dev-ssd/fcp/nqm81-35/sdk-retirement1/deletion-execution1.json`.
+The matrix records its hash, preservation checks and finite analyzer exception
+for source diff `5a1d46`. This is completed local retirement, not a reusable
+deletion budget or an installed parity acceptance. Do not replay the old literal.
+
+The dated closeouts and release receipts below remain historical evidence;
+they grant no repeated signing, installation or external mutation budget.
+
 Canonical `.34` is closed at `2026-10-04T03:36:40.074779411Z`: separate Sol
 GO accepted final test source `efb3e22f11c5` and 19/19 update tests. Local
 integration is `202e5e3924eb183bc01724bf0f8939bee1eed66e`; installed RC43c
@@ -214,6 +252,34 @@ trust root. Do not substitute one for the other. The owner signing seed is
 handled only by the existing protected-FD/stdin signing path; never place it in
 arguments, environment, files, logs, or evidence. Store only public identifiers
 and paths in tracked material, not key bytes.
+
+The pending fixed owner-seed reader (`scripts/n8n_owner_seed.py`) removes release
+signing's dependency on the mutable global getter's whole-file hash and size.
+It reads only `services/fwc-n8n-owner-signing/password` from the same KeePass
+database, using the existing age-encrypted master backend without environment,
+prompt or keyring fallback. Its future root-owned fixed path is
+`/usr/local/libexec/fcp-n8n-owner-seed.py` (root:root, 0500): a hash-bound held
+script FD is interpreted by a hash-bound held Python FD; age runs as root and
+KeePass runs as UID/GID 1000 with no supplementary groups. Backend executable
+FDs are hash-bound, secret files are metadata-guarded, and canonical 44-character
+base64 output (one optional LF), decoding to exactly 32 bytes, is bounded and
+sent only to the guarded signer's private pipe.
+No installation or real-secret execution is authorized by this documentation.
+The next7 continuation remains `executionGo: false` pending exact independent
+review and a separate finite owner GO; unsigned5 and pending6 stay immutable.
+Synthetic tests exercise the route without real secrets:
+`bash scripts/fcp_ssd.sh -- python3 -I -B scripts/tests/test_n8n_owner_seed.py`.
+Missing age material, unsafe metadata, executable drift or timeout fails closed;
+the two existing store parents are explicitly bound to their observed
+UID/GID 1000, 0775 and device/inode identities. This retains the existing
+user/group store trust; it does not establish isolation from that group.
+Backend children inherit the component's process group; the outer supervisor
+retains its unreaped leader until group teardown, then verifies reap and group
+absence. Residual or unobservable groups fail closed. The component is external
+release machinery, outside stage14/request3, so unsigned5 can be revalidated
+without rebuilding or altering its signed-package inputs.
+Hostile root and unpinned operating-system library changes are outside the
+script's trust boundary and still require the existing native loader custody.
 
 Within a task already authorized by the user, routine build/signing with the
 same verified owner key does not require another confirmation. User authority

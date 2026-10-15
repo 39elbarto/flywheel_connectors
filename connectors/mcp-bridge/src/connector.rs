@@ -1179,11 +1179,6 @@ impl McpBridgeConnector {
         read: &crate::types::TypedN8nRead,
         context: HostEgressContext,
     ) -> FcpResult<serde_json::Value> {
-        read.ensure_effect_admission()
-            .map_err(|reason| FcpError::CapabilityDenied {
-                capability: "mcp.n8n.read".into(),
-                reason: reason.into(),
-            })?;
         let denied = || FcpError::CapabilityDenied {
             capability: "mcp.n8n.read".into(),
             reason: "typed read native admission denied".into(),

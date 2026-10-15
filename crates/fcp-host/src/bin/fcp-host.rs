@@ -450,7 +450,7 @@ const N8N_SUPERVISOR_MAX_BUDGET_MS: u64 = 60_000;
 const N8N_SUPERVISOR_START_FRAME_LEN: usize = N8N_SUPERVISOR_START_PREFIX.len() + 4;
 #[cfg(target_os = "linux")]
 static FIXED_READ_ONLY_LANDLOCK_ACTIVE: AtomicBool = AtomicBool::new(false);
-const N8N_READ_ONLY_OPERATIONS: [&str; 17] = [
+const N8N_READ_ONLY_OPERATIONS: [&str; 18] = [
     "n8n.workflows.get_code",
     "n8n.validation.run",
     "n8n.workflows.compare",
@@ -458,6 +458,7 @@ const N8N_READ_ONLY_OPERATIONS: [&str; 17] = [
     "n8n.executions.search",
     "n8n.structure.search",
     "n8n.audit.inspect",
+    "n8n.audit.inspect_instance",
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -480,7 +481,7 @@ const N8N_WRITE_OPERATIONS: [&str; 9] = [
     "n8n.workflows.execute",
     "n8n.workflows.delete_disposable",
 ];
-const N8N_RUN_ONCE_OPERATIONS: [&str; 26] = [
+const N8N_RUN_ONCE_OPERATIONS: [&str; 27] = [
     "n8n.workflows.get_code",
     "n8n.validation.run",
     "n8n.workflows.compare",
@@ -488,6 +489,7 @@ const N8N_RUN_ONCE_OPERATIONS: [&str; 26] = [
     "n8n.executions.search",
     "n8n.structure.search",
     "n8n.audit.inspect",
+    "n8n.audit.inspect_instance",
     "n8n.credentials.list",
     "n8n.executions.diagnostics",
     "n8n.executions.get",
@@ -1995,9 +1997,25 @@ const PER_INVOCATION_RESERVED_HOST_EGRESS_ENV_KEYS: [&str; 7] = [
 ];
 const N8N_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
 const N8N_ACTIVATION_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS";
+const N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_MS";
+const N8N_INSTANCE_AUDIT_MAX_DEADLINE_MS: u64 = 45_000;
 const N8N_UNARCHIVE_DEFAULT_DEADLINE_MS: u64 = 30_000;
 const N8N_UNARCHIVE_MAX_DEADLINE_MS: u64 = 60_000;
 const N8N_UNARCHIVE_READBACK_RESERVE_MS: u64 = 5_000;
+
+fn owned_read_budget_ms(
+    connector: &ConnectorId,
+    operation: &OperationId,
+    requested: Option<u64>,
+) -> u64 {
+    let cap =
+        if connector.as_str() == "fcp.n8n" && operation.as_str() == "n8n.audit.inspect_instance" {
+            N8N_INSTANCE_AUDIT_MAX_DEADLINE_MS
+        } else {
+            30_000
+        };
+    requested.unwrap_or(30_000).min(cap)
+}
 
 fn n8n_unarchive_request_timeout_ms(
     operation: &OperationId,
@@ -2068,6 +2086,24 @@ fn launch_snapshot_for_request(
     {
         snapshot.fixed_env.insert(
             OsString::from(N8N_ACTIVATION_REQUEST_TIMEOUT_ENV),
+            OsString::from(timeout_ms.to_string()),
+        );
+    }
+    if request.connector_id.as_str() == "fcp.n8n"
+        && request.operation.as_str() == "n8n.audit.inspect_instance"
+    {
+        let timeout_ms = owned_read_budget_ms(
+            &request.connector_id,
+            &request.operation,
+            request.deadline_ms,
+        );
+        if timeout_ms == 0 {
+            return Err(HostError::PreflightFailed(
+                "instance audit deadline is empty".into(),
+            ));
+        }
+        snapshot.fixed_env.insert(
+            OsString::from(N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV),
             OsString::from(timeout_ms.to_string()),
         );
     }
@@ -3315,6 +3351,15 @@ impl SubprocessRegistry {
                         .to_string(),
                 ));
             }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "instance audit timeout is host-derived".into(),
+                ));
+            }
 
             if entry.manifest_constraints.source.is_none() {
                 return Err(HostError::PreflightFailed(
@@ -3489,6 +3534,15 @@ impl SubprocessRegistry {
                 return Err(HostError::PreflightFailed(
                     "per-invocation launch env key for n8n activation timeout proof changed"
                         .to_string(),
+                ));
+            }
+            if entry
+                .config
+                .env
+                .contains_key(N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV)
+            {
+                return Err(HostError::PreflightFailed(
+                    "instance audit timeout proof changed".into(),
                 ));
             }
             if entry.manifest_constraints.source.is_none()
@@ -4272,6 +4326,7 @@ struct OwnedCredentialHttpFixture {
     requests: Vec<Value>,
     bad_schema: bool,
     workflow_response: Option<Value>,
+    credential_response: Option<Value>,
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -4315,9 +4370,9 @@ impl OwnedCredentialHttpFixture {
                 "inputSchema":if self.bad_schema {json!({"type":"object","extra":true})} else {json!({"type":"object"})},
                 "outputSchema":{"type":"object","required":["data","count"]}}]}),
             _ => {
-                json!({"structuredContent":{"data":[{"id":"credential-one","name":"synthetic","type":"test",
+                json!({"structuredContent":self.credential_response.clone().unwrap_or_else(||json!({"data":[{"id":"credential-one","name":"synthetic","type":"test",
                 "scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,
-                "data":{"secret":"CHILD_PROVIDER_SECRET_CANARY"}}],"count":1},"isError":false})
+                "data":{"secret":"CHILD_PROVIDER_SECRET_CANARY"}}],"count":1})),"isError":false})
             }
         };
         serde_json::to_vec(&json!({"jsonrpc":"2.0","id":native["id"],"result":result}))
@@ -4462,6 +4517,14 @@ impl OwnedCredentialsSession {
         let mapped_credential = mapping
             .as_ref()
             .map(|mapping| mapping.credential_id().to_owned());
+        let arguments = mapping
+            .as_ref()
+            .map_or(Ok(arguments), |mapping| {
+                mapping.arguments(server_name, &request.input)
+            })
+            .map_err(|_| {
+                HostError::PreflightFailed("credential metadata arguments denied".into())
+            })?;
         if mapped_credential.as_ref().is_some_and(|id| {
             !constraints
                 .credential_allow
@@ -5745,8 +5808,12 @@ async fn invoke_owned_per_invocation(
     plan: PerInvocationExecutionPlan,
     request: InvokeRequest,
 ) -> HostResult<InvokeResponse> {
-    let comparison_deadline =
-        Instant::now() + Duration::from_millis(request.deadline_ms.unwrap_or(30_000).min(30_000));
+    let comparison_deadline = Instant::now()
+        + Duration::from_millis(owned_read_budget_ms(
+            &plan.connector_id,
+            &request.operation,
+            request.deadline_ms,
+        ));
     let mut binding = OwnedPerInvocationBinding::from_plan(&plan, &request)?;
     if binding.read_wait.is_some() {
         binding.read_wait = Some(Arc::new(OwnedReadWait {
@@ -5847,6 +5914,20 @@ async fn invoke_owned_per_invocation(
                 .map_err(|_| {
                     HostError::PreflightFailed("credential metadata completion denied".into())
                 })?;
+            let server = plan
+                .configure_payload
+                .as_ref()
+                .and_then(|config| config["server_id"].as_str())
+                .ok_or_else(|| {
+                    HostError::PreflightFailed("credential metadata server unavailable".into())
+                })?;
+            let projected =
+                fcp_host::project_official_n8n_credentials_page(&projected, server, &request.input)
+                    .map_err(|_| {
+                        HostError::PreflightFailed(
+                            "credential metadata page completion denied".into(),
+                        )
+                    })?;
             if response.result.as_ref() != Some(&projected)
                 || proof.started.elapsed() >= proof.timeout
             {
@@ -6515,6 +6596,17 @@ fn owned_invocation_config(
         // frame. Keep the exception aligned with the bridge result cap.
         config.max_frame_bytes = N8N_DIAGNOSTICS_RPC_MAX_FRAME_BYTES;
     }
+    if connector_id.as_str() == "fcp.n8n" && operation.as_str() == "n8n.audit.inspect_instance" {
+        // This single native reporter has its own 30-second version request.
+        // The original absolute read deadline still bounds the entire protocol.
+        config.rpc_timeout = Duration::from_millis(N8N_INSTANCE_AUDIT_MAX_DEADLINE_MS);
+    }
+    if connector_id.as_str() == "fcp.n8n" && operation.as_str() == "n8n.credentials.list" {
+        // The public page remains 128 KiB. Only its RPC envelope gets headroom.
+        config.max_frame_bytes = N8N_CREDENTIAL_RPC_MAX_FRAME_BYTES;
+        // The original absolute read deadline still bounds all native phases.
+        config.rpc_timeout = Duration::from_secs(30);
+    }
     if connector_id.as_str() == "fcp.n8n"
         && matches!(
             operation.as_str(),
@@ -7170,6 +7262,18 @@ mod owned_per_invocation_unit_tests {
 
     #[test]
     fn n8n_large_connector_frames_are_scoped_to_bounded_operations() {
+        let credential = owned_invocation_config(
+            &ConnectorId::from_static("fcp.n8n"),
+            &OperationId::from_static("n8n.credentials.list"),
+        );
+        assert_eq!(credential.max_frame_bytes, 128 * 1024 + 16 * 1024);
+        assert_eq!(credential.rpc_timeout, Duration::from_secs(30));
+        let unrelated = owned_invocation_config(
+            &ConnectorId::from_static("fcp.test"),
+            &OperationId::from_static("n8n.credentials.list"),
+        );
+        assert_eq!(unrelated.max_frame_bytes, 64 * 1024);
+        assert_eq!(unrelated.rpc_timeout, Duration::from_secs(10));
         assert_eq!(
             connector_rpc_frame_limit(Some("fcp.n8n"), Some("n8n.workflows.list")),
             N8N_BOUNDED_RPC_MAX_FRAME_BYTES
@@ -8688,6 +8792,8 @@ const CONNECTOR_JSON_RPC_ERROR_PREFIX: &str = "connector error: ";
 /// receipt instead of widening this transport frame.
 const CONNECTOR_RPC_MAX_FRAME_BYTES: usize = 64 * 1024;
 const N8N_DESCRIPTOR_RPC_MAX_FRAME_BYTES: usize = 128 * 1024;
+const N8N_CREDENTIAL_RPC_MAX_FRAME_BYTES: usize =
+    fcp_host::N8N_CREDENTIAL_METADATA_PUBLIC_MAX_BYTES + 16 * 1024;
 // 600,000 selected UTF-8 bytes can occupy 3,600,000 escaped JSON bytes.
 // The connector separately caps the complete projected result at 4,000,000.
 const N8N_CODE_RPC_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -13743,6 +13849,7 @@ fn expected_n8n_read_only_resource_uri(
         | "n8n.executions.search"
         | "n8n.structure.search"
         | "n8n.audit.inspect"
+        | "n8n.audit.inspect_instance"
         | "n8n.executions.list"
         | "n8n.projects.list"
         | "n8n.tags.list"
@@ -13830,7 +13937,11 @@ fn build_n8n_read_only_run_once_plan(
     }
     if input.operation == "n8n.validation.run" {
         validate_remote_workflow_input(&input.input)?;
-    } else if input.operation == "n8n.audit.inspect" {
+    } else if matches!(
+        input.operation.as_str(),
+        "n8n.audit.inspect" | "n8n.audit.inspect_instance"
+    ) {
+        let allow_instance = input.operation == "n8n.audit.inspect_instance";
         let object = input
             .input
             .as_object()
@@ -13841,7 +13952,7 @@ fn build_n8n_read_only_run_once_plan(
         let categories = object
             .get("categories")
             .and_then(Value::as_array)
-            .filter(|items| !items.is_empty() && items.len() <= 4)
+            .filter(|items| !items.is_empty() && items.len() <= if allow_instance { 5 } else { 4 })
             .ok_or_else(|| {
                 HostError::InvalidFilter("audit_instance_external_effect_not_admitted".into())
             })?;
@@ -13851,6 +13962,7 @@ fn build_n8n_read_only_run_once_plan(
                 .as_str()
                 .filter(|value| {
                     matches!(*value, "credentials" | "database" | "filesystem" | "nodes")
+                        || (allow_instance && *value == "instance")
                 })
                 .ok_or_else(|| {
                     HostError::InvalidFilter("audit_instance_external_effect_not_admitted".into())
@@ -13858,6 +13970,11 @@ fn build_n8n_read_only_run_once_plan(
             if !seen.insert(category) {
                 return Err(HostError::InvalidFilter("invalid audit input".into()));
             }
+        }
+        if seen.contains("instance") != allow_instance {
+            return Err(HostError::InvalidFilter(
+                "audit operation/category mismatch".into(),
+            ));
         }
     } else if input.operation == "n8n.mcp_access.reconcile" {
         validate_n8n_mcp_access_input(&input.input)?;
@@ -14169,7 +14286,6 @@ fn official_n8n_typed_read_tool(input: &Value) -> HostResult<&'static str> {
     match input["action"].as_str() {
         Some("sdk_reference") => Ok("get_workflow_sdk_reference"),
         Some("workflow_best_practices") => Ok("get_workflow_best_practices"),
-        Some("workflow_code") => Ok("validate_workflow"),
         Some("nodes") => Ok("validate_node_config"),
         Some("credentials") => Ok("list_credentials"),
         Some("projects") => Ok("search_projects"),
@@ -14186,7 +14302,6 @@ fn official_n8n_typed_read_input(tool: &str, arguments: Value) -> HostResult<Val
     let action = match tool {
         "get_workflow_sdk_reference" => "sdk_reference",
         "get_workflow_best_practices" => "workflow_best_practices",
-        "validate_workflow" => "workflow_code",
         "validate_node_config" => "nodes",
         "list_credentials" => "credentials",
         "search_projects" => "projects",
@@ -14213,51 +14328,8 @@ fn official_n8n_typed_read_input(tool: &str, arguments: Value) -> HostResult<Val
 }
 
 fn official_credentials_read_arguments(input: &Value) -> HostResult<Value> {
-    let invalid = || HostError::InvalidFilter("invalid official credential metadata input".into());
-    let object = input.as_object().ok_or_else(invalid)?;
-    if object.keys().any(|key| {
-        !matches!(
-            key.as_str(),
-            "query" | "type" | "projectId" | "onlySharedWithMe" | "page"
-        )
-    }) {
-        return Err(invalid());
-    }
-    let mut arguments = serde_json::Map::new();
-    for key in ["query", "type", "projectId"] {
-        if let Some(value) = object.get(key) {
-            let value = value
-                .as_str()
-                .filter(|value| {
-                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-                })
-                .ok_or_else(invalid)?;
-            arguments.insert(key.into(), json!(value));
-        }
-    }
-    if let Some(value) = object.get("onlySharedWithMe") {
-        arguments.insert(
-            "onlySharedWithMe".into(),
-            json!(value.as_bool().ok_or_else(invalid)?),
-        );
-    }
-    let limit = if let Some(page) = object.get("page") {
-        let page = page.as_object().ok_or_else(invalid)?;
-        if page.keys().any(|key| key != "limit") {
-            return Err(invalid());
-        }
-        match page.get("limit") {
-            Some(value) => value
-                .as_u64()
-                .filter(|limit| (1..=200).contains(limit))
-                .ok_or_else(invalid)?,
-            None => 200,
-        }
-    } else {
-        200
-    };
-    arguments.insert("limit".into(), json!(limit));
-    Ok(Value::Object(arguments))
+    fcp_host::official_n8n_credentials_arguments(input)
+        .map_err(|_| HostError::InvalidFilter("invalid official credential metadata input".into()))
 }
 
 fn build_n8n_official_mcp_run_once_plan(
@@ -29295,7 +29367,7 @@ deny_ptrace = true
         let signing = fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[61; 32]).unwrap();
         let instance = InstanceId::new();
         let mut request = runtime_network_test_request("fcp.n8n", "n8n.credentials.list");
-        request.input = json!({"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"page":{"limit":3}});
+        request.input = json!({"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"limit":3});
         let resource = expected_n8n_read_only_resource_uri(
             N8nReadOnlyServerId::Eec,
             "n8n.credentials.list",
@@ -29593,12 +29665,53 @@ deny_ptrace = true
             .unwrap()
             .keep();
         for server in ["eec", "hetzner"] {
-            for mode in ["success", "schema", "body", "token", "port", "deadline"] {
+            for mode in [
+                "success",
+                "empty",
+                "full",
+                "malformed",
+                "oversize",
+                "schema",
+                "body",
+                "token",
+                "port",
+                "deadline",
+            ] {
                 if server == "eec" && mode == "port" {
                     continue;
                 }
                 let (mut plan, mut request, instance, mut constraints, signing) =
                     credentials_bound_test_fixture("n8n.credentials.metadata.read");
+                let mut credential_response = if matches!(
+                    mode,
+                    "empty" | "full" | "malformed" | "oversize"
+                ) {
+                    let count = match mode {
+                        "empty" => 0,
+                        "full" => 200,
+                        "malformed" | "oversize" => 1,
+                        _ => 7,
+                    };
+                    let rows = (0..count).map(|index| json!({"id":format!("credential-{index:03}"),"name":"synthetic","type":"test",
+                        "scopes":["credential:read"],"isManaged":false,"isGlobal":false,"homeProject":null,
+                        "data":{"secret":"CHILD_PROVIDER_SECRET_CANARY"}})).collect::<Vec<_>>();
+                    Some(json!({"data":rows,"count":count}))
+                } else {
+                    None
+                };
+                if mode == "full" {
+                    request.input["limit"] = json!(200);
+                }
+                if mode == "malformed" {
+                    credential_response.as_mut().unwrap()["data"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("isManaged");
+                }
+                if mode == "oversize" {
+                    credential_response.as_mut().unwrap()["data"][0]["unknown"] =
+                        json!("x".repeat(2 * 1024 * 1024));
+                }
                 plan.state_root = Some(retained_root.join(server).join(mode));
                 constraints.resource_allow = vec![format!("fwc-n8n://{server}")];
                 let native_host = if server == "eec" {
@@ -29736,6 +29849,7 @@ deny_ptrace = true
                     requests: Vec::new(),
                     bad_schema: mode == "schema",
                     workflow_response: None,
+                    credential_response,
                 }));
                 {
                     let mut proof = session.lock().unwrap();
@@ -29796,16 +29910,16 @@ deny_ptrace = true
                 )
                 .await;
                 let recorded_before_closing = fixture.lock().unwrap().requests.clone();
-                let replay = if mode == "success"
-                    && response.as_ref().is_ok_and(|value| value.error.is_none())
-                {
-                    Some(
-                        owned_rpc(&mut handle, "invoke", serde_json::to_value(&sent).unwrap())
-                            .await,
-                    )
-                } else {
-                    None
-                };
+                let successful = matches!(mode, "success" | "full" | "empty");
+                let replay =
+                    if successful && response.as_ref().is_ok_and(|value| value.error.is_none()) {
+                        Some(
+                            owned_rpc(&mut handle, "invoke", serde_json::to_value(&sent).unwrap())
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
                 drop(OwnedCredentialsAdmissionGuard(Some(session.clone())));
                 let cancelled = if response.is_ok() {
                     Some(
@@ -29859,21 +29973,50 @@ deny_ptrace = true
                     serde_json::from_value(cancelled.unwrap().unwrap()).unwrap();
                 assert!(cancelled.error.is_some());
                 assert!(session.lock().unwrap().closed);
-                if mode == "success" {
+                if successful {
                     assert!(response.error.is_none());
                     let output = response.result.as_ref().unwrap();
-                    assert_eq!(output["credentials"][0]["id"], "credential-one");
+                    let captured = session
+                        .lock()
+                        .unwrap()
+                        .protocol
+                        .as_ref()
+                        .unwrap()
+                        .projection()
+                        .unwrap();
                     assert_eq!(
-                        output["credentials"][0]["resourceUri"],
-                        format!("fwc-n8n://{server}/credentials/credential%2Done")
+                        &fcp_host::project_official_n8n_credentials_page(
+                            &captured,
+                            server,
+                            &request.input
+                        )
+                        .unwrap(),
+                        output
                     );
+                    if mode == "success" {
+                        assert_eq!(output["credentials"][0]["id"], "credential-one");
+                        assert_eq!(
+                            output["credentials"][0]["resourceUri"],
+                            format!("fwc-n8n://{server}/credentials/credential%2Done")
+                        );
+                    } else if mode == "full" {
+                        assert_eq!(output["credentials"].as_array().unwrap().len(), 200);
+                        assert_eq!(output["credentials"][0]["id"], "credential-000");
+                        assert!(output["page"]["hint"].as_str().unwrap().contains("narrow"));
+                    } else if mode == "empty" {
+                        assert!(output["credentials"].as_array().unwrap().is_empty());
+                        assert_eq!(output["page"]["returnedCount"], 0);
+                    }
+                    assert_eq!(output["page"]["completeness"], "not_established");
                     assert_eq!(output["page"]["continuation"], "unavailable");
+                    for key in ["nextCursor", "total", "snapshotDigest", "requestDigest"] {
+                        assert!(output["page"].get(key).is_none());
+                    }
                     assert!(!output.to_string().contains("CHILD_PROVIDER_SECRET_CANARY"));
                     assert_eq!(recorded_before_closing.len(), 4);
                     assert_eq!(
                         recorded_before_closing[3]["params"],
-                        json!({"name":"list_credentials",
-                    "arguments":{"query":"synthetic","type":"test","projectId":"project-one","onlySharedWithMe":true,"limit":3}})
+                        json!({"name":"list_credentials","arguments":fcp_host::official_n8n_credentials_arguments(&request.input).unwrap()})
                     );
                     let replay: InvokeResponse =
                         serde_json::from_value(replay.unwrap().unwrap()).unwrap();
@@ -29884,6 +30027,8 @@ deny_ptrace = true
                         recorded_before_closing.len(),
                         if matches!(mode, "schema" | "body") {
                             3
+                        } else if matches!(mode, "malformed" | "oversize") {
+                            4
                         } else {
                             0
                         },
@@ -30162,6 +30307,7 @@ deny_ptrace = true
                 let fixture = Arc::new(std::sync::Mutex::new(OwnedCredentialHttpFixture {
                     requests: Vec::new(),
                     bad_schema: false,
+                    credential_response: None,
                     workflow_response: Some(
                         json!({"id":"workflow-one","name":"Synthetic","active":false,"isArchived":false,
                         "versionId":if case == "response-version" {"changed-version"} else {"version-one"},"activeVersionId":"published-one","activeVersion":{"versionId":"published-one","nodes":nodes,"connections":{}},
@@ -30455,6 +30601,7 @@ deny_ptrace = true
                     requests: Vec::new(),
                     bad_schema: false,
                     workflow_response: Some(native),
+                    credential_response: None,
                 }));
                 let mut binding = OwnedPerInvocationBinding::from_plan(&plan, &request).unwrap();
                 let capture = binding.comparison_capture.clone();
@@ -31625,6 +31772,65 @@ deny_ptrace = true
             ))
         );
         assert_eq!(NativeProxyOnlySandboxSupport::current(), support_before);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn n8n_audit_instance_budget_binds_proxy_actor_and_original_deadline() {
+        let (config, catalog, mut request) = per_invocation_plan_test_fixture();
+        let registry = per_invocation_plan_test_registry(config.clone(), catalog);
+        let mut plan = registry
+            .per_invocation_execution_plan(&request)
+            .await
+            .unwrap()
+            .unwrap();
+        request.connector_id = ConnectorId::from_static("fcp.n8n");
+        request.operation = OperationId::from_static("n8n.audit.inspect_instance");
+        plan.connector_id = request.connector_id.clone();
+        plan.operation = request.operation.clone();
+        let binding = ValidatedConnectorLaunchBinding::from_config(&config).unwrap();
+        for (requested, expected) in [
+            (None, 30_000),
+            (Some(40_000), 40_000),
+            (Some(60_000), 45_000),
+        ] {
+            request.deadline_ms = requested;
+            plan.launch_snapshot =
+                launch_snapshot_for_request(&binding, &config, &request).unwrap();
+            let spec = owned_process_spec(&plan, "synthetic-audit-token").unwrap();
+            assert_eq!(
+                spec.fixed_env
+                    .get(OsStr::new(N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV)),
+                Some(&OsString::from(expected.to_string()))
+            );
+            assert_eq!(
+                owned_read_budget_ms(&plan.connector_id, &plan.operation, requested),
+                expected
+            );
+        }
+        assert_eq!(
+            owned_invocation_config(&plan.connector_id, &plan.operation).rpc_timeout,
+            Duration::from_secs(45)
+        );
+        let ordinary = OperationId::from_static("n8n.audit.inspect");
+        assert_eq!(
+            owned_read_budget_ms(&plan.connector_id, &ordinary, Some(60_000)),
+            30_000
+        );
+        assert_eq!(
+            owned_invocation_config(&plan.connector_id, &ordinary).rpc_timeout,
+            Duration::from_secs(10)
+        );
+        request.operation = ordinary;
+        assert!(
+            !launch_snapshot_for_request(&binding, &config, &request)
+                .unwrap()
+                .fixed_env
+                .contains_key(OsStr::new(N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV))
+        );
+        request.operation = plan.operation.clone();
+        request.deadline_ms = Some(0);
+        assert!(launch_snapshot_for_request(&binding, &config, &request).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -41013,10 +41219,6 @@ print(json.dumps(produced))
             ),
             (
                 "n8n.validation.run",
-                json!({"subject":"workflow_code","code":"synthetic"}),
-            ),
-            (
-                "n8n.validation.run",
                 json!({"subject":"nodes","nodes":[{"type":"n8n-nodes-base.set","typeVersion":3.4,"parameters":{},"isToolNode":false}]}),
             ),
         ] {
@@ -41043,7 +41245,6 @@ print(json.dumps(produced))
                 json!(match tool {
                     "get_workflow_sdk_reference" => "sdk_reference",
                     "get_workflow_best_practices" => "workflow_best_practices",
-                    "validate_workflow" => "workflow_code",
                     "validate_node_config" => "nodes",
                     _ => panic!("fixed test tool"),
                 }),
@@ -41170,7 +41371,7 @@ print(json.dumps(produced))
         let mut input = n8n_official_mcp_test_input();
         input.operation = "n8n.credentials.list".into();
         input.resource_uri = "fwc-mcp-bridge://eec/tools/list%5Fcredentials".into();
-        input.input = json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":17}});
+        input.input = json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":17});
         let plan = build_n8n_official_mcp_run_once_plan(input.clone(), &config).unwrap();
         assert_eq!(
             plan.input,
@@ -41206,7 +41407,7 @@ print(json.dumps(produced))
         assert!(build_n8n_official_mcp_run_once_plan(wrong, &config).is_err());
         for invalid in [
             json!({"page":{"cursor":"next"}}),
-            json!({"limit":17}),
+            json!({"limit":201}),
             json!({"onlySharedWithMe":null}),
             json!({"url":"https://hostile.invalid"}),
         ] {
@@ -43321,6 +43522,7 @@ print(json.dumps(produced))
             ),
             "n8n.structure.search" => ("fwc-n8n://eec", json!({"kind": "projects"})),
             "n8n.audit.inspect" => ("fwc-n8n://eec", json!({"categories": ["credentials"]})),
+            "n8n.audit.inspect_instance" => ("fwc-n8n://eec", json!({"categories": ["instance"]})),
             "n8n.workflows.get" => (
                 "fwc-n8n://eec/workflows/workflow%2D1",
                 json!({"id": "workflow-1"}),
@@ -44482,6 +44684,35 @@ print(json.dumps(produced))
     }
 
     #[test]
+    fn n8n_audit_instance_requires_explicit_operation_and_categories() {
+        let mut config = n8n_read_only_contract_test_config();
+        let instance = n8n_read_only_test_input("n8n.audit.inspect_instance");
+        build_n8n_read_only_run_once_plan(instance.clone(), &config)
+            .expect("explicit instance operation admits its fixed category");
+        for categories in [
+            json!([]),
+            json!(["nodes"]),
+            json!(["instance", "instance"]),
+            json!(["instance", "unknown"]),
+        ] {
+            let mut changed = instance.clone();
+            changed.input = json!({"categories":categories});
+            assert!(build_n8n_read_only_run_once_plan(changed, &config).is_err());
+        }
+        let mut delegated_to_old_operation = instance.clone();
+        delegated_to_old_operation.operation = "n8n.audit.inspect".into();
+        assert!(build_n8n_read_only_run_once_plan(delegated_to_old_operation, &config).is_err());
+        let mut with_days = instance.clone();
+        with_days.input["daysAbandonedWorkflow"] = json!(1);
+        assert!(build_n8n_read_only_run_once_plan(with_days, &config).is_err());
+        config
+            .allowed_operations
+            .retain(|operation| operation != "n8n.audit.inspect_instance");
+        config.enforce_empty_allow_lists = true;
+        assert!(build_n8n_read_only_run_once_plan(instance, &config).is_err());
+    }
+
+    #[test]
     fn n8n_read_only_contract_has_a_closed_operation_and_server_surface() {
         let config = n8n_read_only_contract_test_config();
         for operation in N8N_READ_ONLY_OPERATIONS {
@@ -44845,7 +45076,7 @@ for server,host in [('eec','n8n.europeaneyecenter.com'),('hetzner','n8nhet.levil
             let mut input = n8n_read_only_test_input("n8n.credentials.list");
             input.server_id = server;
             input.resource_uri = format!("fwc-n8n://{}", server.as_str());
-            input.input = json!({"query":"synthetic","page":{"limit":2}});
+            input.input = json!({"query":"synthetic","limit":2});
             let plan = build_n8n_read_only_run_once_plan(input.clone(), &config).unwrap();
             assert_eq!(
                 plan.credential_binding.port_allow,
@@ -44946,7 +45177,7 @@ for server,host in [('eec','n8n.europeaneyecenter.com'),('hetzner','n8nhet.levil
             let mut input = n8n_read_only_test_input("n8n.credentials.list");
             input.server_id = server;
             input.resource_uri = format!("fwc-n8n://{}", server.as_str());
-            input.input = json!({"query":"synthetic","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":2}});
+            input.input = json!({"query":"synthetic","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":2});
             assert!(build_n8n_read_only_run_once_plan(input.clone(), &config).is_err());
             config.config.as_mut().unwrap()["credential_metadata_read"] = mapping.clone();
             let plan = build_n8n_read_only_run_once_plan(input.clone(), &config).unwrap();

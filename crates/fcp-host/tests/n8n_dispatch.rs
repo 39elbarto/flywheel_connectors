@@ -40,6 +40,7 @@ fn provider() -> LocalMcpProvider {
         .collect();
     LocalMcpProvider::new(LocalMcpPolicy {
         package_id: "dispatch-test-provider".into(),
+        package_binding: None,
         package_version: semver::Version::new(1, 0, 0),
         launcher_path: "/bin/sh".into(),
         launcher_digest: "0".repeat(64),

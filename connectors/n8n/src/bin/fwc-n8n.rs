@@ -290,7 +290,6 @@ impl SchemaExportSource {
             Self::EecReadParity | Self::HetznerReadParity => &[
                 "get_workflow_sdk_reference",
                 "get_workflow_best_practices",
-                "validate_workflow",
                 "validate_node_config",
                 "search_projects",
                 "search_folders",
@@ -352,6 +351,8 @@ enum HostRunOnceOperation {
     StructureSearch,
     #[serde(rename = "n8n.audit.inspect")]
     AuditInspect,
+    #[serde(rename = "n8n.audit.inspect_instance")]
+    AuditInspectInstance,
     #[serde(rename = "n8n.capabilities.inspect")]
     CapabilitiesInspect,
     #[serde(rename = "n8n.credentials.list")]
@@ -409,6 +410,7 @@ impl HostRunOnceOperation {
             Self::ExecutionsSearch => "n8n.executions.search",
             Self::StructureSearch => "n8n.structure.search",
             Self::AuditInspect => "n8n.audit.inspect",
+            Self::AuditInspectInstance => "n8n.audit.inspect_instance",
             Self::CapabilitiesInspect => "n8n.capabilities.inspect",
             Self::CredentialsList => "n8n.credentials.list",
             Self::OfficialKnowledge => "n8n.knowledge.query",
@@ -442,6 +444,7 @@ impl HostRunOnceOperation {
             "n8n.executions.search" => Ok(Self::ExecutionsSearch),
             "n8n.structure.search" => Ok(Self::StructureSearch),
             "n8n.audit.inspect" => Ok(Self::AuditInspect),
+            "n8n.audit.inspect_instance" => Ok(Self::AuditInspectInstance),
             "n8n.capabilities.inspect" => Ok(Self::CapabilitiesInspect),
             "n8n.credentials.list" => Ok(Self::CredentialsList),
             "n8n.knowledge.query" => Ok(Self::OfficialKnowledge),
@@ -480,6 +483,7 @@ impl HostRunOnceOperation {
             | Self::WorkflowsSearch => BrokerCredentialPurpose::OfficialMcp,
             Self::ExecutionsSearch
             | Self::AuditInspect
+            | Self::AuditInspectInstance
             | Self::ExecutionsGet
             | Self::ExecutionsDiagnostics
             | Self::ExecutionsList
@@ -619,7 +623,7 @@ struct ErrorEnvelope {
     rpc_code: Option<i32>,
     correlation_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    native_diagnostic: Option<Value>,
+    native_diagnostic: Option<Box<Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -646,7 +650,7 @@ struct AppError {
     correlation_id: Option<String>,
     rpc_phase: Option<&'static str>,
     rpc_code: Option<i32>,
-    native_diagnostic: Option<Value>,
+    native_diagnostic: Option<Box<Value>>,
 }
 
 impl fmt::Debug for AppError {
@@ -694,12 +698,12 @@ impl AppError {
     }
 
     fn with_native_diagnostic(mut self, diagnostic: Value) -> Self {
-        self.native_diagnostic = Some(diagnostic);
+        self.native_diagnostic = Some(Box::new(diagnostic));
         self
     }
 
     fn with_optional_native_diagnostic(mut self, diagnostic: Option<Value>) -> Self {
-        self.native_diagnostic = diagnostic;
+        self.native_diagnostic = diagnostic.map(Box::new);
         self
     }
 
@@ -1183,8 +1187,7 @@ fn is_official_sdk_input(operation: &str, input: &Value) -> bool {
             input["action"].as_str(),
             Some("sdk_reference" | "workflow_best_practices")
         ))
-        || (operation == "n8n.validation.run"
-            && matches!(input["subject"].as_str(), Some("workflow_code" | "nodes")))
+        || (operation == "n8n.validation.run" && input["subject"] == "nodes")
 }
 
 fn normalize_remote_validation_target(bytes: &[u8]) -> Result<Vec<u8>, AppError> {
@@ -1257,6 +1260,7 @@ fn normalize_public_read_target(
             | HostRunOnceOperation::StructureSearch
             | HostRunOnceOperation::CredentialsList
             | HostRunOnceOperation::AuditInspect
+            | HostRunOnceOperation::AuditInspectInstance
     ) {
         return Ok(bytes.to_vec());
     }
@@ -3831,6 +3835,22 @@ fn route_sensitive_code_read(
     Ok(HostRunOnceOperation::WorkflowsGetCode)
 }
 
+fn route_instance_audit_read(
+    operation: HostRunOnceOperation,
+    input: &Value,
+) -> HostRunOnceOperation {
+    if operation == HostRunOnceOperation::AuditInspect
+        && input
+            .get("categories")
+            .and_then(Value::as_array)
+            .is_some_and(|items| items.iter().any(|item| item == "instance"))
+    {
+        HostRunOnceOperation::AuditInspectInstance
+    } else {
+        operation
+    }
+}
+
 fn run_once_from_bytes_at_with_receipt_io<F, P>(
     operation: &str,
     bytes: &[u8],
@@ -3847,6 +3867,7 @@ where
     let normalized = normalize_public_read_target(operation, bytes)?;
     let mut input = parse_host_run_once_input(&normalized)?;
     let operation = route_sensitive_code_read(operation, &mut input)?;
+    let operation = route_instance_audit_read(operation, &input.input);
     apply_public_read_defaults(operation, &mut input.input)?;
     let is_execute = operation == HostRunOnceOperation::WorkflowsExecute;
     let early_execute_correlation_id = if is_execute {
@@ -6023,14 +6044,18 @@ fn project_official_sdk_result(
                 .as_array()
                 .filter(|items| items.len() <= 256)
                 .ok_or_else(invalid)?;
-            if object.len() != 3 || valid != errors.is_empty() {
+            if action != "nodes"
+                || object.len() != 3
+                || valid != errors.is_empty()
+                || !warnings.is_empty()
+            {
                 return Err(invalid());
             }
             for (items, warning) in [(errors, false), (warnings, true)] {
                 for item in items {
                     let object = item.as_object().ok_or_else(invalid)?;
                     let path = item["path"].as_str().ok_or_else(invalid)?;
-                    let (code, message) = if action == "nodes" {
+                    let (code, message) = {
                         if warning {
                             return Err(invalid());
                         }
@@ -6048,21 +6073,6 @@ fn project_official_sdk_result(
                             "sdk_node_validation_error",
                             "Native node validator reported an error",
                         )
-                    } else {
-                        if path != "workflow_code" {
-                            return Err(invalid());
-                        }
-                        if warning {
-                            (
-                                "sdk_validation_warning",
-                                "Native SDK validator reported a warning",
-                            )
-                        } else {
-                            (
-                                "sdk_validation_error",
-                                "Native SDK validator reported an error",
-                            )
-                        }
                     };
                     if object.len() != 3 || item["code"] != code || item["message"] != message {
                         return Err(invalid());
@@ -6097,7 +6107,7 @@ fn decode_original_credentials_response(
     response: Value,
 ) -> Result<Value, AppError> {
     let invalid = || AppError::new("official_credential_response_invalid");
-    let arguments = fcp_n8n::types::official_credentials_input(input).map_err(AppError::new)?;
+    fcp_n8n::types::official_credentials_input(input).map_err(AppError::new)?;
     if response["status"] != "ok" || response.get("error").is_some_and(|value| !value.is_null()) {
         return Err(AppError::new("official_credential_provider_failed"));
     }
@@ -6105,18 +6115,8 @@ fn decode_original_credentials_response(
         .get("result")
         .filter(|value| value.is_object())
         .ok_or_else(invalid)?;
-    let rows = data["credentials"].as_array().ok_or_else(invalid)?;
-    let limit =
-        usize::try_from(arguments["limit"].as_u64().ok_or_else(invalid)?).map_err(|_| invalid())?;
-    let expected = fcp_n8n::types::project_official_credentials(
-        &json!({"data":rows,"count":rows.len()}),
-        server.as_str(),
-        limit,
-    )
-    .map_err(AppError::new)?;
-    if &expected != data {
-        return Err(invalid());
-    }
+    fcp_n8n::types::validate_official_credentials_page(data, server.as_str(), input)
+        .map_err(AppError::new)?;
     Ok(response)
 }
 
@@ -6156,7 +6156,9 @@ fn decode_official_credentials_response(
     if &expected != data {
         return Err(invalid());
     }
-    response["result"] = expected;
+    response["result"] =
+        fcp_n8n::types::project_official_credentials_page(&expected, server.as_str(), input)
+            .map_err(AppError::new)?;
     Ok(response)
 }
 
@@ -6704,10 +6706,13 @@ fn build_host_run_once_envelope(
 
 const CODE_READ_FIELDS: &[&str] = &["id", "version", "pins"];
 const WORKFLOW_READ_FIELDS: &[&str] = &["id", "version", "detail", "includeCode"];
+const AUDIT_CATEGORY_FIELDS: &[&str] = &["categories"];
 
 fn host_run_once_input_fields(
     operation: HostRunOnceOperation,
 ) -> (&'static [&'static str], &'static [&'static str]) {
+    use HostRunOnceOperation::{AuditInspect, AuditInspectInstance};
+
     match operation {
         HostRunOnceOperation::WorkflowsSearch
         | HostRunOnceOperation::ExecutionsSearch
@@ -6721,16 +6726,16 @@ fn host_run_once_input_fields(
             },
         ),
         HostRunOnceOperation::CapabilitiesInspect => (&[], &[]),
-        HostRunOnceOperation::AuditInspect => (&["categories"], &["categories"]),
+        AuditInspect | AuditInspectInstance => (AUDIT_CATEGORY_FIELDS, AUDIT_CATEGORY_FIELDS),
         HostRunOnceOperation::CredentialsList => (
-            &["query", "type", "projectId", "onlySharedWithMe", "page"],
+            &["query", "type", "projectId", "onlySharedWithMe", "limit"],
             &[],
         ),
         HostRunOnceOperation::OfficialKnowledge => {
             (&["action", "section", "technique"], &["action"])
         }
         HostRunOnceOperation::OfficialSdkValidation => (
-            &["subject", "code", "nodes", "profile", "id", "version"],
+            &["subject", "nodes", "profile", "id", "version"],
             &["subject"],
         ),
         HostRunOnceOperation::ExecutionsList
@@ -6811,21 +6816,28 @@ fn host_run_once_input_fields(
 
 fn validate_public_audit_categories(
     object: &serde_json::Map<String, Value>,
+    allow_instance: bool,
 ) -> Result<(), AppError> {
     let categories = object
         .get("categories")
         .and_then(Value::as_array)
-        .filter(|items| !items.is_empty() && items.len() <= 4)
+        .filter(|items| !items.is_empty() && items.len() <= if allow_instance { 5 } else { 4 })
         .ok_or_else(|| AppError::new("audit_instance_external_effect_not_admitted"))?;
     let mut seen = BTreeSet::new();
     for category in categories {
         let category = category
             .as_str()
-            .filter(|value| matches!(*value, "credentials" | "database" | "filesystem" | "nodes"))
+            .filter(|value| {
+                matches!(*value, "credentials" | "database" | "filesystem" | "nodes")
+                    || (allow_instance && *value == "instance")
+            })
             .ok_or_else(|| AppError::new("audit_instance_external_effect_not_admitted"))?;
         if !seen.insert(category) {
             return Err(AppError::new("invalid_operation_input"));
         }
+    }
+    if seen.contains("instance") != allow_instance {
+        return Err(AppError::new("invalid_operation_input"));
     }
     Ok(())
 }
@@ -6858,10 +6870,13 @@ fn validate_host_run_once_input(
                 .map_err(AppError::new)
         }
         HostRunOnceOperation::CapabilitiesInspect => Ok(()),
-        HostRunOnceOperation::AuditInspect => validate_public_audit_categories(object),
+        HostRunOnceOperation::AuditInspect => validate_public_audit_categories(object, false),
+        HostRunOnceOperation::AuditInspectInstance => {
+            validate_public_audit_categories(object, true)
+        }
         HostRunOnceOperation::CredentialsList => fcp_n8n::types::official_credentials_input(input)
             .map(|_| ())
-            .map_err(AppError::new),
+            .map_err(|_| AppError::new("invalid_operation_input")),
         HostRunOnceOperation::OfficialSdkValidation if input["subject"] == "remote_workflow" => {
             fcp_n8n::types::RemoteWorkflowValidationInput::parse(input)
                 .map(|_| ())
@@ -6870,11 +6885,6 @@ fn validate_host_run_once_input(
         HostRunOnceOperation::OfficialKnowledge | HostRunOnceOperation::OfficialSdkValidation => {
             fcp_host::official_n8n_sdk_arguments(operation.as_str(), input)
                 .map_err(AppError::new)?;
-            if input["subject"] == "workflow_code" {
-                return Err(AppError::new(
-                    "native_workflow_code_effect_admission_pending",
-                ));
-            }
             Ok(())
         }
         HostRunOnceOperation::ExecutionsList
@@ -7768,6 +7778,7 @@ fn expected_host_run_once_resource_uri(
         | HostRunOnceOperation::TagsList
         | HostRunOnceOperation::WorkflowsList
         | HostRunOnceOperation::AuditInspect
+        | HostRunOnceOperation::AuditInspectInstance
         | HostRunOnceOperation::McpAccessReconcile => Ok(root),
         HostRunOnceOperation::WorkflowsLifecycle => {
             let tool = match input.get("action").and_then(Value::as_str) {
@@ -7887,7 +7898,7 @@ fn public_operation_intent(operation: &str) -> Result<OperationIntent, AppError>
         "n8n.workflows.execute" => OperationIntent::Execution,
         "n8n.credentials.list" => OperationIntent::CredentialMetadata,
         "n8n.data_tables.search" | "n8n.data_tables.mutate" => OperationIntent::DataTables,
-        "n8n.audit.inspect" => OperationIntent::Audit,
+        "n8n.audit.inspect" | "n8n.audit.inspect_instance" => OperationIntent::Audit,
         "n8n.workflows.versions" => OperationIntent::VersionHistory,
         "n8n.mcp_access.reconcile" => OperationIntent::McpAccessReconcile,
         _ => return Err(AppError::new("unknown_public_operation")),
@@ -8518,6 +8529,41 @@ mod tests {
             );
         }
         assert!(normalize_remote_validation_target(br#"{"server_id":"hetzner","input":{"subject":"remote_workflow","target":{"resourceUri":"fwc-n8n://eec/workflows/one"}}}"#).is_err());
+    }
+
+    #[test]
+    fn audit_instance_routes_to_separate_authoritative_operation() {
+        for server in ["eec", "hetzner"] {
+            let input = json!({"input":{"target":{"server":server},"categories":["instance"]},"deadline_ms":60000});
+            run_once_from_bytes_at("n8n.audit.inspect", &serde_json::to_vec(&input).unwrap(), Instant::now(), |request, _| {
+                assert_eq!(request.operation, HostRunOnceOperation::AuditInspectInstance);
+                assert_eq!(request.resource_uri, format!("fwc-n8n://{server}"));
+                assert_eq!(request.operation.credential_purpose(), BrokerCredentialPurpose::RestApi);
+                assert_eq!(request.input, json!({"categories":["instance"]}));
+                Ok(json!({"status":"ok","result":{"summary":{"categories":["instance"],"fullAudit":false},"findings":[]}}))
+            }).unwrap();
+        }
+        for input in [
+            json!({"categories":[]}),
+            json!({"categories":["instance","instance"]}),
+            json!({"categories":["instance"],"daysAbandonedWorkflow":1}),
+            json!({"categories":["unknown"]}),
+        ] {
+            let mut calls = 0;
+            assert!(
+                run_once_from_bytes_at(
+                    "n8n.audit.inspect",
+                    &serde_json::to_vec(&json!({"server_id":"eec","input":input})).unwrap(),
+                    Instant::now(),
+                    |_, _| {
+                        calls += 1;
+                        Ok(json!({}))
+                    }
+                )
+                .is_err()
+            );
+            assert_eq!(calls, 0);
+        }
     }
 
     #[test]
@@ -9368,49 +9414,12 @@ mod tests {
                 })
                 .unwrap_err();
             assert!(!called);
-            assert_eq!(error.code, "native_workflow_code_effect_admission_pending");
+            assert_eq!(error.code, "invalid_operation_input");
         }
         assert_official_sdk_projection_and_input_bounds();
     }
 
     fn assert_official_sdk_projection_and_input_bounds() {
-        let input = json!({"subject":"workflow_code","code":"synthetic"});
-        let invalid = json!({"valid":false,"errors":["HOSTILE_PROVIDER_CANARY"],"warnings":[]});
-        let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(json!({"action":"workflow_code","code":"synthetic"}),"eec",&json!({"isError":true,"structuredContent":invalid,"content":[{"type":"text","text":invalid.to_string()}]})).unwrap();
-        let native = json!({"status":"ok","result":bridge});
-        let projected = decode_official_sdk_response(
-            HostRunOnceServerId::Eec,
-            HostRunOnceOperation::OfficialSdkValidation,
-            &input,
-            native.clone(),
-        )
-        .unwrap();
-        assert_eq!(projected["result"]["valid"], false);
-        assert!(!projected.to_string().contains("HOSTILE_PROVIDER_CANARY"));
-        let mut mismatch = native.clone();
-        mismatch["result"]["data"]["valid"] = json!(true);
-        assert!(
-            decode_official_sdk_response(
-                HostRunOnceServerId::Eec,
-                HostRunOnceOperation::OfficialSdkValidation,
-                &input,
-                mismatch
-            )
-            .is_err()
-        );
-        let mut transport = native;
-        transport["status"] = json!("error");
-        assert_eq!(
-            decode_official_sdk_response(
-                HostRunOnceServerId::Eec,
-                HostRunOnceOperation::OfficialSdkValidation,
-                &input,
-                transport
-            )
-            .unwrap_err()
-            .code,
-            "official_sdk_provider_failed"
-        );
         let knowledge = json!({"action":"sdk_reference","section":"rules"});
         let bridge = fcp_mcp_bridge::project_n8n_read_test_fixture(knowledge.clone(),"eec",&json!({"structuredContent":{"reference":"Public SDK rules"},"content":[{"type":"text","text":"Public SDK rules"}]})).unwrap();
         let response = json!({"status":"ok","result":bridge});
@@ -9637,7 +9646,7 @@ mod tests {
         let response = json!({"status":"ok","result":bridge});
         let projected = decode_official_credentials_response(
             HostRunOnceServerId::Eec,
-            &json!({"type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":1}}),
+            &json!({"type":"http","projectId":"p1","onlySharedWithMe":true,"limit":1}),
             response.clone(),
         )
         .unwrap();
@@ -9650,7 +9659,7 @@ mod tests {
         assert_eq!(
             decode_original_credentials_response(
                 HostRunOnceServerId::Eec,
-                &json!({"page":{"limit":1}}),
+                &json!({"type":"http","projectId":"p1","onlySharedWithMe":true,"limit":1}),
                 original.clone()
             )
             .unwrap(),
@@ -9746,7 +9755,6 @@ mod tests {
         let expected_tools = [
             "get_workflow_sdk_reference",
             "get_workflow_best_practices",
-            "validate_workflow",
             "validate_node_config",
             "search_projects",
             "search_folders",
@@ -9764,7 +9772,7 @@ mod tests {
             let packet = project_schema_originals(source, &response).unwrap();
             assert_eq!(packet["source"], source.name());
             let tools = packet["tools"].as_array().expect("projected tools");
-            assert_eq!(tools.len(), 10);
+            assert_eq!(tools.len(), 9);
             let projected_names: Vec<&str> = tools
                 .iter()
                 .map(|tool| tool["tool"].as_str().expect("projected tool name"))
@@ -12430,7 +12438,24 @@ mod tests {
             }).unwrap();
             assert_eq!(result["valid"], false);
             assert_eq!(result["errors"].as_array().unwrap().len(), 1);
-            assert!(!result.to_string().contains("CANARY"));
+            let original = &result["errors"][0]["nativeDiagnostic"];
+            assert_eq!(original["node"], "PRIVATE_NODE_CANARY");
+            assert_eq!(
+                original["message"],
+                "typeVersion 9 exceeds maximum supported version 2"
+            );
+            assert_eq!(
+                original["details"],
+                json!({"secret":"PRIVATE_DETAILS_CANARY"})
+            );
+            assert_eq!(original["truncated"], false);
+            assert!(!result.to_string().contains("PRIVATE_PARAMETER_CANARY"));
+            let mut classified = result.clone();
+            classified["errors"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("nativeDiagnostic");
+            assert!(!classified.to_string().contains("CANARY"));
             if package == "2.91.0"
                 && fingerprint == fcp_host::LOCAL_N8N_DIAGNOSTIC_PACKAGE_METADATA_DIGEST
             {
@@ -14474,6 +14499,36 @@ mod tests {
         })
         .expect("error envelope without diagnostic");
         assert!(encoded_without_diagnostic.get("diagnostic").is_none());
+        assert!(encoded_without_diagnostic.get("nativeDiagnostic").is_none());
+        let original = fcp_host::project_native_diagnostic(
+            Some(&json!("AUTHORIZED_NATIVE_CANARY\n\"quoted\"")),
+            Some(&json!({"original":"AUTHORIZED_DETAILS_CANARY"})),
+            Some(&json!("AUTHORIZED_NODE_CANARY")),
+            "local_mcp.validation",
+            "finding",
+            &mut (64 * 1024),
+        );
+        let expected = format!(
+            r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"unknown_outcome","correlationId":"test","nativeDiagnostic":{}}}"#,
+            serde_json::to_string(&original).unwrap()
+        );
+        for error in [
+            AppError::new("unknown_outcome").with_native_diagnostic(original.clone()),
+            AppError::new("unknown_outcome").with_optional_native_diagnostic(Some(original)),
+        ] {
+            assert!(!format!("{error:?}").contains("CANARY"));
+            let envelope = ErrorEnvelope {
+                schema: ERROR_ENVELOPE_SCHEMA,
+                status: "error",
+                code: error.code.to_string(),
+                diagnostic: error.diagnostic,
+                rpc_phase: error.rpc_phase,
+                rpc_code: error.rpc_code,
+                correlation_id: "test".into(),
+                native_diagnostic: error.native_diagnostic.clone(),
+            };
+            assert_eq!(serde_json::to_string(&envelope).unwrap(), expected);
+        }
     }
 
     #[test]

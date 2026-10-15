@@ -20,9 +20,8 @@ use tracing::{debug, instrument};
 use crate::{
     error::{N8nError, N8nResult},
     types::{
-        CredentialListResponse, Execution, ExecutionDiagnostics, ExecutionListResponse, Folder,
-        FolderListResponse, ListResponse, ProjectListResponse, TagListResponse, WorkflowDetail,
-        WorkflowListResponse,
+        Execution, ExecutionDiagnostics, ExecutionListResponse, Folder, FolderListResponse,
+        ListResponse, ProjectListResponse, TagListResponse, WorkflowDetail, WorkflowListResponse,
     },
 };
 
@@ -567,7 +566,7 @@ impl N8nClient {
         if api_origin.origin() != self.base_url.origin() {
             return Err(denied());
         }
-        let arguments = crate::types::official_credentials_input(input).map_err(|_| denied())?;
+        let arguments = mapping.arguments(server, input).map_err(|_| denied())?;
         let protocol = fcp_host::CredentialMetadataReadProtocol::new(
             mapping.clone(),
             server,
@@ -581,7 +580,7 @@ impl N8nClient {
                 mapping.clone(),
                 server,
                 &context.request_id,
-                crate::types::official_credentials_input(input).map_err(|_| denied())?,
+                mapping.arguments(server, input).map_err(|_| denied())?,
                 &serde_json::json!({"type":"object"}),
                 &serde_json::json!({"type":"object","required":["data","count"]}),
             )
@@ -653,6 +652,36 @@ impl N8nClient {
         protocol
             .projection()
             .map_err(|_| N8nError::MalformedProviderResponse)
+    }
+
+    /// One deadline covers native initialization, schema admission, metadata
+    /// read and bounded projection. There is no alternate REST credential path.
+    pub(crate) async fn credentials_metadata_page(
+        &self,
+        mapping: &fcp_host::CredentialMetadataReadMapping,
+        server: &str,
+        input: &serde_json::Value,
+        context: HostEgressContext,
+        deadline: Duration,
+    ) -> N8nResult<serde_json::Value> {
+        if deadline.is_zero() {
+            return Err(N8nError::Api {
+                status_code: 408,
+                message: "credential_metadata_deadline_exceeded".into(),
+            });
+        }
+        fcp_async_core::time::timeout(deadline, async {
+            let native = self
+                .credentials_metadata_read(mapping, server, input, context)
+                .await?;
+            crate::types::project_official_credentials_page(&native, server, input)
+                .map_err(|code| N8nError::InvalidInput(code.into()))
+        })
+        .await
+        .map_err(|_| N8nError::Api {
+            status_code: 408,
+            message: "credential_metadata_deadline_exceeded".into(),
+        })?
     }
 
     async fn get_url_mediated(
@@ -781,25 +810,6 @@ impl N8nClient {
         context: Option<HostEgressContext>,
     ) -> N8nResult<serde_json::Value> {
         let mut url = self.resolve_path("/projects")?;
-        {
-            let mut query_pairs = url.query_pairs_mut();
-            query_pairs.append_pair("limit", &query.limit.to_string());
-            if let Some(cursor) = query.cursor.as_deref() {
-                query_pairs.append_pair("cursor", cursor);
-            }
-        }
-        self.get_url_with_context(url, context).await
-    }
-
-    // -- Credentials --
-
-    /// List safe credential metadata without requesting credential values.
-    async fn list_credentials(
-        &self,
-        query: &ListQuery,
-        context: Option<HostEgressContext>,
-    ) -> N8nResult<serde_json::Value> {
-        let mut url = self.resolve_path("/credentials")?;
         {
             let mut query_pairs = url.query_pairs_mut();
             query_pairs.append_pair("limit", &query.limit.to_string());
@@ -1146,21 +1156,23 @@ impl N8nClient {
         decode_list_typed(self.list_projects(query, context).await?)
     }
 
-    /// List credential metadata using the typed provider DTO layer.
-    /// Generate only explicitly selected local-read audit categories. The
-    /// instance reporter contacts a third party, so it is never sent here.
+    /// The instance category requires the distinct instance-audit operation.
+    /// Its native reporter can contact the configured version-check service;
+    /// it is never admitted by the ordinary four-category audit capability.
     pub(crate) async fn inspect_audit(
         &self,
         categories: &[String],
+        allow_instance: bool,
         context: Option<HostEgressContext>,
     ) -> N8nResult<serde_json::Value> {
         if categories.is_empty()
-            || categories.len() > 4
+            || categories.len() > if allow_instance { 5 } else { 4 }
+            || categories.iter().any(|category| category == "instance") != allow_instance
             || categories.iter().any(|category| {
-                !matches!(
+                !(matches!(
                     category.as_str(),
                     "credentials" | "database" | "filesystem" | "nodes"
-                )
+                ) || allow_instance && category == "instance")
             })
             || categories
                 .iter()
@@ -1211,15 +1223,6 @@ impl N8nClient {
                 message: "n8n provider transport failed".into(),
             })?;
         self.handle_response(response).await
-    }
-
-    /// List credential metadata using the typed provider DTO layer.
-    pub(crate) async fn list_credentials_typed(
-        &self,
-        query: &ListQuery,
-        context: Option<HostEgressContext>,
-    ) -> N8nResult<CredentialListResponse> {
-        decode_list_typed(self.list_credentials(query, context).await?)
     }
 
     /// List tags using the typed provider DTO layer.
@@ -1480,6 +1483,77 @@ fn decode_write_success(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[fcp_async_core::runtime::test]
+    async fn official_credentials_metadata_denies_native_keys_cross_server_and_expired_deadline() {
+        let mapping = serde_json::from_value::<fcp_host::CredentialMetadataReadMapping>(serde_json::json!({
+            "credential_id":CredentialId::new().to_string(),"purpose":"n8n.credentials.metadata.read",
+            "tool":"list_credentials","class":"read",
+            "input_schema_digest":"sha256:a29acfec48d5f9919cb4fb65ce44c7fe544624a4ea537638d148b5c93ee3a821",
+            "output_schema_digest":"sha256:305aeecb628786f249e9f71a2be18fc26a212b8dd4f090ff073c701a8b4563ac"
+        })).unwrap();
+        let context = HostEgressContext {
+            connector_id: "fcp.n8n".into(),
+            operation_id: "n8n.credentials.list".into(),
+            resource_uri: "fwc-n8n://eec".into(),
+            zone_id: "z:work".into(),
+            request_id: "synthetic-no-provider".into(),
+            correlation_id: None,
+            capability_token_cbor_b64: "synthetic".into(),
+        };
+        let keyed = N8nClient::new_with_runtime_config(
+            N8nAuth::ApiKey("PRIVATE_CANARY".into()),
+            "https://n8n.europeaneyecenter.com/api/v1",
+            ConnectorRuntimeConfig::default(),
+        )
+        .unwrap();
+        let result = keyed
+            .credentials_metadata_page(
+                &mapping,
+                "eec",
+                &serde_json::json!({}),
+                context.clone(),
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(
+            matches!(result,Err(N8nError::InvalidInput(ref code)) if code == "credential_metadata_read_denied")
+        );
+        let mediated = N8nClient::new_with_runtime_config(
+            N8nAuth::CredentialId(CredentialId::new()),
+            "https://n8n.europeaneyecenter.com/api/v1",
+            ConnectorRuntimeConfig::default(),
+        )
+        .unwrap();
+        let result = mediated
+            .credentials_metadata_page(
+                &mapping,
+                "hetzner",
+                &serde_json::json!({}),
+                context.clone(),
+                Duration::from_secs(1),
+            )
+            .await;
+        assert!(
+            matches!(result,Err(N8nError::InvalidInput(ref code)) if code == "credential_metadata_read_denied")
+        );
+        let result = mediated
+            .credentials_metadata_page(
+                &mapping,
+                "eec",
+                &serde_json::json!({}),
+                context,
+                Duration::ZERO,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(N8nError::Api {
+                status_code: 408,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn auth_debug_redacts_key() {

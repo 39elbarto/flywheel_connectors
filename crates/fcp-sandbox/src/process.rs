@@ -1600,22 +1600,8 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn host_egress_channel_child_probe() {
-        if std::env::var_os("FCP_HOST_EGRESS_CHANNEL_CHILD").is_none() {
-            return;
-        }
-        let channel_fd = std::env::var(FCP_HOST_EGRESS_FD)
-            .expect("inherited channel fd environment")
-            .parse::<i32>()
-            .expect("numeric inherited channel fd");
-        let mut channel =
-            claim_inherited_host_egress_channel(channel_fd).expect("claim inherited channel");
-        let mut request = [0_u8; 4];
-        channel.read_exact(&mut request).expect("channel request");
-        assert_eq!(&request, b"ping");
-
-        let duplicated_fd = unsafe { libc::dup(channel.as_raw_fd()) };
+    fn duplicated_channel_io_errno(channel_fd: RawFd) -> (i32, i32) {
+        let duplicated_fd = unsafe { libc::dup(channel_fd) };
         assert!(duplicated_fd >= 0, "duplicate inherited channel fd");
         let mut empty = [0_u8; 0];
         let duplicated_send_errno = unsafe {
@@ -1627,12 +1613,11 @@ mod tests {
                 std::ptr::null(),
                 0,
             );
-            let error = if result == 0 {
+            if result == 0 {
                 0
             } else {
                 std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
-            };
-            error
+            }
         };
         let duplicated_recv_errno = unsafe {
             let result = libc::recvfrom(
@@ -1651,7 +1636,26 @@ mod tests {
             libc::close(duplicated_fd);
             error
         };
+        (duplicated_send_errno, duplicated_recv_errno)
+    }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_egress_channel_child_probe() {
+        if std::env::var_os("FCP_HOST_EGRESS_CHANNEL_CHILD").is_none() {
+            return;
+        }
+        let channel_fd = std::env::var(FCP_HOST_EGRESS_FD)
+            .expect("inherited channel fd environment")
+            .parse::<i32>()
+            .expect("numeric inherited channel fd");
+        let mut channel =
+            claim_inherited_host_egress_channel(channel_fd).expect("claim inherited channel");
+        let mut request = [0_u8; 4];
+        channel.read_exact(&mut request).expect("channel request");
+        assert_eq!(&request, b"ping");
+        let (duplicated_send_errno, duplicated_recv_errno) =
+            duplicated_channel_io_errno(channel.as_raw_fd());
         let socket_errno = unsafe {
             let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
             if fd >= 0 {
@@ -2457,9 +2461,10 @@ mod tests {
         let mut marker = [0_u8; 6];
         let mut offset = 0;
         while offset < marker.len() {
-            if deadline.is_expired() {
-                panic!("term-resistant ready marker deadline expired");
-            }
+            assert!(
+                !deadline.is_expired(),
+                "term-resistant ready marker deadline expired"
+            );
             match stdout.read(&mut marker[offset..]) {
                 Ok(0) => panic!("term-resistant stdout reached EOF before ready marker"),
                 Ok(bytes) => offset += bytes,

@@ -24,6 +24,7 @@ use tracing::{info, instrument};
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const HOST_UNARCHIVE_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_UNARCHIVE_REQUEST_TIMEOUT_MS";
 const HOST_ACTIVATION_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_ACTIVATION_REQUEST_TIMEOUT_MS";
+const HOST_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV: &str = "FCP_N8N_INSTANCE_AUDIT_REQUEST_TIMEOUT_MS";
 
 fn host_request_timeout(env_key: &str, operation: &str) -> N8nResult<Option<Duration>> {
     let Some(value) = std::env::var_os(env_key) else {
@@ -46,6 +47,39 @@ fn host_unarchive_request_timeout() -> N8nResult<Option<Duration>> {
 
 fn host_activation_request_timeout() -> N8nResult<Option<Duration>> {
     host_request_timeout(HOST_ACTIVATION_REQUEST_TIMEOUT_ENV, "activation")
+}
+
+fn host_runtime_timeouts(
+    unarchive: Option<Duration>,
+    activation: Option<Duration>,
+    instance_audit: Option<Duration>,
+) -> N8nResult<ConnectorRuntimeConfig> {
+    if instance_audit.is_some_and(|timeout| timeout.is_zero() || timeout > Duration::from_secs(45))
+    {
+        return Err(N8nError::InvalidInput(
+            "instance audit timeout exceeds its fixed bound".into(),
+        ));
+    }
+    if [unarchive, activation, instance_audit]
+        .iter()
+        .filter(|timeout| timeout.is_some())
+        .count()
+        > 1
+    {
+        return Err(N8nError::InvalidInput(
+            "conflicting n8n request timeout launch configuration".into(),
+        ));
+    }
+    let mut runtime =
+        ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30));
+    if let Some(timeout) = unarchive.or(activation).or(instance_audit) {
+        // Both the direct HTTP client and mediated proxy must receive the
+        // same host-derived budget; a default proxy must not shorten it.
+        runtime = runtime
+            .with_request_timeout(timeout)
+            .with_host_egress_proxy_request_timeout(timeout);
+    }
+    Ok(runtime)
 }
 
 use crate::{
@@ -547,22 +581,13 @@ impl N8nConnector {
     pub fn try_new() -> N8nResult<Self> {
         let unarchive_timeout = host_unarchive_request_timeout()?;
         let activation_timeout = host_activation_request_timeout()?;
-        if unarchive_timeout.is_some() && activation_timeout.is_some() {
-            return Err(N8nError::InvalidInput(
-                "conflicting n8n request timeout launch configuration".into(),
-            ));
-        }
-        let mut runtime_config =
-            ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30));
-        if let Some(timeout) = unarchive_timeout.or(activation_timeout) {
-            // The host bridge derives this per-request budget from the
-            // absolute run-once deadline and reserves a bounded tail for a
-            // mandatory readback. Applying it to both direct and mediated
-            // egress makes a stalled POST unable to consume that budget.
-            runtime_config = runtime_config
-                .with_request_timeout(timeout)
-                .with_host_egress_proxy_request_timeout(timeout);
-        }
+        let instance_audit_timeout =
+            host_request_timeout(HOST_INSTANCE_AUDIT_REQUEST_TIMEOUT_ENV, "instance audit")?;
+        let runtime_config = host_runtime_timeouts(
+            unarchive_timeout,
+            activation_timeout,
+            instance_audit_timeout,
+        )?;
         let runtime_config = runtime_config.with_host_egress_from_env().map_err(|_| {
             N8nError::InvalidInput("invalid host egress launch configuration".into())
         })?;
@@ -1012,7 +1037,11 @@ impl N8nConnector {
                     .await
             }
             "n8n.audit.inspect" => {
-                self.invoke_audit(client, &input, Some(context.clone()))
+                self.invoke_audit(client, &input, false, Some(context.clone()))
+                    .await
+            }
+            "n8n.audit.inspect_instance" => {
+                self.invoke_audit(client, &input, true, Some(context.clone()))
                     .await
             }
             "n8n.tags.list" => {
@@ -1238,24 +1267,6 @@ impl N8nConnector {
                             .into_iter()
                             .map(|item| serde_json::to_value(item.into_view()))
                             .collect::<Result<Vec<_>, _>>()?,
-                        response.next_cursor,
-                    )
-                }
-                "n8n.credentials.list" => {
-                    let response = client
-                        .list_credentials_typed(&query, context.clone())
-                        .await?;
-                    let server = self.configured_server_id()?;
-                    (
-                        response
-                            .data
-                            .into_iter()
-                            .map(|item| {
-                                let uri = credential_resource_uri(server, &item.id)
-                                    .map_err(|_| N8nError::MalformedProviderResponse)?;
-                                serde_json::to_value(item.into_view(uri)).map_err(N8nError::from)
-                            })
-                            .collect::<N8nResult<Vec<_>>>()?,
                         response.next_cursor,
                     )
                 }
@@ -2301,10 +2312,13 @@ impl N8nConnector {
         &self,
         client: &N8nClient,
         input: &Value,
+        allow_instance: bool,
         context: Option<HostEgressContext>,
     ) -> N8nResult<Value> {
-        let categories = parse_audit_categories(input)?;
-        let response = client.inspect_audit(&categories, context).await?;
+        let categories = parse_audit_categories(input, allow_instance)?;
+        let response = client
+            .inspect_audit(&categories, allow_instance, context)
+            .await?;
         project_audit_findings(&response, &categories)
     }
 
@@ -2325,7 +2339,13 @@ impl N8nConnector {
             N8nError::InvalidInput("credential_metadata_bound_context_required".into())
         })?;
         client
-            .credentials_metadata_read(mapping, &config.server_id, input, context)
+            .credentials_metadata_page(
+                mapping,
+                &config.server_id,
+                input,
+                context,
+                self.runtime_config.request_timeout,
+            )
             .await
     }
 
@@ -2741,6 +2761,7 @@ impl N8nConnector {
             | "n8n.projects.list"
             | "n8n.credentials.list"
             | "n8n.audit.inspect"
+            | "n8n.audit.inspect_instance"
             | "n8n.tags.list"
             | "n8n.mcp_access.reconcile" => instance_resource_uri(server_id),
             "n8n.workflows.create_draft" => {
@@ -3183,11 +3204,6 @@ fn project_resource_uri(server_id: &str, project_id: &str) -> N8nResult<String> 
 fn folder_resource_uri(server_id: &str, folder_id: &str) -> N8nResult<String> {
     let folder_id = encoded_resource_segment(folder_id, "folder id")?;
     Ok(format!("fwc-n8n://{server_id}/folders/{folder_id}"))
-}
-
-fn credential_resource_uri(server_id: &str, credential_id: &str) -> N8nResult<String> {
-    let credential_id = encoded_resource_segment(credential_id, "credential id")?;
-    Ok(format!("fwc-n8n://{server_id}/credentials/{credential_id}"))
 }
 
 fn encoded_resource_segment(value: &str, field: &str) -> N8nResult<String> {
@@ -3857,17 +3873,14 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> N8nRe
                 .map(|_| ())
                 .map_err(|code| N8nError::InvalidInput(code.into()))
         }
-        "n8n.credentials.list" if input.get("limit").is_none() && input.get("cursor").is_none() => {
-            MetadataSearch::parse(operation, input)
-                .map(|_| ())
-                .map_err(|code| N8nError::InvalidInput(code.into()))
+        "n8n.credentials.list" => crate::types::official_credentials_input(input)
+            .map(|_| ())
+            .map_err(|code| N8nError::InvalidInput(code.into())),
+        "n8n.audit.inspect" => parse_audit_categories(input, false).map(|_| ()),
+        "n8n.audit.inspect_instance" => parse_audit_categories(input, true).map(|_| ()),
+        "n8n.workflows.list" | "n8n.executions.list" | "n8n.projects.list" | "n8n.tags.list" => {
+            parse_list_query(input).map(|_| ())
         }
-        "n8n.audit.inspect" => parse_audit_categories(input).map(|_| ()),
-        "n8n.workflows.list"
-        | "n8n.executions.list"
-        | "n8n.projects.list"
-        | "n8n.credentials.list"
-        | "n8n.tags.list" => parse_list_query(input).map(|_| ()),
         "n8n.workflows.get" => crate::types::WorkflowReadInput::parse(input)
             .and_then(|read| {
                 if read.include_code == Some(true) {
@@ -3982,7 +3995,6 @@ fn project_metadata_search_bound(
             ("projectId", &search.project_id),
             ("parentFolderId", &search.folder_id),
             ("workflowId", &search.workflow_id),
-            ("type", &search.credential_type),
         ] {
             if let Some(expected) = expected {
                 if native_workflow_filters && matches!(field, "projectId" | "parentFolderId") {
@@ -3997,7 +4009,6 @@ fn project_metadata_search_bound(
         for (field, expected) in [
             ("active", search.active),
             ("isArchived", search.is_archived),
-            ("onlySharedWithMe", search.only_shared_with_me),
         ] {
             if let Some(expected) = expected {
                 matched &= record
@@ -4057,7 +4068,6 @@ fn project_metadata_search_bound(
         }
         let collection = match operation {
             "n8n.workflows.search" => "workflows",
-            "n8n.credentials.list" => "credentials",
             "n8n.structure.search" => search.kind.as_deref().ok_or_else(malformed)?,
             "n8n.executions.search" => "executions",
             _ => return Err(malformed()),
@@ -4128,7 +4138,6 @@ fn project_metadata_search_bound(
     let key = match operation {
         "n8n.workflows.search" => "workflows",
         "n8n.executions.search" => "executions",
-        "n8n.credentials.list" => "credentials",
         _ => "items",
     };
     Ok(
@@ -4140,12 +4149,12 @@ fn encode_resource_segment(value: &str) -> String {
     utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
 }
 
-fn parse_audit_categories(input: &Value) -> N8nResult<Vec<String>> {
+fn parse_audit_categories(input: &Value, allow_instance: bool) -> N8nResult<Vec<String>> {
     require_exact_object(input, &["categories"], "audit input")?;
     let categories = input
         .get("categories")
         .and_then(Value::as_array)
-        .filter(|items| !items.is_empty() && items.len() <= 4)
+        .filter(|items| !items.is_empty() && items.len() <= if allow_instance { 5 } else { 4 })
         .ok_or_else(|| {
             N8nError::InvalidInput("audit_instance_external_effect_not_admitted".into())
         })?;
@@ -4153,13 +4162,21 @@ fn parse_audit_categories(input: &Value) -> N8nResult<Vec<String>> {
     for category in categories {
         let category = category
             .as_str()
-            .filter(|value| matches!(*value, "credentials" | "database" | "filesystem" | "nodes"))
+            .filter(|value| {
+                matches!(*value, "credentials" | "database" | "filesystem" | "nodes")
+                    || (allow_instance && *value == "instance")
+            })
             .ok_or_else(|| {
                 N8nError::InvalidInput("audit_instance_external_effect_not_admitted".into())
             })?;
         if !seen.insert(category.to_string()) {
             return Err(N8nError::InvalidInput("audit duplicate category".into()));
         }
+    }
+    if seen.contains("instance") != allow_instance {
+        return Err(N8nError::InvalidInput(
+            "audit operation/category mismatch".into(),
+        ));
     }
     Ok(seen.into_iter().collect())
 }
@@ -4191,6 +4208,7 @@ fn project_audit_findings(response: &Value, categories: &[String]) -> N8nResult<
             "database" => "Database Risk Report",
             "filesystem" => "Filesystem Risk Report",
             "nodes" => "Nodes Risk Report",
+            "instance" => "Instance Risk Report",
             _ => return Err(N8nError::MalformedProviderResponse),
         };
         if report_title != expected_title {
@@ -4204,11 +4222,15 @@ fn project_audit_findings(response: &Value, categories: &[String]) -> N8nResult<
             .and_then(Value::as_array)
             .filter(|sections| sections.len() <= 3)
             .ok_or(N8nError::MalformedProviderResponse)?;
+        let mut section_titles = BTreeSet::new();
         for section in sections {
             let title = section
                 .get("title")
                 .and_then(Value::as_str)
                 .ok_or(N8nError::MalformedProviderResponse)?;
+            if !section_titles.insert(title) {
+                return Err(N8nError::MalformedProviderResponse);
+            }
             let code = match (category, title) {
                 ("credentials", "Credentials not used in any workflow") => "credentials_unused",
                 ("credentials", "Credentials not used in any active workflow") => {
@@ -4230,15 +4252,80 @@ fn project_audit_findings(response: &Value, categories: &[String]) -> N8nResult<
                 ("nodes", "Official risky nodes") => "official_risky_nodes",
                 ("nodes", "Community nodes") => "community_nodes",
                 ("nodes", "Custom nodes") => "custom_nodes",
+                ("instance", "Unprotected webhooks in instance") => "unprotected_webhook_nodes",
+                ("instance", "Outdated instance") => "instance_outdated",
+                ("instance", "Security settings") => "instance_security_settings",
                 _ => return Err(N8nError::MalformedProviderResponse),
             };
-            let locations = section
-                .get("location")
-                .and_then(Value::as_array)
-                .filter(|locations| locations.len() <= 10_000)
-                .ok_or(N8nError::MalformedProviderResponse)?;
-            findings.push(json!({"category":category,"severity":"warning","code":code,
-                "message":"Native security audit reported a risk", "affectedCount":locations.len()}));
+            let affected_count = if code == "instance_outdated" {
+                section
+                    .get("nextVersions")
+                    .and_then(Value::as_array)
+                    .filter(|versions| {
+                        versions.len() <= 10_000 && versions.iter().all(Value::is_object)
+                    })
+                    .ok_or(N8nError::MalformedProviderResponse)?
+                    .len()
+            } else if code == "instance_security_settings" {
+                let settings = section
+                    .get("settings")
+                    .and_then(Value::as_object)
+                    .filter(|settings| {
+                        settings.len() == 3
+                            && settings.keys().all(|key| {
+                                matches!(key.as_str(), "features" | "nodes" | "telemetry")
+                            })
+                    })
+                    .ok_or(N8nError::MalformedProviderResponse)?;
+                let features = settings.get("features").and_then(Value::as_object);
+                let nodes = settings.get("nodes").and_then(Value::as_object);
+                let telemetry = settings.get("telemetry").and_then(Value::as_object);
+                if !features.is_some_and(|group| {
+                    group.len() == 4
+                        && group.keys().all(|key| {
+                            matches!(
+                                key.as_str(),
+                                "communityPackagesEnabled"
+                                    | "versionNotificationsEnabled"
+                                    | "templatesEnabled"
+                                    | "publicApiEnabled"
+                            )
+                        })
+                        && group.values().all(Value::is_boolean)
+                }) || !nodes.is_some_and(|group| {
+                    group.len() == 2
+                        && group
+                            .keys()
+                            .all(|key| matches!(key.as_str(), "nodesExclude" | "nodesInclude"))
+                        && group
+                            .values()
+                            .all(|value| value.as_str().is_some_and(|value| value.len() <= 65_536))
+                }) || !telemetry.is_some_and(|group| {
+                    group.len() == 1
+                        && group
+                            .get("diagnosticsEnabled")
+                            .is_some_and(Value::is_boolean)
+                }) {
+                    return Err(N8nError::MalformedProviderResponse);
+                }
+                settings.len()
+            } else {
+                section
+                    .get("location")
+                    .and_then(Value::as_array)
+                    .filter(|locations| {
+                        locations.len() <= 10_000 && locations.iter().all(Value::is_object)
+                    })
+                    .ok_or(N8nError::MalformedProviderResponse)?
+                    .len()
+            };
+            let severity = if code == "instance_security_settings" {
+                "info"
+            } else {
+                "warning"
+            };
+            findings.push(json!({"category":category,"severity":severity,"code":code,
+                "message":"Native security audit reported a risk", "affectedCount":affected_count}));
         }
     }
     Ok(json!({"summary":{"categories":categories,"fullAudit":false},"findings":findings}))
@@ -6319,32 +6406,70 @@ fn mcp_access_reconcile_output_schema() -> serde_json::Value {
     })
 }
 
+fn audit_operation_info(instance: bool) -> OperationInfo {
+    let mut categories = vec!["credentials", "database", "filesystem", "nodes"];
+    if instance {
+        categories.push("instance");
+    }
+    let mut input = json!({"type":"object","additionalProperties":false,"required":["categories"],"properties":{
+        "categories":{"type":"array","minItems":1,"maxItems":categories.len(),"uniqueItems":true,"items":{
+            "type":"string","enum":categories}}
+    }});
+    if instance {
+        input["properties"]["categories"]["contains"] = json!({"const":"instance"});
+    }
+    op_info(
+        if instance {
+            "n8n.audit.inspect_instance"
+        } else {
+            "n8n.audit.inspect"
+        },
+        if instance {
+            "Inspect instance risks with separately authorized native version-check effects"
+        } else {
+            "Inspect explicitly selected local-read security audit categories"
+        },
+        input,
+        json!({"type":"object","additionalProperties":false,"required":["summary","findings"],"properties":{
+            "summary":{"type":"object","additionalProperties":false,"required":["categories","fullAudit"],"properties":{
+                "categories":{"type":"array","items":{"type":"string"}},"fullAudit":{"type":"boolean","const":false}}},
+            "findings":{"type":"array","maxItems":if instance { 15 } else { 12 },"items":{"type":"object","additionalProperties":false,
+                "required":["category","severity","code","message","affectedCount"],"properties":{
+                    "category":{"type":"string"},"severity":if instance { json!({"type":"string","enum":["warning","info"]}) } else { json!({"type":"string","const":"warning"}) },
+                    "code":{"type":"string"},"message":{"type":"string"},"affectedCount":{"type":"integer","minimum":0,"maximum":10000}}}}
+        }}),
+        if instance {
+            "n8n.audit.instance.read"
+        } else {
+            "n8n.audit.read"
+        },
+        RiskLevel::High,
+        SafetyTier::Safe,
+        IdempotencyClass::Strict,
+        AgentHint {
+            when_to_use:
+                "Inspect safe native audit findings without names, paths or provider descriptions."
+                    .into(),
+            common_mistakes: vec![if instance {
+                "Native instance audit can send the instance ID and version to its configured version service. Missing outdated findings do not prove a completed version check. No current admission is implied.".into()
+            } else {
+                "Instance and default-all audit are denied before HTTP because the native instance reporter contacts a third party.".into()
+            }],
+            examples: vec![if instance {
+                r#"{"categories":["instance"]}"#.into()
+            } else {
+                r#"{"categories":["credentials","database","filesystem","nodes"]}"#.into()
+            }],
+            related: vec![],
+        },
+    )
+}
+
 /// Build the operations info for introspection.
 fn operations_info() -> Vec<OperationInfo> {
     let mut operations = vec![
-        op_info(
-            "n8n.audit.inspect",
-            "Inspect explicitly selected local-read security audit categories",
-            json!({"type":"object","additionalProperties":false,"required":["categories"],"properties":{
-                "categories":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{
-                    "type":"string","enum":["credentials","database","filesystem","nodes"]}}
-            }}),
-            json!({"type":"object","additionalProperties":false,"required":["summary","findings"],"properties":{
-                "summary":{"type":"object","additionalProperties":false,"required":["categories","fullAudit"],"properties":{
-                    "categories":{"type":"array","items":{"type":"string"}},"fullAudit":{"type":"boolean","const":false}}},
-                "findings":{"type":"array","maxItems":12,"items":{"type":"object","additionalProperties":false,
-                    "required":["category","severity","code","message","affectedCount"],"properties":{
-                        "category":{"type":"string"},"severity":{"type":"string","const":"warning"},
-                        "code":{"type":"string"},"message":{"type":"string"},"affectedCount":{"type":"integer","minimum":0,"maximum":10000}}}}
-            }}),
-            "n8n.audit.read", RiskLevel::High, SafetyTier::Safe, IdempotencyClass::Strict,
-            AgentHint {
-                when_to_use: "Inspect safe native audit findings without names, paths or provider descriptions.".into(),
-                common_mistakes: vec!["Instance and default-all audit are denied before HTTP because the native instance reporter contacts a third party.".into()],
-                examples: vec![r#"{"categories":["credentials","database","filesystem","nodes"]}"#.into()],
-                related: vec![],
-            },
-        ),
+        audit_operation_info(false),
+        audit_operation_info(true),
         op_info(
             "n8n.workflows.list",
             "List all workflows in the n8n instance",
@@ -6692,7 +6817,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "The upstream endpoint requires the credential:list scope and owner or admin access.".into(),
                     "Credential values, secret maps, auth headers, and configuration data are never returned.".into(),
                     "Availability and flags vary by n8n version and license; scopes and sharing state are not inferred.".into(),
-                    "The admitted official tool has no cursor; page completeness and continuation are not established.".into(),
+                    "Continuation is unavailable and completeness is unknown, even for short results; at the limit narrow query, type, projectId or sharing filters.".into(),
                 ],
                 examples: vec!["{}".into()],
                 related: vec![CapabilityId::from_static("n8n.projects.list")],
@@ -6826,10 +6951,10 @@ fn operations_info() -> Vec<OperationInfo> {
             }));
     }
     operations.push(op_info("n8n.validation.run",
-        "Read one selected current graph for host-owned signed local validation",
+        "Validate one current graph",
         crate::types::remote_workflow_validation_input_schema(), json!({"type":"object"}),
         "n8n.workflows.read", RiskLevel::Low, SafetyTier::Safe, IdempotencyClass::Strict,
-        AgentHint { when_to_use:"Validate a current draft or published graph under the invocation deadline.".into(),
+        AgentHint { when_to_use:"Validate a current graph with the local MCP graph validator.".into(),
             common_mistakes:vec!["validation_required is an incomplete private binding, never a successful validation.".into()],
             examples:vec![r#"{"subject":"remote_workflow","id":"1001","version":"draft","profile":"runtime"}"#.into()],
             related:vec![CapabilityId::from_static("n8n.workflows.get")] }));
@@ -7240,6 +7365,34 @@ mod tests {
     }
 
     #[test]
+    fn audit_instance_budget_reaches_direct_and_mediated_clients_only_when_host_selected() {
+        let ordinary = host_runtime_timeouts(None, None, None).unwrap();
+        assert_eq!(ordinary.request_timeout, Duration::from_secs(30));
+        assert_eq!(
+            ordinary.host_egress_proxy_request_timeout,
+            Duration::from_secs(30)
+        );
+        let audit = host_runtime_timeouts(None, None, Some(Duration::from_secs(45))).unwrap();
+        assert_eq!(audit.request_timeout, Duration::from_secs(45));
+        assert_eq!(
+            audit.host_egress_proxy_request_timeout,
+            audit.request_timeout
+        );
+        for invalid in [Duration::ZERO, Duration::from_millis(45_001)] {
+            assert!(host_runtime_timeouts(None, None, Some(invalid)).is_err());
+        }
+        for (unarchive, activation) in [
+            (Some(Duration::from_secs(1)), None),
+            (None, Some(Duration::from_secs(1))),
+        ] {
+            assert!(
+                host_runtime_timeouts(unarchive, activation, Some(Duration::from_secs(45)))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes() {
         let categories = vec!["credentials".to_owned()];
         assert_eq!(
@@ -7258,6 +7411,63 @@ mod tests {
                 project_audit_findings(&malformed, &categories),
                 Err(N8nError::MalformedProviderResponse)
             ));
+        }
+    }
+
+    #[test]
+    fn audit_instance_projection_is_separate_bounded_and_never_claims_full_audit() {
+        let input = json!({"categories":["instance"]});
+        assert!(parse_audit_categories(&input, false).is_err());
+        let categories = parse_audit_categories(&input, true).unwrap();
+        assert!(parse_audit_categories(&json!({"categories":["nodes"]}), true).is_err());
+        assert_eq!(
+            required_capability("n8n.audit.inspect_instance")
+                .unwrap()
+                .as_ref(),
+            "n8n.audit.instance.read"
+        );
+        let report = json!({"Instance Risk Report":{"risk":"instance","sections":[
+            {"title":"Unprotected webhooks in instance","location":[{"name":"PRIVATE_CANARY"}]},
+            {"title":"Outdated instance","nextVersions":[{"name":"PRIVATE_CANARY","description":"PRIVATE_CANARY"}]},
+            {"title":"Security settings","settings":{
+                "features":{"communityPackagesEnabled":true,"versionNotificationsEnabled":true,"templatesEnabled":false,"publicApiEnabled":true},
+                "nodes":{"nodesExclude":"PRIVATE_CANARY","nodesInclude":"PRIVATE_CANARY"},
+                "telemetry":{"diagnosticsEnabled":false}}}
+        ]}});
+        let result = project_audit_findings(&report, &categories).unwrap();
+        assert_eq!(result["summary"]["fullAudit"], false);
+        assert_eq!(result["findings"][0]["affectedCount"], 1);
+        assert_eq!(result["findings"][1]["code"], "instance_outdated");
+        assert_eq!(result["findings"][2]["severity"], "info");
+        assert_eq!(result["findings"][2]["affectedCount"], 3);
+        assert!(!result.to_string().contains("PRIVATE_CANARY"));
+        for change in [
+            "title",
+            "duplicate",
+            "versions",
+            "settings",
+            "settings-type",
+            "location-scalar",
+            "location-null",
+        ] {
+            let mut altered = report.clone();
+            let sections = &mut altered["Instance Risk Report"]["sections"];
+            match change {
+                "location-scalar" => sections[0]["location"] = json!([7]),
+                "location-null" => sections[0]["location"] = json!([null]),
+                "title" => sections[0]["title"] = json!("unknown"),
+                "duplicate" => sections[1] = sections[0].clone(),
+                "versions" => sections[1]["nextVersions"] = json!(["PRIVATE_CANARY"]),
+                "settings" => sections[2]["settings"]["extra"] = json!(true),
+                "settings-type" => {
+                    sections[2]["settings"]["features"]["publicApiEnabled"] = json!("true");
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                project_audit_findings(&altered, &categories).is_err(),
+                "{change}"
+            );
         }
     }
 
@@ -7970,6 +8180,7 @@ mod tests {
             operation_ids,
             [
                 "n8n.audit.inspect",
+                "n8n.audit.inspect_instance",
                 "n8n.credentials.list",
                 "n8n.executions.diagnostics",
                 "n8n.executions.get",
@@ -8654,7 +8865,7 @@ mod tests {
                 assert_eq!(
                     op.risk_level,
                     match op.id.as_ref() {
-                        "n8n.audit.inspect" => RiskLevel::High,
+                        "n8n.audit.inspect" | "n8n.audit.inspect_instance" => RiskLevel::High,
                         "n8n.workflows.get_code" => RiskLevel::Medium,
                         _ => RiskLevel::Low,
                     },
@@ -8982,6 +9193,30 @@ mod tests {
                 .unwrap()
                 .port_allow,
             vec![443]
+        );
+    }
+
+    #[test]
+    fn current_graph_validation_schema_matches_manifest() {
+        let manifest = fcp_manifest::ConnectorManifest::parse_str(MANIFEST_TOML).unwrap();
+        let operations = operations_info();
+        let operation = operations
+            .iter()
+            .find(|item| item.id.as_ref() == "n8n.validation.run")
+            .unwrap();
+        assert_eq!(
+            operation.input_schema,
+            manifest.provides.operations["n8n.validation.run"].input_schema
+        );
+        assert_eq!(
+            operation.input_schema,
+            crate::types::remote_workflow_validation_input_schema()
+        );
+        assert!(
+            crate::types::RemoteWorkflowValidationInput::parse(
+                &json!({"subject":"workflow_code","code":"x"})
+            )
+            .is_err()
         );
     }
 

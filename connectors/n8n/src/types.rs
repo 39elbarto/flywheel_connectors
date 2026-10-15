@@ -303,49 +303,6 @@ pub fn project_official_node_validation(
     Ok(serde_json::json!({"valid":valid,"errors":errors,"warnings":[]}))
 }
 
-pub fn project_official_sdk_validation(
-    native: &Value,
-    is_error: bool,
-) -> Result<Value, &'static str> {
-    let object = native
-        .as_object()
-        .ok_or("validation_provider_response_invalid")?;
-    let valid = object
-        .get("valid")
-        .and_then(Value::as_bool)
-        .ok_or("validation_provider_response_invalid")?;
-    let errors = match object.get("errors") {
-        None if valid => &[][..],
-        Some(Value::Array(errors)) => errors.as_slice(),
-        _ => return Err("validation_provider_response_invalid"),
-    };
-    let warnings = match object.get("warnings") {
-        None => &[][..],
-        Some(Value::Array(warnings)) => warnings.as_slice(),
-        _ => return Err("validation_provider_response_invalid"),
-    };
-    if errors.len() > 256
-        || warnings.len() > 256
-        || errors
-            .iter()
-            .any(|error| error.as_str().is_none_or(|text| text.len() > 8192))
-        || warnings.iter().any(|warning| {
-            !warning.is_object()
-                || warning["code"].as_str().is_none_or(|text| text.len() > 256)
-                || warning["message"]
-                    .as_str()
-                    .is_none_or(|text| text.len() > 8192)
-        })
-        || valid && (is_error || !errors.is_empty())
-        || !valid && errors.is_empty()
-    {
-        return Err("validation_provider_response_invalid");
-    }
-    Ok(serde_json::json!({"valid":valid,
-        "errors":errors.iter().map(|_| serde_json::json!({"path":"workflow_code","code":"sdk_validation_error","message":"Native SDK validator reported an error"})).collect::<Vec<_>>(),
-        "warnings":warnings.iter().map(|_| serde_json::json!({"path":"workflow_code","code":"sdk_validation_warning","message":"Native SDK validator reported a warning"})).collect::<Vec<_>>() }))
-}
-
 impl WorkflowReadInput {
     pub fn parse(input: &Value) -> Result<Self, &'static str> {
         if ["version", "detail", "includeCode"]
@@ -393,9 +350,6 @@ pub struct MetadataSearch {
     pub status: Option<Vec<String>>,
     pub started_after: Option<String>,
     pub started_before: Option<String>,
-    #[serde(rename = "type")]
-    pub credential_type: Option<String>,
-    pub only_shared_with_me: Option<bool>,
     pub kind: Option<String>,
     pub sort: Option<String>,
     pub page: Option<MetadataPage>,
@@ -427,7 +381,6 @@ impl MetadataSearch {
             &typed.folder_id,
             &typed.parent_folder_id,
             &typed.workflow_id,
-            &typed.credential_type,
         ]
         .into_iter()
         .flatten()
@@ -551,40 +504,22 @@ pub fn metadata_search_fields(operation: &str) -> Option<&'static [&'static str]
             "page",
         ],
         "n8n.structure.search" => &["kind", "query", "projectId", "parentFolderId", "page"],
-        "n8n.credentials.list" => &["query", "type", "projectId", "onlySharedWithMe", "page"],
         _ => return None,
     })
 }
 
-/// Exact installed official `list_credentials` input. The native tool has no
-/// cursor; a full page cannot establish that no further credentials exist.
+/// Validate bounded native metadata filters. Continuation is unavailable.
 pub fn official_credentials_input(input: &Value) -> Result<Value, &'static str> {
-    let search = MetadataSearch::parse("n8n.credentials.list", input)?;
-    if search
-        .page
-        .as_ref()
-        .is_some_and(|page| page.cursor.is_some())
-    {
-        return Err("credential_native_pagination_unavailable");
-    }
-    let mut arguments = serde_json::Map::new();
-    for field in ["query", "type", "projectId", "onlySharedWithMe"] {
-        if let Some(value) = input.get(field) {
-            arguments.insert(field.into(), value.clone());
-        }
-    }
-    arguments.insert(
-        "limit".into(),
-        Value::from(search.page.and_then(|page| page.limit).unwrap_or(200)),
-    );
-    Ok(Value::Object(arguments))
+    fcp_host::official_n8n_credentials_arguments(input)
 }
 
 pub fn official_credentials_input_schema() -> Value {
-    let mut schema = metadata_search_schema("n8n.credentials.list");
-    schema["properties"]["page"] = serde_json::json!({"type":"object","additionalProperties":false,
-        "properties":{"limit":{"type":"integer","minimum":1,"maximum":200}}});
-    schema
+    serde_json::json!({"type":"object","additionalProperties":false,"required":[],"properties":{
+        "query":{"type":"string","minLength":1,"maxLength":256},
+        "type":{"type":"string","minLength":1,"maxLength":256},
+        "projectId":{"type":"string","minLength":1,"maxLength":256},
+        "onlySharedWithMe":{"type":"boolean"},
+        "limit":{"type":"integer","minimum":1,"maximum":200,"default":50}}})
 }
 
 pub fn official_credentials_output_schema() -> Value {
@@ -599,12 +534,19 @@ pub fn official_credentials_output_schema() -> Value {
                     "id":{"type":"string","minLength":1,"maxLength":256},"name":{"type":"string","minLength":1,"maxLength":256},"type":{"type":"string","minLength":1,"maxLength":256}}}}}},
         "page":{"type":"object","additionalProperties":false,"required":["returnedCount","limit","continuation","completeness"],"properties":{
             "returnedCount":{"type":"integer","minimum":0,"maximum":200},"limit":{"type":"integer","minimum":1,"maximum":200},
-            "continuation":{"type":"string","enum":["unavailable"]},"completeness":{"type":"string","enum":["not_established"]}}}}})
+            "continuation":{"type":"string","enum":["unavailable"]},
+            "hint":{"type":"string","const":"Result may be limited; narrow query, type, projectId or sharing filters."},
+            "completeness":{"type":"string","enum":["not_established"]}}}}})
 }
 
 /// Project only the required official credential metadata. Descriptions,
 /// gateway suggestions and unknown provider fields never enter this output.
 pub use fcp_host::project_official_n8n_credentials as project_official_credentials;
+
+pub use fcp_host::{
+    project_official_n8n_credentials_page as project_official_credentials_page,
+    validate_official_n8n_credentials_page as validate_official_credentials_page,
+};
 
 pub fn metadata_search_schema(operation: &str) -> Value {
     use serde_json::json;
@@ -1744,8 +1686,20 @@ pub struct ApiErrorResponse {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn official_sdk_inputs_and_invalid_results_are_typed_and_redacted() {
-        use super::{official_knowledge_arguments, project_official_sdk_validation};
+    fn retired_workflow_code_is_not_remote_graph_input() {
+        use super::RemoteWorkflowValidationInput;
+        use serde_json::json;
+        let input = json!({"subject":"workflow_code","code":"process.env.UNAVAILABLE_TEST_VALUE"});
+        assert!(RemoteWorkflowValidationInput::parse(&input).is_err());
+        assert!(
+            RemoteWorkflowValidationInput::parse(&json!({"subject":"remote_workflow","id":"1001"}))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn official_sdk_reference_inputs_are_typed() {
+        use super::official_knowledge_arguments;
         use serde_json::json;
         for section in [
             "patterns",
@@ -1771,39 +1725,12 @@ mod tests {
         ] {
             assert!(official_knowledge_arguments(&input).is_err());
         }
-        let invalid = json!({"valid":false,"errors":["SDK_PRIVATE_CANARY"],
-            "warnings":[{"code":"warning","message":"SDK_PRIVATE_CANARY","nodeName":"SDK_PRIVATE_CANARY"}],"hint":"SDK_PRIVATE_CANARY"});
-        let projected = project_official_sdk_validation(&invalid, true).unwrap();
-        assert_eq!(projected["valid"], false);
-        assert!(
-            !serde_json::to_string(&projected)
-                .unwrap()
-                .contains("SDK_PRIVATE_CANARY")
-        );
-        assert!(project_official_sdk_validation(&json!({"valid":true,"errors":[]}), true).is_err());
-        assert!(
-            project_official_sdk_validation(&json!({"valid":false,"errors":[]}), true).is_err()
-        );
-        assert!(
-            project_official_sdk_validation(&json!({"valid":false,"errors":[{}]}), true).is_err()
-        );
-        assert_eq!(
-            project_official_sdk_validation(
-                &json!({"valid":true,"errors":[],"nodeCount":0}),
-                false
-            )
-            .unwrap()["valid"],
-            true
-        );
     }
 
     #[test]
     fn official_credentials_exact_public_list_preserves_native_partial_filter() {
-        let input = serde_json::json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"page":{"limit":17}});
-        assert_eq!(
-            super::official_credentials_input(&input).unwrap(),
-            serde_json::json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":17})
-        );
+        let input = serde_json::json!({"query":"Synth","type":"http","projectId":"p1","onlySharedWithMe":true,"limit":17});
+        assert_eq!(super::official_credentials_input(&input).unwrap(), input);
         for input in [
             serde_json::json!({"page":{"cursor":"next"}}),
             serde_json::json!({"page":{"limit":201}}),
@@ -1837,6 +1764,109 @@ mod tests {
             "official_credential_provider_failed"
         );
         assert!(super::project_official_credentials(&input, "legacy", 1).is_err());
+    }
+
+    fn credential_snapshot_fixture(count: usize, server: &str) -> Value {
+        let rows = (0..count).rev().map(|index| serde_json::json!({
+            "id":format!("c{index:03}"),"name":"Synthetic SQL_% match","type":"httpHeaderAuth",
+            "scopes":["credential:read"],"isManaged":false,"isGlobal":false,
+            "homeProject":{"id":"home-other-than-sharing-project","name":"Synthetic","type":"team"},
+            "description":"PRIVATE_CANARY","data":{"secret":"PRIVATE_CANARY"}
+        })).collect::<Vec<_>>();
+        super::project_official_credentials(
+            &serde_json::json!({"data":rows,"count":count}),
+            server,
+            200,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn official_credentials_bounded_results_preserve_native_semantics_and_redaction() {
+        let native = credential_snapshot_fixture(7, "eec");
+        // Native SQL partial/type and project-sharing membership remain native
+        // semantics, rather than exact type or home-project equality.
+        let input = serde_json::json!({"query":"SQL_%","type":"http","projectId":"shared-project","onlySharedWithMe":true,"limit":200});
+        let output = super::project_official_credentials_page(&native, "eec", &input).unwrap();
+        super::validate_official_credentials_page(&output, "eec", &input).unwrap();
+        assert_eq!(output["page"]["returnedCount"], 7);
+        assert_eq!(output["page"]["completeness"], "not_established");
+        assert_eq!(output["page"]["continuation"], "unavailable");
+        assert!(!output.to_string().contains("PRIVATE_CANARY"));
+        for key in ["nextCursor", "snapshotDigest", "requestDigest", "total"] {
+            assert!(output["page"].get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn official_credentials_empty_full_cap_and_oversize_are_honest() {
+        let mut empty = credential_snapshot_fixture(0, "eec");
+        empty["page"]["limit"] = Value::from(50);
+        let output =
+            super::project_official_credentials_page(&empty, "eec", &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(output["page"]["returnedCount"], 0);
+        assert_eq!(output["page"]["completeness"], "not_established");
+        super::validate_official_credentials_page(&output, "eec", &serde_json::json!({})).unwrap();
+        let smaller_native = super::project_official_credentials(
+            &json!({"data":credential_snapshot_fixture(17, "eec")["credentials"],"count":17}),
+            "eec",
+            17,
+        )
+        .unwrap();
+        assert!(
+            super::project_official_credentials_page(
+                &smaller_native,
+                "eec",
+                &serde_json::json!({"limit":17})
+            )
+            .is_ok()
+        );
+        let full = credential_snapshot_fixture(200, "eec");
+        assert_eq!(
+            super::project_official_credentials_page(
+                &full,
+                "eec",
+                &serde_json::json!({"limit":200})
+            )
+            .unwrap()["page"]["completeness"],
+            "not_established"
+        );
+        let mut oversized = empty;
+        oversized["unexpected"] = Value::from("x".repeat(4 * 1024 * 1024));
+        assert_eq!(
+            super::project_official_credentials_page(&oversized, "eec", &serde_json::json!({}))
+                .unwrap_err(),
+            "credential_metadata_byte_bound_exceeded"
+        );
+    }
+
+    #[test]
+    fn official_credentials_refuse_cursor_server_and_metadata_substitution() {
+        let native = credential_snapshot_fixture(7, "eec");
+        let first_input = serde_json::json!({"query":"SQL_%","type":"http","projectId":"shared","onlySharedWithMe":true,"limit":200});
+        let first = super::project_official_credentials_page(&native, "eec", &first_input).unwrap();
+        let mut resumed = first_input.clone();
+        resumed["cursor"] = Value::from("retired");
+        assert_eq!(
+            super::project_official_credentials_page(&native, "eec", &resumed).unwrap_err(),
+            "invalid_credential_metadata_input"
+        );
+        assert!(
+            super::validate_official_credentials_page(&first, "hetzner", &first_input).is_err()
+        );
+        let mut duplicate = native.clone();
+        duplicate["credentials"][1] = duplicate["credentials"][0].clone();
+        assert!(super::project_official_credentials_page(&duplicate, "eec", &first_input).is_err());
+        let mut malformed = native;
+        malformed["credentials"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("isGlobal");
+        assert!(super::project_official_credentials_page(&malformed, "eec", &first_input).is_err());
+        let mut injected = first;
+        injected["credentials"][0]["data"] = serde_json::json!({"secret":"PRIVATE_CANARY"});
+        assert!(super::validate_official_credentials_page(&injected, "eec", &first_input).is_err());
     }
     use super::*;
     use serde_json::{Value, json};

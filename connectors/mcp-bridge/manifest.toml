@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:be35eedbc82878505f7e4ab7f47059e5f05242af98345a9c23c41ba7aec3d51d"
+interface_hash = "blake3-256:fcp.interface.v2:409d916220912f2117fb5c2120fdf36a55de9e2e9767ee916f971fe9d76e132b"
 
 [connector]
 id = "fcp.mcp-bridge"
@@ -340,7 +340,7 @@ related = [
 ]
 
 [provides.operations."mcp.n8n.read"]
-description = "Closed typed n8n catalog, SDK validation and credential metadata reads with exact fresh native schema admission"
+description = "Closed typed n8n catalog, node validation and credential metadata reads with exact fresh native schema admission"
 capability = "mcp.n8n.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -352,7 +352,6 @@ revocation_freshness = "safe"
 oneOf = [
     { type = "object", additionalProperties = false, required = ["action", "section"], properties = { action = { const = "sdk_reference" }, section = { type = "string", enum = ["patterns", "patterns_detailed", "expressions", "functions", "rules", "import", "guidelines", "design", "all"] } } },
     { type = "object", additionalProperties = false, required = ["action", "technique"], properties = { action = { const = "workflow_best_practices" }, technique = { type = "string", enum = ["list", "scheduling", "chatbot", "form_input", "scraping_and_research", "monitoring", "enrichment", "triage", "content_generation", "document_processing", "data_extraction", "data_analysis", "data_transformation", "data_persistence", "notification", "knowledge_base", "human_in_the_loop", "web_app"] } } },
-    { type = "object", additionalProperties = false, required = ["action", "code"], properties = { action = { const = "workflow_code" }, code = { type = "string", minLength = 1, maxLength = 300000 } } },
     { type = "object", additionalProperties = false, required = ["action", "nodes"], properties = { action = { const = "nodes" }, nodes = { type = "array", minItems = 1, maxItems = 50, items = { type = "object", additionalProperties = false, required = ["type"], properties = { name = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, typeVersion = { type = "number", exclusiveMinimum = 0, maximum = 1000 }, parameters = { type = "object" }, subnodes = { type = "object", additionalProperties = false, properties = { model = { type = "object" }, memory = { type = "object" }, tools = { type = "array", maxItems = 20, items = { type = "object" } } } }, isToolNode = { type = "boolean" } } } } } },
     { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "credentials" }, query = { type = "string", minLength = 1, maxLength = 256 }, type = { type = "string", minLength = 1, maxLength = 256 }, projectId = { type = "string", minLength = 1, maxLength = 256 }, onlySharedWithMe = { type = "boolean" }, limit = { type = "integer", minimum = 1, maximum = 200 } } },
     { type = "object", additionalProperties = false, required = ["action", "limit"], properties = { action = { const = "projects" }, query = { type = "string", minLength = 1, maxLength = 256 }, limit = { type = "integer", minimum = 1, maximum = 100 } } },
@@ -365,7 +364,7 @@ oneOf = [
 type = "object"
 additionalProperties = false
 required = ["serverId", "action", "data"]
-properties = { serverId = { type = "string", enum = ["eec", "hetzner"] }, action = { type = "string", enum = ["sdk_reference", "workflow_best_practices", "workflow_code", "nodes", "credentials", "projects", "folders", "tags", "workflows"] }, data = { type = "object" } }
+properties = { serverId = { type = "string", enum = ["eec", "hetzner"] }, action = { type = "string", enum = ["sdk_reference", "workflow_best_practices", "nodes", "credentials", "projects", "folders", "tags", "workflows"] }, data = { type = "object" } }
 
 [provides.operations."mcp.n8n.read".network_constraints]
 host_allow = ["operator-configured"]
@@ -386,7 +385,7 @@ total_timeout_ms = 15000
 max_response_bytes = 10485760
 
 [provides.operations."mcp.n8n.read".ai_hints]
-when_to_use = "Read only an explicitly admitted fixed n8n SDK or metadata action."
+when_to_use = "Read only an explicitly admitted n8n reference, node validation or metadata action."
 common_mistakes = ["Generic tool names, arguments, URLs and write actions are rejected.", "Observed schemas do not enroll a tool; exact native admission is required before every call.", "Credential continuation is unavailable; never infer completeness from one bounded result."]
 examples = ['{"action":"sdk_reference","section":"rules"}']
 related = ["mcp.tools.list"]

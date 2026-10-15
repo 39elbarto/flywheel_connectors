@@ -1987,8 +1987,10 @@ Projection-only invalid-result fixtures do not authorize native evaluation.
 
 #### .35 read-parity implementation matrix — source checkpoint 2026-10-04
 
-This matrix is not installed acceptance or closure. Installed source remains
-RC43c `09cebc4`; the first candidate source was committed as `537b8451`
+The original source checkpoint below is historical, not whole-feature closure.
+Current row-specific acceptance is explicitly marked `4c39` below; it does not
+upgrade the other rows or their unsupported submodes. The original installed
+baseline was RC43c `09cebc4`; the first candidate source was committed as `537b8451`
 (README `3168d9c4`, coordinator snapshot `138057a5`). The following useful
 workflow-scenario delta is still under source review. Native
 catalog/source discovery proves availability and shapes, not a successful
@@ -2002,19 +2004,51 @@ separate signed schema/profile and runtime admission before installed use.
 | `targets.resolve`: exact URI/server, names and ambiguity | Needs installed public-path validation | Canonical URI plus typed existence reads; exact project/workflow name matching over complete unsaturated native snapshots; one shared deadline and exact server/project/resource bindings | `public_targets_*`, `public_target_name_lookup_*`, `public_project_name_lookup_*`; name search native-shaped bridge projection passes the actual wrapper decoder. Installed new-source acceptance remains open |
 | `runtime.status` | No proved global observer | Public nullable `not_collected`; local engine and physical lifecycle hooks tested with private fixture authority only | Mixed separate-process writers, real actor/local IO teardown and unknown epoch tests; trusted writer, scoped authenticated query and complete global coverage remain open |
 | Knowledge: tool documentation, node search, templates search/get | Local catalog exists; new public projection uninstalled | Fixed local tools, bounded action-specific projection, source/default digests; combined template selectors intersect complete native subsets before paging | `combined_template_*` controlled nonempty intersection and fixed-call tests; retained real network-disabled process tests current node 3.5 and two complete empty template subsets. Oversized native subset refused; no candidate CLI or installed trust claim |
-| `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | Local tool available; public modes need validation | Closed mode-to-native arguments and bounded catalog projection; display-condition property bindings retained | `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`; native optional version semantics still require mode-specific proof |
-| SDK reference: all nine public sections; best practices | Official tools discovered on both servers | Closed typed bridge read action → exact server/action decoder → bounded reference result/digest | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`; discovery is not schema admission; native extra `groups` section is not auto-enrolled |
+| `get_node`: info/docs/search_properties/versions/compare/breaking/migrations | CHECKED installed `4c39` local process: HTTP Request info/full, authentication search_properties/full, migrations 3→4.5; other modes retain scoped prior evidence | Full info returns 42 properties, 32 with display options; full property search returns one match; migration result preserves `migrationStrategy`, pair and availability | `local-result.json` below plus `public_get_node_seven_modes_project_serialized_catalog_without_transport_or_values`, `node_catalog_conditions_*`. This fixes the prior full-info acceptance failure for this exact fixture; historical requested-version restrictions remain open |
+| SDK reference: all nine public sections; best practices | CHECKED installed `4c39`: `patterns` and technique `list`, independently on EEC and Hetzner | Ordinary public CLI → typed official MCP route; nonempty reference/guidance with domain-separated digest and exact selector. These actions use the remote official provider, not local knowledge | Actual reference 15,712 bytes and guidance 6,422 bytes per server; original outputs retained below. Other sections/techniques remain source-tested, not separately installed-tested; native extra `groups` is not enrolled |
 | Validation: graph, four profiles | Actual installed synthetic empty graph valid with warning | Fixed network-disabled local validator; public valid/errors/warnings projection | Pinned installed receipt `517ce0bf…`; `public_validation_projects_primary_installed_process_receipt` explicitly run with `--ignored` and receipt environment; malformed/contradictory responses denied |
-| Validation: nodes 1–50/version/subnodes | Official validator source available | Fixed `validate_node_config`, typed arguments and safe invalid-result projection | `official_sdk_inputs_and_invalid_results_are_typed_and_redacted`; unsupported native profile options are not simulated |
+| Validation: nodes 1–50/version/subnodes | CHECKED installed `4c39` on EEC and Hetzner: one synthetic Set node, version 3.4, empty parameters | Ordinary public CLI → fixed remote `validate_node_config`; native-default result `valid:true`, zero errors/warnings, no node/workflow execution | Only the one-node native-default fixture is installed acceptance. Counts/version/subnode boundaries retain local tests; unsupported profiles are not simulated. Public errors are deliberately generic/redacted, not retained original native error text |
 | Validation: workflow_code | Native restricted SDK interpreter available | Wrapper and typed bridge refuse before broker/provider calls; bounded invalid-result projection is tested only as a pure adapter | `official_sdk_public_dispatch_and_native_projection_bind_exact_tools`, `workflow_code_effect_admission_refuses_before_native_call`; admission pending synchronous-preemption, reachable effects and earlier telemetry leakage; no live SDK validation |
 | Validation: remote_workflow/current draft or published, four profiles | Missing installed public composition | One exact REST GET captured privately; ID/version/digest bound; same selected graph validated by signed local provider with shared deadline/cancel/teardown | `remote_workflow_public_target_*`, `remote_validation_capture_*`, actual ignored local four-profile test; new runtime admission required; historical versions excluded |
-| Structure: projects/folders/tags | Installed projects call failed on both servers; folders/tags unproved | Fixed official read actions, exact native filters and complete bounded snapshots | `official_structure_bridge_projection_supports_complete_snapshot_pages`; native caps 100/100/500, truncation refuses |
+| Structure: projects/folders/tags | CHECKED installed `4c39`, separately on EEC and Hetzner, one public row per kind | Fixed official reads; folders project derived only from the actual single returned project. Exact server/resource and folder `parentUri` bindings verified | Both servers return nonempty project/folder/tag pages; folder totals 24/42, tag totals 1/8. One page is not the whole catalog; further cursor pages and additional selectors are not inferred. Native caps 100/100/500 and truncation refusal remain |
 | Workflows search: filters/page/sort | REST cannot supply folder/global sort equivalence | Fixed official native search for query/project/folder/tags/sort, complete snapshot before public paging/active filtering | `official_workflow_search_native_query_is_not_replaced_with_page_local_name_filter`; cap 200 and archived search remain explicit capability limits |
 | Workflows get: draft/published/both, detail/includeCode | Exact legacy state read exists; new public selectors unproved | Native GET with activeVersion; bounded selected graphs and metadata Code fingerprints. `includeCode:true` routes before admission to distinct pinned `workflows.get_code` / `workflows.code.read`; installed operation and rights remain OPEN | `current_workflow_read_native_active_version_redacts_both_graphs`, `current_workflow_read_public_defaults_and_comparison_binding`, `get_code_production_projection_is_exact_pinned_and_sensitive`, `include_code_routes_before_authoritative_envelope_and_binds_every_pin`, `get_code_original_child_sensitive_authority_and_pins`; actual diagnostic CLI refusal is separate from callback/process fixtures |
 | Draft/published compare: semantic/layout/validation | New public composition missing | Same single GET crossbinds both graphs; semantic/layout digests; two owned local validations; no public raw graph | `captured_comparison_graphs` tests and retained native local comparison test; missing published/validator failure is limited outcome, not empty success |
 | Executions search/get metadata | Existing metadata routes; new filter parity needs validation | Native workflow/time/status pushdown; running explicitly requested/merged; queryless exact metadata GET, no execution payload | Six `metadata_*` HTTP tests passed; wrong workflow denied; payload/history/rollback remain outside .35 |
 | Credentials list query/type/project/sharing/page | REST lacks required official metadata; installed direct FCP mapping absent | Wrapper/host official adapter plus LOCAL A optional original-invocation mapping; bounded safe metadata, no native cursor | `official_credentials_*`, `credentials_owned_*`, retained producer/signer/provision fixtures and `credentials_original_child_inherited_transport`: actual original child and inherited proxy with private synthetic transport, not installed CLI acceptance. Mapping/source admission and continuation remain OPEN |
 | Audit credentials/database/filesystem/nodes | Source-proved fixed native POST, no installed audit invocation | Explicit four-category selection and redacted report/count projection; legitimate native empty array accepted | `audit_projection_accepts_native_no_risk_array_and_denies_unknown_shapes`; instance/default-all denied before HTTP pending external-effect decision, never full-audit success |
+
+**Installed v7 acceptance, 2026-10-15:** release
+`release-20261014-read-parity-4c39cbe7-rc1`, source `4c39cbe7`, signed receipt
+BLAKE3 `66403a8dbd49a7e0fc12873653432b31d2363f9b1bdc5efb7cf9673c7851200a`.
+Primary requests and bounded original public responses are under
+`/srv/dev-ssd/fcp/nqm81-35/execution-metadata-acceptance-20261014-1/autonomous1/v7-acceptance1/`.
+The initial EEC project process succeeded; its capture group stopped on a local
+incorrect `page.limit` expectation. That failed result and `current_after:null`
+remain unchanged. Correct interpretation reused the saved 405-byte response
+SHA256 `408dea94c638c2d18b798fe7f2a553ad74decac701aa9de628989513396495bc`
+without repeating the call. `continuation1/eec-result.json` SHA256
+`78e8580dc852633e48191e033576cf75232eede014b239c1723c4b73320569cf`
+records the remaining five calls; `continuation1/hetzner-result.json` SHA256
+`dd76187a58aad718f49ebf659c41078afb97b10703afc4bbcc3616d7774d6dae`
+records six calls. All twelve actual processes completed known exit0 with group
+absence, joined IO, empty stderr and no retry. Each continuation's current
+before/after agrees and its 24 held installed/tool inputs are preserved; this
+does not retroactively fill the first group's null proof or establish global
+continuous stability. SDK/nodes server binding comes from the fixed request and
+typed host decoder; public results do not expose a `serverId` field. This is
+narrow installed/live acceptance, not global idle, business validity or `.35`
+closure. UBS remains NON_GREEN with its retained scoped dispositions.
+
+The same directory's `local-result.json` SHA256
+`650ce2be736be98728395d1d38ced7b4c3becdd782bf38aff89a10a9eab3924f`
+records three additional network-disabled local knowledge calls, all known
+exit0 with joined IO/group absence, preserved held24 and identical current
+proofs. Full-info original SHA256
+`30ee61f1113bce90e735cd064f15b5438ca98298ad470e80ac573e011f97039f`
+and migration original SHA256
+`ecc7351b8ea817d8a8dfaacee9920f80ee00eb293bdcb32b40e649fa9baede03`
+are retained without claiming remote validation or node execution.
 
 History/rollback (.36), external credential lookup (.39), execution payload (.40)
 and authoring (.42) are not implemented or accepted by this matrix. Existing

@@ -1949,7 +1949,7 @@ mod tests {
                 .code(),
             expected
         );
-        let mut wrong_output = snapshot.clone();
+        let mut wrong_output = snapshot;
         assert_eq!(
             wrong_output
                 .approve_tool("reviewed", ToolClass::Read, &input_digest, "wrong-output")

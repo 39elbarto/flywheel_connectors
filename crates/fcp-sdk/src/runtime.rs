@@ -3381,77 +3381,80 @@ deny_ptrace = true
         ));
         let rendered = format!("{legacy_conflict:?} {legacy_conflict}");
         assert!(!rendered.contains("secret-auth-token"));
-        assert!(!rendered.contains("3"));
+        assert!(!rendered.contains('3'));
     }
 
     #[cfg(all(feature = "connector-http", target_os = "linux"))]
-    #[test]
-    fn host_egress_inherited_client_is_claimed_once_across_clones() {
+    fn serve_claim_once_http_requests(mut peer: std::os::unix::net::UnixStream) {
         use crate::migration::{
             HOST_EGRESS_WIRE_SCHEMA_VERSION, HostEgressWireRequest, HostEgressWireRequestPayload,
             HostEgressWireResponse, HostEgressWireResponseBody, HostEgressWireRoute,
         };
         use std::io::Read;
+        for _ in 0..2 {
+            let mut frame = Vec::new();
+            let mut byte = [0_u8; 1];
+            loop {
+                peer.read_exact(&mut byte).expect("read request frame");
+                if byte[0] == b'\n' {
+                    break;
+                }
+                frame.push(byte[0]);
+            }
+            let request: HostEgressWireRequest =
+                serde_json::from_slice(&frame).expect("decode request frame");
+            assert_eq!(request.route, HostEgressWireRoute::Http);
+            let HostEgressWireRequestPayload::Http(http_request) = request.payload else {
+                panic!("expected HTTP request payload");
+            };
+            let context = http_request.context;
+            let egress = fcp_manifest::HostEgressDecisionMetadata {
+                connector_id: context.connector_id.clone(),
+                operation_id: context.operation_id.clone(),
+                zone_id: context.zone_id.clone(),
+                request_id: context.request_id.clone(),
+                correlation_id: context.correlation_id.clone(),
+                execution_mode: "host_egress_proxy".to_string(),
+                constraint_source: "test".to_string(),
+                decision: "allow".to_string(),
+                resolved_host: "api.example.test".to_string(),
+                resolved_port: 443,
+                credential_injected: false,
+                elapsed_ms: 1,
+            };
+            let response = HostEgressWireResponse {
+                schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
+                request_id: request.request_id,
+                route: HostEgressWireRoute::Http,
+                status: 200,
+                body: Some(HostEgressWireResponseBody::Http(
+                    fcp_manifest::HostEgressHttpResponse {
+                        status: 200,
+                        headers: Vec::new(),
+                        body: fcp_manifest::Base64Bytes::from_vec(b"ok".to_vec()),
+                        egress,
+                    },
+                )),
+                error: None,
+            };
+            let encoded = serde_json::to_vec(&response).expect("encode response frame");
+            peer.write_all(&encoded).expect("write response frame");
+            peer.write_all(b"\n").expect("write response delimiter");
+        }
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn host_egress_inherited_client_is_claimed_once_across_clones() {
         use std::os::fd::IntoRawFd;
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::thread;
 
-        let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
+        let (client_stream, peer) = StdUnixStream::pair().expect("socketpair");
         let raw_fd = client_stream.into_raw_fd();
         fcp_sandbox::prepare_inherited_fd_for_test(raw_fd)
             .expect("clear inherited fixture close-on-exec");
-        let peer_handle = thread::spawn(move || {
-            for _ in 0..2 {
-                let mut frame = Vec::new();
-                let mut byte = [0_u8; 1];
-                loop {
-                    peer.read_exact(&mut byte).expect("read request frame");
-                    if byte[0] == b'\n' {
-                        break;
-                    }
-                    frame.push(byte[0]);
-                }
-                let request: HostEgressWireRequest =
-                    serde_json::from_slice(&frame).expect("decode request frame");
-                assert_eq!(request.route, HostEgressWireRoute::Http);
-                let HostEgressWireRequestPayload::Http(http_request) = request.payload else {
-                    panic!("expected HTTP request payload");
-                };
-                let context = http_request.context;
-                let egress = fcp_manifest::HostEgressDecisionMetadata {
-                    connector_id: context.connector_id.clone(),
-                    operation_id: context.operation_id.clone(),
-                    zone_id: context.zone_id.clone(),
-                    request_id: context.request_id.clone(),
-                    correlation_id: context.correlation_id.clone(),
-                    execution_mode: "host_egress_proxy".to_string(),
-                    constraint_source: "test".to_string(),
-                    decision: "allow".to_string(),
-                    resolved_host: "api.example.test".to_string(),
-                    resolved_port: 443,
-                    credential_injected: false,
-                    elapsed_ms: 1,
-                };
-                let response = HostEgressWireResponse {
-                    schema_version: HOST_EGRESS_WIRE_SCHEMA_VERSION,
-                    request_id: request.request_id,
-                    route: HostEgressWireRoute::Http,
-                    status: 200,
-                    body: Some(HostEgressWireResponseBody::Http(
-                        fcp_manifest::HostEgressHttpResponse {
-                            status: 200,
-                            headers: Vec::new(),
-                            body: fcp_manifest::Base64Bytes::from_vec(b"ok".to_vec()),
-                            egress,
-                        },
-                    )),
-                    error: None,
-                };
-                let encoded = serde_json::to_vec(&response).expect("encode response frame");
-                peer.write_all(&encoded).expect("write response frame");
-                peer.write_all(b"\n").expect("write response delimiter");
-            }
-        });
+        let peer_handle = thread::spawn(move || serve_claim_once_http_requests(peer));
 
         let raw_fd_text = raw_fd.to_string();
         let config = ConnectorRuntimeConfig::default()

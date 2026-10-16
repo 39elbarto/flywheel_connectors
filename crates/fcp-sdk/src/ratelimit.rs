@@ -2710,12 +2710,14 @@ mod tests {
         let before = {
             let pools = tracker.pools.read().expect("healthy pool state");
             let state = pools.get("api").expect("api pool");
-            (
+            let snapshot = (
                 serde_json::to_value(&state.config).expect("pool config"),
                 state.prev_count,
                 state.curr_count,
                 state.window_start,
-            )
+            );
+            drop(pools);
+            snapshot
         };
         let poison_pools = Arc::clone(&tracker.pools);
         assert!(
@@ -2753,8 +2755,11 @@ mod tests {
                 "Rate limit pool lock poisoned; rejecting fail-closed"
             );
         }
-        let poisoned = tracker.pools.read().expect_err("poison remains set");
-        let pools = poisoned.get_ref();
+        let pools = tracker
+            .pools
+            .read()
+            .expect_err("poison remains set")
+            .into_inner();
         assert_eq!(pools.len(), 1);
         let state = pools.get("api").expect("original pool remains");
         assert_eq!(
@@ -2766,6 +2771,7 @@ mod tests {
             ),
             before
         );
+        drop(pools);
         assert_eq!(
             fs::read(&store.path).expect("retained checkpoint"),
             persisted

@@ -3875,7 +3875,7 @@ mod tests {
         assert_eq!(config.sampling.max_tokens_cap, 4096);
     }
 
-    fn policy_params(server_id: &str, approved_tools: serde_json::Value) -> serde_json::Value {
+    fn policy_params(server_id: &str, approved_tools: &serde_json::Value) -> serde_json::Value {
         json!({
             "server_id": server_id,
             "mcp_url": "http://localhost:3000/mcp",
@@ -3934,8 +3934,8 @@ mod tests {
 
     #[test]
     fn capability_policy_parses_provider_identity_and_auth_mode() {
-        let eec = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
-        let hetzner = McpBridgeConfig::from_params(&policy_params("hetzner", json!([]))).unwrap();
+        let eec = McpBridgeConfig::from_params(&policy_params("eec", &json!([]))).unwrap();
+        let hetzner = McpBridgeConfig::from_params(&policy_params("hetzner", &json!([]))).unwrap();
         assert_eq!(
             eec.capability_policy.as_ref().unwrap().server_id,
             ServerId::Eec
@@ -3956,7 +3956,7 @@ mod tests {
 
     #[test]
     fn capability_policy_accepts_direct_api_key_access_token() {
-        let config = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
+        let config = McpBridgeConfig::from_params(&policy_params("eec", &json!([]))).unwrap();
         assert!(config.auth.api_key.is_some());
         assert_eq!(
             config.capability_policy.as_ref().unwrap().auth_mode,
@@ -3966,14 +3966,14 @@ mod tests {
 
     #[test]
     fn capability_policy_rejects_direct_api_key_oauth() {
-        let mut params = policy_params("eec", json!([]));
+        let mut params = policy_params("eec", &json!([]));
         params["capability_policy"]["auth_mode"] = json!("oauth");
         assert!(McpBridgeConfig::from_params(&params).is_err());
     }
 
     #[test]
     fn capability_policy_requires_configured_auth() {
-        let mut params = policy_params("eec", json!([]));
+        let mut params = policy_params("eec", &json!([]));
         params
             .as_object_mut()
             .expect("test parameters object")
@@ -3984,7 +3984,7 @@ mod tests {
     #[test]
     fn capability_policy_accepts_credential_id_with_either_declared_mode() {
         for auth_mode in ["oauth", "access_token"] {
-            let mut params = policy_params("eec", json!([]));
+            let mut params = policy_params("eec", &json!([]));
             let object = params.as_object_mut().expect("test parameters object");
             object.remove("api_key");
             object.insert(
@@ -4001,18 +4001,18 @@ mod tests {
 
     #[test]
     fn capability_policy_rejects_unsupported_identity_and_malformed_values() {
-        assert!(McpBridgeConfig::from_params(&policy_params("mcp-test", json!([]))).is_err());
-        let mut invalid_auth = policy_params("eec", json!([]));
+        assert!(McpBridgeConfig::from_params(&policy_params("mcp-test", &json!([]))).is_err());
+        let mut invalid_auth = policy_params("eec", &json!([]));
         invalid_auth["capability_policy"]["auth_mode"] = json!("bearer");
         assert!(McpBridgeConfig::from_params(&invalid_auth).is_err());
         let invalid_class = policy_params(
             "eec",
-            json!([policy_tool("read", "unknown", "input", "output")]),
+            &json!([policy_tool("read", "unknown", "input", "output")]),
         );
         assert!(McpBridgeConfig::from_params(&invalid_class).is_err());
         let duplicate = policy_params(
             "eec",
-            json!([
+            &json!([
                 policy_tool("read", "read", "input", "output"),
                 policy_tool("read", "read", "input", "output")
             ]),
@@ -4020,7 +4020,7 @@ mod tests {
         assert!(McpBridgeConfig::from_params(&duplicate).is_err());
         let oversized = policy_params(
             "eec",
-            serde_json::Value::Array(
+            &serde_json::Value::Array(
                 (0..=MAX_TOOL_COUNT)
                     .map(|index| policy_tool(&format!("tool-{index}"), "read", "input", "output"))
                     .collect(),
@@ -4036,7 +4036,7 @@ mod tests {
         let output_digest =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let archive = policy_tool("archive_workflow", "write", input_digest, output_digest);
-        let mut valid = policy_params("eec", json!([archive.clone()]));
+        let mut valid = policy_params("eec", &json!([archive]));
         valid["capability_policy"]["archive_workflow_schema"] = json!({
             "input_schema_digest": input_digest,
             "output_schema_digest": output_digest,
@@ -4050,7 +4050,7 @@ mod tests {
         assert_eq!(binding.input_schema_digest, input_digest);
         assert_eq!(binding.output_schema_digest, output_digest);
 
-        let missing = policy_params("eec", json!([archive.clone()]));
+        let missing = policy_params("eec", &json!([archive]));
         assert!(McpBridgeConfig::from_params(&missing).is_err());
 
         let mut mismatched = valid;
@@ -4073,7 +4073,7 @@ mod tests {
         let output_digest =
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let execute = policy_tool("execute_workflow", "write", input_digest, output_digest);
-        let mut valid = policy_params("eec", json!([execute.clone()]));
+        let mut valid = policy_params("eec", &json!([execute]));
         valid["capability_policy"]["execute_workflow_schema"] = json!({
             "status": "owner_provisioned",
             "input_schema_digest": input_digest,
@@ -4089,7 +4089,7 @@ mod tests {
         assert_eq!(binding.input_schema_digest.as_deref(), Some(input_digest));
         assert_eq!(binding.output_schema_digest.as_deref(), Some(output_digest));
 
-        let missing = policy_params("eec", json!([execute.clone()]));
+        let missing = policy_params("eec", &json!([execute]));
         assert!(McpBridgeConfig::from_params(&missing).is_err());
 
         let mut mismatched = valid;
@@ -4097,7 +4097,7 @@ mod tests {
             json!("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
         assert!(McpBridgeConfig::from_params(&mismatched).is_err());
 
-        let mut sentinel = policy_params("eec", json!([]));
+        let mut sentinel = policy_params("eec", &json!([]));
         sentinel["capability_policy"]["execute_workflow_schema"] = json!({
             "status": "unavailable_unproven_schema",
             "input_schema_digest": null,
@@ -4123,7 +4123,7 @@ mod tests {
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         );
-        let mut params = policy_params("eec", json!([execute]));
+        let mut params = policy_params("eec", &json!([execute]));
         params["capability_policy"]["execute_workflow_schema"] = json!({
             "status": "unavailable_unproven_schema",
             "input_schema_digest": null,
@@ -4143,7 +4143,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let params = policy_params("eec", json!([approved]));
+        let params = policy_params("eec", &json!([approved]));
         let config = McpBridgeConfig::from_params(&params).unwrap();
         let policy = config.capability_policy.as_ref().unwrap();
         let mut changed_input = input;
@@ -4232,7 +4232,7 @@ mod tests {
         let (input_digest, output_digest) = schema_digests(&input_schema, &output_schema);
         let config = McpBridgeConfig::from_params(&policy_params(
             "eec",
-            json!([policy_tool(
+            &json!([policy_tool(
                 "approved",
                 "read",
                 &input_digest,
@@ -4281,7 +4281,7 @@ mod tests {
             schema_digests(&original_input, &serde_json::Value::Null);
         let config = McpBridgeConfig::from_params(&policy_params(
             "eec",
-            json!([policy_tool(
+            &json!([policy_tool(
                 "approved",
                 "write",
                 &input_digest,
@@ -4314,7 +4314,7 @@ mod tests {
         let output_schema = json!({"type": "object", "required": ["archived"]});
         let (input_digest, output_digest) = schema_digests(&input_schema, &output_schema);
         let archive = policy_tool("archive_workflow", "write", &input_digest, &output_digest);
-        let mut params = policy_params("eec", json!([archive]));
+        let mut params = policy_params("eec", &json!([archive]));
         params["capability_policy"]["archive_workflow_schema"] = json!({
             "input_schema_digest": input_digest,
             "output_schema_digest": output_digest,
@@ -4354,7 +4354,7 @@ mod tests {
 
     #[test]
     fn capability_snapshot_rejects_duplicate_and_malformed_catalogs() {
-        let config = McpBridgeConfig::from_params(&policy_params("eec", json!([]))).unwrap();
+        let config = McpBridgeConfig::from_params(&policy_params("eec", &json!([]))).unwrap();
         let policy = config.capability_policy.as_ref().unwrap();
         assert!(
             build_capability_snapshot(
@@ -4402,7 +4402,7 @@ mod tests {
 
         let mut configured = McpBridgeConnector::new();
         configured
-            .handle_configure(policy_params("eec", json!([])))
+            .handle_configure(policy_params("eec", &json!([])))
             .await
             .unwrap();
         let conditional = configured
@@ -4422,7 +4422,7 @@ mod tests {
     async fn shutdown_clears_capability_policy_and_client_state() {
         let mut connector = McpBridgeConnector::new();
         connector
-            .handle_configure(policy_params("eec", json!([])))
+            .handle_configure(policy_params("eec", &json!([])))
             .await
             .unwrap();
         assert!(

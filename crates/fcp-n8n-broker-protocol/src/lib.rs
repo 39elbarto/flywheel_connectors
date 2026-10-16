@@ -828,7 +828,7 @@ mod tests {
             )
             .expect("response");
         assert_eq!(transport.deadline, Some(deadline));
-        assert_eq!(parsed.with_bytes(|bytes| bytes.to_vec()), b"key");
+        assert_eq!(parsed.with_bytes(<[u8]>::to_vec), b"key");
         assert_eq!(
             verify_broker_peer_uid(1)
                 .expect_err("untrusted peer")

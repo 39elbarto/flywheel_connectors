@@ -188,17 +188,15 @@ mod tests {
     fn round_trip_requires_exact_eof() {
         let secret = ZeroizingSecret::with_zeroize_drop(b"api-key".to_vec());
         let frame = encode(&secret).expect("encode");
-        let bytes = frame.with_bytes(|bytes| bytes.to_vec());
+        let bytes = frame.with_bytes(<[u8]>::to_vec);
         assert_eq!(
-            parse(&bytes)
-                .expect("parse")
-                .with_bytes(|bytes| bytes.to_vec()),
+            parse(&bytes).expect("parse").with_bytes(<[u8]>::to_vec),
             b"api-key"
         );
         assert_eq!(
             read(&mut Cursor::new(bytes))
                 .expect("read")
-                .with_bytes(|bytes| bytes.to_vec()),
+                .with_bytes(<[u8]>::to_vec),
             b"api-key"
         );
     }
@@ -207,11 +205,10 @@ mod tests {
     fn rejects_trailing_and_invalid_material() {
         let secret = ZeroizingSecret::with_zeroize_drop(b"api-key".to_vec());
         let frame = encode(&secret).expect("encode");
-        let mut bytes = frame.with_bytes(|bytes| bytes.to_vec());
+        let mut bytes = frame.with_bytes(<[u8]>::to_vec);
         bytes.push(b'x');
-        let error = match parse(&bytes) {
-            Err(error) => error,
-            Ok(_) => panic!("trailing frame accepted"),
+        let Err(error) = parse(&bytes) else {
+            panic!("trailing frame accepted");
         };
         assert_eq!(error, CredentialFrameError::TrailingData);
         assert_eq!(

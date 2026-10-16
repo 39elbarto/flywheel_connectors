@@ -2180,7 +2180,7 @@ mod tests {
             HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::RequestIdExhausted)
         ));
         let second = fcp_async_core::runtime::block_on_sync(
-            channel.exchange(request.route, request.payload.clone()),
+            channel.exchange(request.route, request.payload),
         )
         .expect("runtime layer")
         .expect_err("request-id exhaustion must poison the channel");
@@ -2277,9 +2277,8 @@ mod tests {
 
     #[cfg(all(feature = "connector-http", target_os = "linux"))]
     #[test]
-    fn inherited_fd_channel_poisoning_and_fd_validation_are_deterministic() {
+    fn inherited_fd_channel_malformed_response_poisoning_is_deterministic() {
         use std::io::Write;
-        use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream as StdUnixStream;
         use std::thread;
 
@@ -2322,6 +2321,14 @@ mod tests {
             ));
             handle.join().expect("wire peer thread");
         }
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_channel_rejects_wrong_response_id() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::thread;
 
         let request = fcp_manifest::HostEgressHttpRequest {
             context: br_b0qqv_host_egress_context("messages.create", "req-wire-bounds"),
@@ -2357,11 +2364,27 @@ mod tests {
             HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Validation)
         ));
         handle.join().expect("wire peer thread");
+    }
 
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_channel_rejects_oversized_and_timed_out_responses() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream as StdUnixStream;
+        use std::thread;
+
+        let request = fcp_manifest::HostEgressHttpRequest {
+            context: br_b0qqv_host_egress_context("messages.create", "req-wire-bounds"),
+            url: "https://api.example.test".to_string(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: None,
+            credential_id: None,
+        };
         let (client_stream, mut peer) = StdUnixStream::pair().expect("socketpair");
         let handle = thread::spawn(move || {
             let _ = read_wire_test_frame(&mut peer);
-            let _ = peer.write_all(&vec![b'x'; 65]);
+            let _ = peer.write_all(&[b'x'; 65]);
             let _ = peer.write_all(b"\n");
         });
         let client = HostEgressProxyClient::from_inherited_fd(
@@ -2404,6 +2427,13 @@ mod tests {
             HostEgressProxyError::InheritedChannelStage(InheritedChannelStage::Timeout)
         ));
         handle.join().expect("wire peer thread");
+    }
+
+    #[cfg(all(feature = "connector-http", target_os = "linux"))]
+    #[test]
+    fn inherited_fd_validation_rejects_closed_and_non_unix_stream_descriptors() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream as StdUnixStream;
 
         let (closed, peer) = StdUnixStream::pair().expect("socketpair");
         let closed_fd = closed.as_raw_fd();

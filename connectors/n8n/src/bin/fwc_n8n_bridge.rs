@@ -1182,7 +1182,7 @@ pub fn run_process(
 
 #[cfg(target_os = "linux")]
 fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
-    // Provider outcomes retain priority. Owned egress stages replace only a
+    // Provider outcomes retain priority. Owned runtime/egress stages replace only a
     // generic host fallback; specific host details keep their prior precedence.
     let owned_egress_stage = stderr
         .split(|byte| *byte == b'\n')
@@ -1190,6 +1190,13 @@ fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
         .filter(|label| label.starts_with("owned.egress_stage."));
     let host_error = child_host_error_diagnostic(stderr);
     let host_error_detail = child_host_error_detail(stderr);
+    let owned_runtime_state_stage = stderr.split(|byte| *byte == b'\n').find_map(|line| {
+        child_owned_diagnostic_label(line)
+            .and_then(|label| owned_runtime_state_diagnostic(Some(label)))
+    });
+    let generic_runtime_state_fallback = owned_runtime_state_stage.is_some()
+        && host_error_detail == Some("host.other")
+        && host_error.is_none_or(generic_runtime_state_diagnostic);
     let generic_host_fallback = (host_error.is_none() || host_error == Some("local.policy_denied"))
         && (host_error_detail.is_none() || host_error_detail == Some("policy.network"));
     child_invoke_diagnostic(stderr)
@@ -1197,9 +1204,11 @@ fn child_primary_diagnostic(stderr: &[u8]) -> Option<&'static str> {
         .or_else(|| child_external_provenance_diagnostic(stderr))
         .or_else(|| child_mcp_rpc_provenance(stderr).map(|provenance| provenance.label))
         .or_else(|| {
-            if generic_host_fallback {
+            if generic_runtime_state_fallback {
+                owned_runtime_state_stage
+            } else if generic_host_fallback {
                 owned_egress_stage.or(host_error).or(host_error_detail)
-            } else if owned_egress_stage.is_some()
+            } else if (owned_egress_stage.is_some() || owned_runtime_state_stage.is_some())
                 && host_error == Some("local.policy_denied")
                 && host_error_detail.is_some_and(|detail| detail != "policy.network")
             {
@@ -1225,6 +1234,19 @@ fn generic_child_diagnostic(diagnostic: &str) -> bool {
 }
 
 #[cfg(target_os = "linux")]
+fn generic_runtime_state_diagnostic(diagnostic: &str) -> bool {
+    generic_child_diagnostic(diagnostic)
+        || matches!(
+            diagnostic,
+            "local.validation"
+                | "internal.registry"
+                | "internal.cache"
+                | "internal.runtime"
+                | "host.other"
+        )
+}
+
+#[cfg(target_os = "linux")]
 pub fn child_failure_with_stderr(
     stdout: &[u8],
     stderr: &[u8],
@@ -1232,15 +1254,26 @@ pub fn child_failure_with_stderr(
 ) -> BridgeError {
     let error = child_failure(stdout);
     let stderr_diagnostic = child_primary_diagnostic(stderr);
+    let runtime_state_stage_observed = stderr.split(|byte| *byte == b'\n').any(|line| {
+        child_owned_diagnostic_label(line)
+            .and_then(|label| owned_runtime_state_diagnostic(Some(label)))
+            .is_some()
+    });
     let fallback_diagnostic = match prior_diagnostic {
-        Some(existing) if generic_child_diagnostic(existing) => {
+        Some(existing)
+            if generic_child_diagnostic(existing)
+                || (runtime_state_stage_observed && generic_runtime_state_diagnostic(existing)) =>
+        {
             stderr_diagnostic.or(Some(existing))
         }
         Some(existing) => Some(existing),
         None => stderr_diagnostic,
     };
     let diagnostic = match error.diagnostic() {
-        Some(existing) if generic_child_diagnostic(existing) => {
+        Some(existing)
+            if generic_child_diagnostic(existing)
+                || (runtime_state_stage_observed && generic_runtime_state_diagnostic(existing)) =>
+        {
             fallback_diagnostic.or(Some(existing))
         }
         existing => existing.or(fallback_diagnostic),
@@ -1562,6 +1595,13 @@ fn child_owned_diagnostics(stderr: &[u8]) -> Vec<&'static str> {
 
 #[cfg(target_os = "linux")]
 fn child_owned_diagnostic_label(line: &[u8]) -> Option<&'static str> {
+    if let Some(label) = line
+        .strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)
+        .and_then(|label| std::str::from_utf8(label).ok())
+        .and_then(|label| owned_runtime_state_diagnostic(Some(label)))
+    {
+        return Some(label);
+    }
     let label = line.strip_prefix(CHILD_OWNED_DIAGNOSTIC_PREFIX)?;
     match label {
         b"owned.setup" => Some("owned.setup"),
@@ -2158,6 +2198,26 @@ const SAFE_ERROR_DIAGNOSTICS: &[&str] = &[
     "child.unknown",
 ];
 
+pub fn owned_runtime_state_diagnostic(value: Option<&str>) -> Option<&'static str> {
+    const LABELS: &[&str] = &[
+        "owned.runtime_state.connector.lifecycle_policy",
+        "owned.runtime_state.connector.prewarm_policy",
+        "owned.runtime_state.connector.network_policy",
+        "owned.runtime_state.connector.manifest",
+        "owned.runtime_state.connector.hrw_config",
+        "owned.runtime_state.connector.hrw_route",
+        "owned.runtime_state.connector.runtime",
+        "owned.runtime_state.connector_registry",
+        "owned.runtime_state.self_check_config",
+        "owned.runtime_state.admin_state_load",
+        "owned.runtime_state.admin_state_reconcile",
+        "owned.runtime_state.supply_chain_config",
+        "owned.runtime_state.owner_verifier_config",
+        "owned.runtime_state.admin_bearer_token",
+    ];
+    value.and_then(|value| LABELS.iter().copied().find(|allowed| *allowed == value))
+}
+
 #[cfg(target_os = "linux")]
 fn safe_error_diagnostic(value: Option<&str>) -> Option<&'static str> {
     value.and_then(|value| {
@@ -2165,6 +2225,7 @@ fn safe_error_diagnostic(value: Option<&str>) -> Option<&'static str> {
             .iter()
             .copied()
             .find(|allowed| *allowed == value)
+            .or_else(|| owned_runtime_state_diagnostic(Some(value)))
     })
 }
 
@@ -3290,6 +3351,103 @@ mod tests {
         ] {
             assert!(child_owned_diagnostics(stderr).is_empty());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn owned_runtime_state_stage_preserves_specific_failures_and_redaction() {
+        let stage = "owned.runtime_state.connector.manifest";
+        let owned = format!(
+            "FCP-N8N-OWNED-DIAGNOSTIC/v1 owned.setup\nFCP-N8N-OWNED-DIAGNOSTIC/v1 {stage}\n"
+        );
+        for class in [
+            "local.validation",
+            "internal.registry",
+            "internal.cache",
+            "internal.runtime",
+            "local.policy_denied",
+        ] {
+            let stderr = format!(
+                "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 {class}\nFCP-N8N-HOST-ERROR-DETAIL/v1 host.other\n{owned}"
+            );
+            let stdout = format!(
+                r#"{{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_runtime_state_failed","diagnostic":"{class}"}}"#
+            );
+            assert_eq!(child_primary_diagnostic(stderr.as_bytes()), Some(stage));
+            assert_eq!(
+                child_failure_with_stderr(stdout.as_bytes(), stderr.as_bytes(), None).diagnostic(),
+                Some(stage)
+            );
+        }
+        for (prefix, label) in [
+            ("FCP-N8N-INVOKE-DIAGNOSTIC/v1 ", "response_external_5xx"),
+            (
+                "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ",
+                "local.capability_denied",
+            ),
+            (
+                "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 ",
+                "transport.host_connector",
+            ),
+            ("FCP-N8N-HOST-ERROR-DETAIL/v1 ", "policy.approval"),
+        ] {
+            let stderr = format!("{prefix}{label}\n{owned}");
+            assert_eq!(child_primary_diagnostic(stderr.as_bytes()), Some(label));
+        }
+        for invalid in [
+            "owned.runtime_state.connector.manifest_PRIVATE",
+            "owned.runtime_state.connector.manifest PRIVATE",
+            "owned.runtime_state.unknown",
+        ] {
+            assert_eq!(owned_runtime_state_diagnostic(Some(invalid)), None);
+            assert_eq!(
+                child_owned_diagnostic_label(
+                    format!("FCP-N8N-OWNED-DIAGNOSTIC/v1 {invalid}").as_bytes()
+                ),
+                None
+            );
+        }
+
+        let generic_stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_runtime_state_failed","diagnostic":"internal.runtime"}"#;
+        let runtime_stderr = format!("FCP-N8N-HOST-ERROR-DETAIL/v1 host.other\n{owned}");
+        for (prior, expected) in [
+            ("internal.registry", stage),
+            ("invoke_unknown", stage),
+            ("policy.approval", "policy.approval"),
+            ("local.capability_denied", "local.capability_denied"),
+        ] {
+            assert_eq!(
+                child_failure_with_stderr(generic_stdout, runtime_stderr.as_bytes(), Some(prior))
+                    .diagnostic(),
+                Some(expected)
+            );
+        }
+        let mcp = format!(
+            "{owned}FCP-N8N-EXTERNAL-PROVENANCE-DIAGNOSTIC/v1 external.mcp.execute_call_jsonrpc_error rpc_code=-32017\n"
+        );
+        let merged = child_failure_with_stderr(generic_stdout, mcp.as_bytes(), None);
+        assert_eq!(
+            merged.diagnostic(),
+            Some("external.mcp.execute_call_jsonrpc_error")
+        );
+        assert_eq!(merged.rpc_phase(), Some("execute_call"));
+        assert_eq!(merged.rpc_code(), Some(-32017));
+        let specific_stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_runtime_state_failed","diagnostic":"policy.approval"}"#;
+        assert_eq!(
+            child_failure_with_stderr(
+                specific_stdout,
+                runtime_stderr.as_bytes(),
+                Some("internal.registry")
+            )
+            .diagnostic(),
+            Some("policy.approval")
+        );
+        let no_runtime = b"FCP-N8N-HOST-ERROR-DETAIL/v1 host.other\n";
+        assert_eq!(
+            child_failure_with_stderr(generic_stdout, no_runtime, Some("policy.approval"))
+                .diagnostic(),
+            Some("internal.runtime")
+        );
     }
 
     #[cfg(target_os = "linux")]

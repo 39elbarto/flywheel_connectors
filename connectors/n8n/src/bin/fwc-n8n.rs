@@ -4391,6 +4391,7 @@ fn map_host_bridge_error(error: fwc_n8n_bridge::BridgeError, lifecycle: bool) ->
             .flatten()
     } else {
         owned_egress_stage_diagnostic(error.diagnostic())
+            .or_else(|| fwc_n8n_bridge::owned_runtime_state_diagnostic(error.diagnostic()))
     };
     AppError::with_diagnostic(code, diagnostic)
         .with_rpc_provenance(error.diagnostic(), error.rpc_phase(), error.rpc_code())
@@ -4519,6 +4520,7 @@ fn error_envelope_diagnostic(value: Option<&str>) -> Option<&'static str> {
             .iter()
             .copied()
             .find(|allowed| *allowed == value)
+            .or_else(|| fwc_n8n_bridge::owned_runtime_state_diagnostic(Some(value)))
     })
 }
 
@@ -13880,6 +13882,27 @@ mod tests {
             parsed.diagnostic,
             Some("owned.egress_stage.response_body_read")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn runtime_state_stage_reaches_typed_rest_error_and_redacts_text() {
+        let stdout = br#"{"schema":"fwc.n8n.error.v1","status":"error","code":"host_n8n_runtime_state_failed","diagnostic":"local.validation"}"#;
+        let stage = "owned.runtime_state.connector.manifest";
+        let stderr = format!(
+            "FCP-N8N-HOST-ERROR-DIAGNOSTIC/v1 local.validation\nFCP-N8N-HOST-ERROR-DETAIL/v1 host.other\nFCP-N8N-OWNED-DIAGNOSTIC/v1 {stage}\nFCP-N8N-OWNED-DIAGNOSTIC/v1 {stage}_PRIVATE\nPRIVATE-RUNTIME-STATE-DETAIL\n"
+        );
+        let error = fwc_n8n_bridge::child_failure_with_stderr(stdout, stderr.as_bytes(), None);
+        assert_eq!(error.code(), "host_n8n_runtime_state_failed");
+        let mapped = map_host_bridge_error(error, false);
+        let emitted = error_envelope(&mapped, "00000000-0000-4000-8000-000000000003");
+        let encoded = serde_json::to_string(&emitted).expect("error envelope");
+        assert!(!encoded.contains("PRIVATE"));
+        let response = serde_json::from_str(&encoded).expect("encoded error JSON");
+        let parsed =
+            response_result(response, "unknown_outcome").expect_err("failure remains failure");
+        assert_eq!(parsed.code, "unknown_outcome");
+        assert_eq!(parsed.diagnostic, Some(stage));
     }
 
     #[test]

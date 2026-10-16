@@ -1214,7 +1214,7 @@ mod tests {
         }
     }
 
-    fn rpc_response(status: u16, id: u64, result: serde_json::Value) -> ResponseTemplate {
+    fn rpc_response(status: u16, id: u64, result: &serde_json::Value) -> ResponseTemplate {
         ResponseTemplate::new(status).set_body_json(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -1226,7 +1226,7 @@ mod tests {
         let mut response = rpc_response(
             200,
             id,
-            json!({
+            &json!({
                 "protocolVersion": "2025-11-25",
                 "serverInfo": {"name": "wiremock", "version": "1"},
                 "capabilities": {"tools": {}}
@@ -1818,7 +1818,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn wiremock_modern_success_is_one_stateless_post() {
         let server = MockServer::start().await;
-        mount_sequence(&server, vec![rpc_response(200, 1, json!({"tools": []}))]).await;
+        mount_sequence(&server, vec![rpc_response(200, 1, &json!({"tools": []}))]).await;
         let client = loopback_client(&server);
 
         let result = client.rpc_call("tools/list", json!({})).await.unwrap();
@@ -1847,7 +1847,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn wiremock_modern_tools_call_has_exact_metadata_and_headers() {
         let server = MockServer::start().await;
-        mount_sequence(&server, vec![rpc_response(200, 1, json!({"ok": true}))]).await;
+        mount_sequence(&server, vec![rpc_response(200, 1, &json!({"ok": true}))]).await;
         let client = loopback_client(&server);
 
         let result = client
@@ -1888,7 +1888,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn wiremock_tools_call_sentinel_name_is_exactly_encoded() {
         let server = MockServer::start().await;
-        mount_sequence(&server, vec![rpc_response(200, 1, json!({"ok": true}))]).await;
+        mount_sequence(&server, vec![rpc_response(200, 1, &json!({"ok": true}))]).await;
         let client = loopback_client(&server);
         let name = "=?base64?YWJj?=";
 
@@ -1912,8 +1912,8 @@ mod tests {
                 ResponseTemplate::new(400).set_body_string("legacy server"),
                 initialize_response(2, Some("session-a")),
                 ResponseTemplate::new(202),
-                rpc_response(200, 4, json!({"tools": []})),
-                rpc_response(200, 5, json!({"ok": true})),
+                rpc_response(200, 4, &json!({"tools": []})),
+                rpc_response(200, 5, &json!({"ok": true})),
             ],
         )
         .await;
@@ -1960,7 +1960,7 @@ mod tests {
                 ResponseTemplate::new(400).set_body_string("legacy server"),
                 initialize_response(2, Some("session-a")),
                 ResponseTemplate::new(202),
-                rpc_response(200, 4, json!({"tools": []})),
+                rpc_response(200, 4, &json!({"tools": []})),
                 ResponseTemplate::new(404),
             ],
         )
@@ -2004,8 +2004,8 @@ mod tests {
         mount_sequence(
             &server,
             vec![
-                rpc_response(200, 1, json!({"tools": []})).set_delay(Duration::from_millis(250)),
-                rpc_response(200, 2, json!({"tools": []})),
+                rpc_response(200, 1, &json!({"tools": []})).set_delay(Duration::from_millis(250)),
+                rpc_response(200, 2, &json!({"tools": []})),
             ],
         )
         .await;
@@ -2110,8 +2110,8 @@ mod tests {
                 ResponseTemplate::new(400).set_body_string("legacy server"),
                 initialize_response(2, Some("session-a")),
                 ResponseTemplate::new(202),
-                rpc_response(200, 4, json!({"ok": true})),
-                rpc_response(200, 5, json!({"ok": true})),
+                rpc_response(200, 4, &json!({"ok": true})),
+                rpc_response(200, 5, &json!({"ok": true})),
             ],
         )
         .await;
@@ -2181,7 +2181,7 @@ mod tests {
                 ResponseTemplate::new(400).set_body_string("legacy server"),
                 initialize_response(2, Some("session-a")),
                 ResponseTemplate::new(202),
-                rpc_response(200, 4, json!({"ok": true})),
+                rpc_response(200, 4, &json!({"ok": true})),
                 ResponseTemplate::new(404),
                 initialize_response(6, Some("session-b")),
                 ResponseTemplate::new(202),
@@ -2302,7 +2302,7 @@ mod tests {
                 ResponseTemplate::new(400).set_body_string("legacy server"),
                 initialize_sse_response(2, Some("session-a")),
                 ResponseTemplate::new(202),
-                rpc_response(200, 4, json!({"tools": []})),
+                rpc_response(200, 4, &json!({"tools": []})),
             ],
         )
         .await;

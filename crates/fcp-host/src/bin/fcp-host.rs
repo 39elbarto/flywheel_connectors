@@ -2738,28 +2738,52 @@ async fn build_registry_entry(
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
 ) -> HostResult<RegistryEntry> {
-    validate_connector_lifecycle_policy(&config)?;
-    validate_production_prewarm_policy(&config)?;
+    validate_connector_lifecycle_policy(&config).inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(
+            N8nRunOnceRuntimeStateStage::ConnectorLifecyclePolicy,
+        );
+    })?;
+    validate_production_prewarm_policy(&config).inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorPrewarmPolicy);
+    })?;
     validate_runtime_network_claim(
         &config.id,
         config.runtime_network_enforcement,
         &config.allowed_operations,
         &config.operation_network_constraints,
         config.config.as_ref(),
-    )?;
-    let manifest_constraints = load_manifest_operation_constraints(&config)?;
-    let hrw_routing = current_hrw_lease_routing_config()?;
-    enforce_hrw_singleton_writer_launch_route(&config, hrw_routing.as_ref())?;
+    )
+    .inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorNetworkPolicy);
+    })?;
+    let manifest_constraints = load_manifest_operation_constraints(&config).inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorManifest);
+    })?;
+    let hrw_routing = current_hrw_lease_routing_config().inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorHrwConfig);
+    })?;
+    enforce_hrw_singleton_writer_launch_route(&config, hrw_routing.as_ref()).inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorHrwRoute);
+    })?;
     let connector = match config.lifecycle_mode {
         ConnectorLifecycleMode::Persistent => {
-            ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key).await?
+            ConnectorRuntime::spawn(config.clone(), resilience, capability_verifying_key)
+                .await
+                .inspect_err(|_| {
+                    emit_n8n_run_once_runtime_state_stage(
+                        N8nRunOnceRuntimeStateStage::ConnectorRuntime,
+                    );
+                })?
         }
         ConnectorLifecycleMode::PerInvocation => ConnectorRuntime::metadata_only(
             config.clone(),
             resilience,
             capability_verifying_key,
             &manifest_constraints,
-        )?,
+        )
+        .inspect_err(|_| {
+            emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorRuntime);
+        })?,
     };
     Ok(RegistryEntry {
         config,
@@ -16644,6 +16668,54 @@ enum N8nRunOnceOwnedEgressStage {
     ResponseBodyRead,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum N8nRunOnceRuntimeStateStage {
+    ConnectorLifecyclePolicy,
+    ConnectorPrewarmPolicy,
+    ConnectorNetworkPolicy,
+    ConnectorManifest,
+    ConnectorHrwConfig,
+    ConnectorHrwRoute,
+    ConnectorRuntime,
+    ConnectorRegistry,
+    SelfCheckConfig,
+    AdminStateLoad,
+    AdminStateReconcile,
+    SupplyChainConfig,
+    OwnerVerifierConfig,
+    AdminBearerToken,
+}
+
+impl N8nRunOnceRuntimeStateStage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ConnectorLifecyclePolicy => "owned.runtime_state.connector.lifecycle_policy",
+            Self::ConnectorPrewarmPolicy => "owned.runtime_state.connector.prewarm_policy",
+            Self::ConnectorNetworkPolicy => "owned.runtime_state.connector.network_policy",
+            Self::ConnectorManifest => "owned.runtime_state.connector.manifest",
+            Self::ConnectorHrwConfig => "owned.runtime_state.connector.hrw_config",
+            Self::ConnectorHrwRoute => "owned.runtime_state.connector.hrw_route",
+            Self::ConnectorRuntime => "owned.runtime_state.connector.runtime",
+            Self::ConnectorRegistry => "owned.runtime_state.connector_registry",
+            Self::SelfCheckConfig => "owned.runtime_state.self_check_config",
+            Self::AdminStateLoad => "owned.runtime_state.admin_state_load",
+            Self::AdminStateReconcile => "owned.runtime_state.admin_state_reconcile",
+            Self::SupplyChainConfig => "owned.runtime_state.supply_chain_config",
+            Self::OwnerVerifierConfig => "owned.runtime_state.owner_verifier_config",
+            Self::AdminBearerToken => "owned.runtime_state.admin_bearer_token",
+        }
+    }
+}
+
+fn emit_n8n_run_once_runtime_state_stage(stage: N8nRunOnceRuntimeStateStage) {
+    #[cfg(target_os = "linux")]
+    if FIXED_READ_ONLY_LANDLOCK_ACTIVE.load(Ordering::Acquire) {
+        eprintln!("{N8N_RUN_ONCE_OWNED_DIAGNOSTIC_PREFIX}{}", stage.label());
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = stage.label();
+}
+
 #[cfg(target_os = "linux")]
 impl N8nRunOnceOwnedEgressStage {
     const fn label(self) -> &'static str {
@@ -18634,9 +18706,14 @@ async fn build_app_state(
                 .as_ref()
                 .map(Ed25519VerifyingKey::to_bytes),
         )
-        .await?,
+        .await
+        .inspect_err(|_| {
+            emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::ConnectorRegistry);
+        })?,
     );
-    let doctor = match resolve_self_check_timeout()? {
+    let doctor = match resolve_self_check_timeout().inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::SelfCheckConfig);
+    })? {
         Some(timeout) => DoctorService::with_timeout(Arc::clone(&registry), timeout),
         None => DoctorService::new(Arc::clone(&registry)),
     };
@@ -18645,11 +18722,16 @@ async fn build_app_state(
         Arc::clone(&registry),
         Arc::clone(&budget),
     ));
-    let lifecycle = Arc::new(HostAdminStateStore::from_env()?);
+    let lifecycle = Arc::new(HostAdminStateStore::from_env().inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::AdminStateLoad);
+    })?);
     let startup_inventory = registry.list().await;
     let startup_reconciliation = lifecycle
         .reconcile_registered_connectors(&startup_inventory)
         .await
+        .inspect_err(|_| {
+            emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::AdminStateReconcile);
+        })
         .map_err(map_lifecycle_host_error)?;
     log_startup_reconciliation(&startup_reconciliation);
     let rollout = Arc::new(RolloutController::new(
@@ -18657,9 +18739,13 @@ async fn build_app_state(
         Arc::clone(&lifecycle),
     ));
     let supply_chain = Arc::new(SupplyChainGate::with_config(
-        resolve_supply_chain_gate_config()?,
+        resolve_supply_chain_gate_config().inspect_err(|_| {
+            emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::SupplyChainConfig);
+        })?,
     ));
-    let hybrid_owner_verifier = resolve_hybrid_owner_production_verifier()?;
+    let hybrid_owner_verifier = resolve_hybrid_owner_production_verifier().inspect_err(|_| {
+        emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::OwnerVerifierConfig);
+    })?;
     let cancellation = Arc::new(CancellationController::new());
     Ok(Arc::new(AppState {
         registry,
@@ -18675,7 +18761,9 @@ async fn build_app_state(
         revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
         hybrid_owner_verifier,
         approval_verifying_key,
-        admin_bearer_token: resolve_admin_bearer_token()?,
+        admin_bearer_token: resolve_admin_bearer_token().inspect_err(|_| {
+            emit_n8n_run_once_runtime_state_stage(N8nRunOnceRuntimeStateStage::AdminBearerToken);
+        })?,
         connectors_file: loaded_configs.connectors_file,
         zone_policies: Arc::new(RwLock::new(zone_policies)),
         telemetry_config,
@@ -41465,6 +41553,38 @@ print(json.dumps(produced))
             for forbidden in forbidden_content {
                 assert!(!stage.label().contains(forbidden));
             }
+        }
+    }
+
+    #[test]
+    fn n8n_run_once_runtime_state_labels_are_finite_and_redacted() {
+        let stages = [
+            N8nRunOnceRuntimeStateStage::ConnectorLifecyclePolicy,
+            N8nRunOnceRuntimeStateStage::ConnectorPrewarmPolicy,
+            N8nRunOnceRuntimeStateStage::ConnectorNetworkPolicy,
+            N8nRunOnceRuntimeStateStage::ConnectorManifest,
+            N8nRunOnceRuntimeStateStage::ConnectorHrwConfig,
+            N8nRunOnceRuntimeStateStage::ConnectorHrwRoute,
+            N8nRunOnceRuntimeStateStage::ConnectorRuntime,
+            N8nRunOnceRuntimeStateStage::ConnectorRegistry,
+            N8nRunOnceRuntimeStateStage::SelfCheckConfig,
+            N8nRunOnceRuntimeStateStage::AdminStateLoad,
+            N8nRunOnceRuntimeStateStage::AdminStateReconcile,
+            N8nRunOnceRuntimeStateStage::SupplyChainConfig,
+            N8nRunOnceRuntimeStateStage::OwnerVerifierConfig,
+            N8nRunOnceRuntimeStateStage::AdminBearerToken,
+        ];
+        let labels: std::collections::HashSet<_> =
+            stages.iter().map(|stage| stage.label()).collect();
+        assert_eq!(labels.len(), 14);
+        for label in labels {
+            assert!(label.starts_with("owned.runtime_state."));
+            assert!(
+                label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || matches!(byte, b'.' | b'_'))
+            );
+            assert!(!label.contains("secret"));
         }
     }
 

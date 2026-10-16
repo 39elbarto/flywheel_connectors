@@ -170,6 +170,7 @@ build_hash_helper() {
     'use std::{env,fs::File,io::{self,Read,Write}};' \
     'fn main(){let p=env::args().nth(1).expect("path");let mut f:Box<dyn Read>=if p=="-"{Box::new(io::stdin())}else{Box::new(File::open(p).expect("open"))};let mut h=blake3::Hasher::new();let mut b=[0u8;65536];loop{let n=f.read(&mut b).expect("read");if n==0{break}h.update(&b[..n]);}writeln!(io::stdout(),"{}",h.finalize().to_hex()).expect("write");}' \
     | bash "$SSD_LAUNCHER" --target-dir "$TARGET_DIR" -- rustc - --edition=2024 \
+        -C panic=abort \
         -L "dependency=${TARGET_DIR}/release/deps" \
         --extern "blake3=${rlib}" \
         -o "$helper"

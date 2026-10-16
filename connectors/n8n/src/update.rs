@@ -133,7 +133,7 @@ impl ComponentSnapshot {
         }
         for (name, version) in &self.dependencies {
             validate_atom("dependency_name", name)?;
-            validate_atom("dependency_version", version)?;
+            validate_dependency_version(version)?;
         }
         if self.tools.len() > MAX_TOOLS {
             return Err(UpdateError::InvalidSnapshot("too_many_tools"));
@@ -960,6 +960,20 @@ fn validate_atom(field: &'static str, value: &str) -> Result<(), UpdateError> {
     Ok(())
 }
 
+fn validate_dependency_version(value: &str) -> Result<(), UpdateError> {
+    if value.is_empty()
+        || value.len() > MAX_ATOM_BYTES
+        || !value.is_ascii()
+        || value.chars().any(char::is_control)
+        || value
+            .chars()
+            .any(|character| character.is_whitespace() && character != ' ')
+    {
+        return Err(UpdateError::InvalidSnapshot("dependency_version"));
+    }
+    Ok(())
+}
+
 fn validate_identifier(field: &'static str, value: &str) -> Result<(), UpdateError> {
     validate_atom(field, value)?;
     if value
@@ -1160,6 +1174,57 @@ mod tests {
         let current = snapshot("2.69.0", vec![tool("search_nodes", ToolImpact::Read)]);
         let outcome = detect_update(current.clone(), current).expect("detect no change");
         assert!(matches!(outcome, DetectionOutcome::NoChange { .. }));
+    }
+
+    #[test]
+    fn dependency_specs_preserve_ascii_spaces_but_reject_invalid_metadata() {
+        let mut current = snapshot("2.69.0", vec![tool("search_nodes", ToolImpact::Read)]);
+        current.dependencies.insert(
+            "@supabase/supabase-js".to_string(),
+            ">=2.57.4 <2.110.0".to_string(),
+        );
+        let outcome = detect_update(current.clone(), current.clone())
+            .expect("spaced dependency range remains inert metadata");
+        assert!(matches!(outcome, DetectionOutcome::NoChange { .. }));
+        assert_eq!(
+            current
+                .clone()
+                .normalize_and_validate()
+                .unwrap()
+                .dependencies,
+            current.dependencies
+        );
+
+        for invalid in [
+            String::new(),
+            ">=2.57.4\t<2.110.0".to_string(),
+            ">=2.57.4\n<2.110.0".to_string(),
+            "2.0\0".to_string(),
+            "2.0\u{7f}".to_string(),
+            "2.0\u{a0}".to_string(),
+            "2.é".to_string(),
+            "2".repeat(MAX_ATOM_BYTES + 1),
+        ] {
+            let mut changed = current.clone();
+            changed.dependencies.insert("zod".to_string(), invalid);
+            assert!(matches!(
+                detect_update(current.clone(), changed),
+                Err(UpdateError::InvalidSnapshot("dependency_version"))
+            ));
+        }
+
+        let mut changed = current.clone();
+        changed
+            .dependencies
+            .insert("zod".to_string(), "2".repeat(MAX_ATOM_BYTES));
+        assert!(detect_update(changed.clone(), changed).is_ok());
+        current
+            .dependencies
+            .insert("invalid name".to_string(), "1.0.0".to_string());
+        assert!(matches!(
+            detect_update(current.clone(), current),
+            Err(UpdateError::InvalidSnapshot("dependency_name"))
+        ));
     }
 
     #[test]

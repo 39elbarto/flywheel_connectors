@@ -108,23 +108,82 @@ The `am serve-http` process is a **shared singleton** that all agents depend on.
 
 ---
 
-## RULE NUMBER 1: NO FILE DELETION
+## RULE NUMBER 1: PROTECT FILES; BOUNDED TOOL TEMPORARIES EXCEPTION
 
-**YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
+**Deletion requires explicit owner permission except for the tool-owned temporary
+lifecycle below, authorized by the owner on 2026-10-14.** Source and test files,
+including files created by the current agent, are not temporary files for this
+exception. Existing data, evidence, backups, shared caches, worktrees, installed
+artifacts, runtime state and secrets remain protected.
 
-**YOU MUST ALWAYS ASK AND RECEIVE CLEAR, WRITTEN PERMISSION BEFORE EVER DELETING A FILE OR FOLDER OF ANY KIND.**
+### Standing permission for tool-owned temporary files
+
+A reviewed build, test or analysis tool may create and remove its own disposable
+files during an already-authorized task without a new owner question for every
+invocation, only when all of these conditions hold:
+
+- Use a fresh, exclusively created, mode-0700 directory owned by the invoking
+  user beneath the task's approved temporary root. On this host, generated FCP
+  files remain under `/srv/dev-ssd/fcp`; verify the SSD mount first. Existing
+  directories and files cannot be relabelled as disposable.
+- Record the exact tool/module identities, command, relevant environment and
+  temporary root in the existing task evidence. Review the selected tool's
+  actual temporary lifecycle, including children, cache and report destinations.
+  `TMPDIR` alone is not proof that deletion stays inside that directory.
+- Validate the parent and fresh directory identities and ownership without
+  following symlinks. Cleanup must not traverse symlinks, substituted ancestors,
+  mount boundaries or paths outside the owned directory. Use the tool's reviewed
+  confined lifecycle or an existing enforcing runner; if confinement cannot be
+  established, retain the files and stop only that invocation.
+- Only files/directories created by this invocation for disposable use are
+  covered. Keep source, inputs, final logs, reports and failure evidence outside
+  the disposable area. Preserve exit status, relevant findings and any unknown
+  outcome before calling the work complete.
+- This permits the tool's own bounded lifecycle, not agent-issued broad cleanup,
+  deletion of the task root, reuse of another run's directory, or manual removal
+  of leftovers. Retain leftovers unless separately authorized. It grants no
+  provider mutation, installation, signing, access expansion or Git cleanup.
+
+An existing reviewed invocation recipe may be reused with a fresh directory and
+fresh input/tool checks; no new plan or owner approval is needed merely because
+the previous invocation completed. Changes to tool/module identities, selected
+features, destinations or lifecycle require a new technical review. A reviewer
+may establish compliance within this standing permission, but cannot broaden
+it. A previously authorized one-attempt provider operation or signing/install
+budget is never renewed by this exception. These are instruction-level rules;
+claim technical enforcement only where the actual runner proves it.
 
 ---
 
 ## Irreversible Git & Filesystem Actions — DO NOT EVER BREAK GLASS
 
-1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or irreversibly overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences. The reversible artifact-install exception below is not covered by this prohibition.
+The confirmation steps below apply outside the two expressly scoped exceptions.
+An exception with unproven prerequisites grants no action; preserve state first.
+
+1. **Absolutely forbidden commands:** `git reset --hard`, `git clean -fd`, `rm -rf`, or any command that can delete or irreversibly overwrite code/data must never be run unless the user explicitly provides the exact command and states, in the same message, that they understand and want the irreversible consequences. The bounded tool-owned temporary lifecycle above and the reversible artifact-install exception below are not covered by this prohibition; neither authorizes agent-issued broad cleanup.
 2. **No guessing:** If there is any uncertainty about what a command might delete or overwrite, stop immediately and ask the user for specific approval. "I think it's safe" is never acceptable.
-3. **Safer alternatives first:** When cleanup or rollbacks are needed, request permission to use non-destructive options (`git status`, `git diff`, `git stash`, copying to backups) before ever considering a destructive command.
+3. **Safer alternatives first:** Inspect with read-only commands such as `git status` and `git diff` without another permission question. Prefer a new recovery copy where already authorized. `git stash` changes the working tree and must not move another writer's work without authorization. Inspection or a backup never grants destructive cleanup authority.
 4. **Mandatory explicit plan:** For destructive or irreversible actions, even after explicit user authorization, restate the command verbatim, list exactly what will be affected, and wait for a confirmation that your understanding is correct. Only then may you execute it—if anything remains ambiguous, refuse and escalate.
 5. **Document the confirmation:** When running any approved destructive command, record (in the session notes / final response) the exact user text that authorized it, the command actually run, and the execution time. If that record is absent, the operation did not happen.
 
 **Scoped reversible artifact-install exception:** When an already-authorized task calls for installing or updating one exact artifact at its fixed, in-scope destination, the agent may proceed without asking the owner to repeat the authorization or retype the command if all of these hold: verify the candidate's exact SHA-256 immediately before installation; preserve the current destination using `install --backup=numbered`; and verify the installed SHA-256, owner, group, mode, and numbered backup's digest afterward. Stop on any digest, destination, metadata, or backup discrepancy. This exception covers only that previously authorized artifact replacement; it grants no blanket deployment or live-operation authority and does not cover deletion, data loss, signing/trust-key changes, access expansion, or a new target/scope.
+
+### Continue independent authorized work
+
+A blocked scan, commit, provider call or release step blocks its dependants,
+not the whole task. The coordinator must identify the actual dependency and
+continue independent implementation, tests and review within existing authority.
+Do not bypass the blocked gate or create parallel copies to evade ownership.
+
+Resolve routine technical questions with the assigned implementers and reviewers.
+Consultants advise on unresolved difficult questions; they are not mandatory
+approvers or online process supervisors unless explicitly assigned that role.
+Reuse the existing acceptance matrix and evidence; do not add approval paperwork
+when existing checks already cover the risk. Before asking the owner, prepare the
+concrete candidate and finish independent authorized work, then group the genuine
+owner decisions into one concise request with exact scope and consequences.
+Report partial completion honestly; never close an unmet criterion as a refusal,
+silently shrink scope, or infer merge/push/install/live-operation permission.
 
 ---
 
@@ -851,7 +910,38 @@ bv --robot-insights | jq '.Cycles'                         # Circular deps (must
 
 ## UBS — Ultimate Bug Scanner
 
-**Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
+**Golden Rule:** Run UBS on changed source files before a code commit, preserve
+its actual result and resolve the findings before committing. Exit 0 is a scan
+result, not proof that all other checks passed. Documentation-only changes with
+no executable content need a diff/content review and `git diff --check`; record
+UBS as not applicable rather than invoking a source scanner on Markdown.
+
+This owner-approved project policy (2026-10-14) refines the generic UBS skill's
+exit-code shorthand for this repository; it does not change the shared skill.
+Use the bounded tool-temporary permission above for qualifying scanner runs.
+
+### Interpret the result before deciding
+
+- **Tool failure or incomplete coverage:** timeout, crash, missing analyzer,
+  malformed/truncated output or unverified completion is not a finding waiver
+  or a clean scan. Preserve it and repair/re-run the affected check; a required
+  uncompleted check still blocks its dependent commit.
+- **New or changed findings:** inspect the actual code and fix confirmed defects.
+  Unresolved findings block the affected commit. An independent reviewer may
+  classify a specific finding as a false positive with a code-based explanation
+  and relevant validation; severity alone does not establish a false positive.
+  Accepting a real residual risk still requires owner authority.
+- **Previously reviewed findings:** reuse a disposition only when the finding,
+  relevant code/context, tool/rule identity and scope still match, and the
+  original decision permits reuse. An expired or one-commit owner exception
+  cannot be renewed or applied to a new artifact implicitly. New code near an
+  old finding requires fresh review when it changes the reasoning.
+- A nonzero scan may accompany a commit only when scanning completed, every
+  reported finding is accounted for by a valid disposition, no defect or
+  unknown remains unaddressed, and an independent reviewer confirms this exact
+  change. Record the nonzero result honestly; never label it scanner-green.
+  Do not disable hooks, suppress rules or edit the scanner to force success.
+  A hook refusal remains a gate to resolve through the approved workflow.
 
 ### Commands
 
@@ -872,7 +962,8 @@ Warning  Category (N errors)
 Exit code: 1
 ```
 
-Parse: `file:line:col` -> location | Suggested fix -> how to fix | Exit 0/1 -> pass/fail
+Parse: `file:line:col` -> location | Suggested fix -> investigation starting point.
+Classify the exit and findings using the rules above, not the exit code alone.
 
 ### Fix Workflow
 
@@ -880,8 +971,8 @@ Parse: `file:line:col` -> location | Suggested fix -> how to fix | Exit 0/1 -> p
 2. Navigate `file:line:col` -> view context
 3. Verify real issue (not false positive)
 4. Fix root cause (not symptom)
-5. Re-run `ubs <file>` -> exit 0
-6. Commit
+5. Re-run changed source after fixes; preserve the result and any remaining findings
+6. Commit only after the result/dispositions and other required gates permit it
 
 ### Bug Severity
 
